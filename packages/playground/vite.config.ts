@@ -109,6 +109,9 @@ export default defineConfig(({ mode, command }) => {
           "vite-plugin-node-polyfills/shims/buffer": require.resolve(
             "vite-plugin-node-polyfills/shims/buffer",
           ),
+          "vite-plugin-node-polyfills/shims/process": require.resolve(
+            "vite-plugin-node-polyfills/shims/process",
+          ),
         }),
       },
       dedupe: ["@aztec/bb-prover"],
