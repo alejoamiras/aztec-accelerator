@@ -1,8 +1,8 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <!-- Background -->
-  <rect width="1024" height="1024" rx="180" fill="#1a1a2e"/>
+  <rect width="1024" height="1024" rx="180" fill="#0b0a06"/>
   <!-- Outer ring -->
-  <path d="M512,172 L852,512 L512,852 L172,512 Z M512,257 L257,512 L512,767 L767,512 Z" fill="#e2e8f0"/>
+  <path d="M512,172 L852,512 L512,852 L172,512 Z M512,257 L257,512 L512,767 L767,512 Z" fill="#d4ff28"/>
   <!-- Lightning bolt -->
-  <path d="M478,369 L560,369 L519,478 L573,478 L464,655 L505,533 L451,533 Z" fill="#e2e8f0"/>
+  <path d="M478,369 L560,369 L519,478 L573,478 L464,655 L505,533 L451,533 Z" fill="#d4ff28"/>
 </svg>
