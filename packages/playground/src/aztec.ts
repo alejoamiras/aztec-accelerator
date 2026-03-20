@@ -467,8 +467,8 @@ export async function deployTestAccount(
 
   try {
     // Step 1: Create account
-    onStep(`creating account [${mode}]`);
-    log(`Creating Schnorr account [${mode}]...`);
+    onStep("creating account");
+    log("Creating Schnorr account...");
     let stepStart = Date.now();
 
     const secret = Fr.random();
@@ -489,8 +489,8 @@ export async function deployTestAccount(
 
     // Step 2: Simulate (captures witness gen timing)
     // Simulate may fail with AztecAddress.ZERO (first deploy on live networks)
-    onStep(`simulating deploy [${mode}]`);
-    log(`Simulating deploy [${mode}]...`);
+    onStep("simulating deploy");
+    log("Simulating deploy...");
     stepStart = Date.now();
 
     let simDetail: SimStepDetail | undefined;
@@ -508,8 +508,8 @@ export async function deployTestAccount(
     });
 
     // Step 3: Prove + send + confirm
-    onStep(`proving + sending [${mode}]`);
-    log(`Deploying [${mode} proving]...`);
+    onStep("proving + sending");
+    log("Proving and sending...");
     stepStart = Date.now();
 
     const txHash = await sendWithRetry(deployMethod, sendOpts, log);
@@ -517,7 +517,7 @@ export async function deployTestAccount(
     const proveMs = _lastProveMs;
     _lastProveMs = undefined;
 
-    onStep(`confirming [${mode}]`);
+    onStep("confirming");
     const confirmStart = Date.now();
     await waitForTx(txHash);
     const confirmMs = Date.now() - confirmStart;
@@ -563,7 +563,6 @@ export async function deployToken(
   }
 
   const mode = state.uiMode;
-  const modeLabel = mode;
   const alice = state.registeredAddresses[state.selectedAccountIndex];
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
@@ -581,15 +580,15 @@ export async function deployToken(
   }, 100);
 
   try {
-    onStep(`deploying token [${modeLabel}]`);
-    log(`Deploying TokenContract (admin=Alice) [${modeLabel}]...`);
+    onStep("deploying token");
+    log("Deploying TokenContract (admin=Alice)...");
     const tokenDeploy = TokenContract.deploy(state.wallet, alice, "Accelerator", "ACEL", 18);
     const { timing: tokenStep, txHash: tokenTxHash } = await executeStep({
       step: "deploy token",
       method: tokenDeploy,
       sendOpts: { from: alice, fee: { paymentMethod: state.feePaymentMethod! } },
       log,
-      onConfirming: () => onStep(`confirming token deploy [${modeLabel}]`),
+      onConfirming: () => onStep("confirming token deploy"),
     });
     steps.push(tokenStep);
 
@@ -619,7 +618,6 @@ export async function runTokenFlow(
   }
 
   const mode = state.uiMode;
-  const modeLabel = mode;
   const alice = state.registeredAddresses[state.selectedAccountIndex];
   const fee = { paymentMethod: state.feePaymentMethod! };
   const steps: StepTiming[] = [];
@@ -644,8 +642,8 @@ export async function runTokenFlow(
     if (bobCandidate) {
       bob = bobCandidate;
     } else {
-      onStep(`deploying bob account [${modeLabel}]`);
-      log(`Deploying second account (Bob) for transfer [${modeLabel}]...`);
+      onStep("deploying bob account");
+      log("Deploying second account (Bob) for transfer...");
       const bobManager = await state.embeddedWallet!.createSchnorrAccount(Fr.random(), Fr.random());
       const bobDeploy = await bobManager.getDeployMethod();
       // Account constructor initializes private storage — needs its own nullifier key in scope.
@@ -660,7 +658,7 @@ export async function runTokenFlow(
         method: bobDeploy,
         sendOpts: bobSendOpts,
         log,
-        onConfirming: () => onStep(`confirming bob [${modeLabel}]`),
+        onConfirming: () => onStep("confirming bob"),
       });
       bob = bobManager.address;
       state.registeredAddresses.push(bob);
@@ -673,15 +671,15 @@ export async function runTokenFlow(
     }
 
     // Step 1: Deploy TokenContract
-    onStep(`deploying token [${modeLabel}]`);
-    log(`Deploying TokenContract (admin=Alice) [${modeLabel}]...`);
+    onStep("deploying token");
+    log("Deploying TokenContract (admin=Alice)...");
     const tokenDeploy = TokenContract.deploy(state.wallet, alice, "Accelerator", "ACEL", 18);
     const { timing: tokenStep, txHash: tokenTxHash } = await executeStep({
       step: "deploy token",
       method: tokenDeploy,
       sendOpts: { from: alice, fee },
       log,
-      onConfirming: () => onStep(`confirming token deploy [${modeLabel}]`),
+      onConfirming: () => onStep("confirming token deploy"),
     });
     const token = TokenContract.at(tokenDeploy.address!, state.wallet);
     steps.push(tokenStep);
@@ -692,14 +690,14 @@ export async function runTokenFlow(
     );
 
     // Step 2: Mint 1000 ACEL to Alice (private)
-    onStep(`minting 1000 ACEL [${modeLabel}]`);
-    log(`Minting 1000 ACEL to Alice [${modeLabel}]...`);
+    onStep("minting 1000 ACEL");
+    log("Minting 1000 ACEL to Alice...");
     const { timing: mintStep, txHash: mintTxHash } = await executeStep({
       step: "mint to private",
       method: token.methods.mint_to_private(alice, 1000n),
       sendOpts: { from: alice, fee },
       log,
-      onConfirming: () => onStep(`confirming mint [${modeLabel}]`),
+      onConfirming: () => onStep("confirming mint"),
     });
     steps.push(mintStep);
     log(
@@ -709,14 +707,14 @@ export async function runTokenFlow(
     );
 
     // Step 3: Transfer 500 ACEL Alice → Bob (private)
-    onStep(`transferring 500 ACEL [${modeLabel}]`);
-    log(`Transferring 500 ACEL Alice → Bob [${modeLabel}]...`);
+    onStep("transferring 500 ACEL");
+    log("Transferring 500 ACEL Alice → Bob...");
     const { timing: transferStep, txHash: transferTxHash } = await executeStep({
       step: "private transfer",
       method: token.methods.transfer(bob, 500n),
       sendOpts: { from: alice, fee },
       log,
-      onConfirming: () => onStep(`confirming transfer [${modeLabel}]`),
+      onConfirming: () => onStep("confirming transfer"),
     });
     steps.push(transferStep);
     log(

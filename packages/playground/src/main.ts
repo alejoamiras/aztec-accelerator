@@ -58,14 +58,14 @@ $("mode-local").addEventListener("click", () => {
   if (deploying) return;
   setUiMode("local");
   updateModeUI("local");
-  appendLog("Switched to local proving mode (WASM)");
+  appendLog("Proving mode → WASM");
 });
 
 $("mode-accelerated").addEventListener("click", () => {
   if (deploying) return;
   setUiMode("accelerated");
   updateModeUI("accelerated");
-  appendLog("Switched to accelerated proving mode");
+  appendLog("Proving mode → Accelerated");
 });
 
 // ── Shared helpers ──

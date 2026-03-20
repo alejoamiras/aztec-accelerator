@@ -51,7 +51,7 @@ test.describe("Accelerated", () => {
     await expect(page.locator("#mode-accelerated")).toHaveClass(/mode-active/);
     await page.click("#mode-local");
     await expect(page.locator("#mode-local")).toHaveClass(/mode-active/);
-    await expect(page.locator("#log")).toContainText("Switched to local proving mode");
+    await expect(page.locator("#log")).toContainText("Proving mode");
     await deployAndAssert(page, "local");
   });
 });
@@ -79,7 +79,7 @@ test.describe("Local", () => {
     await expect(page.locator("#mode-local")).toHaveClass(/mode-active/);
     await page.click("#mode-accelerated");
     await expect(page.locator("#mode-accelerated")).toHaveClass(/mode-active/);
-    await expect(page.locator("#log")).toContainText("Switched to accelerated proving mode");
+    await expect(page.locator("#log")).toContainText("Proving mode");
     await deployAndAssert(page, "accelerated");
   });
 });
