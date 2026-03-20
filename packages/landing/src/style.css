@@ -56,6 +56,7 @@ img, svg {
   max-width: 1120px;
   margin: 0 auto;
   padding: 0 1.5rem;
+  overflow-x: clip;
 }
 
 /* ── Nav ──────────────────────────────────────────────────────────── */
@@ -143,7 +144,6 @@ img, svg {
 .hero {
   padding: 6rem 0 5rem;
   position: relative;
-  overflow: hidden;
 }
 
 .hero-inner {
