@@ -161,19 +161,19 @@ img, svg {
 
 .hero-ambient {
   position: fixed;
-  top: -10%;
-  left: 5%;
-  width: 70%;
-  height: 80%;
-  background: radial-gradient(ellipse at center, rgba(212, 255, 40, 0.05) 0%, transparent 65%);
+  width: 60vw;
+  height: 60vw;
+  max-width: 800px;
+  max-height: 800px;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, rgba(212, 255, 40, 0.06) 0%, transparent 60%);
   pointer-events: none;
   z-index: -1;
-  animation: ambient-drift 8s ease-in-out infinite alternate;
-}
-
-@keyframes ambient-drift {
-  from { opacity: 0.6; transform: translate(0, 0) scale(1); }
-  to { opacity: 1; transform: translate(2%, 3%) scale(1.05); }
+  transform: translate(-50%, -50%);
+  transition: left 0.8s ease-out, top 0.8s ease-out;
+  /* Default position — overridden by JS on mousemove */
+  left: 55%;
+  top: 30%;
 }
 
 .hero-inner {

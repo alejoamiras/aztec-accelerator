@@ -15,6 +15,15 @@ for (const el of document.querySelectorAll(".reveal")) {
   observer.observe(el);
 }
 
+// ── Mouse-reactive ambient glow ──
+const glow = document.querySelector(".hero-ambient") as HTMLElement | null;
+if (glow) {
+  document.addEventListener("mousemove", (e) => {
+    glow.style.left = `${e.clientX}px`;
+    glow.style.top = `${e.clientY}px`;
+  });
+}
+
 // ── OS-aware download button ──
 const REPO = "alejoamiras/aztec-accelerator";
 const RELEASES_URL = `https://github.com/${REPO}/releases`;

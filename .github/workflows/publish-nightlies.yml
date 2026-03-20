@@ -13,13 +13,31 @@ permissions:
   contents: write
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      sdk: ${{ steps.filter.outputs.sdk }}
+      playground: ${{ steps.filter.outputs.playground }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            sdk:
+              - "packages/sdk/**"
+            playground:
+              - "packages/playground/**"
+
   e2e:
     uses: ./.github/workflows/_e2e.yml
     with:
       ref: ${{ github.sha }}
 
   publish-sdk:
-    needs: e2e
+    needs: [changes, e2e]
+    if: needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/_publish-sdk.yml
     with:
       dist_tag: nightlies
