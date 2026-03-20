@@ -18,6 +18,7 @@
     "dev": "tsc -w",
     "prepublishOnly": "bun run test:lint && bun run build",
     "test:e2e": "bun test --preload ./e2e/e2e-setup.ts e2e/",
+    "test:e2e:remote": "AZTEC_NODE_URL=https://rpc.testnet.aztec-labs.com bun test --preload ./e2e/e2e-setup.ts e2e/remote-network.test.ts",
     "test:lint": "tsc --noEmit --emitDeclarationOnly false",
     "test:unit": "bun test src/"
   },
