@@ -21,8 +21,7 @@ test("page loads with correct initial state", async ({ page }) => {
   await page.goto("/");
 
   // Embedded UI is visible (wait for init to complete — accelerator health check has 2s timeout)
-  // Use word-boundary regex to avoid matching "overflow-hidden"
-  await expect(page.locator("#embedded-ui")).not.toHaveClass(/\bhidden\b/, { timeout: 10000 });
+  await expect(page.locator("#embedded-ui")).toBeVisible({ timeout: 10000 });
 
   // Accelerated mode button is active by default
   const accelBtn = page.locator("#mode-accelerated");
