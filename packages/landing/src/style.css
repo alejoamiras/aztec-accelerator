@@ -17,7 +17,7 @@
   --text-muted: #9a9080;
   --accent: #d4ff28;
   --accent-dim: #b8dd1e;
-  --accent-on: #1a2000;
+  --accent-on: #0e1400;
 }
 
 html {
@@ -105,6 +105,7 @@ img, svg {
   color: var(--accent);
 }
 
+/* ── Buttons ──────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -142,23 +143,20 @@ img, svg {
 .hero {
   padding: 6rem 0 5rem;
   position: relative;
+  overflow: hidden;
 }
 
-.hero::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: -10%;
-  width: 60%;
-  height: 100%;
-  background: radial-gradient(ellipse at center, rgba(212, 255, 40, 0.04) 0%, transparent 70%);
-  pointer-events: none;
+.hero-inner {
+  display: flex;
+  align-items: center;
+  gap: 4rem;
 }
 
 .hero-content {
   position: relative;
   z-index: 1;
-  max-width: 640px;
+  flex: 1;
+  min-width: 0;
 }
 
 .hero h1 {
@@ -222,6 +220,61 @@ img, svg {
 
 .hero-sub a:hover span {
   transform: translateX(3px);
+}
+
+/* ── Hero visual ──────────────────────────────────────────────────── */
+.hero-visual {
+  flex-shrink: 0;
+  width: 320px;
+  height: 320px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hero-glow {
+  position: absolute;
+  inset: -80px;
+  background: radial-gradient(circle at center, rgba(212, 255, 40, 0.08) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-ring {
+  position: absolute;
+  border: 1px solid rgba(212, 255, 40, 0.12);
+  transform: rotate(45deg);
+}
+
+.hero-ring-outer {
+  width: 280px;
+  height: 280px;
+}
+
+.hero-ring-mid {
+  width: 210px;
+  height: 210px;
+  border-color: rgba(212, 255, 40, 0.25);
+}
+
+.hero-ring-inner {
+  width: 140px;
+  height: 140px;
+  border-width: 2px;
+  border-color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(26, 22, 16, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.hero-icon {
+  width: 56px;
+  height: 56px;
+  color: var(--accent);
+  transform: rotate(-45deg);
 }
 
 /* ── Dev callout ──────────────────────────────────────────────────── */
@@ -436,6 +489,35 @@ img, svg {
 
   .hero {
     padding: 4rem 0 3rem;
+  }
+
+  .hero-inner {
+    flex-direction: column;
+  }
+
+  .hero-visual {
+    width: 220px;
+    height: 220px;
+  }
+
+  .hero-ring-outer {
+    width: 200px;
+    height: 200px;
+  }
+
+  .hero-ring-mid {
+    width: 150px;
+    height: 150px;
+  }
+
+  .hero-ring-inner {
+    width: 100px;
+    height: 100px;
+  }
+
+  .hero-icon {
+    width: 40px;
+    height: 40px;
   }
 
   .features {
