@@ -9,7 +9,7 @@ on:
         type: string
         default: ""
       test_script:
-        description: "Package script to run (e.g. test:e2e:local-network or test:e2e:smoke)"
+        description: "Package script to run (e.g. test:e2e or test:e2e:smoke)"
         required: false
         type: string
         default: "test:e2e:smoke"
