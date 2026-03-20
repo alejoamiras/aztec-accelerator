@@ -8,8 +8,6 @@
     "preview": "vite preview",
     "test": "bun test",
     "test:e2e": "bunx playwright test --project=mocked",
-    "test:e2e:all": "bun run test:e2e && bun run test:e2e:local-network",
-    "test:e2e:local-network": "bunx playwright test --project=local-network --workers=1",
     "test:unit": "bun test"
   },
   "dependencies": {
