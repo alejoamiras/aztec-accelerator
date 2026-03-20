@@ -29,6 +29,17 @@
     Menlo, Consolas, monospace;
 }
 
+/* ── Dot grid background ── */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, rgba(212, 255, 40, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
 /* ── Grain texture ── */
 body::after {
   content: "";
@@ -66,9 +77,16 @@ body::after {
   to { opacity: 1; }
 }
 
-/* ── Panel accent lines ── */
+/* ── Floating panels ── */
 .panel {
   position: relative;
+  background: rgba(19, 16, 8, 0.75);
+  backdrop-filter: blur(8px);
+  border-radius: 6px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 4px 12px rgba(0, 0, 0, 0.15),
+    inset 0 1px 0 rgba(212, 255, 40, 0.04);
 }
 
 .panel::after {
@@ -78,9 +96,9 @@ body::after {
   left: 8%;
   right: 8%;
   height: 1px;
-  background: linear-gradient(90deg, transparent, var(--color-brand-border), transparent);
-  opacity: 0.5;
+  background: linear-gradient(90deg, transparent, rgba(212, 255, 40, 0.12), transparent);
   pointer-events: none;
+  border-radius: 6px 6px 0 0;
 }
 
 /* ── Title glow ── */
@@ -316,11 +334,17 @@ body::after {
 }
 
 /* ── ASCII art animation ── */
+.ascii-art-container {
+  height: 224px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .ascii-art {
-  @apply mt-3 text-[10px] leading-[1.4] text-center whitespace-pre;
+  @apply text-[10px] leading-[1.4] text-center whitespace-pre;
   color: rgba(212, 255, 40, 0.5);
   font-family: "JetBrains Mono", ui-monospace, monospace;
-  min-height: 6em;
 }
 
 /* ── Two-panel responsive layout ── */

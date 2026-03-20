@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
+  <div class="hero-ambient" aria-hidden="true"></div>
   <div class="container">
 
     <!-- Nav -->
@@ -69,7 +70,7 @@
     </section>
 
     <!-- Developer callout -->
-    <div class="dev-callout">
+    <div class="dev-callout reveal">
       <div class="dev-callout-text">
         <strong>Ship faster apps.</strong>
         <span>Drop in the SDK. Your users get native proving with zero config.</span>
@@ -81,23 +82,37 @@
     </div>
 
     <!-- Features -->
-    <div class="features">
+    <div class="features reveal">
       <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
         <p class="feature-label">Unthrottled</p>
         <h3>100% resource utilization</h3>
       </div>
       <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="4" width="16" height="16" rx="2"/>
+          <path d="M9 9h6v6H9z"/>
+          <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>
+        </svg>
         <p class="feature-label">Native execution</p>
         <h3>Bypass browser limitations</h3>
       </div>
       <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1" y="5" width="9" height="6" rx="1"/>
+          <rect x="14" y="5" width="9" height="6" rx="1"/>
+          <rect x="1" y="13" width="9" height="6" rx="1"/>
+          <rect x="14" y="13" width="9" height="6" rx="1"/>
+        </svg>
         <p class="feature-label">Multi-core</p>
         <h3>All CPU cores, full speed</h3>
       </div>
     </div>
 
     <!-- How it works -->
-    <section class="how">
+    <section class="how reveal">
       <div class="how-header">
         <h2>How it works</h2>
         <p>Install once. Every Aztec app on your machine gets native-speed proving automatically.</p>
@@ -122,7 +137,7 @@
     </section>
 
     <!-- Safari notice -->
-    <div class="notice">
+    <div class="notice reveal">
       <div class="notice-content">
         <h3>Safari users</h3>
         <p>
@@ -147,5 +162,6 @@
     </footer>
 
   </div>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

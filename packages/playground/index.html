@@ -17,7 +17,7 @@
   <div class="relative z-10 flex flex-col min-h-screen">
 
     <!-- HEADER -->
-    <header class="panel border-b border-brand-border bg-brand-surface/80 backdrop-blur-sm">
+    <header class="panel bg-brand-surface/80">
       <div class="px-5 py-3 flex items-center gap-3">
         <a href="https://aztec-accelerator.dev" class="flex items-center gap-2 text-brand-accent hover:opacity-80 transition-opacity">
           <svg class="w-5 h-5" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -41,10 +41,10 @@
     <div class="app-layout flex flex-1 overflow-hidden">
 
       <!-- SIDEBAR -->
-      <aside class="sidebar w-80 shrink-0 border-r border-brand-border overflow-y-auto">
+      <aside class="sidebar w-80 shrink-0 border-r border-brand-border overflow-y-auto p-2 space-y-2">
 
         <!-- SERVICES -->
-        <section class="panel border-b border-brand-border" aria-label="Service status">
+        <section class="panel" aria-label="Service status">
           <div class="border-b border-brand-border px-4 py-1.5">
             <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">services</span>
           </div>
@@ -67,16 +67,23 @@
               <span class="text-brand-text-muted/70 w-24">Wallet</span>
               <span id="wallet-state" class="text-brand-text-muted/50 ml-auto text-[10px] font-mono font-light">not initialized</span>
             </div>
-            <div id="versions-row" class="hidden border-t border-brand-border/40 mt-2 pt-1.5 flex items-center gap-3">
-              <span class="w-[11px] shrink-0"></span>
-              <span class="text-brand-text-muted/50 text-[10px] uppercase tracking-wider w-24 shrink-0">Versions</span>
-              <span id="versions-info" class="text-[10px] text-brand-text-muted/40 font-mono font-light tabular-nums"></span>
+            <div id="versions-row" class="hidden border-t border-brand-border/40 mt-2 pt-1.5 space-y-1">
+              <div class="flex items-center gap-3">
+                <span class="w-[11px] shrink-0"></span>
+                <span class="text-brand-text-muted/50 text-[10px] uppercase tracking-wider w-24 shrink-0">SDK</span>
+                <span id="version-sdk" class="text-[10px] text-brand-text-muted/40 font-mono font-light tabular-nums ml-auto"></span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="w-[11px] shrink-0"></span>
+                <span class="text-brand-text-muted/50 text-[10px] uppercase tracking-wider w-24 shrink-0">Node</span>
+                <span id="version-node" class="text-[10px] text-brand-text-muted/40 font-mono font-light tabular-nums ml-auto"></span>
+              </div>
             </div>
           </div>
         </section>
 
         <!-- MODE TOGGLE -->
-        <section class="panel border-b border-brand-border">
+        <section class="panel">
           <div class="border-b border-brand-border px-4 py-1.5">
             <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">proving mode</span>
           </div>
@@ -95,7 +102,7 @@
         </section>
 
         <!-- ACTIONS -->
-        <section class="panel border-b border-brand-border">
+        <section class="panel">
           <div class="border-b border-brand-border px-4 py-1.5">
             <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">actions</span>
           </div>
@@ -114,32 +121,37 @@
       <!-- MAIN PANEL -->
       <main class="flex-1 flex flex-col overflow-hidden">
 
-        <div id="embedded-ui" class="hidden flex flex-col flex-1 overflow-hidden">
+        <div id="embedded-ui" class="hidden flex flex-col flex-1 overflow-hidden p-2 gap-2">
 
           <!-- ASCII ANIMATION -->
-          <div id="progress" class="hidden panel border-b border-brand-border">
+          <div id="progress" class="hidden panel">
             <div class="border-b border-brand-border px-4 py-1.5">
               <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">proving</span>
             </div>
             <div class="p-3">
-              <pre id="ascii-art" class="ascii-art"></pre>
+              <div class="ascii-art-container">
+                <pre id="ascii-art" class="ascii-art"></pre>
+              </div>
+              <div class="text-center mt-1">
+                <span id="ascii-elapsed" class="text-[10px] text-brand-text-muted/50 font-mono tabular-nums"></span>
+              </div>
             </div>
           </div>
 
           <!-- RESULTS -->
-          <section id="results" class="hidden panel border-b border-brand-border">
+          <section id="results" class="hidden panel">
             <div class="border-b border-brand-border px-4 py-1.5">
               <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">results</span>
             </div>
             <div class="p-3">
               <div class="grid grid-cols-2 gap-2">
-                <div id="result-local" class="border border-brand-border p-4 text-center transition-colors">
+                <div id="result-local" class="border border-brand-border p-4 text-center transition-colors rounded">
                   <div class="text-[10px] uppercase tracking-[0.15em] text-brand-text-muted mb-2">WASM</div>
                   <div id="time-local" class="text-3xl font-bold tabular-nums text-gray-700 font-mono">—</div>
                   <div id="tag-local" class="mt-1.5 text-[10px] uppercase tracking-widest text-gray-700"></div>
                   <div id="steps-local" class="hidden mt-2 pt-2 border-t border-brand-border/40 text-left"></div>
                 </div>
-                <div id="result-accelerated" class="border border-brand-border p-4 text-center transition-colors">
+                <div id="result-accelerated" class="border border-brand-border p-4 text-center transition-colors rounded">
                   <div class="text-[10px] uppercase tracking-[0.15em] text-brand-text-muted mb-2">Accelerated (native)</div>
                   <div id="time-accelerated" class="text-3xl font-bold tabular-nums text-gray-700 font-mono">—</div>
                   <div id="tag-accelerated" class="mt-1.5 text-[10px] uppercase tracking-widest text-gray-700"></div>
@@ -181,7 +193,7 @@
     </div>
 
     <!-- FOOTER -->
-    <footer class="border-t border-brand-border text-center text-[10px] text-brand-text-muted/40 py-2 tracking-wide">
+    <footer class="text-center text-[10px] text-brand-text-muted/40 py-2 mx-2 mb-2 tracking-wide">
       made with &hearts; by <a href="https://github.com/alejoamiras/aztec-accelerator" class="text-brand-accent/70 hover:text-brand-accent">alejo</a>
     </footer>
 

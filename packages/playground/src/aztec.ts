@@ -296,9 +296,7 @@ export async function initializeWallet(log: LogFn): Promise<boolean> {
 
 export function setUiMode(mode: UiMode): void {
   state.uiMode = mode;
-  // AcceleratorProver always auto-detects accelerator. In local mode, the
-  // accelerator won't be probed and WASM is used directly. We don't need
-  // to reconfigure the prover — the UI mode only affects the animation.
+  state.prover?.setForceLocal(mode === "local");
 }
 
 export interface SimStepDetail {

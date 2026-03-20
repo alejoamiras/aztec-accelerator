@@ -23,6 +23,13 @@ export function resetLogCount(): void {
   logCount = 0;
 }
 
+const LOG_SYMBOL: Record<string, string> = {
+  info: "\u00b7",
+  success: "\u2713",
+  warn: "\u26a0",
+  error: "\u2717",
+};
+
 export function appendLog(
   msg: string,
   level: "info" | "warn" | "error" | "success" = "info",
@@ -32,12 +39,11 @@ export function appendLog(
   const log = $("log");
   const line = document.createElement("div");
   const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-  const prefix =
-    level === "error" ? "ERR" : level === "warn" ? "WRN" : level === "success" ? " OK" : "   ";
+  const symbol = LOG_SYMBOL[level];
   line.className = `log-${level}`;
 
   if (url) {
-    line.textContent = `${time} ${prefix}  `;
+    line.textContent = `${time}  ${symbol}  `;
     const link = document.createElement("a");
     link.href = url;
     link.target = "_blank";
@@ -46,7 +52,7 @@ export function appendLog(
     link.textContent = msg;
     line.appendChild(link);
   } else {
-    line.textContent = `${time} ${prefix}  ${msg}`;
+    line.textContent = `${time}  ${symbol}  ${msg}`;
   }
 
   log.appendChild(line);

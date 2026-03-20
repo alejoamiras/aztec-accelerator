@@ -296,6 +296,7 @@ const FRAME_INTERVAL_MS = 100;
 
 export class AsciiController {
   #el: HTMLElement;
+  #elapsedEl: HTMLElement | null;
   #mode: UiMode = "local";
   #queue: PhaseQueue;
   #frameFn: FrameFn | null = null;
@@ -303,8 +304,9 @@ export class AsciiController {
   #startTime = 0;
   #animTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(el: HTMLElement) {
+  constructor(el: HTMLElement, elapsedEl?: HTMLElement | null) {
     this.#el = el;
+    this.#elapsedEl = elapsedEl ?? null;
     this.#queue = new PhaseQueue((phase) => {
       this.#frameFn = getFrameFn(this.#mode, phase);
       this.#tick = 0;
@@ -318,8 +320,11 @@ export class AsciiController {
     this.#tick = 0;
     this.#animTimer = setInterval(() => {
       if (this.#frameFn) {
-        const elapsed = ((Date.now() - this.#startTime) / 1000).toFixed(1);
-        this.#el.textContent = `${this.#frameFn(this.#tick)}\n\n              elapsed ${elapsed}s`;
+        this.#el.textContent = this.#frameFn(this.#tick);
+        if (this.#elapsedEl) {
+          const elapsed = ((Date.now() - this.#startTime) / 1000).toFixed(1);
+          this.#elapsedEl.textContent = `elapsed ${elapsed}s`;
+        }
         this.#tick++;
       }
     }, FRAME_INTERVAL_MS);
@@ -338,5 +343,6 @@ export class AsciiController {
     this.#frameFn = null;
     this.#el.classList.add("hidden");
     this.#el.textContent = "";
+    if (this.#elapsedEl) this.#elapsedEl.textContent = "";
   }
 }

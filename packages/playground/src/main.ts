@@ -101,7 +101,7 @@ $("deploy-btn").addEventListener("click", async () => {
 
   $("progress").classList.remove("hidden");
 
-  const ascii = new AsciiController($("ascii-art"));
+  const ascii = new AsciiController($("ascii-art"), document.getElementById("ascii-elapsed"));
   ascii.start(state.uiMode);
 
   try {
@@ -117,11 +117,10 @@ $("deploy-btn").addEventListener("click", async () => {
     );
     diagMemory("deploy-end");
 
-    appendLog("--- step breakdown ---");
     for (const step of result.steps) {
-      appendLog(`  ${step.step}: ${formatDuration(step.durationMs)}`);
+      appendLog(`${step.step} ${formatDuration(step.durationMs)}`);
     }
-    appendLog(`  total: ${formatDuration(result.totalDurationMs)}`);
+    appendLog(`total: ${formatDuration(result.totalDurationMs)}`, "success");
 
     showResult("", result.mode, result.totalDurationMs, undefined, result.steps);
   } catch (err) {
@@ -147,7 +146,7 @@ $("token-flow-btn").addEventListener("click", async () => {
 
   $("progress").classList.remove("hidden");
 
-  const ascii = new AsciiController($("ascii-art"));
+  const ascii = new AsciiController($("ascii-art"), document.getElementById("ascii-elapsed"));
   ascii.start(state.uiMode);
 
   try {
@@ -163,11 +162,10 @@ $("token-flow-btn").addEventListener("click", async () => {
     );
     diagMemory("token-flow-end");
 
-    appendLog("--- step breakdown ---");
     for (const step of result.steps) {
-      appendLog(`  ${step.step}: ${formatDuration(step.durationMs)}`);
+      appendLog(`${step.step} ${formatDuration(step.durationMs)}`);
     }
-    appendLog(`  total: ${formatDuration(result.totalDurationMs)}`);
+    appendLog(`total: ${formatDuration(result.totalDurationMs)}`, "success");
 
     showResult("", result.mode, result.totalDurationMs, "token flow", result.steps);
   } catch (err) {
@@ -232,18 +230,20 @@ async function init(): Promise<void> {
   setStatus("aztec-status", aztec);
 
   // Show versions row once we have data
-  const versionParts: string[] = [];
-  if (AZTEC_SDK_VERSION !== "unknown") versionParts.push(`sdk ${AZTEC_SDK_VERSION}`);
-  if (nodeVersion) {
-    versionParts.push(`node ${nodeVersion}`);
-    appendLog(`Aztec node version: ${nodeVersion}`);
-    if (nodeVersion !== AZTEC_SDK_VERSION) {
-      appendLog(`Version mismatch: SDK ${AZTEC_SDK_VERSION} ≠ node ${nodeVersion}`, "warn");
-    }
-  }
-  if (versionParts.length > 0) {
+  if (AZTEC_SDK_VERSION !== "unknown" || nodeVersion) {
     $("versions-row").classList.remove("hidden");
-    $("versions-info").textContent = versionParts.join(" · ");
+    const sdkEl = $("version-sdk");
+    const nodeEl = $("version-node");
+    if (AZTEC_SDK_VERSION !== "unknown") sdkEl.textContent = AZTEC_SDK_VERSION;
+    if (nodeVersion) {
+      nodeEl.textContent = nodeVersion;
+      appendLog(`Aztec node version: ${nodeVersion}`);
+      if (nodeVersion !== AZTEC_SDK_VERSION) {
+        appendLog(`Version mismatch: SDK ${AZTEC_SDK_VERSION} ≠ node ${nodeVersion}`, "warn");
+        sdkEl.classList.add("text-amber-500/80");
+        nodeEl.classList.add("text-amber-500/80");
+      }
+    }
   }
 
   // Check accelerator

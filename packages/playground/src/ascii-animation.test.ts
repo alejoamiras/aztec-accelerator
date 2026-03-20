@@ -142,12 +142,16 @@ describe("getFrameFn", () => {
 
 describe("AsciiController", () => {
   let el: HTMLPreElement;
+  let elapsedEl: HTMLSpanElement;
 
   beforeEach(() => {
     el = document.createElement("pre");
     el.id = "ascii-art";
     el.classList.add("hidden");
     document.body.appendChild(el);
+    elapsedEl = document.createElement("span");
+    elapsedEl.id = "ascii-elapsed";
+    document.body.appendChild(elapsedEl);
   });
 
   afterEach(() => {
@@ -155,16 +159,17 @@ describe("AsciiController", () => {
   });
 
   test("start shows element and stop hides it", () => {
-    const ctrl = new AsciiController(el);
+    const ctrl = new AsciiController(el, elapsedEl);
     ctrl.start("local");
     expect(el.classList.contains("hidden")).toBe(false);
     ctrl.stop();
     expect(el.classList.contains("hidden")).toBe(true);
     expect(el.textContent).toBe("");
+    expect(elapsedEl.textContent).toBe("");
   });
 
   test("pushPhase renders frame content", async () => {
-    const ctrl = new AsciiController(el);
+    const ctrl = new AsciiController(el, elapsedEl);
     ctrl.start("accelerated");
     ctrl.pushPhase("proving");
 
@@ -172,16 +177,18 @@ describe("AsciiController", () => {
     await new Promise((r) => setTimeout(r, 150));
     expect(el.textContent!.length).toBeGreaterThan(0);
     expect(el.textContent).toContain("NATIVE ACCELERATOR");
+    expect(elapsedEl.textContent).toContain("elapsed");
     ctrl.stop();
   });
 
   test("stop clears content and timers", async () => {
-    const ctrl = new AsciiController(el);
+    const ctrl = new AsciiController(el, elapsedEl);
     ctrl.start("local");
     ctrl.pushPhase("proving");
     await new Promise((r) => setTimeout(r, 150));
     ctrl.stop();
     expect(el.textContent).toBe("");
+    expect(elapsedEl.textContent).toBe("");
     // Ensure no more updates after stop
     const snapshot = el.textContent;
     await new Promise((r) => setTimeout(r, 200));
