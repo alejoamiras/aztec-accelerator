@@ -6,6 +6,8 @@ If every dApp in the ecosystem uses `AcceleratorProver` with accelerated mode, a
 
 [![Accelerator](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml)
 
+> **dApp developer?** You're looking for the [SDK package](../sdk/README.md) — `npm install @alejoamiras/aztec-accelerator` gives your app native proving with zero user-side configuration.
+
 ## Installation
 
 Download the latest release from [GitHub Releases](https://github.com/alejoamiras/aztec-accelerator/releases):
