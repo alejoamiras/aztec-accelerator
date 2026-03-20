@@ -59,16 +59,16 @@ describe("buildDotRow", () => {
 
 describe("stepToPhase", () => {
   test("maps simulation steps", () => {
-    expect(stepToPhase("simulating deploy [local]")).toBe("app:simulate");
+    expect(stepToPhase("simulating deploy")).toBe("app:simulate");
   });
 
   test("maps proving/deploying steps", () => {
-    expect(stepToPhase("proving + sending [local]")).toBe("app:prove");
-    expect(stepToPhase("deploying token [wallet]")).toBe("app:prove");
+    expect(stepToPhase("proving + sending")).toBe("app:prove");
+    expect(stepToPhase("deploying token")).toBe("app:prove");
   });
 
   test("maps confirming steps", () => {
-    expect(stepToPhase("confirming token deploy [local]")).toBe("app:confirm");
+    expect(stepToPhase("confirming token deploy")).toBe("app:confirm");
   });
 
   test("returns null for unknown steps", () => {

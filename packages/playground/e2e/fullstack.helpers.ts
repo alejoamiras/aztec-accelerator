@@ -81,7 +81,7 @@ export async function deployAndAssert(page: Page, mode: "local" | "accelerated")
   expect(timeText).toMatch(/^\d+\.\d+s$/);
 
   await expect(page.locator(`#result-${mode}`)).toHaveClass(/result-filled/);
-  await expect(page.locator("#log")).toContainText("step breakdown");
+  await expect(page.locator("#log")).toContainText("total:");
 
   const steps = page.locator(`#steps-${mode}`);
   await expect(steps).not.toHaveClass(/hidden/);
@@ -120,7 +120,7 @@ export async function runTokenFlowAndAssert(
 
   await expect(page.locator(`#tag-${mode}`)).toHaveText("token flow");
 
-  await expect(page.locator("#log")).toContainText("step breakdown");
+  await expect(page.locator("#log")).toContainText("total:");
   await expect(page.locator("#log")).toContainText("Token flow complete");
   await expect(page.locator("#log")).toContainText("Alice: 500");
   await expect(page.locator("#log")).toContainText("Bob: 500");

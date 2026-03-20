@@ -20,8 +20,8 @@ test("page loads with correct initial state", async ({ page }) => {
   await mockServicesOffline(page);
   await page.goto("/");
 
-  // Embedded UI is visible
-  await expect(page.locator("#embedded-ui")).not.toHaveClass(/hidden/);
+  // Embedded UI is visible (wait for init to complete — accelerator health check has 2s timeout)
+  await expect(page.locator("#embedded-ui")).toBeVisible({ timeout: 10000 });
 
   // Accelerated mode button is active by default
   const accelBtn = page.locator("#mode-accelerated");

@@ -125,6 +125,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   #acceleratorHttpsPort: number;
   #acceleratorHost: string;
   #acceleratorProtocol: "http" | "https" | null = null;
+  #forceLocal = false;
 
   constructor(options?: AcceleratorProverOptions) {
     const opts = options ?? {};
@@ -167,6 +168,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   /** Register a callback for proof generation sub-phase transitions (for UI animation). */
   setOnPhase(callback: ((phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void) | null) {
     this.#onPhase = callback;
+  }
+
+  /** Force WASM proving, bypassing accelerator detection. */
+  setForceLocal(force: boolean) {
+    this.#forceLocal = force;
   }
 
   get #acceleratorBaseUrl(): string {
@@ -267,6 +273,17 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   async createChonkProof(
     executionSteps: PrivateExecutionStep[],
   ): Promise<ChonkProofWithPublicInputs> {
+    if (this.#forceLocal) {
+      logger.info("Force-local mode, using WASM prover");
+      this.#onPhase?.("proving");
+      const start = performance.now();
+      const proof = await super.createChonkProof(executionSteps);
+      const durationMs = Math.round(performance.now() - start);
+      logger.info("Local proof completed", { durationMs });
+      this.#onPhase?.("proved", { durationMs });
+      return proof;
+    }
+
     logger.info("Using accelerated prover");
 
     this.#onPhase?.("detect");

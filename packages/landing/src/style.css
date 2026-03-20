@@ -33,6 +33,7 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
 }
 
 h1, h2, h3 {
@@ -56,7 +57,6 @@ img, svg {
   max-width: 1120px;
   margin: 0 auto;
   padding: 0 1.5rem;
-  overflow-x: clip;
 }
 
 /* ── Nav ──────────────────────────────────────────────────────────── */
@@ -130,6 +130,18 @@ img, svg {
   background: var(--accent-dim);
 }
 
+.btn-nav {
+  border: 1px solid rgba(212, 255, 40, 0.4);
+  color: var(--accent);
+  font-size: 0.75rem;
+  padding: 0.5rem 1.25rem;
+}
+
+.btn-nav:hover {
+  background: rgba(212, 255, 40, 0.08);
+  border-color: var(--accent);
+}
+
 .btn-outline {
   border: 1px solid var(--border);
   color: var(--text);
@@ -144,6 +156,24 @@ img, svg {
 .hero {
   padding: 6rem 0 5rem;
   position: relative;
+  overflow: visible;
+}
+
+.hero-ambient {
+  position: fixed;
+  width: 60vw;
+  height: 60vw;
+  max-width: 800px;
+  max-height: 800px;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, rgba(212, 255, 40, 0.06) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: -1;
+  transform: translate(-50%, -50%);
+  transition: left 0.8s ease-out, top 0.8s ease-out;
+  /* Default position — overridden by JS on mousemove */
+  left: 55%;
+  top: 30%;
 }
 
 .hero-inner {
@@ -236,7 +266,7 @@ img, svg {
 .hero-glow {
   position: absolute;
   inset: -80px;
-  background: radial-gradient(circle at center, rgba(212, 255, 40, 0.08) 0%, transparent 70%);
+  background: radial-gradient(circle at center, rgba(212, 255, 40, 0.10) 0%, transparent 60%);
   pointer-events: none;
 }
 
@@ -265,9 +295,8 @@ img, svg {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(26, 22, 16, 0.6);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--surface);
+  box-shadow: inset 0 0 30px rgba(212, 255, 40, 0.06);
 }
 
 .hero-icon {
@@ -305,12 +334,26 @@ img, svg {
   letter-spacing: 0.02em;
 }
 
-.dev-callout-text code {
+.dev-callout-text span {
   font-size: 0.875rem;
   color: var(--text-muted);
-  background: var(--surface-raised);
-  padding: 0.25em 0.5em;
+}
+
+.dev-callout-text code {
+  display: inline-block;
+  font-size: 0.8125rem;
+  color: var(--accent);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.5em 0.875em;
   font-family: "SF Mono", "Fira Code", monospace;
+  letter-spacing: -0.01em;
+  margin-top: 0.375rem;
+}
+
+.dev-callout-text code::before {
+  content: "$ ";
+  color: var(--text-muted);
 }
 
 .dev-callout a {
@@ -338,6 +381,7 @@ img, svg {
   padding: 2.5rem 2rem;
   background: var(--surface);
   border: 1px solid var(--border);
+  overflow: hidden;
 }
 
 .feature-label {
@@ -347,6 +391,15 @@ img, svg {
   letter-spacing: 0.15em;
   color: var(--text-muted);
   margin-bottom: 0.75rem;
+}
+
+.feature-icon {
+  width: 2rem;
+  height: 2rem;
+  color: var(--accent);
+  margin-bottom: 1.25rem;
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
 }
 
 .feature h3 {
@@ -402,6 +455,7 @@ img, svg {
   font-size: 0.875rem;
   color: var(--accent);
   margin-bottom: 1.5rem;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
 .step h3 {
@@ -542,5 +596,180 @@ img, svg {
     flex-direction: column;
     gap: 1rem;
     text-align: center;
+  }
+}
+
+/* ── Dot grid background ─────────────────────────────────────────── */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: radial-gradient(circle, rgba(212, 255, 40, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 65% 50%, rgba(11, 10, 6, 0.9) 0%, transparent 70%);
+  z-index: 0;
+}
+
+/* ── Hero ring animations (still rings + ambient glow) ───────────── */
+.hero-ring-outer {
+  animation: ring-glow-outer 6s ease-in-out infinite;
+}
+
+.hero-ring-mid {
+  animation: ring-glow-mid 4s ease-in-out infinite;
+}
+
+.hero-ring-inner {
+  animation: ring-breathe 4s ease-in-out infinite;
+}
+
+.hero-glow {
+  animation: glow-pulse 4s ease-in-out infinite;
+}
+
+@keyframes ring-glow-outer {
+  0%, 100% { border-color: rgba(212, 255, 40, 0.06); box-shadow: 0 0 0 rgba(212, 255, 40, 0); }
+  50% { border-color: rgba(212, 255, 40, 0.22); box-shadow: 0 0 40px rgba(212, 255, 40, 0.08); }
+}
+
+@keyframes ring-glow-mid {
+  0%, 100% { border-color: rgba(212, 255, 40, 0.15); box-shadow: 0 0 0 rgba(212, 255, 40, 0); }
+  50% { border-color: rgba(212, 255, 40, 0.4); box-shadow: 0 0 30px rgba(212, 255, 40, 0.1); }
+}
+
+@keyframes ring-breathe {
+  0%, 100% { transform: rotate(45deg) scale(1); box-shadow: inset 0 0 30px rgba(212, 255, 40, 0.06); }
+  50% { transform: rotate(45deg) scale(1.03); box-shadow: inset 0 0 50px rgba(212, 255, 40, 0.15), 0 0 50px rgba(212, 255, 40, 0.1); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+/* ── Hero text staggered entrance ────────────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.hero h1 {
+  animation: fade-up 0.6s ease-out backwards;
+}
+
+.hero p {
+  animation: fade-up 0.6s ease-out 0.15s backwards;
+}
+
+.hero-actions {
+  animation: fade-up 0.6s ease-out 0.3s backwards;
+}
+
+.hero-sub {
+  animation: fade-up 0.6s ease-out 0.45s backwards;
+}
+
+.hero-visual {
+  animation: scale-in 0.8s ease-out 0.2s backwards;
+}
+
+/* ── Card hover micro-interactions ───────────────────────────────── */
+
+/* Feature cards: glow border + icon brightens */
+.feature {
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.3s ease;
+}
+
+.feature:hover {
+  transform: translateY(-2px);
+  border-color: rgba(212, 255, 40, 0.25);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.3),
+    0 0 24px rgba(212, 255, 40, 0.06),
+    inset 0 0 20px rgba(212, 255, 40, 0.03);
+}
+
+.feature:hover .feature-icon {
+  opacity: 1;
+}
+
+.feature::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.4s ease;
+}
+
+.feature:hover::after {
+  transform: scaleX(1);
+}
+
+/* Step cards: left border sweep + number glow */
+.step {
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-left-color 0.3s ease;
+  border-left: 2px solid transparent;
+}
+
+.step:hover {
+  transform: translateY(-2px);
+  border-left-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.step:hover .step-number {
+  background: rgba(212, 255, 40, 0.08);
+  box-shadow: 0 0 12px rgba(212, 255, 40, 0.1);
+}
+
+/* ── Scroll-triggered reveals ────────────────────────────────────── */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+
+.reveal.revealed {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.reveal .feature:nth-child(2),
+.reveal .step:nth-child(2) {
+  transition-delay: 0.1s;
+}
+
+.reveal .feature:nth-child(3),
+.reveal .step:nth-child(3) {
+  transition-delay: 0.2s;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
   }
 }

@@ -21,8 +21,10 @@ bun run test             # Full checks (lint + typecheck + unit tests)
 bun run lint             # Linting only (biome + pkg + rust)
 bun run lint:actions     # Lint GitHub Actions workflows
 bun run lint:fix         # Auto-fix lint/format issues
-bun run sdk:build        # Build SDK
-bun run playground       # Start playground dev server
+bun run --cwd packages/sdk build          # Build SDK
+bun run --cwd packages/playground dev     # Playground (default)
+bun run --cwd packages/playground dev:localhost  # Playground -> localhost
+bun run --cwd packages/playground dev:testnet    # Playground -> testnet
 ```
 
 ## Development Principles

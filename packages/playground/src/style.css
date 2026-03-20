@@ -1,18 +1,46 @@
 @import "tailwindcss";
 
+@theme {
+  --color-brand-bg: #0b0a06;
+  --color-brand-surface: #131008;
+  --color-brand-surface-raised: #1a1610;
+  --color-brand-border: #2a2518;
+  --color-brand-text: #f0e8d0;
+  --color-brand-text-muted: #9a9080;
+  --color-brand-accent: #d4ff28;
+  --color-brand-accent-dim: #b8dd1e;
+  --color-brand-accent-on: #0e1400;
+}
+
 @layer base {
   body {
-    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
-      Menlo, Consolas, monospace;
+    font-family: "Inter", system-ui, -apple-system, sans-serif;
   }
 }
 
-/* ── Display font (title only) ── */
+/* ── Heading font ── */
 .font-display {
-  font-family: "Outfit", system-ui, sans-serif;
+  font-family: "Space Grotesk", system-ui, sans-serif;
 }
 
-/* ── Grain texture — physical screen presence ── */
+/* ── Monospace for terminal/log/code ── */
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
+    Menlo, Consolas, monospace;
+}
+
+/* ── Dot grid background ── */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, rgba(212, 255, 40, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ── Grain texture ── */
 body::after {
   content: "";
   position: fixed;
@@ -25,12 +53,12 @@ body::after {
   background-size: 256px 256px;
 }
 
-/* ── Ambient glow behind the app ── */
-main {
+/* ── Ambient glow ── */
+.app-layout {
   position: relative;
 }
 
-main::before {
+.app-layout::before {
   content: "";
   position: absolute;
   inset: -60px -40px;
@@ -38,7 +66,7 @@ main::before {
   pointer-events: none;
   background: radial-gradient(
     ellipse at 50% 20%,
-    oklch(from var(--color-emerald-950) l c h / 10%) 0%,
+    rgba(212, 255, 40, 0.04) 0%,
     transparent 55%
   );
   animation: ambient-pulse 8s ease-in-out infinite alternate;
@@ -49,28 +77,35 @@ main::before {
   to { opacity: 1; }
 }
 
-/* ── Panel accent lines ── */
-main :is(header, section) {
+/* ── Floating panels ── */
+.panel {
   position: relative;
+  background: rgba(19, 16, 8, 0.75);
+  backdrop-filter: blur(8px);
+  border-radius: 6px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 4px 12px rgba(0, 0, 0, 0.15),
+    inset 0 1px 0 rgba(212, 255, 40, 0.04);
 }
 
-main :is(header, section)::after {
+.panel::after {
   content: "";
   position: absolute;
   top: 0;
   left: 8%;
   right: 8%;
   height: 1px;
-  background: linear-gradient(90deg, transparent, var(--color-emerald-900), transparent);
-  opacity: 0.25;
+  background: linear-gradient(90deg, transparent, rgba(212, 255, 40, 0.12), transparent);
   pointer-events: none;
+  border-radius: 6px 6px 0 0;
 }
 
 /* ── Title glow ── */
 .title-glow {
   text-shadow:
-    0 0 15px oklch(from var(--color-emerald-400) l c h / 25%),
-    0 0 40px oklch(from var(--color-emerald-400) l c h / 10%);
+    0 0 15px rgba(212, 255, 40, 0.25),
+    0 0 40px rgba(212, 255, 40, 0.10);
 }
 
 /* ── Status indicator LEDs ── */
@@ -83,10 +118,10 @@ main :is(header, section)::after {
 }
 
 .status-online {
-  @apply bg-emerald-400;
+  background-color: var(--color-brand-accent);
   box-shadow:
-    0 0 4px oklch(from var(--color-emerald-400) l c h / 50%),
-    0 0 10px oklch(from var(--color-emerald-400) l c h / 20%);
+    0 0 4px rgba(212, 255, 40, 0.50),
+    0 0 10px rgba(212, 255, 40, 0.20);
   animation: led-breathe 3s ease-in-out infinite;
 }
 
@@ -102,29 +137,67 @@ main :is(header, section)::after {
   50% { opacity: 0.6; }
 }
 
-/* ── Mode toggle active state ── */
-.mode-active {
-  @apply border-emerald-600/70 text-emerald-400 bg-emerald-950/40;
-  box-shadow:
-    inset 0 0 20px oklch(from var(--color-emerald-900) l c h / 20%),
-    0 0 12px oklch(from var(--color-emerald-900) l c h / 10%);
+/* ── Mode toggle buttons ── */
+.mode-btn {
+  @apply flex flex-col items-center py-2.5 px-2 text-xs font-medium uppercase tracking-wider
+         border transition-all duration-150 border-brand-border text-brand-text-muted;
 }
 
-/* ── Mode button hover ── */
 .mode-btn:not(:disabled):not(.mode-active):hover {
-  box-shadow: 0 0 8px oklch(from var(--color-gray-500) l c h / 10%);
+  @apply border-brand-accent/30 text-brand-text;
+  box-shadow: 0 0 8px rgba(212, 255, 40, 0.06);
+}
+
+/* ── Mode toggle active state ── */
+.mode-active {
+  border-color: rgba(212, 255, 40, 0.35);
+  color: var(--color-brand-accent);
+  background-color: rgba(212, 255, 40, 0.05);
+  box-shadow:
+    inset 0 0 20px rgba(212, 255, 40, 0.06),
+    0 0 12px rgba(212, 255, 40, 0.04);
+}
+
+/* ── Action buttons ── */
+.action-btn {
+  @apply w-full py-3 px-4 text-xs font-semibold uppercase tracking-widest
+         transition-all duration-150 border disabled:opacity-30
+         disabled:cursor-not-allowed;
+}
+
+.action-btn-primary {
+  border-color: rgba(212, 255, 40, 0.25);
+  background: rgba(212, 255, 40, 0.06);
+  color: var(--color-brand-accent);
+}
+
+.action-btn-primary:not(:disabled):hover {
+  border-color: rgba(212, 255, 40, 0.4);
+  background: rgba(212, 255, 40, 0.1);
+  color: var(--color-brand-accent);
+}
+
+.action-btn-secondary {
+  border-color: var(--color-brand-border);
+  background: rgba(26, 22, 16, 0.4);
+  color: var(--color-brand-text-muted);
+}
+
+.action-btn-secondary:not(:disabled):hover {
+  border-color: rgba(212, 255, 40, 0.2);
+  color: var(--color-brand-text);
 }
 
 /* ── Result card glow when filled ── */
 .result-filled {
-  @apply border-emerald-800/50;
+  border-color: rgba(212, 255, 40, 0.2) !important;
   box-shadow:
-    0 0 16px oklch(from var(--color-emerald-900) l c h / 12%),
-    inset 0 0 8px oklch(from var(--color-emerald-950) l c h / 20%);
+    0 0 16px rgba(212, 255, 40, 0.06),
+    inset 0 0 8px rgba(212, 255, 40, 0.03);
 }
 
 .result-filled .text-gray-700 {
-  @apply text-emerald-400;
+  color: var(--color-brand-accent);
 }
 
 /* ── Scan-line overlay with drift ── */
@@ -159,19 +232,19 @@ main :is(header, section)::after {
 }
 
 #log::-webkit-scrollbar-thumb {
-  background: var(--color-gray-800);
+  background: var(--color-brand-border);
   border-radius: 2px;
 }
 
 #log::-webkit-scrollbar-thumb:hover {
-  background: var(--color-gray-600);
+  background: var(--color-brand-text-muted);
 }
 
 /* ── Log line colors ── */
-.log-info { @apply text-gray-500; }
+.log-info { color: var(--color-brand-text-muted); }
 .log-warn { @apply text-amber-500/80; }
 .log-error { @apply text-red-400/80; }
-.log-success { @apply text-emerald-500/80; }
+.log-success { color: rgba(212, 255, 40, 0.8); }
 
 /* ── Log line hover highlight ── */
 #log > div {
@@ -180,14 +253,15 @@ main :is(header, section)::after {
 }
 
 #log > div:hover {
-  background-color: oklch(from var(--color-gray-900) l c h / 50%);
+  background-color: rgba(26, 22, 16, 0.5);
 }
 
 /* ── Step breakdown details/summary ── */
 .result-filled details summary {
   list-style: none;
   cursor: pointer;
-  @apply text-[10px] text-gray-500 uppercase tracking-wider;
+  @apply text-[10px] uppercase tracking-wider;
+  color: var(--color-brand-text-muted);
 }
 
 .result-filled details summary::-webkit-details-marker {
@@ -212,7 +286,7 @@ main :is(header, section)::after {
 
 .step-dots {
   flex: 1;
-  border-bottom: 1px dotted var(--color-gray-800);
+  border-bottom: 1px dotted var(--color-brand-border);
   min-width: 8px;
   margin-bottom: 3px;
 }
@@ -225,11 +299,12 @@ main :is(header, section)::after {
   display: flex;
   align-items: baseline;
   gap: 4px;
-  @apply text-[9px] text-gray-700;
+  @apply text-[9px];
+  color: var(--color-brand-text-muted);
 }
 
 .step-sim-row .step-dots {
-  border-bottom-color: var(--color-gray-900);
+  border-bottom-color: rgba(42, 37, 24, 0.5);
 }
 
 /* ── Emoji verification grid ── */
@@ -242,13 +317,16 @@ main :is(header, section)::after {
 }
 
 .emoji-cell {
-  @apply text-2xl text-center p-1.5 border border-gray-800 bg-gray-900/40 rounded-sm;
+  @apply text-2xl text-center p-1.5 rounded-sm;
+  border: 1px solid var(--color-brand-border);
+  background: rgba(19, 16, 8, 0.4);
 }
 
 /* ── Wallet selection cards ── */
 .wallet-choice-card:not(:disabled):hover {
-  @apply border-emerald-700/50 text-emerald-400;
-  box-shadow: 0 0 12px oklch(from var(--color-emerald-900) l c h / 20%);
+  border-color: rgba(212, 255, 40, 0.25);
+  color: var(--color-brand-accent);
+  box-shadow: 0 0 12px rgba(212, 255, 40, 0.08);
 }
 
 .wallet-choice-card:not(:disabled) {
@@ -256,7 +334,25 @@ main :is(header, section)::after {
 }
 
 /* ── ASCII art animation ── */
+.ascii-art-container {
+  height: 224px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .ascii-art {
-  @apply mt-3 text-[10px] leading-[1.4] text-emerald-500/50 text-center whitespace-pre;
-  min-height: 6em;
+  @apply text-[10px] leading-[1.4] text-center whitespace-pre;
+  color: rgba(212, 255, 40, 0.5);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* ── Two-panel responsive layout ── */
+@media (max-width: 767px) {
+  .app-layout {
+    flex-direction: column !important;
+  }
+  .sidebar {
+    width: 100% !important;
+  }
 }

@@ -13,7 +13,8 @@ export function setupDOM(): void {
     <span id="wallet-dot" class="status-dot status-unknown"></span>
     <span id="wallet-state"></span>
     <div id="versions-row" class="hidden">
-      <span id="versions-info"></span>
+      <span id="version-sdk"></span>
+      <span id="version-node"></span>
     </div>
     <button id="mode-local"></button>
     <button id="mode-accelerated"></button>
@@ -21,6 +22,7 @@ export function setupDOM(): void {
     <button id="token-flow-btn" disabled></button>
     <div id="progress" class="hidden">
       <pre id="ascii-art" class="ascii-art"></pre>
+      <span id="ascii-elapsed"></span>
     </div>
     <section id="results" class="hidden"></section>
     <div id="result-local"></div>

@@ -30,6 +30,46 @@ const wallet = await getSchnorrAccount(pxe, secretKey, signingKey, Fr.ZERO, prov
 
 That's it. If the user has the [Aztec Accelerator](https://github.com/alejoamiras/aztec-accelerator/releases) desktop app running, proving happens natively at full speed. If not, it falls back to in-browser WASM proving automatically.
 
+### Embedded Wallet (Browser dApps)
+
+For browser-based dApps using Aztec's embedded wallet, inject the prover when creating the PXE:
+
+```typescript
+import { AcceleratorProver } from "@alejoamiras/aztec-accelerator";
+import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { createPXE, getPXEConfig } from "@aztec/pxe/client/lazy";
+import { EmbeddedWallet, WalletDB } from "@aztec/wallets/embedded";
+import { createStore } from "@aztec/kv-store/indexeddb";
+
+// 1. Create the prover
+const prover = new AcceleratorProver();
+
+// 2. Connect to an Aztec node
+const node = createAztecNodeClient("http://localhost:8080");
+const l1Contracts = await node.getL1ContractAddresses();
+const rollupAddress = l1Contracts.rollupAddress;
+
+// 3. Initialize PXE with the accelerated prover
+const pxeConfig = getPXEConfig();
+pxeConfig.dataDirectory = `pxe-${rollupAddress}`;
+pxeConfig.proverEnabled = true;
+pxeConfig.l1Contracts = l1Contracts;
+
+const pxe = await createPXE(node, pxeConfig, {
+  proverOrOptions: prover, // <-- AcceleratorProver injected here
+});
+
+// 4. Create the wallet
+const store = await createStore(`wallet-${rollupAddress}`, {
+  dataDirectory: "wallet",
+  dataStoreMapSizeKb: 2e10,
+});
+const walletDB = WalletDB.init(store);
+const wallet = new EmbeddedWallet(pxe, node, walletDB);
+```
+
+Every transaction sent through this wallet will automatically use native proving when the accelerator is available.
+
 ## API Reference
 
 ### `AcceleratorProver`
