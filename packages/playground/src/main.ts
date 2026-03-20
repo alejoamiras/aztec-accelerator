@@ -35,15 +35,13 @@ async function checkServices(): Promise<void> {
   if (accel) {
     appendLog("Native accelerator detected on localhost:59833", "success");
   } else {
-    appendLog("Accelerator not detected — will fall back to WASM", "warn");
+    appendLog("Accelerator not detected, will fall back to WASM", "warn");
   }
 }
 
 // ── Mode toggle ──
-const INACTIVE_BTN =
-  "mode-btn flex flex-col items-center py-2.5 px-2 text-xs font-medium uppercase tracking-wider border transition-all duration-150 border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400";
-const ACTIVE_BTN =
-  "mode-btn flex flex-col items-center py-2.5 px-2 text-xs font-medium uppercase tracking-wider border transition-all duration-150 mode-active";
+const INACTIVE_BTN = "mode-btn";
+const ACTIVE_BTN = "mode-btn mode-active";
 
 function updateModeUI(mode: UiMode): void {
   const buttons: Record<UiMode, HTMLElement> = {
@@ -75,7 +73,7 @@ $("mode-accelerated").addEventListener("click", () => {
 /** Update the accelerator service label and button state. */
 function updateAcceleratorLabel(available: boolean): void {
   setStatus("accelerator-status", available);
-  $("accelerator-label").textContent = available ? "available" : "not detected — fallback: wasm";
+  $("accelerator-label").textContent = available ? "available" : "not detected, fallback: wasm";
 }
 
 /** Handle a prover phase: feed the animation and react to fallback. */
@@ -83,7 +81,7 @@ function handleProverPhase(ascii: AsciiController, phase: string, _data?: unknow
   ascii.pushPhase(phase as Parameters<typeof ascii.pushPhase>[0]);
   if (phase === "fallback") {
     updateAcceleratorLabel(false);
-    appendLog("Accelerator offline — falling back to WASM (this will be slower)", "warn");
+    appendLog("Accelerator offline, falling back to WASM (this will be slower)", "warn");
   }
 }
 
@@ -193,23 +191,24 @@ async function initWallet(): Promise<void> {
   const ok = await initializeWallet(appendLog);
   if (ok) {
     $("wallet-state").textContent = "ready";
-    $("wallet-state").className = "text-emerald-500/80 ml-auto font-light";
+    $("wallet-state").className = "text-brand-accent/80 ml-auto text-[10px] font-mono font-light";
     setStatus("wallet-dot", true);
     setActionButtonsDisabled(false);
 
     const networkLabel = $("network-label");
     if (state.proofsRequired) {
       networkLabel.textContent = "proofs enabled";
-      networkLabel.className = "text-amber-500/80 text-[10px] uppercase tracking-wider ml-2";
-      appendLog("Ready — deploy a test account to get started (proofs enabled)", "success");
+      networkLabel.className = "text-amber-500/80 text-[10px] uppercase tracking-wider ml-auto";
+      appendLog("Ready. Deploy a test account to get started (proofs enabled)", "success");
     } else {
       networkLabel.textContent = "proofs simulated";
-      networkLabel.className = "text-gray-600 text-[10px] uppercase tracking-wider ml-2";
-      appendLog("Ready — deploy a test account or run the token flow", "success");
+      networkLabel.className =
+        "text-brand-text-muted/50 text-[10px] uppercase tracking-wider ml-auto";
+      appendLog("Ready. Deploy a test account or run the token flow", "success");
     }
   } else {
     $("wallet-state").textContent = "failed";
-    $("wallet-state").className = "text-red-400/80 ml-auto font-light";
+    $("wallet-state").className = "text-red-400/80 ml-auto text-[10px] font-mono font-light";
     setStatus("wallet-dot", false);
   }
 }
@@ -250,8 +249,9 @@ async function init(): Promise<void> {
   // Check accelerator
   await checkServices();
 
-  // Show embedded UI directly
+  // Show embedded UI and hide fallback placeholder
   $("embedded-ui").classList.remove("hidden");
+  document.querySelector(".embedded-ui-fallback")?.classList.add("hidden");
 
   if (aztec) {
     await initWallet();

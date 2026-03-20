@@ -265,9 +265,8 @@ img, svg {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(26, 22, 16, 0.6);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--surface);
+  box-shadow: inset 0 0 30px rgba(212, 255, 40, 0.06);
 }
 
 .hero-icon {
@@ -303,6 +302,11 @@ img, svg {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.02em;
+}
+
+.dev-callout-text span {
+  font-size: 0.875rem;
+  color: var(--text-muted);
 }
 
 .dev-callout-text code {

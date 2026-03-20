@@ -3,6 +3,6 @@
   <rect width="1024" height="1024" rx="180" fill="#1a1a2e"/>
   <!-- Outer ring -->
   <path d="M512,172 L852,512 L512,852 L172,512 Z M512,257 L257,512 L512,767 L767,512 Z" fill="#e2e8f0"/>
-  <!-- Inner ring -->
-  <path d="M512,342 L682,512 L512,682 L342,512 Z M512,427 L427,512 L512,597 L597,512 Z" fill="#e2e8f0"/>
+  <!-- Lightning bolt -->
+  <path d="M478,369 L560,369 L519,478 L573,478 L464,655 L505,533 L451,533 Z" fill="#e2e8f0"/>
 </svg>

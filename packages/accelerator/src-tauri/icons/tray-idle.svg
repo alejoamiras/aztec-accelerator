@@ -1,6 +1,4 @@
 <svg width="300" height="300" viewBox="40 40 220 220" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Outer ring: area between diamond 1 (half-diag 100) and diamond 2 (half-diag 75) -->
   <path d="M150,50 L250,150 L150,250 L50,150 Z M150,75 L75,150 L150,225 L225,150 Z" fill="black"/>
-  <!-- Inner ring: area between diamond 3 (half-diag 50) and diamond 4 (half-diag 25) -->
-  <path d="M150,100 L200,150 L150,200 L100,150 Z M150,125 L125,150 L150,175 L175,150 Z" fill="black"/>
+  <path d="M140,108 L164,108 L152,140 L168,140 L136,192 L148,156 L132,156 Z" fill="black"/>
 </svg>

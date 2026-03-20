@@ -5,6 +5,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "dev:localhost": "AZTEC_NODE_URL=http://localhost:8080 vite",
+    "dev:testnet": "AZTEC_NODE_URL=https://rpc.testnet.aztec-labs.com SPONSORED_FPC_SALT=0x2a0f57c183e73d3390f80b6b28e57593d6faea3517eb57604491220173ad2f32 vite",
     "preview": "vite preview",
     "test": "bun test",
     "test:e2e": "bunx playwright test --project=mocked",

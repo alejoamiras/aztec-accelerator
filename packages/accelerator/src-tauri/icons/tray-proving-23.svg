@@ -23,5 +23,5 @@
   <path d="M100,100 L116.7,83.3 L125,100 L112.5,112.5 Z" fill="black" fill-opacity="0.15"/>
   <path d="M116.7,83.3 L133.3,66.7 L137.5,87.5 L125,100 Z" fill="black"/>
   <path d="M133.3,66.7 L150,50 L150,75 L137.5,87.5 Z" fill="black" fill-opacity="0.96"/>
-  <path d="M150,100 L200,150 L150,200 L100,150 Z M150,125 L125,150 L150,175 L175,150 Z" fill="black"/>
+  <path d="M140,108 L164,108 L152,140 L168,140 L136,192 L148,156 L132,156 Z" fill="black"/>
 </svg>

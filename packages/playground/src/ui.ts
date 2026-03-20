@@ -42,7 +42,7 @@ export function appendLog(
     link.href = url;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.className = "text-cyan-500/70 hover:text-cyan-400 underline";
+    link.className = "text-brand-accent/70 hover:text-brand-accent underline";
     link.textContent = msg;
     line.appendChild(link);
   } else {

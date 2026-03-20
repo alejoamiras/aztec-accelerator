@@ -57,9 +57,9 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
       buildDotRow(
         "step-row",
         step.step,
-        "text-gray-300",
+        "text-brand-text",
         formatMs(step.durationMs),
-        "text-emerald-500/80 tabular-nums",
+        "text-brand-accent/80 tabular-nums",
       ),
     );
 
@@ -75,7 +75,7 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
           buildDotRow(
             "step-sim-row",
             "sim",
-            "text-gray-600",
+            "text-brand-text-muted",
             formatMs(sim.totalMs),
             "tabular-nums",
           ),
@@ -84,7 +84,7 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
           buildDotRow(
             "step-sim-row",
             "sync",
-            "text-gray-600",
+            "text-brand-text-muted",
             formatMs(sim.syncMs),
             "tabular-nums",
           ),
@@ -94,7 +94,7 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
             buildDotRow(
               "step-sim-row",
               shortFnName(fn.name),
-              "text-gray-600",
+              "text-brand-text-muted",
               formatMs(fn.ms),
               "tabular-nums",
             ),
@@ -108,7 +108,7 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
           buildDotRow(
             "step-sim-row",
             "prove",
-            "text-gray-600",
+            "text-brand-text-muted",
             formatMs(step.proveMs),
             "tabular-nums",
           ),
@@ -121,7 +121,7 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
           buildDotRow(
             "step-sim-row",
             "prove + send",
-            "text-gray-600",
+            "text-brand-text-muted",
             formatMs(step.proveSendMs),
             "tabular-nums",
           ),
@@ -133,7 +133,7 @@ export function renderSteps(container: HTMLElement, steps: StepTiming[]): void {
           buildDotRow(
             "step-sim-row",
             "confirm",
-            "text-gray-600",
+            "text-brand-text-muted",
             formatMs(step.confirmMs),
             "tabular-nums",
           ),
@@ -167,16 +167,16 @@ export function showResult(
 
   const timeEl = $(`${prefix}time-${mode}`);
   timeEl.textContent = formatDuration(durationMs);
-  timeEl.className = "text-3xl font-bold tabular-nums text-emerald-400";
+  timeEl.className = "text-3xl font-bold tabular-nums text-brand-accent font-mono";
 
   const tagEl = $(`${prefix}tag-${mode}`);
   tagEl.textContent = tag;
   tagEl.className = `mt-1.5 text-[10px] uppercase tracking-widest ${
     tag === "token flow"
-      ? "text-cyan-500/70"
+      ? "text-brand-accent/70"
       : tag === "cold"
         ? "text-amber-500/70"
-        : "text-cyan-500/70"
+        : "text-brand-accent/70"
   }`;
 
   $(`${prefix}result-${mode}`).classList.add("result-filled");
