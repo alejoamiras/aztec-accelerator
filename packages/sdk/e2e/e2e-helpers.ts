@@ -1,32 +1,17 @@
 /**
  * Shared e2e test helpers.
  *
- * Two deployment helpers:
- *   - deploySchnorrAccountSimple(pxe) — simple sandbox deploy via getSchnorrAccount
- *   - deploySchnorrAccount(wallet, fpc, label?) — network-agnostic deploy via EmbeddedWallet + Sponsored FPC
+ * deploySchnorrAccount(wallet, fpc, label?) — network-agnostic deploy
+ * via EmbeddedWallet + Sponsored FPC.
  */
 
-import { getSchnorrAccount } from "@aztec/accounts/testing/lazy";
-import type { PXE, Wallet } from "@aztec/aztec.js";
-import { AztecAddress, type AztecAddressLike } from "@aztec/aztec.js/addresses";
+import { AztecAddress } from "@aztec/aztec.js/addresses";
 import type { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee";
 import { Fr } from "@aztec/aztec.js/fields";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { getLogger } from "@logtape/logtape";
 
 const logger = getLogger(["aztec-accelerator", "sdk", "e2e", "helpers"]);
-
-/** Deploy a Schnorr account using simple sandbox pattern. */
-export async function deploySchnorrAccountSimple(pxe: PXE): Promise<{
-  wallet: Wallet;
-  address: AztecAddressLike;
-}> {
-  const secret = Fr.random();
-  const salt = Fr.random();
-  const account = await getSchnorrAccount(pxe, secret, salt);
-  const wallet = await account.waitSetup();
-  return { wallet, address: wallet.getAddress() };
-}
 
 /** Deploy a new Schnorr account using the current prover with Sponsored FPC. */
 export async function deploySchnorrAccount(
