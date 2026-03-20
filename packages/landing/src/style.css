@@ -130,6 +130,18 @@ img, svg {
   background: var(--accent-dim);
 }
 
+.btn-nav {
+  border: 1px solid rgba(212, 255, 40, 0.4);
+  color: var(--accent);
+  font-size: 0.75rem;
+  padding: 0.5rem 1.25rem;
+}
+
+.btn-nav:hover {
+  background: rgba(212, 255, 40, 0.08);
+  border-color: var(--accent);
+}
+
 .btn-outline {
   border: 1px solid var(--border);
   color: var(--text);
