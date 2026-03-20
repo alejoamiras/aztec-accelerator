@@ -1,0 +1,27 @@
+<svg width="300" height="300" viewBox="40 40 220 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M150,50 L166.7,66.7 L162.5,87.5 L150,75 Z" fill="black" fill-opacity="0.59"/>
+  <path d="M166.7,66.7 L183.3,83.3 L175,100 L162.5,87.5 Z" fill="black" fill-opacity="0.56"/>
+  <path d="M183.3,83.3 L200,100 L187.5,112.5 L175,100 Z" fill="black" fill-opacity="0.52"/>
+  <path d="M200,100 L216.7,116.7 L200,125 L187.5,112.5 Z" fill="black" fill-opacity="0.48"/>
+  <path d="M216.7,116.7 L233.3,133.3 L212.5,137.5 L200,125 Z" fill="black" fill-opacity="0.45"/>
+  <path d="M233.3,133.3 L250,150 L225,150 L212.5,137.5 Z" fill="black" fill-opacity="0.41"/>
+  <path d="M250,150 L233.3,166.7 L212.5,162.5 L225,150 Z" fill="black" fill-opacity="0.37"/>
+  <path d="M233.3,166.7 L216.7,183.3 L200,175 L212.5,162.5 Z" fill="black" fill-opacity="0.33"/>
+  <path d="M216.7,183.3 L200,200 L187.5,187.5 L200,175 Z" fill="black" fill-opacity="0.3"/>
+  <path d="M200,200 L183.3,216.7 L175,200 L187.5,187.5 Z" fill="black" fill-opacity="0.26"/>
+  <path d="M183.3,216.7 L166.7,233.3 L162.5,212.5 L175,200 Z" fill="black" fill-opacity="0.22"/>
+  <path d="M166.7,233.3 L150,250 L150,225 L162.5,212.5 Z" fill="black" fill-opacity="0.19"/>
+  <path d="M150,250 L133.3,233.3 L137.5,212.5 L150,225 Z" fill="black" fill-opacity="0.15"/>
+  <path d="M133.3,233.3 L116.7,216.7 L125,200 L137.5,212.5 Z" fill="black"/>
+  <path d="M116.7,216.7 L100,200 L112.5,187.5 L125,200 Z" fill="black" fill-opacity="0.96"/>
+  <path d="M100,200 L83.3,183.3 L100,175 L112.5,187.5 Z" fill="black" fill-opacity="0.93"/>
+  <path d="M83.3,183.3 L66.7,166.7 L87.5,162.5 L100,175 Z" fill="black" fill-opacity="0.89"/>
+  <path d="M66.7,166.7 L50,150 L75,150 L87.5,162.5 Z" fill="black" fill-opacity="0.85"/>
+  <path d="M50,150 L66.7,133.3 L87.5,137.5 L75,150 Z" fill="black" fill-opacity="0.82"/>
+  <path d="M66.7,133.3 L83.3,116.7 L100,125 L87.5,137.5 Z" fill="black" fill-opacity="0.78"/>
+  <path d="M83.3,116.7 L100,100 L112.5,112.5 L100,125 Z" fill="black" fill-opacity="0.74"/>
+  <path d="M100,100 L116.7,83.3 L125,100 L112.5,112.5 Z" fill="black" fill-opacity="0.7"/>
+  <path d="M116.7,83.3 L133.3,66.7 L137.5,87.5 L125,100 Z" fill="black" fill-opacity="0.67"/>
+  <path d="M133.3,66.7 L150,50 L150,75 L137.5,87.5 Z" fill="black" fill-opacity="0.63"/>
+  <path d="M150,100 L200,150 L150,200 L100,150 Z M150,125 L125,150 L150,175 L175,150 Z" fill="black"/>
+</svg>

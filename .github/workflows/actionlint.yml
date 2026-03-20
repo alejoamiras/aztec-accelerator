@@ -1,0 +1,106 @@
+name: "Lint: Infra & Workflows"
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      workflows: ${{ steps.override.outputs.workflows || steps.filter.outputs.workflows }}
+      shell: ${{ steps.override.outputs.shell || steps.filter.outputs.shell }}
+      tofu: ${{ steps.override.outputs.tofu || steps.filter.outputs.tofu }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+              - '.github/actions/**'
+            shell:
+              - 'infra/**/*.sh'
+            tofu:
+              - 'infra/tofu/**/*.tf'
+      - name: Override for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: override
+        run: |
+          {
+            echo "workflows=true"
+            echo "shell=true"
+            echo "tofu=true"
+          } >> "$GITHUB_OUTPUT"
+
+  actionlint:
+    name: Lint workflows
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download actionlint
+        id: get_actionlint
+        run: bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        shell: bash
+      - name: Run actionlint
+        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        shell: bash
+
+  shellcheck:
+    name: Shellcheck
+    needs: changes
+    if: needs.changes.outputs.shell == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run shellcheck
+        run: shellcheck infra/*.sh
+
+  tofu:
+    name: Lint OpenTofu
+    needs: changes
+    if: needs.changes.outputs.tofu == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: '1.10.0'
+      - name: Format check
+        run: tofu -chdir=infra/tofu fmt -check -diff
+      - name: Init (providers only)
+        run: tofu -chdir=infra/tofu init -backend=false -input=false
+      - name: Validate
+        run: tofu -chdir=infra/tofu validate
+
+  status:
+    name: Actionlint Status
+    if: always()
+    needs: [changes, actionlint, shellcheck, tofu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.actionlint.result }}" = "failure" ]; then
+            echo "Actionlint failed"
+            exit 1
+          fi
+          if [ "${{ needs.shellcheck.result }}" = "failure" ]; then
+            echo "Shellcheck failed"
+            exit 1
+          fi
+          if [ "${{ needs.tofu.result }}" = "failure" ]; then
+            echo "OpenTofu lint failed"
+            exit 1
+          fi
+          echo "All checks passed (or skipped — no relevant changes)"

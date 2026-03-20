@@ -1,0 +1,192 @@
+name: Aztec Version Update
+
+on:
+  workflow_call:
+    inputs:
+      dist_tag:
+        description: "npm dist-tag to check (nightly, devnet, etc.)"
+        required: true
+        type: string
+      target_branch:
+        description: "Branch to target for the PR (main, devnet, etc.)"
+        required: true
+        type: string
+      branch_prefix:
+        description: "Branch name prefix (e.g. chore/aztec-nightlies)"
+        required: true
+        type: string
+      add_label:
+        description: "PR label to add (leave empty for none)"
+        required: false
+        default: ""
+        type: string
+      auto_merge:
+        description: "true: gh pr merge --auto --squash; false: gh pr merge --squash (immediate)"
+        required: false
+        default: true
+        type: boolean
+      version:
+        description: "Force specific version (leave empty for auto-detect)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  # ── Job 1: Check if a newer version exists ─────────────────────────
+  check-update:
+    name: Check for new ${{ inputs.dist_tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      needs_update: ${{ steps.check.outputs.needs_update }}
+      new_version: ${{ steps.check.outputs.new_version }}
+      current_version: ${{ steps.check.outputs.current_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_branch }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Check ${{ inputs.dist_tag }} version
+        id: check
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            CURRENT=$(bun -e "console.log(JSON.parse(require('fs').readFileSync('packages/sdk/package.json','utf8')).devDependencies['@aztec/aztec.js'])")
+            {
+              echo "needs_update=true"
+              echo "new_version=${{ inputs.version }}"
+              echo "current_version=$CURRENT"
+            } >> "$GITHUB_OUTPUT"
+            echo "Forced update to ${{ inputs.version }} (current: $CURRENT)"
+          else
+            RESULT=$(bun scripts/check-aztec-update.ts "${{ inputs.dist_tag }}")
+            echo "$RESULT" | jq .
+            NEEDS=$(echo "$RESULT" | jq -r .needsUpdate)
+            LATEST=$(echo "$RESULT" | jq -r .latest)
+            CURRENT=$(echo "$RESULT" | jq -r .current)
+            {
+              echo "needs_update=$NEEDS"
+              echo "new_version=$LATEST"
+              echo "current_version=$CURRENT"
+            } >> "$GITHUB_OUTPUT"
+            if [ "$NEEDS" = "true" ]; then
+              echo "New ${{ inputs.dist_tag }} available: $CURRENT → $LATEST"
+            else
+              echo "Already up to date at $CURRENT"
+            fi
+          fi
+
+  # ── Job 2: Update deps, commit, push ──────────────────────────────
+  update:
+    name: Update & push
+    needs: check-update
+    if: needs.check-update.outputs.needs_update == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_branch }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ inputs.dist_tag }}-${{ needs.check-update.outputs.new_version }}
+          restore-keys: |
+            ${{ runner.os }}-bun-${{ inputs.dist_tag }}-
+            ${{ runner.os }}-bun-
+
+      - name: Update @aztec/* versions
+        run: bun scripts/update-aztec-version.ts "$NEW_VERSION"
+
+      - name: Install dependencies with new versions
+        run: bun install
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="${{ inputs.branch_prefix }}-${NEW_VERSION}"
+
+          # If the branch already exists on the remote, skip — a prior run
+          # already pushed it. Force-pushing would orphan the commit that
+          # CI workflows are running against, causing the PR to show no checks.
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" > /dev/null 2>&1; then
+            echo "Branch $BRANCH already exists on remote — skipping push"
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH"
+          git add packages/*/package.json bun.lock
+          git commit -m "chore: update @aztec/* to ${NEW_VERSION}"
+          git push -u origin "$BRANCH"
+
+  # ── Job 3: Create PR with optional label + merge strategy ─────────
+  create-pr:
+    name: Create PR
+    needs: [check-update, update]
+    if: needs.update.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
+      CURRENT_VERSION: ${{ needs.check-update.outputs.current_version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create or update PR
+        run: |
+          BRANCH="${{ inputs.branch_prefix }}-${NEW_VERSION}"
+          TITLE="chore: update @aztec/* to ${NEW_VERSION}"
+
+          BODY="$(cat <<'EOF'
+          ## Aztec ${{ inputs.dist_tag }} Update
+
+          Automated dependency bump. PR CI runs all tests (unit, e2e).
+
+          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ---
+          *Automated by [Aztec Update](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) workflow.*
+          EOF
+          )"
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Updating existing PR #$EXISTING_PR"
+            gh pr edit "$EXISTING_PR" --title "$TITLE" --body "$BODY"
+          else
+            echo "Creating new PR"
+            gh pr create \
+              --head "$BRANCH" \
+              --base "${{ inputs.target_branch }}" \
+              --title "$TITLE" \
+              --body "$BODY"
+          fi
+
+          # Get PR number
+          PR_NUM=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')
+
+          # Add label if specified (e.g. triggers infra.yml for TEE + UEE deploy + e2e)
+          if [ -n "${{ inputs.add_label }}" ]; then
+            gh pr edit "$PR_NUM" --add-label "${{ inputs.add_label }}" 2>/dev/null || true
+          fi
+
+          # Merge strategy: auto-merge waits for checks, immediate merges now
+          if [ "${{ inputs.auto_merge }}" = "true" ]; then
+            gh pr merge "$PR_NUM" --auto --squash --delete-branch
+          else
+            gh pr merge "$PR_NUM" --squash --delete-branch
+          fi

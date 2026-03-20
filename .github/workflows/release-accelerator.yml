@@ -1,0 +1,211 @@
+name: Release Accelerator
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.2.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-accelerator
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Create Git Tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create and push tag
+        id: tag
+        run: |
+          TAG="accelerator-v${{ inputs.version }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping creation"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Created and pushed tag $TAG"
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: tag
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            platform: macos-arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            platform: macos-x86_64
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            platform: linux-x86_64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/accelerator/src-tauri -> target
+          key: release-${{ matrix.target }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+
+      - name: Patch version in tauri.conf.json
+        run: |
+          cd packages/accelerator/src-tauri
+          bun -e "
+            const conf = JSON.parse(await Bun.file('tauri.conf.json').text());
+            conf.version = '${{ needs.tag.outputs.version }}';
+            await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+          "
+
+      - name: Patch version in Cargo.toml
+        run: |
+          cd packages/accelerator/src-tauri
+          sed -i.bak 's/^version = ".*"/version = "${{ needs.tag.outputs.version }}"/' Cargo.toml
+          rm -f Cargo.toml.bak
+
+      - name: Copy bb sidecar
+        run: bun run --cwd packages/accelerator prebuild
+
+      - name: Build Tauri bundle
+        run: npx @tauri-apps/cli@^2 build --target ${{ matrix.target }}
+        working-directory: packages/accelerator
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: accelerator-${{ matrix.platform }}
+          path: |
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+
+  release:
+    name: Create GitHub Release
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Flatten and rename artifacts
+        run: |
+          VERSION="${{ needs.tag.outputs.version }}"
+          mkdir -p release-files
+
+          # Find all bundle files (nested in subdirs from upload-artifact) and rename to human-friendly names
+          find artifacts -name '*_aarch64.dmg' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.dmg" \;
+          find artifacts -name '*_x64.dmg'     -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.dmg" \;
+          find artifacts -name '*_amd64.deb'   -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \;
+          find artifacts -name '*_amd64.AppImage' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \;
+
+          echo "Release files:"
+          ls -la release-files/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${{ needs.tag.outputs.tag }}"
+          VERSION="${{ needs.tag.outputs.version }}"
+
+          # Collect all bundle files into a null-delimited list
+          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0)
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "No artifacts found!"
+            exit 1
+          fi
+
+          echo "Uploading ${#FILES[@]} files:"
+          printf '  %s\n' "${FILES[@]}"
+
+          # Delete existing release if present (clean slate)
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists, deleting..."
+            gh release delete "$TAG" --yes
+          fi
+
+          echo "Creating release $TAG..."
+
+          # Write release notes to file (avoids heredoc/YAML indentation issues)
+          cat > /tmp/release-notes.md << NOTES
+          ## Aztec Accelerator ${VERSION}
+
+          Native proving accelerator for Aztec transactions.
+
+          ### Downloads
+
+          | Platform | File |
+          |----------|------|
+          | **macOS (Apple Silicon)** | \`Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.dmg\` |
+          | **macOS (Intel)** | \`Aztec-Accelerator-${VERSION}-macOS-Intel.dmg\` |
+          | **Linux (Debian/Ubuntu)** | \`Aztec-Accelerator-${VERSION}-Linux-x86_64.deb\` |
+          | **Linux (Other distros)** | \`Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage\` |
+
+          ### macOS: First Launch
+
+          The app is **code-signed and notarized** by Apple. Double-click the DMG, drag to Applications, and launch.
+
+          ### Aztec Version
+          Built against Aztec \`${VERSION}\`.
+          NOTES
+
+          # Strip leading whitespace from each line (YAML indentation artifact)
+          sed -i 's/^          //' /tmp/release-notes.md
+
+          gh release create "$TAG" \
+            --title "Aztec Accelerator $VERSION" \
+            --notes-file /tmp/release-notes.md \
+            "${FILES[@]}"

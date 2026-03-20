@@ -1,0 +1,54 @@
+name: Publish Testnet
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/sdk/**"
+      - "packages/playground/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  e2e:
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      ref: ${{ github.sha }}
+
+  publish-sdk:
+    needs: e2e
+    uses: ./.github/workflows/_publish-sdk.yml
+    with:
+      dist_tag: testnet
+      latest: true
+    secrets: inherit
+
+  deploy-app:
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run --cwd packages/playground build
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy playground to S3
+        run: |
+          aws s3 sync packages/playground/dist/ s3://${{ secrets.S3_BUCKET_NAME }}/playground/ --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/playground/*"

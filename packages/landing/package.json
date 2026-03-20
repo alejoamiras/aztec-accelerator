@@ -1,0 +1,13 @@
+{
+  "name": "@alejoamiras/aztec-accelerator-landing",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^7.3.1"
+  }
+}

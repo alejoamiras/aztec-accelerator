@@ -1,0 +1,38 @@
+.DS_Store
+node_modules
+build
+dist
+package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+.vscode
+.op
+
+codegenCache.json
+
+cache
+
+**/target
+
+# Bun
+.bun
+
+# Playwright
+test-results/
+playwright-report/
+
+# OpenTofu / Terraform
+infra/tofu/.terraform/
+infra/tofu/*.tfstate
+infra/tofu/*.tfstate.*
+infra/tofu/terraform.tfvars
+infra/tofu/.snapshot/
+
+# Yarn (not used — this is a Bun workspace)
+.pnp.*
+.yarn/
+yarn.lock

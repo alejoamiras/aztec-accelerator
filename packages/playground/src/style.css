@@ -1,0 +1,262 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
+      Menlo, Consolas, monospace;
+  }
+}
+
+/* ── Display font (title only) ── */
+.font-display {
+  font-family: "Outfit", system-ui, sans-serif;
+}
+
+/* ── Grain texture — physical screen presence ── */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* ── Ambient glow behind the app ── */
+main {
+  position: relative;
+}
+
+main::before {
+  content: "";
+  position: absolute;
+  inset: -60px -40px;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at 50% 20%,
+    oklch(from var(--color-emerald-950) l c h / 10%) 0%,
+    transparent 55%
+  );
+  animation: ambient-pulse 8s ease-in-out infinite alternate;
+}
+
+@keyframes ambient-pulse {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
+
+/* ── Panel accent lines ── */
+main :is(header, section) {
+  position: relative;
+}
+
+main :is(header, section)::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8%;
+  right: 8%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-emerald-900), transparent);
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+/* ── Title glow ── */
+.title-glow {
+  text-shadow:
+    0 0 15px oklch(from var(--color-emerald-400) l c h / 25%),
+    0 0 40px oklch(from var(--color-emerald-400) l c h / 10%);
+}
+
+/* ── Status indicator LEDs ── */
+.status-dot {
+  @apply w-1.5 h-1.5 rounded-full flex-shrink-0;
+}
+
+.status-unknown {
+  @apply bg-gray-700;
+}
+
+.status-online {
+  @apply bg-emerald-400;
+  box-shadow:
+    0 0 4px oklch(from var(--color-emerald-400) l c h / 50%),
+    0 0 10px oklch(from var(--color-emerald-400) l c h / 20%);
+  animation: led-breathe 3s ease-in-out infinite;
+}
+
+.status-offline {
+  @apply bg-red-400;
+  box-shadow:
+    0 0 4px oklch(from var(--color-red-400) l c h / 40%),
+    0 0 8px oklch(from var(--color-red-400) l c h / 15%);
+}
+
+@keyframes led-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ── Mode toggle active state ── */
+.mode-active {
+  @apply border-emerald-600/70 text-emerald-400 bg-emerald-950/40;
+  box-shadow:
+    inset 0 0 20px oklch(from var(--color-emerald-900) l c h / 20%),
+    0 0 12px oklch(from var(--color-emerald-900) l c h / 10%);
+}
+
+/* ── Mode button hover ── */
+.mode-btn:not(:disabled):not(.mode-active):hover {
+  box-shadow: 0 0 8px oklch(from var(--color-gray-500) l c h / 10%);
+}
+
+/* ── Result card glow when filled ── */
+.result-filled {
+  @apply border-emerald-800/50;
+  box-shadow:
+    0 0 16px oklch(from var(--color-emerald-900) l c h / 12%),
+    inset 0 0 8px oklch(from var(--color-emerald-950) l c h / 20%);
+}
+
+.result-filled .text-gray-700 {
+  @apply text-emerald-400;
+}
+
+/* ── Scan-line overlay with drift ── */
+.scanlines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  animation: scanline-drift 8s linear infinite;
+}
+
+@keyframes scanline-drift {
+  from { background-position: 0 0; }
+  to { background-position: 0 4px; }
+}
+
+/* ── Log terminal depth ── */
+#log {
+  box-shadow: inset 0 8px 16px -8px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Log scrollbar ── */
+#log::-webkit-scrollbar {
+  width: 3px;
+}
+
+#log::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#log::-webkit-scrollbar-thumb {
+  background: var(--color-gray-800);
+  border-radius: 2px;
+}
+
+#log::-webkit-scrollbar-thumb:hover {
+  background: var(--color-gray-600);
+}
+
+/* ── Log line colors ── */
+.log-info { @apply text-gray-500; }
+.log-warn { @apply text-amber-500/80; }
+.log-error { @apply text-red-400/80; }
+.log-success { @apply text-emerald-500/80; }
+
+/* ── Log line hover highlight ── */
+#log > div {
+  @apply px-1.5 -mx-1.5 rounded-sm;
+  transition: background-color 0.1s;
+}
+
+#log > div:hover {
+  background-color: oklch(from var(--color-gray-900) l c h / 50%);
+}
+
+/* ── Step breakdown details/summary ── */
+.result-filled details summary {
+  list-style: none;
+  cursor: pointer;
+  @apply text-[10px] text-gray-500 uppercase tracking-wider;
+}
+
+.result-filled details summary::-webkit-details-marker {
+  display: none;
+}
+
+.result-filled details summary::before {
+  content: "\25B8 ";
+}
+
+.result-filled details[open] summary::before {
+  content: "\25BE ";
+}
+
+/* ── Step rows with dot leaders ── */
+.step-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  @apply text-[10px];
+}
+
+.step-dots {
+  flex: 1;
+  border-bottom: 1px dotted var(--color-gray-800);
+  min-width: 8px;
+  margin-bottom: 3px;
+}
+
+.step-sim {
+  @apply pl-3 mt-0.5 space-y-px;
+}
+
+.step-sim-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  @apply text-[9px] text-gray-700;
+}
+
+.step-sim-row .step-dots {
+  border-bottom-color: var(--color-gray-900);
+}
+
+/* ── Emoji verification grid ── */
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  max-width: 200px;
+  margin: 0 auto;
+}
+
+.emoji-cell {
+  @apply text-2xl text-center p-1.5 border border-gray-800 bg-gray-900/40 rounded-sm;
+}
+
+/* ── Wallet selection cards ── */
+.wallet-choice-card:not(:disabled):hover {
+  @apply border-emerald-700/50 text-emerald-400;
+  box-shadow: 0 0 12px oklch(from var(--color-emerald-900) l c h / 20%);
+}
+
+.wallet-choice-card:not(:disabled) {
+  cursor: pointer;
+}
+
+/* ── ASCII art animation ── */
+.ascii-art {
+  @apply mt-3 text-[10px] leading-[1.4] text-emerald-500/50 text-center whitespace-pre;
+  min-height: 6em;
+}

@@ -1,0 +1,8 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="180" fill="#1a1a2e"/>
+  <!-- Outer ring -->
+  <path d="M512,172 L852,512 L512,852 L172,512 Z M512,257 L257,512 L512,767 L767,512 Z" fill="#e2e8f0"/>
+  <!-- Inner ring -->
+  <path d="M512,342 L682,512 L512,682 L342,512 Z M512,427 L427,512 L512,597 L597,512 Z" fill="#e2e8f0"/>
+</svg>

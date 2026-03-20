@@ -1,0 +1,116 @@
+name: SDK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'packages/sdk/**'
+              - 'tsconfig.json'
+              - 'biome.json'
+              - 'package.json'
+              - 'bun.lock'
+              - '.github/workflows/sdk.yml'
+              - '.github/workflows/_e2e.yml'
+              - '.github/actions/setup-aztec/**'
+              - '.github/actions/start-services/**'
+      - name: Override for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: override
+        run: echo "relevant=true" >> "$GITHUB_OUTPUT"
+
+  lint:
+    name: Lint
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  typecheck:
+    name: Typecheck
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/sdk test:lint
+
+  unit-tests:
+    name: Unit Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/sdk test:unit
+
+  e2e:
+    name: E2E Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    uses: ./.github/workflows/_e2e.yml
+    secrets: inherit
+
+  sdk-status:
+    name: SDK Status
+    if: always()
+    needs: [changes, lint, typecheck, unit-tests, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check results
+        run: |
+          results="${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.typecheck.result }} ${{ needs.unit-tests.result }} ${{ needs.e2e.result }}"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "Job failed or was cancelled: $r"
+              exit 1
+            fi
+          done
+          echo "All jobs passed or were skipped"

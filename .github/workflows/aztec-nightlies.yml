@@ -1,0 +1,31 @@
+name: Aztec Nightlies Update
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # 08:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Force specific version (leave empty for auto-detect)"
+        required: false
+        type: string
+
+concurrency:
+  group: aztec-nightlies
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    uses: ./.github/workflows/_aztec-update.yml
+    secrets: inherit
+    with:
+      dist_tag: nightly
+      target_branch: nightlies
+      branch_prefix: chore/aztec-nightlies
+      add_label: test-infra
+      auto_merge: true
+      version: ${{ inputs.version || '' }}

@@ -1,0 +1,121 @@
+name: App
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'packages/playground/**'
+              - 'packages/sdk/**'
+              - 'tsconfig.json'
+              - 'biome.json'
+              - 'package.json'
+              - 'bun.lock'
+              - '.github/workflows/app.yml'
+              - '.github/workflows/_e2e-app.yml'
+              - '.github/actions/setup-aztec/**'
+              - '.github/actions/start-services/**'
+      - name: Override for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: override
+        run: echo "relevant=true" >> "$GITHUB_OUTPUT"
+
+  lint:
+    name: Lint
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  unit-tests:
+    name: Unit Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/playground test:unit
+
+  mocked-e2e:
+    name: Mocked E2E
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+      - run: bun run --cwd packages/playground test:e2e
+
+  local-network-e2e:
+    name: Local Network E2E
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    uses: ./.github/workflows/_e2e-app.yml
+    secrets: inherit
+    with:
+      test_script: "test:e2e:local-network"
+
+  app-status:
+    name: App Status
+    if: always()
+    needs: [changes, lint, unit-tests, mocked-e2e, local-network-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check results
+        run: |
+          results="${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.unit-tests.result }} ${{ needs.mocked-e2e.result }} ${{ needs.local-network-e2e.result }}"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "Job failed or was cancelled: $r"
+              exit 1
+            fi
+          done
+          echo "All jobs passed or were skipped"

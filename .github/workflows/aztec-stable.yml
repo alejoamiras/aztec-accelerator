@@ -1,0 +1,30 @@
+name: Aztec Stable Update
+
+on:
+  schedule:
+    - cron: "0 10 * * 3" # Weekly Wednesday 10:00 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Force specific version (leave empty for auto-detect)"
+        required: false
+        type: string
+
+concurrency:
+  group: aztec-stable
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    uses: ./.github/workflows/_aztec-update.yml
+    secrets: inherit
+    with:
+      dist_tag: rc
+      target_branch: main
+      branch_prefix: chore/aztec-stable
+      auto_merge: true
+      version: ${{ inputs.version || '' }}

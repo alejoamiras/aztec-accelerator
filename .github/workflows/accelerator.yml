@@ -1,0 +1,150 @@
+name: Accelerator
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'packages/accelerator/**'
+              - 'packages/sdk/src/**'
+              - 'biome.json'
+              - 'package.json'
+              - 'bun.lock'
+              - '.github/workflows/accelerator.yml'
+              - '.github/workflows/_e2e.yml'
+              - '.github/actions/**'
+      - name: Override for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: override
+        run: echo "relevant=true" >> "$GITHUB_OUTPUT"
+
+  clippy:
+    name: Clippy
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/accelerator/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - name: Copy bb sidecar
+        run: bun run --cwd packages/accelerator prebuild
+        working-directory: .
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/accelerator/src-tauri -> target
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Rust Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/accelerator/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - name: Copy bb sidecar
+        run: bun run --cwd packages/accelerator prebuild
+        working-directory: .
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/accelerator/src-tauri -> target
+      - run: cargo test
+
+  lint:
+    name: Lint
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  e2e:
+    name: E2E
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    uses: ./.github/workflows/_e2e.yml
+    secrets: inherit
+    with:
+      build_accelerator: true
+
+  accelerator-status:
+    name: Accelerator Status
+    if: always()
+    needs: [changes, clippy, test, lint, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check results
+        run: |
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.e2e.result }}"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "Job failed or was cancelled: $r"
+              exit 1
+            fi
+          done
+          echo "All jobs passed or were skipped"

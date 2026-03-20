@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "moduleResolution": "NodeNext",
+    "module": "NodeNext",
+
+    // Bun types for bun:test, Bun.spawn, etc.
+    "types": ["bun-types"],
+
+    // compatibility
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+
+    // lib
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // strictness
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true
+  }
+}

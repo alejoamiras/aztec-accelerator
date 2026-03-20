@@ -1,0 +1,4 @@
+[test]
+# 10 minute timeout for Aztec proving operations
+timeout = 600000
+preload = ["./src/test-setup.ts"]

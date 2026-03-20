@@ -1,0 +1,7 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — NEVER commit it.
+
+# ACM certificate ARN for aztec-accelerator.dev (must be in us-east-1)
+# Create manually: ACM console → Request certificate → aztec-accelerator.dev + *.aztec-accelerator.dev
+# Validate via Cloudflare DNS (add the CNAME record ACM provides)
+acm_certificate_arn = "arn:aws:acm:us-east-1:XXXXXXXXXXXX:certificate/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"

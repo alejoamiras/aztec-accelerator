@@ -1,0 +1,129 @@
+name: _Publish SDK (reusable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: "npm dist-tag (e.g. testnet, nightlies)"
+        required: true
+        type: string
+        default: testnet
+      latest:
+        description: "Also set this version as npm 'latest' and mark GitHub release as --latest"
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      dist_tag:
+        description: "npm dist-tag (e.g. testnet, nightlies)"
+        required: true
+        type: string
+      latest:
+        description: "Also set this version as npm 'latest' and mark GitHub release as --latest"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    name: Publish SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write # needed for --provenance (Sigstore attestation)
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build SDK
+        run: bun run sdk:build
+
+      - name: Read Aztec version
+        id: aztec-version
+        working-directory: packages/sdk
+        run: |
+          VERSION=$(node -p "require('./package.json').dependencies['@aztec/stdlib']")
+          if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
+            echo "::error::@aztec/stdlib not found in packages/sdk/package.json dependencies"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Aztec version: $VERSION"
+
+      - name: Determine SDK publish version
+        id: sdk-version
+        run: |
+          VERSION=$(bun scripts/get-sdk-publish-version.ts "${{ steps.aztec-version.outputs.version }}")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "SDK publish version: $VERSION"
+
+      - name: Set SDK version and fix exports for npm
+        working-directory: packages/sdk
+        run: |
+          node -e "
+            const p = require('./package.json');
+            p.version = '${{ steps.sdk-version.outputs.version }}';
+            p.main = './dist/index.js';
+            p.types = './dist/index.d.ts';
+            p.exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } };
+            delete p.publishConfig.exports;
+            require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+      - name: Publish to npm
+        working-directory: packages/sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --tag ${{ inputs.dist_tag }} --workspaces=false
+
+      - name: Also tag as 'latest' on npm
+        if: inputs.latest && inputs.dist_tag != 'latest'
+        working-directory: packages/sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${{ steps.sdk-version.outputs.version }}" latest
+
+      - name: Create git tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.sdk-version.outputs.version }}"
+          AZTEC_VERSION="${{ steps.aztec-version.outputs.version }}"
+          TAG="@alejoamiras/aztec-accelerator@${VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" || true
+          git push origin "$TAG" || true
+
+          if [ "$VERSION" = "$AZTEC_VERSION" ]; then
+            NOTES="Aligned with Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
+          else
+            NOTES="SDK revision for Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
+          fi
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "$NOTES" \
+            ${{ inputs.latest && '--latest' || '--latest=false' }}

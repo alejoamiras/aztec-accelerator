@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aztec Accelerator</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+</head>
+<body class="bg-gray-950 text-gray-300 min-h-screen font-mono antialiased selection:bg-emerald-500/30 selection:text-emerald-200">
+
+  <!-- Scan-line overlay -->
+  <div class="pointer-events-none fixed inset-0 z-50 scanlines"></div>
+
+  <!-- Subtle vignette -->
+  <div class="pointer-events-none fixed inset-0 z-40 bg-[radial-gradient(ellipse_at_center,transparent_50%,rgba(0,0,0,0.4)_100%)]"></div>
+
+  <div class="relative z-10 flex items-center justify-center min-h-screen p-6">
+    <main class="w-full max-w-2xl space-y-4">
+
+      <!-- HEADER -->
+      <header class="border border-gray-800 bg-gray-950/80 backdrop-blur-sm">
+        <div class="border-b border-gray-800 px-4 py-1.5 flex items-center gap-2">
+          <span class="text-[10px] uppercase tracking-[0.2em] text-gray-600">sys://aztec-accelerator</span>
+          <span class="ml-auto text-[10px] text-gray-700" id="clock"></span>
+          <a href="https://github.com/alejoamiras/aztec-accelerator" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-gray-700 hover:text-gray-400 transition-colors" title="GitHub">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            <span class="text-[10px] tracking-wide">GitHub</span>
+          </a>
+        </div>
+        <div class="px-5 py-6 text-center">
+          <h1 class="font-display text-3xl font-extrabold tracking-tight text-gray-100">
+            <span class="text-emerald-400 title-glow">Aztec</span> Accelerator
+            <span class="inline-block ml-1.5 text-xl opacity-70">⚡</span>
+          </h1>
+          <p class="mt-1.5 text-xs tracking-wide text-gray-500 uppercase">
+            Compare local WASM vs native accelerated proving
+          </p>
+        </div>
+      </header>
+
+      <!-- EMBEDDED UI -->
+      <div id="embedded-ui" class="hidden space-y-4">
+
+        <!-- SERVICES -->
+        <section class="border border-gray-800 bg-gray-950/80 backdrop-blur-sm" aria-label="Service status">
+          <div class="border-b border-gray-800 px-4 py-1.5">
+            <span class="text-[10px] uppercase tracking-[0.2em] text-gray-600">services</span>
+          </div>
+          <div class="px-4 py-3 space-y-2">
+            <div class="flex items-center gap-3 text-xs">
+              <span id="aztec-status" class="status-dot status-unknown"></span>
+              <span class="text-gray-400 w-28">Aztec Node</span>
+              <span id="network-label" class="text-gray-600 text-[10px] uppercase tracking-wider ml-2"></span>
+              <span id="aztec-url" class="text-gray-600 ml-auto font-light">localhost:8080</span>
+            </div>
+            <div class="flex items-center gap-3 text-xs">
+              <span id="accelerator-status" class="status-dot status-unknown"></span>
+              <span class="text-gray-400 w-28">Accelerator</span>
+              <span id="accelerator-label" class="text-[10px] text-gray-600">checking...</span>
+              <span class="text-gray-600 ml-auto font-light">localhost</span>
+            </div>
+            <div class="border-t border-gray-800/60 mt-2 pt-2 flex items-center gap-3 text-xs">
+              <span id="wallet-dot" class="status-dot status-unknown"></span>
+              <span class="text-gray-400 w-28">Wallet</span>
+              <span id="wallet-state" class="text-gray-600 ml-auto font-light">not initialized</span>
+            </div>
+            <div id="versions-row" class="hidden border-t border-gray-800/40 mt-2 pt-1.5 flex items-center gap-3">
+              <span class="w-[11px] shrink-0"></span>
+              <span class="text-gray-600 text-[10px] uppercase tracking-wider w-28 shrink-0">Versions</span>
+              <span id="versions-info" class="text-[10px] text-gray-700 font-light tabular-nums"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- MODE TOGGLE -->
+        <section class="border border-gray-800 bg-gray-950/80 backdrop-blur-sm">
+          <div class="border-b border-gray-800 px-4 py-1.5">
+            <span class="text-[10px] uppercase tracking-[0.2em] text-gray-600">proving mode</span>
+          </div>
+          <div id="proving-mode-container" class="p-3">
+            <div class="grid grid-cols-2 gap-2">
+              <button
+                id="mode-local"
+                class="mode-btn flex flex-col items-center py-2.5 px-2 text-xs font-medium uppercase tracking-wider border transition-all duration-150 border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400"
+              >
+                <span>▸ WASM</span>
+                <span class="mode-hint text-[9px] normal-case tracking-normal mt-1 opacity-60">slow · fully private</span>
+              </button>
+              <button
+                id="mode-accelerated"
+                class="mode-btn flex flex-col items-center py-2.5 px-2 text-xs font-medium uppercase tracking-wider border transition-all duration-150 mode-active"
+              >
+                <span>▸ Accelerated <span class="text-gray-600 normal-case tracking-normal">(native)</span></span>
+                <span class="mode-hint text-[9px] normal-case tracking-normal mt-1 opacity-60">fastest · fully private</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ACTIONS -->
+        <section class="border border-gray-800 bg-gray-950/80 backdrop-blur-sm">
+          <div class="border-b border-gray-800 px-4 py-1.5">
+            <span class="text-[10px] uppercase tracking-[0.2em] text-gray-600">action</span>
+          </div>
+          <div class="p-3 space-y-3">
+            <button
+              id="deploy-btn"
+              disabled
+              class="w-full py-3 px-4 text-xs font-semibold uppercase tracking-widest transition-all duration-150 border border-emerald-700/50 bg-emerald-900/20 text-emerald-500 hover:bg-emerald-900/40 hover:border-emerald-600/60 hover:text-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-emerald-900/20 disabled:hover:border-emerald-700/50 disabled:hover:text-emerald-500"
+            >
+              Deploy Test Account
+            </button>
+            <button
+              id="token-flow-btn"
+              disabled
+              class="w-full py-3 px-4 text-xs font-semibold uppercase tracking-widest transition-all duration-150 border border-cyan-700/50 bg-cyan-900/20 text-cyan-500 hover:bg-cyan-900/40 hover:border-cyan-600/60 hover:text-cyan-400 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-cyan-900/20 disabled:hover:border-cyan-700/50 disabled:hover:text-cyan-500"
+            >
+              Run Token Flow
+            </button>
+            <div id="progress" class="hidden">
+              <pre id="ascii-art" class="ascii-art"></pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- RESULTS -->
+        <section id="results" class="hidden border border-gray-800 bg-gray-950/80 backdrop-blur-sm">
+          <div class="border-b border-gray-800 px-4 py-1.5">
+            <span class="text-[10px] uppercase tracking-[0.2em] text-gray-600">results</span>
+          </div>
+          <div class="p-3">
+            <div class="grid grid-cols-2 gap-2">
+              <div id="result-local" class="border border-gray-800 p-4 text-center transition-colors">
+                <div class="text-[10px] uppercase tracking-[0.15em] text-gray-600 mb-2">WASM</div>
+                <div id="time-local" class="text-3xl font-bold tabular-nums text-gray-700">—</div>
+                <div id="tag-local" class="mt-1.5 text-[10px] uppercase tracking-widest text-gray-700"></div>
+                <div id="steps-local" class="hidden mt-2 pt-2 border-t border-gray-800/40 text-left"></div>
+              </div>
+              <div id="result-accelerated" class="border border-gray-800 p-4 text-center transition-colors">
+                <div class="text-[10px] uppercase tracking-[0.15em] text-gray-600 mb-2">Accelerated (native)</div>
+                <div id="time-accelerated" class="text-3xl font-bold tabular-nums text-gray-700">—</div>
+                <div id="tag-accelerated" class="mt-1.5 text-[10px] uppercase tracking-widest text-gray-700"></div>
+                <div id="steps-accelerated" class="hidden mt-2 pt-2 border-t border-gray-800/40 text-left"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div><!-- /embedded-ui -->
+
+      <!-- LOG -->
+      <section class="border border-gray-800 bg-gray-950/80 backdrop-blur-sm" aria-label="Activity log">
+        <div class="border-b border-gray-800 px-4 py-1.5 flex items-center">
+          <span class="text-[10px] uppercase tracking-[0.2em] text-gray-600">log</span>
+          <span id="log-count" class="ml-auto text-[10px] text-gray-700 tabular-nums">0 entries</span>
+          <button id="export-diagnostics-btn" class="ml-2 text-[10px] text-gray-700 hover:text-emerald-400 transition-colors uppercase tracking-wider" title="Download diagnostic log as JSON">Export</button>
+        </div>
+        <div
+          id="log"
+          role="log"
+          aria-live="polite"
+          class="h-56 overflow-y-auto text-[11px] leading-[1.6] text-gray-500 bg-black/40 px-3 py-2 space-y-px scroll-smooth"
+        ></div>
+      </section>
+
+      <!-- FOOTER -->
+      <footer class="text-center text-[10px] text-gray-700 py-2 tracking-wide">
+        made with &hearts; by <a href="https://github.com/alejoamiras/aztec-accelerator" class="text-gray-600 hover:text-gray-400">alejo</a>
+      </footer>
+
+    </main>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
