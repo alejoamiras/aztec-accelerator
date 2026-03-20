@@ -93,16 +93,25 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - run: bun run --cwd packages/playground test:e2e
 
+  local-network-e2e:
+    name: Local Network E2E
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    uses: ./.github/workflows/_e2e-app.yml
+    secrets: inherit
+    with:
+      test_script: "test:e2e:local-network"
+
   app-status:
     name: App Status
     if: always()
-    needs: [changes, lint, unit-tests, mocked-e2e]
+    needs: [changes, lint, unit-tests, mocked-e2e, local-network-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.unit-tests.result }} ${{ needs.mocked-e2e.result }}"
+          results="${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.unit-tests.result }} ${{ needs.mocked-e2e.result }} ${{ needs.local-network-e2e.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"
