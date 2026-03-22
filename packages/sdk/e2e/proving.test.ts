@@ -6,7 +6,7 @@
  *   - Accelerated: real accelerator desktop app (skipped when ACCELERATOR_URL not set)
  *   - Local (WASM): fallback via unreachable port
  *
- * Network-agnostic: always uses Sponsored FPC + from: AztecAddress.ZERO.
+ * Network-agnostic: always uses Sponsored FPC + from: NO_FROM.
  * Services must be running before tests start (asserted by e2e-setup.ts preload).
  */
 
