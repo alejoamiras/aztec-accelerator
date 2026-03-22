@@ -215,13 +215,26 @@ Safari blocks `fetch()` from HTTPS pages to `http://127.0.0.1`. The SDK works ar
 
 The SDK auto-detects its Aztec version from `@aztec/stdlib` in its dependencies and sends it as the `x-aztec-version` header on prove requests. The accelerator uses this to select (or download) the correct `bb` binary — no manual version matching needed.
 
+## Claude Code Skill
+
+This SDK ships with a [Claude Code](https://claude.com/claude-code) skill at `.claude/skills/aztec-accelerator/`. If you're using Claude Code in a project that depends on this SDK, the `/aztec-accelerator` slash command gives Claude full context on the integration patterns — EmbeddedWallet wiring, phase callbacks, Safari compatibility, Vite config, and more.
+
+To use it in your own project, copy the skill directory:
+
+```bash
+mkdir -p .claude/skills
+cp -r node_modules/@alejoamiras/aztec-accelerator/.claude/skills/aztec-accelerator .claude/skills/
+```
+
+Then use `/aztec-accelerator` in Claude Code for guided integration.
+
 ## Development
 
 ```bash
-bun run sdk:build     # Build the SDK
-bun run test:unit     # Run unit tests (from packages/sdk)
-bun run test:lint     # Typecheck
-bun run test:e2e      # Run e2e tests (requires local Aztec sandbox)
+bun run --cwd packages/sdk build   # Build the SDK
+bun run --cwd packages/sdk test:unit   # Run unit tests
+bun run --cwd packages/sdk test:lint   # Typecheck
+bun run --cwd packages/sdk test:e2e    # Run e2e tests (requires local Aztec sandbox)
 ```
 
 ## License
