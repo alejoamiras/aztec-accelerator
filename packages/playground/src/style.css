@@ -347,6 +347,11 @@ body::after {
   font-family: "JetBrains Mono", ui-monospace, monospace;
 }
 
+/* ── Accelerator install banner ── */
+.accel-banner {
+  border-left: 2px solid var(--color-brand-accent);
+}
+
 /* ── Two-panel responsive layout ── */
 @media (max-width: 767px) {
   .app-layout {

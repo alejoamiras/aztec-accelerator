@@ -34,8 +34,12 @@ async function checkServices(): Promise<void> {
   updateAcceleratorLabel(accel);
   if (accel) {
     appendLog("Native accelerator detected on localhost:59833", "success");
+    $("accel-banner").classList.add("hidden");
   } else {
     appendLog("Accelerator not detected, will fall back to WASM", "warn");
+    if (!localStorage.getItem("accel-banner-dismissed")) {
+      $("accel-banner").classList.remove("hidden");
+    }
   }
 }
 
@@ -70,10 +74,11 @@ $("mode-accelerated").addEventListener("click", () => {
 
 // ── Shared helpers ──
 
-/** Update the accelerator service label and button state. */
+/** Update the accelerator service label, CTA link, and button state. */
 function updateAcceleratorLabel(available: boolean): void {
   setStatus("accelerator-status", available);
   $("accelerator-label").textContent = available ? "available" : "not detected, fallback: wasm";
+  $("accelerator-cta").classList.toggle("hidden", available);
 }
 
 /** Handle a prover phase: feed the animation and react to fallback. */
@@ -221,6 +226,12 @@ async function init(): Promise<void> {
 
   // Wire diagnostics export
   $("export-diagnostics-btn").addEventListener("click", downloadDiagnostics);
+
+  // Wire accelerator banner dismiss
+  $("accel-banner-dismiss").addEventListener("click", () => {
+    $("accel-banner").classList.add("hidden");
+    localStorage.setItem("accel-banner-dismissed", "1");
+  });
 
   // Default mode UI
   updateModeUI("accelerated");

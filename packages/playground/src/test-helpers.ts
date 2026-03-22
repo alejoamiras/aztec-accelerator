@@ -10,6 +10,7 @@ export function setupDOM(): void {
     <span id="aztec-url"></span>
     <span id="accelerator-status" class="status-dot status-unknown"></span>
     <span id="accelerator-label"></span>
+    <a id="accelerator-cta" class="hidden"></a>
     <span id="wallet-dot" class="status-dot status-unknown"></span>
     <span id="wallet-state"></span>
     <div id="versions-row" class="hidden">
@@ -37,5 +38,7 @@ export function setupDOM(): void {
     <span id="log-count"></span>
     <button id="export-diagnostics-btn"></button>
     <div id="embedded-ui" class="hidden"></div>
+    <div id="accel-banner" class="hidden"></div>
+    <button id="accel-banner-dismiss"></button>
   `;
 }

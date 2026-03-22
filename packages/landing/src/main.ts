@@ -101,3 +101,39 @@ async function initDownload(): Promise<void> {
 }
 
 initDownload();
+
+// ── Accelerator detection ──
+async function checkAccelerator(): Promise<boolean> {
+  try {
+    const { res } = await Promise.any([
+      fetch("http://127.0.0.1:59833/health", { signal: AbortSignal.timeout(2000) }).then((res) => ({
+        res,
+        protocol: "http" as const,
+      })),
+      fetch("https://127.0.0.1:59834/health", { signal: AbortSignal.timeout(2000) }).then(
+        (res) => ({ res, protocol: "https" as const }),
+      ),
+    ]);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function initAcceleratorDetection(): Promise<void> {
+  const detected = await checkAccelerator();
+  if (!detected) return;
+
+  const btn = document.getElementById("download-btn") as HTMLAnchorElement | null;
+  if (btn) {
+    btn.textContent = "Open Playground \u2192";
+    btn.href = "https://playground.aztec-accelerator.dev";
+  }
+
+  const badge = document.getElementById("accel-status");
+  if (badge) {
+    badge.classList.remove("hidden");
+  }
+}
+
+initAcceleratorDetection();
