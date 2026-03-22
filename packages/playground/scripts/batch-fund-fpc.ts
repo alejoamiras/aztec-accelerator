@@ -15,6 +15,7 @@
  *   L1_RPC_URL=https://... Sepolia RPC endpoint
  */
 
+import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { L1FeeJuicePortalManager } from "@aztec/aztec.js/ethereum";
 import { FeeJuicePaymentMethodWithClaim } from "@aztec/aztec.js/fee";
@@ -261,7 +262,7 @@ const feeMethod = new FeeJuicePaymentMethodWithClaim(deployerAddress, {
   messageLeafIndex: deployerClaim.messageLeafIndex,
 });
 const { receipt: deployReceipt } = await deployMethod.send({
-  from: AztecAddress.ZERO,
+  from: NO_FROM,
   fee: { paymentMethod: feeMethod },
   wait: { returnReceipt: true },
 });

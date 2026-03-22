@@ -5,7 +5,7 @@
  * via EmbeddedWallet + Sponsored FPC.
  */
 
-import { AztecAddress } from "@aztec/aztec.js/addresses";
+import { NO_FROM } from "@aztec/aztec.js/account";
 import type { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee";
 import { Fr } from "@aztec/aztec.js/fields";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
@@ -29,7 +29,7 @@ export async function deploySchnorrAccount(
   const startTime = Date.now();
   const deployMethod = await accountManager.getDeployMethod();
   const { contract: deployedContract } = await deployMethod.send({
-    from: AztecAddress.ZERO,
+    from: NO_FROM,
     skipClassPublication: true,
     fee: { paymentMethod: feePaymentMethod },
   });
