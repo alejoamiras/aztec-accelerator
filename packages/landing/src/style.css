@@ -248,7 +248,7 @@ img, svg {
   transition: transform 0.15s;
 }
 
-.hero-sub a:hover span {
+.hero-sub a:hover span:not(.accel-dot) {
   transform: translateX(3px);
 }
 
@@ -763,6 +763,28 @@ body::before {
 .reveal .feature:nth-child(3),
 .reveal .step:nth-child(3) {
   transition-delay: 0.2s;
+}
+
+/* ── Accelerator status badge ────────────────────────────────────── */
+.hidden {
+  display: none !important;
+}
+
+.hero-sub.detected a {
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: color 0.3s;
+}
+
+.accel-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(212, 255, 40, 0.5);
+  flex-shrink: 0;
 }
 
 /* ── Reduced motion ──────────────────────────────────────────────── */

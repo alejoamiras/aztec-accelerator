@@ -101,3 +101,36 @@ async function initDownload(): Promise<void> {
 }
 
 initDownload();
+
+// ── Accelerator detection ──
+async function checkAccelerator(): Promise<boolean> {
+  try {
+    const { res } = await Promise.any([
+      fetch("http://127.0.0.1:59833/health", { signal: AbortSignal.timeout(2000) }).then((res) => ({
+        res,
+        protocol: "http" as const,
+      })),
+      fetch("https://127.0.0.1:59834/health", { signal: AbortSignal.timeout(2000) }).then(
+        (res) => ({ res, protocol: "https" as const }),
+      ),
+    ]);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function initAcceleratorDetection(): Promise<void> {
+  const detected = await checkAccelerator();
+  if (!detected) return;
+
+  const heroSub = document.querySelector(".hero-sub") as HTMLElement | null;
+  const link = heroSub?.querySelector("a") as HTMLAnchorElement | null;
+  if (heroSub && link) {
+    heroSub.classList.add("detected");
+    link.innerHTML =
+      '<span class="accel-dot" aria-hidden="true"></span> Accelerator detected — Open the Playground <span>&rarr;</span>';
+  }
+}
+
+initAcceleratorDetection();
