@@ -248,7 +248,7 @@ img, svg {
   transition: transform 0.15s;
 }
 
-.hero-sub a:hover span {
+.hero-sub a:hover span:not(.accel-dot) {
   transform: translateX(3px);
 }
 
