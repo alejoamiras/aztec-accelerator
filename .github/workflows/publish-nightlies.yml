@@ -66,10 +66,10 @@ jobs:
 
       - name: Deploy playground to S3
         run: |
-          aws s3 sync packages/playground/dist/ s3://${{ secrets.S3_BUCKET_NAME }}/playground/ --delete
+          aws s3 sync packages/playground/dist/ s3://${{ secrets.S3_BUCKET_NAME }}/playground-nightly/ --delete
 
       - name: Invalidate CloudFront
         run: |
           aws cloudfront create-invalidation \
             --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --paths "/playground/*"
+            --paths "/playground-nightly/*"

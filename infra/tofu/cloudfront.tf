@@ -33,8 +33,9 @@ resource "aws_cloudfront_response_headers_policy" "coop_coep" {
 
 # -----------------------------------------------------------------------------
 # CloudFront Function — subdomain-based request routing
-# aztec-accelerator.dev        → S3 /landing/
-# playground.aztec-accelerator.dev → S3 /playground/
+# aztec-accelerator.dev                    → S3 /landing/
+# playground.aztec-accelerator.dev         → S3 /playground/
+# nightly-playground.aztec-accelerator.dev → S3 /playground-nightly/
 # Also handles SPA fallback for the playground (no extension → index.html)
 # -----------------------------------------------------------------------------
 
@@ -48,8 +49,14 @@ resource "aws_cloudfront_function" "subdomain_router" {
       var host = request.headers.host.value;
       var uri = request.uri;
 
-      var isPlayground = host.startsWith('playground.');
-      var prefix = isPlayground ? '/playground' : '/landing';
+      var prefix;
+      if (host.startsWith('nightly-playground.')) {
+        prefix = '/playground-nightly';
+      } else if (host.startsWith('playground.')) {
+        prefix = '/playground';
+      } else {
+        prefix = '/landing';
+      }
 
       // SPA fallback: no file extension → serve index.html
       if (uri.endsWith('/') || uri.lastIndexOf('.') <= uri.lastIndexOf('/')) {
@@ -65,17 +72,18 @@ resource "aws_cloudfront_function" "subdomain_router" {
 
 # -----------------------------------------------------------------------------
 # CloudFront Distribution
-# aztec-accelerator.dev              → landing page
-# playground.aztec-accelerator.dev   → proving comparison app
+# aztec-accelerator.dev                    → landing page
+# playground.aztec-accelerator.dev         → proving comparison app
+# nightly-playground.aztec-accelerator.dev → nightly playground
 # -----------------------------------------------------------------------------
 
 resource "aws_cloudfront_distribution" "site" {
-  comment         = "aztec-accelerator — landing + playground"
+  comment         = "aztec-accelerator — landing + playground + nightly playground"
   enabled         = true
   is_ipv6_enabled = true
   http_version    = "http2"
   price_class     = "PriceClass_100"
-  aliases         = ["aztec-accelerator.dev", "playground.aztec-accelerator.dev"]
+  aliases         = ["aztec-accelerator.dev", "playground.aztec-accelerator.dev", "nightly-playground.aztec-accelerator.dev"]
 
   origin {
     domain_name              = aws_s3_bucket.site.bucket_regional_domain_name
