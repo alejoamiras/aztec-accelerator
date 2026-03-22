@@ -783,12 +783,8 @@ body::before {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
-  animation: accel-breathe 3s ease-in-out infinite;
-}
-
-@keyframes accel-breathe {
-  0%, 100% { opacity: 1; box-shadow: 0 0 4px rgba(212, 255, 40, 0.5); }
-  50% { opacity: 0.5; box-shadow: 0 0 8px rgba(212, 255, 40, 0.3); }
+  box-shadow: 0 0 6px rgba(212, 255, 40, 0.5);
+  flex-shrink: 0;
 }
 
 /* ── Reduced motion ──────────────────────────────────────────────── */
