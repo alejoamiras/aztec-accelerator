@@ -150,19 +150,6 @@ Safari blocks HTTP fetch from HTTPS pages (mixed-content). The SDK handles this 
 
 No code changes needed in the dApp — the SDK handles protocol negotiation.
 
-## Sender-less transactions (Sponsored FPC)
-
-When using `SponsoredFeePaymentMethod` without a sender account, use `NO_FROM`:
-
-```typescript
-import { NO_FROM } from "@aztec/aztec.js/account";
-
-const receipt = await deployMethod.send({
-  from: NO_FROM,  // not AztecAddress.ZERO (removed in 4.2.0+)
-  fee: { paymentMethod: sponsoredFeePayment },
-});
-```
-
 ## Error handling
 
 The SDK is designed to be fail-safe:
@@ -207,4 +194,3 @@ COOP/COEP headers are required for `SharedArrayBuffer` (used by WASM proving).
 - [ ] Use `checkAcceleratorStatus()` for status indicators (optional)
 - [ ] Test with accelerator offline to verify WASM fallback works
 - [ ] Configure Vite with `nodePolyfills` and COOP/COEP headers (browser apps)
-- [ ] Use `NO_FROM` (not `AztecAddress.ZERO`) for sender-less transactions
