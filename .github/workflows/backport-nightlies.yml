@@ -1,0 +1,66 @@
+name: Backport to Nightlies
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+concurrency:
+  group: backport-nightlies
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  backport:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - "packages/sdk/**"
+              - "packages/playground/**"
+
+      - name: Cherry-pick to nightlies
+        if: steps.filter.outputs.relevant == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="backport/nightlies-pr-${PR_NUMBER}"
+
+          git checkout -b "$BRANCH" origin/nightlies
+
+          if git cherry-pick --no-commit "$MERGE_SHA" && git commit -m "backport: ${PR_TITLE} (#${PR_NUMBER})"; then
+            git push origin "$BRANCH"
+            gh pr create \
+              --base nightlies \
+              --head "$BRANCH" \
+              --title "backport: ${PR_TITLE} (#${PR_NUMBER})" \
+              --body "Automated backport of #${PR_NUMBER} from main to nightlies." \
+              --label backport
+          else
+            git cherry-pick --abort || true
+            git checkout -- . || true
+            git push origin "$BRANCH"
+            gh pr create \
+              --base nightlies \
+              --head "$BRANCH" \
+              --title "backport (conflicts): ${PR_TITLE} (#${PR_NUMBER})" \
+              --body "Automated backport of #${PR_NUMBER} — has merge conflicts that need manual resolution." \
+              --label backport
+          fi
