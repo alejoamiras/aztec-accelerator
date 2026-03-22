@@ -770,18 +770,12 @@ body::before {
   display: none !important;
 }
 
-.accel-status {
+.hero-sub.detected a {
+  color: var(--accent);
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.6875rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--accent);
-  padding: 0.375rem 0.75rem;
-  border: 1px solid rgba(212, 255, 40, 0.25);
-  background: rgba(212, 255, 40, 0.05);
+  transition: color 0.3s;
 }
 
 .accel-dot {

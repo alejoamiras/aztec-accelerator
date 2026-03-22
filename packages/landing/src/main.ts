@@ -124,15 +124,12 @@ async function initAcceleratorDetection(): Promise<void> {
   const detected = await checkAccelerator();
   if (!detected) return;
 
-  const btn = document.getElementById("download-btn") as HTMLAnchorElement | null;
-  if (btn) {
-    btn.textContent = "Open Playground \u2192";
-    btn.href = "https://playground.aztec-accelerator.dev";
-  }
-
-  const badge = document.getElementById("accel-status");
-  if (badge) {
-    badge.classList.remove("hidden");
+  const heroSub = document.querySelector(".hero-sub") as HTMLElement | null;
+  const link = heroSub?.querySelector("a") as HTMLAnchorElement | null;
+  if (heroSub && link) {
+    heroSub.classList.add("detected");
+    link.innerHTML =
+      '<span class="accel-dot" aria-hidden="true"></span> Accelerator detected — Open the Playground <span>&rarr;</span>';
   }
 }
 
