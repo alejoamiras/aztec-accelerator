@@ -57,7 +57,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build SDK
-        run: bun run sdk:build
+        run: bun run --cwd packages/sdk build
 
       - name: Read Aztec version
         id: aztec-version
