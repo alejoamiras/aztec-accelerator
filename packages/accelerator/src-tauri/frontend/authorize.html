@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Authorize Site</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="auth-container">
+    <h2>A site wants to use the Aztec Accelerator</h2>
+    <div class="auth-origin" id="origin"></div>
+    <label class="auth-remember">
+      <input type="checkbox" id="remember" checked />
+      Remember this site
+    </label>
+    <div class="auth-buttons">
+      <button class="btn btn-secondary" id="deny">Deny</button>
+      <button class="btn btn-primary" id="allow">Allow</button>
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+
+    // Origin is passed as a query parameter
+    const params = new URLSearchParams(window.location.search);
+    const origin = params.get("origin") || "unknown";
+    document.getElementById("origin").textContent = origin;
+
+    async function respond(allowed) {
+      const remember = document.getElementById("remember").checked;
+      await invoke("respond_auth", { origin, allowed, remember });
+    }
+
+    document.getElementById("allow").addEventListener("click", () => respond(true));
+    document.getElementById("deny").addEventListener("click", () => respond(false));
+  </script>
+</body>
+</html>

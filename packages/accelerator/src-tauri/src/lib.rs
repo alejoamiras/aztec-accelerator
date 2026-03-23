@@ -1,5 +1,7 @@
+pub mod authorization;
 pub mod bb;
 pub mod certs;
+pub mod commands;
 pub mod config;
 pub mod crash_recovery;
 pub mod server;

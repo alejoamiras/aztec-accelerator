@@ -2,8 +2,14 @@
 //!
 //! Runs the same Axum HTTP server as the Tauri app but without any display
 //! context. Used in CI for e2e testing against the native `bb` binary.
+//!
+//! Set `ALLOWED_ORIGINS=origin1,origin2` to restrict which origins can call `/prove`.
+//! When unset, all origins are auto-approved (no auth_manager).
 
+use aztec_accelerator::authorization::AuthorizationManager;
+use aztec_accelerator::config::AcceleratorConfig;
 use aztec_accelerator::server::{start, AppState};
+use std::sync::{Arc, RwLock};
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -20,7 +26,32 @@ async fn main() {
 
     tracing::info!("Starting headless accelerator server");
 
-    let state = AppState::default();
+    // If ALLOWED_ORIGINS is set, enforce origin gating with those origins pre-approved.
+    // Without it, auth_manager is None and all origins are auto-approved.
+    let (auth_manager, config) = if let Ok(origins_str) = std::env::var("ALLOWED_ORIGINS") {
+        let origins: Vec<String> = origins_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        tracing::info!(origins = ?origins, "Restricting to allowed origins");
+        let cfg = AcceleratorConfig {
+            approved_origins: origins,
+            ..Default::default()
+        };
+        (
+            Some(Arc::new(AuthorizationManager::new())),
+            Some(Arc::new(RwLock::new(cfg))),
+        )
+    } else {
+        (None, None)
+    };
+
+    let state = AppState {
+        auth_manager,
+        config,
+        ..Default::default()
+    };
 
     if let Err(e) = start(state).await {
         tracing::error!("Accelerator server error: {e}");
