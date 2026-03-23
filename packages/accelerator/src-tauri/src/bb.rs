@@ -115,21 +115,10 @@ pub async fn prove(
     }
 
     if !output.status.success() {
-        // Truncate stderr in error responses to avoid leaking unbounded output to HTTP clients
-        let truncated_stderr = if stderr.len() > 500 {
-            format!(
-                "{}... [truncated, {} bytes total]",
-                &stderr[..500],
-                stderr.len()
-            )
-        } else {
-            stderr.to_string()
-        };
-        return Err(format!(
-            "bb prove failed (exit {}): {truncated_stderr}",
-            output.status
-        )
-        .into());
+        // Log full stderr server-side, but return only a generic error to HTTP clients
+        // to avoid leaking bb internals (file paths, witness data) to the browser.
+        tracing::error!(exit_code = %output.status, "bb prove failed");
+        return Err(format!("bb prove failed (exit {})", output.status).into());
     }
 
     let proof_path = output_dir.join("proof");

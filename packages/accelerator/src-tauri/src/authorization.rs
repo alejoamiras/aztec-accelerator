@@ -15,6 +15,10 @@ pub enum AuthDecision {
 /// `request(origin)`. If this is the first request for that origin, the caller
 /// shows an authorization popup. Subsequent requests from the same origin
 /// piggyback on the same popup — they all share the decision.
+/// Maximum number of distinct origins that can have pending authorization simultaneously.
+/// Prevents popup/memory spam from a malicious site generating many subdomains.
+const MAX_PENDING_ORIGINS: usize = 10;
+
 pub struct AuthorizationManager {
     pending: Mutex<HashMap<String, Vec<oneshot::Sender<AuthDecision>>>>,
 }
@@ -34,15 +38,23 @@ impl AuthorizationManager {
 
     /// Register a pending authorization request for `origin`.
     ///
-    /// Returns `(receiver, is_first)`. If `is_first` is true, the caller should
+    /// Returns `Ok((receiver, is_first))`. If `is_first` is true, the caller should
     /// show the authorization popup. Otherwise, a popup is already showing and
     /// this request will piggyback on that decision.
-    pub fn request(&self, origin: &str) -> (oneshot::Receiver<AuthDecision>, bool) {
+    ///
+    /// Returns `Err` if the maximum number of pending origins is exceeded (DoS protection).
+    pub fn request(
+        &self,
+        origin: &str,
+    ) -> Result<(oneshot::Receiver<AuthDecision>, bool), &'static str> {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.pending.lock().unwrap();
         let is_first = !pending.contains_key(origin);
+        if is_first && pending.len() >= MAX_PENDING_ORIGINS {
+            return Err("too many pending authorization requests");
+        }
         pending.entry(origin.to_string()).or_default().push(tx);
-        (rx, is_first)
+        Ok((rx, is_first))
     }
 
     /// Resolve all pending requests for `origin` with the given decision.
@@ -137,10 +149,10 @@ mod tests {
     #[tokio::test]
     async fn request_and_resolve() {
         let mgr = AuthorizationManager::new();
-        let (rx1, is_first1) = mgr.request("https://example.com");
+        let (rx1, is_first1) = mgr.request("https://example.com").unwrap();
         assert!(is_first1);
 
-        let (rx2, is_first2) = mgr.request("https://example.com");
+        let (rx2, is_first2) = mgr.request("https://example.com").unwrap();
         assert!(!is_first2);
 
         mgr.resolve(
@@ -155,8 +167,20 @@ mod tests {
     #[tokio::test]
     async fn resolve_deny() {
         let mgr = AuthorizationManager::new();
-        let (rx, _) = mgr.request("https://evil.com");
+        let (rx, _) = mgr.request("https://evil.com").unwrap();
         mgr.resolve("https://evil.com", AuthDecision::Deny);
         assert_eq!(rx.await.unwrap(), AuthDecision::Deny);
+    }
+
+    #[test]
+    fn rejects_when_too_many_pending_origins() {
+        let mgr = AuthorizationManager::new();
+        for i in 0..MAX_PENDING_ORIGINS {
+            assert!(mgr.request(&format!("https://site{i}.com")).is_ok());
+        }
+        // One more should fail
+        assert!(mgr.request("https://one-too-many.com").is_err());
+        // Piggybacking on an existing origin should still work
+        assert!(mgr.request("https://site0.com").is_ok());
     }
 }

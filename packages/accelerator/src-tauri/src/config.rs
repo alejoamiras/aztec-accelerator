@@ -62,13 +62,24 @@ pub fn load() -> AcceleratorConfig {
 }
 
 /// Save config to disk. Creates parent directories if needed.
+/// Sets file permissions to 0o600 on Unix (owner read/write only).
 pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, json)?;
+    std::fs::write(&path, &json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

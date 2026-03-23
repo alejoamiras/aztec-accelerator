@@ -428,6 +428,7 @@ fn main() {
                 config: Some(config_state.clone()),
                 auth_manager: Some(auth_manager.clone()),
                 show_auth_popup: Some(show_auth_popup),
+                prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
             };
 
             // Auto-start HTTPS if Safari Support is configured.

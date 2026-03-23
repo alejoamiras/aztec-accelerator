@@ -19,6 +19,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::authorization::{AuthDecision, AuthorizationManager};
 use crate::{bb, config, versions};
 use std::sync::RwLock;
+use tokio::sync::Semaphore;
 
 const PORT: u16 = 59833;
 pub const HTTPS_PORT: u16 = 59834;
@@ -38,6 +39,8 @@ pub struct AppState {
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     pub show_auth_popup: Option<ShowAuthPopupCallback>,
+    /// Limits concurrent proving to 1 — bb already uses all cores.
+    pub prove_semaphore: Option<Arc<Semaphore>>,
 }
 
 pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -224,7 +227,17 @@ async fn prove(
                 }
 
                 tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-                let (rx, is_first) = auth_manager.request(&origin);
+                let (rx, is_first) = auth_manager.request(&origin).map_err(|_| {
+                    tracing::warn!(origin = %origin, "Too many pending authorization requests");
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        serde_json::to_string(&serde_json::json!({
+                            "error": "too_many_requests",
+                            "message": "Too many pending authorization requests"
+                        }))
+                        .unwrap(),
+                    )
+                })?;
 
                 if is_first {
                     if let Some(ref show_popup) = state.show_auth_popup {
@@ -290,6 +303,19 @@ async fn prove(
         // No Origin header → auto-approve (curl, same-origin, etc.)
     }
     // No auth_manager → auto-approve all (headless mode)
+
+    // Limit to one concurrent prove — bb already uses all cores.
+    // Held until the handler returns (success or error).
+    let _permit = if let Some(ref sem) = state.prove_semaphore {
+        Some(sem.acquire().await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Proving service shutting down".to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
 
     // Extract requested Aztec version from header (if any)
     let requested_version = headers
