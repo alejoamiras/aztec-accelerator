@@ -569,11 +569,15 @@ img, svg {
 /* ── Footer ───────────────────────────────────────────────────────── */
 .footer {
   border-top: 1px solid var(--border);
-  padding: 2rem 0;
+  padding: 2rem 3rem 0;
+}
+
+.footer-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 2rem;
+  max-width: 960px;
+  margin: 0 auto 1.5rem;
 }
 
 .footer-links {
@@ -605,7 +609,7 @@ img, svg {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   text-align: center;
-  padding-bottom: 2rem;
+  padding: 0 1rem 2rem;
 }
 
 /* ── Responsive ───────────────────────────────────────────────────── */
@@ -666,6 +670,10 @@ img, svg {
   }
 
   .footer {
+    padding: 2rem 1.5rem 0;
+  }
+
+  .footer-inner {
     flex-direction: column;
     gap: 1rem;
     text-align: center;
