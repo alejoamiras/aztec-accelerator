@@ -24,6 +24,11 @@ export type LogFn = (
   url?: string,
 ) => void;
 
+/** Extract a human-readable message from an unknown error value. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export type UiMode = "local" | "accelerated";
 
 const AZTEC_NODE_URL = process.env.AZTEC_NODE_URL || "/aztec";
@@ -286,7 +291,7 @@ export async function initializeWallet(log: LogFn): Promise<boolean> {
         );
         await clearIndexedDB();
       } else {
-        log(`Wallet initialization failed: ${err}`, "error");
+        log(`Wallet initialization failed: ${errorMessage(err)}`, "error");
         return false;
       }
     }

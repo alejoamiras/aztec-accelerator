@@ -130,7 +130,7 @@ $("deploy-btn").addEventListener("click", async () => {
     showResult("", result.mode, result.totalDurationMs, undefined, result.steps);
   } catch (err) {
     diagMemory("deploy-error");
-    appendLog(`Deploy failed: ${err}`, "error");
+    appendLog(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`, "error");
   } finally {
     ascii.stop();
     deploying = false;
@@ -175,7 +175,7 @@ $("token-flow-btn").addEventListener("click", async () => {
     showResult("", result.mode, result.totalDurationMs, "token flow", result.steps);
   } catch (err) {
     diagMemory("token-flow-error");
-    appendLog(`Token flow failed: ${err}`, "error");
+    appendLog(`Token flow failed: ${err instanceof Error ? err.message : String(err)}`, "error");
   } finally {
     ascii.stop();
     deploying = false;
