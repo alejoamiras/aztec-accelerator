@@ -98,7 +98,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     uses: ./.github/workflows/_e2e-app.yml
-    secrets: inherit
+    secrets:
+      SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
     with:
       test_script: "test:e2e:local-network"
 

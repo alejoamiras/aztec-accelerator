@@ -41,7 +41,8 @@ jobs:
     uses: ./.github/workflows/_publish-sdk.yml
     with:
       dist_tag: nightlies
-    secrets: inherit
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   deploy-app:
     needs: e2e

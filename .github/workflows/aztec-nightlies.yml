@@ -21,7 +21,8 @@ permissions:
 jobs:
   update:
     uses: ./.github/workflows/_aztec-update.yml
-    secrets: inherit
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
     with:
       dist_tag: nightly
       target_branch: nightlies
