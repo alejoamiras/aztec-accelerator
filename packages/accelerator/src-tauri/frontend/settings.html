@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aztec Accelerator Settings</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="section">
+    <h2>Approved Sites</h2>
+    <ul id="origins" class="origin-list"></ul>
+    <div id="origins-empty" class="empty-state">No approved sites yet.</div>
+  </div>
+
+  <div class="section">
+    <h2>General</h2>
+    <div class="row">
+      <span>Start on Login</span>
+      <label class="toggle">
+        <input type="checkbox" id="autostart" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div id="safari-row" class="row" style="display:none">
+      <span>Safari Support</span>
+      <label class="toggle">
+        <input type="checkbox" id="safari" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="speed-section">
+      <div class="speed-header">
+        <span>Proving Speed</span>
+        <span class="speed-value" id="speed-label">Full</span>
+      </div>
+      <div class="speed-track-wrap">
+        <input type="range" id="speed" class="speed-slider" min="0" max="4" step="1" value="4" />
+        <div class="speed-ticks">
+          <span>Low</span>
+          <span>Light</span>
+          <span>Balanced</span>
+          <span>High</span>
+          <span>Full</span>
+        </div>
+      </div>
+      <div class="speed-description" id="speed-desc"></div>
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+
+    // CPU count comes from the Rust backend (std::thread::available_parallelism),
+    // NOT navigator.hardwareConcurrency which WebKit caps for fingerprinting protection.
+    let CPUS = 1;
+
+    function threadsForLevel(index) {
+      const fractions = [1/4, 3/8, 1/2, 3/4, 1];
+      return Math.max(1, Math.floor(CPUS * fractions[index]));
+    }
+
+    const SPEED_LEVELS = [
+      { value: "low",      label: "Low" },
+      { value: "light",    label: "Light" },
+      { value: "balanced", label: "Balanced" },
+      { value: "high",     label: "High" },
+      { value: "full",     label: "Full" },
+    ];
+
+    function descForLevel(index) {
+      const t = threadsForLevel(index);
+      if (index === 4) return `All ${CPUS} cores. Fastest proving.`;
+      return `${t} of ${CPUS} cores. ${
+        index <= 1 ? "Keeps the system responsive." : "Good balance of speed and usability."
+      }`;
+    }
+
+    function speedToIndex(speed) {
+      const idx = SPEED_LEVELS.findIndex(l => l.value === speed);
+      return idx >= 0 ? idx : 4;
+    }
+
+    function updateSpeedUI(index) {
+      const level = SPEED_LEVELS[index];
+      document.getElementById("speed-label").textContent = level.label;
+      document.getElementById("speed-desc").textContent = descForLevel(index);
+      document.getElementById("speed").style.setProperty("--fill", (index / 4) * 100 + "%");
+    }
+
+    async function loadSettings() {
+      const [config, autostart, sysInfo] = await Promise.all([
+        invoke("get_config"),
+        invoke("get_autostart_enabled"),
+        invoke("get_system_info"),
+      ]);
+
+      CPUS = sysInfo.cpu_count;
+
+      document.getElementById("autostart").checked = autostart;
+
+      if (sysInfo.platform === "macos") {
+        document.getElementById("safari-row").style.display = "";
+        document.getElementById("safari").checked = config.safari_support;
+      }
+
+      const idx = speedToIndex(config.speed || "full");
+      document.getElementById("speed").value = idx;
+      updateSpeedUI(idx);
+
+      renderOrigins(config.approved_origins || []);
+    }
+
+    function renderOrigins(origins) {
+      const list = document.getElementById("origins");
+      const empty = document.getElementById("origins-empty");
+      list.innerHTML = "";
+
+      if (origins.length === 0) {
+        empty.style.display = "";
+        return;
+      }
+      empty.style.display = "none";
+
+      for (const origin of origins) {
+        const li = document.createElement("li");
+        li.className = "origin-item";
+
+        const span = document.createElement("span");
+        span.textContent = origin;
+
+        const btn = document.createElement("button");
+        btn.textContent = "Remove";
+        btn.onclick = async () => {
+          await invoke("remove_approved_origin", { origin });
+          await loadSettings();
+        };
+
+        li.appendChild(span);
+        li.appendChild(btn);
+        list.appendChild(li);
+      }
+    }
+
+    // Autostart toggle
+    document.getElementById("autostart").addEventListener("change", (e) => {
+      const el = e.target;
+      el.disabled = true;
+      invoke("set_autostart", { enabled: el.checked })
+        .catch((err) => {
+          el.checked = !el.checked;
+          console.error("Failed to set autostart:", err);
+        })
+        .finally(() => { el.disabled = false; });
+    });
+
+    // Safari toggle
+    document.getElementById("safari").addEventListener("change", (e) => {
+      const el = e.target;
+      el.disabled = true;
+      const cmd = el.checked ? "enable_safari_support" : "disable_safari_support";
+      invoke(cmd)
+        .catch((err) => {
+          el.checked = !el.checked;
+          console.error("Failed to toggle Safari support:", err);
+        })
+        .finally(() => { el.disabled = false; });
+    });
+
+    // Speed slider
+    const speedSlider = document.getElementById("speed");
+    speedSlider.addEventListener("input", (e) => {
+      updateSpeedUI(Number(e.target.value));
+    });
+    speedSlider.addEventListener("change", (e) => {
+      const level = SPEED_LEVELS[Number(e.target.value)];
+      invoke("set_speed", { speed: level.value }).catch((err) => {
+        console.error("Failed to set speed:", err);
+        loadSettings();
+      });
+    });
+
+    loadSettings().catch((err) => console.error("Failed to load settings:", err));
+  </script>
+</body>
+</html>

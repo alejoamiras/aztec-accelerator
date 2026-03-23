@@ -1,19 +1,19 @@
 // Prevents additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
+use aztec_accelerator::commands::{AuthState, ConfigState, SharedAppState};
 use aztec_accelerator::server::{AppState, HTTPS_PORT};
 use aztec_accelerator::versions;
-use aztec_accelerator::{certs, config, log_dir};
+use aztec_accelerator::{certs, commands, config, log_dir};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tauri::menu::{
-    CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
-};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::AppHandle;
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -105,41 +105,21 @@ fn build_versions_submenu(
     Ok(builder.build()?)
 }
 
-/// Show a native macOS dialog asking the user to confirm Safari Support setup.
-/// Returns true if the user clicks "Continue", false otherwise.
-#[cfg(target_os = "macos")]
-fn show_safari_support_dialog() -> bool {
-    let script = r#"display dialog "Safari blocks requests to localhost unless you install a local certificate.\n\nmacOS will ask for your password once to trust it." with title "Enable Safari Support" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel""#;
-    std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Show a native macOS error dialog.
-#[cfg(target_os = "macos")]
-fn show_error_dialog(message: &str) {
-    let script = format!(
-        r#"display dialog "{message}" with title "Safari Support Error" buttons {{"OK"}} default button "OK" with icon stop"#,
-    );
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .output();
-}
-
 /// Try to start HTTPS server if Safari Support is configured and certs are valid.
+/// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
 /// Returns the HTTPS port if started, None otherwise.
-fn try_start_https() -> Option<u16> {
+fn try_start_https(state: &AppState) -> Option<u16> {
     let cfg = config::load();
     if !cfg.safari_support {
         return None;
     }
     if !certs::certs_exist() {
         tracing::warn!("Safari Support enabled but certs missing — resetting config");
-        let _ = config::save(&config::AcceleratorConfig {
-            safari_support: false,
-        });
+        if let Some(ref cfg_lock) = state.config {
+            let mut cfg = cfg_lock.write().unwrap();
+            cfg.safari_support = false;
+            let _ = config::save(&cfg);
+        }
         return None;
     }
 
@@ -156,10 +136,8 @@ fn try_start_https() -> Option<u16> {
 
     match certs::load_rustls_config() {
         Ok(tls_config) => {
-            let state_for_https = AppState {
-                https_port: Some(HTTPS_PORT),
-                ..Default::default()
-            };
+            let mut state_for_https = state.clone();
+            state_for_https.https_port = Some(HTTPS_PORT);
             tauri::async_runtime::spawn(async move {
                 if let Err(e) =
                     aztec_accelerator::server::start_https(state_for_https, tls_config).await
@@ -211,11 +189,28 @@ fn main() {
         tracing::info!("Developer mode enabled");
     }
 
+    // Load config early so it can be shared with AppState and Tauri commands
+    let config_state: ConfigState = Arc::new(RwLock::new(config::load()));
+    let auth_manager: AuthState = Arc::new(AuthorizationManager::new());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .manage(config_state.clone())
+        .manage(auth_manager.clone())
+        .invoke_handler(tauri::generate_handler![
+            commands::get_config,
+            commands::get_autostart_enabled,
+            commands::set_autostart,
+            commands::set_speed,
+            commands::remove_approved_origin,
+            commands::get_system_info,
+            commands::respond_auth,
+            commands::enable_safari_support,
+            commands::disable_safari_support,
+        ])
         .setup(move |app| {
             // Hide from Dock — tray-only app
             #[cfg(target_os = "macos")]
@@ -226,22 +221,15 @@ fn main() {
                 .enabled(false)
                 .build(app)?;
 
-            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
-            if autostart_enabled {
-                aztec_accelerator::crash_recovery::enable_crash_recovery();
+            // Check autostart on launch for crash recovery
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                if app.autolaunch().is_enabled().unwrap_or(false) {
+                    aztec_accelerator::crash_recovery::enable_crash_recovery();
+                }
             }
-            let autostart = CheckMenuItemBuilder::with_id("toggle_autostart", "Start on Login")
-                .checked(autostart_enabled)
-                .build(app)?;
 
-            // Safari Support toggle (macOS only)
-            #[cfg(target_os = "macos")]
-            let safari_support = {
-                let cfg = config::load();
-                CheckMenuItemBuilder::with_id("toggle_safari", "Safari Support")
-                    .checked(cfg.safari_support)
-                    .build(app)?
-            };
+            let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
 
             // About section: version info + GitHub link (always shown)
             let app_version = env!("CARGO_PKG_VERSION");
@@ -263,57 +251,24 @@ fn main() {
                 let show_logs = MenuItemBuilder::with_id("show_logs", "Show Logs").build(app)?;
                 let separator = PredefinedMenuItem::separator(app)?;
 
-                #[cfg(target_os = "macos")]
-                let menu = MenuBuilder::new(app)
+                MenuBuilder::new(app)
                     .items(&[
                         &status,
                         &versions_submenu,
                         &show_logs,
-                        &autostart,
-                        &safari_support,
+                        &settings,
                         &separator,
                         &version_text,
                         &github,
                         &quit,
                     ])
-                    .build()?;
-
-                #[cfg(not(target_os = "macos"))]
-                let menu = MenuBuilder::new(app)
-                    .items(&[
-                        &status,
-                        &versions_submenu,
-                        &show_logs,
-                        &autostart,
-                        &separator,
-                        &version_text,
-                        &github,
-                        &quit,
-                    ])
-                    .build()?;
-
-                menu
+                    .build()?
             } else {
                 let separator = PredefinedMenuItem::separator(app)?;
 
-                #[cfg(target_os = "macos")]
-                let menu = MenuBuilder::new(app)
-                    .items(&[
-                        &autostart,
-                        &safari_support,
-                        &separator,
-                        &version_text,
-                        &github,
-                        &quit,
-                    ])
-                    .build()?;
-
-                #[cfg(not(target_os = "macos"))]
-                let menu = MenuBuilder::new(app)
-                    .items(&[&autostart, &separator, &version_text, &github, &quit])
-                    .build()?;
-
-                menu
+                MenuBuilder::new(app)
+                    .items(&[&settings, &separator, &version_text, &github, &quit])
+                    .build()?
             };
 
             let tray_icon =
@@ -332,86 +287,8 @@ fn main() {
                     "open_github" => {
                         open_in_browser(&"https://github.com/alejoamiras/aztec-accelerator");
                     }
-                    "toggle_autostart" => {
-                        let manager = app.autolaunch();
-                        let currently_enabled = manager.is_enabled().unwrap_or(false);
-                        if currently_enabled {
-                            let _ = manager.disable();
-                            aztec_accelerator::crash_recovery::disable_crash_recovery();
-                            let _ = autostart.set_checked(false);
-                            tracing::info!("Auto-start on login disabled");
-                        } else {
-                            let _ = manager.enable();
-                            aztec_accelerator::crash_recovery::enable_crash_recovery();
-                            let _ = autostart.set_checked(true);
-                            tracing::info!("Auto-start on login enabled");
-                        }
-                    }
-                    #[cfg(target_os = "macos")]
-                    "toggle_safari" => {
-                        let safari_support = safari_support.clone();
-                        let currently_enabled = config::load().safari_support;
-                        if currently_enabled {
-                            // Disable: save config, note restart needed
-                            let _ = config::save(&config::AcceleratorConfig {
-                                safari_support: false,
-                            });
-                            let _ = safari_support.set_checked(false);
-                            tracing::info!("Safari Support disabled (HTTPS stops on next restart)");
-                        } else {
-                            // Enable: show dialog, generate certs, install trust, start HTTPS
-                            let _ = safari_support.set_checked(false); // Don't check until success
-                            std::thread::spawn(move || {
-                                if !show_safari_support_dialog() {
-                                    tracing::info!("Safari Support setup cancelled by user");
-                                    return;
-                                }
-
-                                if let Err(e) = certs::generate_and_save() {
-                                    tracing::error!("Failed to generate certs: {e}");
-                                    show_error_dialog("Failed to generate certificates.");
-                                    return;
-                                }
-
-                                if let Err(e) = certs::install_ca_trust() {
-                                    tracing::error!("Failed to install CA trust: {e}");
-                                    show_error_dialog(
-                                        "Certificate trust was not granted. Safari Support was not enabled.",
-                                    );
-                                    return;
-                                }
-
-                                // Trust succeeded — save config and start HTTPS
-                                let _ = config::save(&config::AcceleratorConfig {
-                                    safari_support: true,
-                                });
-                                let _ = safari_support.set_checked(true);
-
-                                // Start HTTPS server
-                                match certs::load_rustls_config() {
-                                    Ok(tls_config) => {
-                                        let state = AppState {
-                                            https_port: Some(HTTPS_PORT),
-                                            ..Default::default()
-                                        };
-                                        tauri::async_runtime::spawn(async move {
-                                            if let Err(e) =
-                                                aztec_accelerator::server::start_https(
-                                                    state, tls_config,
-                                                )
-                                                .await
-                                            {
-                                                tracing::error!("HTTPS server error: {e}");
-                                            }
-                                        });
-                                        tracing::info!("Safari Support enabled, HTTPS server started");
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to load TLS config: {e}");
-                                    }
-                                }
-                            });
-                        }
+                    "settings" => {
+                        open_settings_window(app);
                     }
                     _ => {}
                 })
@@ -475,19 +352,14 @@ fn main() {
                     }
                     match build_versions_submenu(&app_handle, &bundled_for_cb) {
                         Ok(new_submenu) => {
-                            // Rebuild the full menu with the updated versions submenu
                             let status_rebuild = status.clone();
                             let show_logs_rebuild =
                                 MenuItemBuilder::with_id("show_logs", "Show Logs")
                                     .build(&app_handle)
                                     .unwrap();
-                            let autostart_enabled =
-                                app_handle.autolaunch().is_enabled().unwrap_or(false);
-                            let autostart_rebuild =
-                                CheckMenuItemBuilder::with_id("toggle_autostart", "Start on Login")
-                                    .checked(autostart_enabled)
-                                    .build(&app_handle)
-                                    .unwrap();
+                            let settings_rebuild = MenuItemBuilder::with_id("settings", "Settings")
+                                .build(&app_handle)
+                                .unwrap();
                             let quit_rebuild = MenuItemBuilder::with_id("quit", "Quit")
                                 .build(&app_handle)
                                 .unwrap();
@@ -512,7 +384,7 @@ fn main() {
                                     &status_rebuild,
                                     &new_submenu,
                                     &show_logs_rebuild,
-                                    &autostart_rebuild,
+                                    &settings_rebuild,
                                     &separator_rebuild,
                                     &version_text_rebuild,
                                     &github_rebuild,
@@ -529,8 +401,13 @@ fn main() {
                     }
                 });
 
-            // Auto-start HTTPS if Safari Support is configured
-            let https_port = try_start_https();
+            // Build the show_auth_popup callback that opens the authorization window
+            let app_handle_for_auth = app.handle().clone();
+            let auth_manager_for_timeout = auth_manager.clone();
+            let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback =
+                Arc::new(move |origin: &str| {
+                    show_auth_popup_window(&app_handle_for_auth, origin, &auth_manager_for_timeout);
+                });
 
             let is_animating_for_status = is_animating.clone();
             let state = AppState {
@@ -547,12 +424,27 @@ fn main() {
                 })),
                 bundled_version: Some(bundled_version),
                 on_versions_changed: Some(on_versions_changed),
-                https_port,
+                https_port: None,
+                config: Some(config_state.clone()),
+                auth_manager: Some(auth_manager.clone()),
+                show_auth_popup: Some(show_auth_popup),
+                prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
             };
 
+            // Auto-start HTTPS if Safari Support is configured.
+            // Uses a clone of the full AppState so the HTTPS server has auth + config.
+            let https_port = try_start_https(&state);
+
+            // Manage the shared state for Tauri commands (e.g. enable_safari_support)
+            let mut state_with_https = state.clone();
+            state_with_https.https_port = https_port;
+            app.manage::<SharedAppState>(Arc::new(state_with_https));
+
             // Spawn the HTTP server on the Tokio runtime
+            let mut http_state = state;
+            http_state.https_port = https_port;
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = aztec_accelerator::server::start(state).await {
+                if let Err(e) = aztec_accelerator::server::start(http_state).await {
                     tracing::error!("Accelerator server error: {e}");
                 }
             });
@@ -561,4 +453,57 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Aztec Accelerator");
+}
+
+/// Open or focus the Settings window.
+fn open_settings_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+        .title("Aztec Accelerator Settings")
+        .inner_size(500.0, 450.0)
+        .resizable(false)
+        .center()
+        .build();
+}
+
+/// Show the authorization popup for an unknown origin.
+/// Spawns a 60s timeout that auto-denies if the user doesn't respond.
+/// If the user closes the window without responding, the timeout will still
+/// fire and resolve all pending requests for this origin with Deny.
+fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<AuthorizationManager>) {
+    let label = format!("auth-{}", commands::sanitize_window_label(origin));
+    if app.get_webview_window(&label).is_some() {
+        return; // popup already open for this origin
+    }
+
+    let url = format!("authorize.html?origin={}", urlencoding::encode(origin));
+    let _ = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+        .title("Authorize Site")
+        .inner_size(400.0, 250.0)
+        .resizable(false)
+        .center()
+        .always_on_top(true)
+        .build();
+
+    // Spawn 60s timeout — always resolve with Deny if still pending.
+    // This handles both: (a) user ignoring the popup, and (b) user closing the
+    // window without clicking Allow/Deny. In case (b), the window is gone but
+    // the pending senders are still in the HashMap. resolve() is a no-op if the
+    // origin was already resolved by respond_auth (senders already consumed).
+    let app_handle = app.clone();
+    let origin_owned = origin.to_string();
+    let auth_manager = auth_manager.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        // Close window if still open
+        if let Some(window) = app_handle.get_webview_window(&label) {
+            let _ = window.close();
+        }
+        // Always try to resolve — no-op if already resolved by user click
+        auth_manager.resolve(&origin_owned, AuthDecision::Deny);
+        tracing::debug!(origin = %origin_owned, "Authorization timeout cleanup");
+    });
 }

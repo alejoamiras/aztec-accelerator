@@ -1,10 +1,47 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceleratorConfig {
     #[serde(default)]
     pub safari_support: bool,
+    #[serde(default)]
+    pub approved_origins: Vec<String>,
+    #[serde(default = "default_speed")]
+    pub speed: String,
+}
+
+fn default_speed() -> String {
+    "full".to_string()
+}
+
+impl Default for AcceleratorConfig {
+    fn default() -> Self {
+        Self {
+            safari_support: false,
+            approved_origins: Vec::new(),
+            speed: default_speed(),
+        }
+    }
+}
+
+/// Convert speed setting to thread count.
+/// - "full": all available cores
+/// - "high": 3/4 of available cores (min 1)
+/// - "balanced": half of available cores (min 1)
+/// - "light": 3/8 of available cores (min 1)
+/// - "low": quarter of available cores (min 1)
+pub fn speed_to_threads(speed: &str) -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    match speed {
+        "low" => (cpus / 4).max(1),
+        "light" => (cpus * 3 / 8).max(1),
+        "balanced" => (cpus / 2).max(1),
+        "high" => (cpus * 3 / 4).max(1),
+        _ => cpus, // "full" or unknown
+    }
 }
 
 /// Returns `~/.aztec-accelerator/config.json`.
@@ -25,13 +62,24 @@ pub fn load() -> AcceleratorConfig {
 }
 
 /// Save config to disk. Creates parent directories if needed.
+/// Sets file permissions to 0o600 on Unix (owner read/write only).
 pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, json)?;
+    std::fs::write(&path, &json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -43,6 +91,8 @@ mod tests {
     fn default_config_has_safari_support_false() {
         let config = AcceleratorConfig::default();
         assert!(!config.safari_support);
+        assert!(config.approved_origins.is_empty());
+        assert_eq!(config.speed, "full");
     }
 
     #[test]
@@ -51,12 +101,34 @@ mod tests {
         let path = dir.path().join("config.json");
         let config = AcceleratorConfig {
             safari_support: true,
+            approved_origins: vec!["https://example.com".to_string()],
+            speed: "balanced".to_string(),
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         std::fs::write(&path, &json).unwrap();
         let loaded: AcceleratorConfig =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(loaded.safari_support);
+        assert_eq!(loaded.approved_origins, vec!["https://example.com"]);
+        assert_eq!(loaded.speed, "balanced");
+    }
+
+    #[test]
+    fn speed_to_threads_returns_valid_counts() {
+        let full = speed_to_threads("full");
+        let high = speed_to_threads("high");
+        let balanced = speed_to_threads("balanced");
+        let light = speed_to_threads("light");
+        let low = speed_to_threads("low");
+        assert!(full >= 1);
+        assert!(high >= 1);
+        assert!(balanced >= 1);
+        assert!(light >= 1);
+        assert!(low >= 1);
+        assert!(full >= high);
+        assert!(high >= balanced);
+        assert!(balanced >= light);
+        assert!(light >= low);
     }
 
     #[test]

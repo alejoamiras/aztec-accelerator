@@ -127,7 +127,7 @@ interface AcceleratorStatus {
 ```typescript
 type AcceleratorPhase =
   | "detect" | "serialize" | "transmit" | "proving"
-  | "proved" | "receive" | "fallback" | "downloading";
+  | "proved" | "receive" | "fallback" | "downloading" | "denied";
 ```
 
 ### `AcceleratorPhaseData`
@@ -150,6 +150,8 @@ interface AcceleratorPhaseData {
 ```
 
 If the accelerator is unreachable at step 1, the SDK emits a `"fallback"` phase and proves via WASM instead — no error, no user action required.
+
+If the user denies your site at step 3 (or authorization times out), the SDK emits `"denied"` → `"fallback"` and falls back to WASM automatically. Use the `onPhase` callback to show a hint like "Approve in the Accelerator app for faster proving".
 
 ## Configuration
 
@@ -200,6 +202,7 @@ const prover = new AcceleratorProver({
 | `downloading` | Accelerator is downloading `bb` for this Aztec version |
 | `receive` | Deserializing proof from response |
 | `fallback` | Accelerator unavailable, falling back to WASM |
+| `denied` | User denied this site access to the accelerator (403) — falling back to WASM |
 
 ## Browser Compatibility
 

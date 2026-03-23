@@ -64,9 +64,11 @@ fn home_dir_fallback() -> Option<PathBuf> {
 /// with a 4-byte BE field-count header suitable for `ChonkProofWithPublicInputs.fromBuffer()`.
 ///
 /// When `version` is specified, searches the version cache for the matching `bb` binary.
+/// When `threads` is specified, passes `-t N` to limit parallelism.
 pub async fn prove(
     ivc_inputs: &[u8],
     version: Option<&str>,
+    threads: Option<usize>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let bb_path =
         find_bb(version).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -77,20 +79,26 @@ pub async fn prove(
     std::fs::create_dir_all(&output_dir)?;
     std::fs::write(&input_path, ivc_inputs)?;
 
-    tracing::info!(version = version.unwrap_or("bundled"), "Starting bb prove");
+    tracing::info!(
+        version = version.unwrap_or("bundled"),
+        ?threads,
+        "Starting bb prove"
+    );
 
-    let output = tokio::process::Command::new(&bb_path)
-        .args([
-            "prove",
-            "--scheme",
-            "chonk",
-            "--ivc_inputs_path",
-            input_path.to_str().unwrap(),
-            "-o",
-            output_dir.to_str().unwrap(),
-        ])
-        .output()
-        .await?;
+    let mut cmd = tokio::process::Command::new(&bb_path);
+    cmd.args([
+        "prove",
+        "--scheme",
+        "chonk",
+        "--ivc_inputs_path",
+        input_path.to_str().unwrap(),
+        "-o",
+        output_dir.to_str().unwrap(),
+    ]);
+    if let Some(t) = threads {
+        cmd.args(["-t", &t.to_string()]);
+    }
+    let output = cmd.output().await?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.is_empty() {
@@ -107,21 +115,10 @@ pub async fn prove(
     }
 
     if !output.status.success() {
-        // Truncate stderr in error responses to avoid leaking unbounded output to HTTP clients
-        let truncated_stderr = if stderr.len() > 500 {
-            format!(
-                "{}... [truncated, {} bytes total]",
-                &stderr[..500],
-                stderr.len()
-            )
-        } else {
-            stderr.to_string()
-        };
-        return Err(format!(
-            "bb prove failed (exit {}): {truncated_stderr}",
-            output.status
-        )
-        .into());
+        // Log full stderr server-side, but return only a generic error to HTTP clients
+        // to avoid leaking bb internals (file paths, witness data) to the browser.
+        tracing::error!(exit_code = %output.status, "bb prove failed");
+        return Err(format!("bb prove failed (exit {})", output.status).into());
     }
 
     let proof_path = output_dir.join("proof");

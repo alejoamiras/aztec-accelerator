@@ -52,6 +52,11 @@ pub fn generate_and_save() -> Result<(), Box<dyn std::error::Error + Send + Sync
 
     let dir = certs_dir();
     std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
 
     let now = OffsetDateTime::now_utc();
     let ten_years = time::Duration::days(3650);
