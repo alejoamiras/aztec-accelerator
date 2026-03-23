@@ -27,10 +27,12 @@ jobs:
 
       - name: Create and push tag
         id: tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          TAG="accelerator-v${{ inputs.version }}"
+          TAG="accelerator-v${INPUT_VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
 
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping creation"
@@ -87,18 +89,22 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
 
       - name: Patch version in tauri.conf.json
+        env:
+          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
         run: |
           cd packages/accelerator/src-tauri
           bun -e "
             const conf = JSON.parse(await Bun.file('tauri.conf.json').text());
-            conf.version = '${{ needs.tag.outputs.version }}';
+            conf.version = process.env.RELEASE_VERSION;
             await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
           "
 
       - name: Patch version in Cargo.toml
+        env:
+          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
         run: |
           cd packages/accelerator/src-tauri
-          sed -i.bak 's/^version = ".*"/version = "${{ needs.tag.outputs.version }}"/' Cargo.toml
+          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
           rm -f Cargo.toml.bak
 
       - name: Copy bb sidecar
@@ -139,8 +145,9 @@ jobs:
           merge-multiple: true
 
       - name: Flatten and rename artifacts
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
         run: |
-          VERSION="${{ needs.tag.outputs.version }}"
           mkdir -p release-files
 
           # Find all bundle files (nested in subdirs from upload-artifact) and rename to human-friendly names
@@ -156,10 +163,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          VERSION: ${{ needs.tag.outputs.version }}
         run: |
-          TAG="${{ needs.tag.outputs.tag }}"
-          VERSION="${{ needs.tag.outputs.version }}"
-
           # Collect all bundle files into a null-delimited list
           mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0)
 
@@ -172,12 +178,12 @@ jobs:
           printf '  %s\n' "${FILES[@]}"
 
           # Delete existing release if present (clean slate)
-          if gh release view "$TAG" &>/dev/null; then
-            echo "Release $TAG already exists, deleting..."
-            gh release delete "$TAG" --yes
+          if gh release view "$RELEASE_TAG" &>/dev/null; then
+            echo "Release $RELEASE_TAG already exists, deleting..."
+            gh release delete "$RELEASE_TAG" --yes
           fi
 
-          echo "Creating release $TAG..."
+          echo "Creating release $RELEASE_TAG..."
 
           # Write release notes to file (avoids heredoc/YAML indentation issues)
           cat > /tmp/release-notes.md << NOTES
@@ -205,7 +211,7 @@ jobs:
           # Strip leading whitespace from each line (YAML indentation artifact)
           sed -i 's/^          //' /tmp/release-notes.md
 
-          gh release create "$TAG" \
+          gh release create "$RELEASE_TAG" \
             --title "Aztec Accelerator $VERSION" \
             --notes-file /tmp/release-notes.md \
             "${FILES[@]}"

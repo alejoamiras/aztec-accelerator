@@ -24,6 +24,16 @@ export type LogFn = (
   url?: string,
 ) => void;
 
+/** Truncate an address for display: first 6 + last 4 chars. */
+function shortAddr(addr: string): string {
+  return addr.length > 14 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
+}
+
+/** Extract a human-readable message from an unknown error value. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export type UiMode = "local" | "accelerated";
 
 const AZTEC_NODE_URL = process.env.AZTEC_NODE_URL || "/aztec";
@@ -286,7 +296,7 @@ export async function initializeWallet(log: LogFn): Promise<boolean> {
         );
         await clearIndexedDB();
       } else {
-        log(`Wallet initialization failed: ${err}`, "error");
+        log(`Wallet initialization failed: ${errorMessage(err)}`, "error");
         return false;
       }
     }
@@ -477,7 +487,7 @@ export async function deployTestAccount(
     const deployMethod = await accountManager.getDeployMethod();
 
     steps.push({ step: "create account", durationMs: Date.now() - stepStart });
-    log(`Account: ${accountManager.address.toString()}`);
+    log(`Account: ${shortAddr(accountManager.address.toString())}`);
 
     const sendOpts = {
       from: state.proofsRequired ? AztecAddress.ZERO : state.registeredAddresses[0],
@@ -535,7 +545,7 @@ export async function deployTestAccount(
     const totalDurationMs = Date.now() - totalStart;
     const address = accountManager.address.toString();
     log(
-      `Deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${address}`,
+      `Deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${shortAddr(address)}`,
       "success",
       `${EXPLORER_BASE}/${deployTxHash}`,
     );
@@ -595,7 +605,7 @@ export async function deployToken(
     const address = tokenDeploy.address!.toString();
     const totalDurationMs = Date.now() - totalStart;
     log(
-      `Token deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${address}`,
+      `Token deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${shortAddr(address)}`,
       "success",
       `${EXPLORER_BASE}/${tokenTxHash}`,
     );
@@ -684,7 +694,7 @@ export async function runTokenFlow(
     const token = TokenContract.at(tokenDeploy.address!, state.wallet);
     steps.push(tokenStep);
     log(
-      `Token deployed in ${(tokenStep.durationMs / 1000).toFixed(1)}s → ${token.address.toString()}`,
+      `Token deployed in ${(tokenStep.durationMs / 1000).toFixed(1)}s → ${shortAddr(token.address.toString())}`,
       "success",
       `${EXPLORER_BASE}/${tokenTxHash}`,
     );
