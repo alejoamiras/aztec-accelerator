@@ -180,6 +180,13 @@ fn main() {
     let log_path = log_dir();
     std::fs::create_dir_all(&log_path).ok();
 
+    // Restrict log directory permissions to owner-only on Unix (0o700)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o700));
+    }
+
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("accelerator")
