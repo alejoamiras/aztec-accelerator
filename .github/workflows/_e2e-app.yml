@@ -45,7 +45,8 @@ jobs:
         env:
           AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
           SPONSORED_FPC_SALT: ${{ !contains(inputs.aztec_node_url, 'localhost') && secrets.SPONSORED_FPC_SALT || '' }}
-        run: bun run --cwd packages/playground ${{ inputs.test_script }}
+          TEST_SCRIPT: ${{ inputs.test_script }}
+        run: bun run --cwd packages/playground "$TEST_SCRIPT"
 
       - name: Upload Aztec logs
         if: failure()
@@ -55,4 +56,3 @@ jobs:
           path: /tmp/aztec-node.log
           if-no-files-found: ignore
           retention-days: 7
-
