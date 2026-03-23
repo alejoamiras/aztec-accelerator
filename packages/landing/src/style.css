@@ -598,6 +598,16 @@ img, svg {
   color: var(--text-muted);
 }
 
+.footer-disclosure {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  opacity: 0.5;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding-bottom: 2rem;
+}
+
 /* ── Responsive ───────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .nav-links {
