@@ -165,6 +165,16 @@ impl Drop for StatusGuard {
     }
 }
 
+/// Validate that a version string contains only safe characters for URL interpolation.
+/// Allows digits, ASCII letters, dots, hyphens, and underscores.
+fn is_valid_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 128
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
 async fn prove(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -179,7 +189,18 @@ async fn prove(
         .and_then(|v| v.to_str().ok())
         .map(|v| v.to_string());
 
+    // Validate version string to prevent URL manipulation in download URLs.
+    // Only allows semver-like strings: digits, dots, hyphens, and ASCII letters.
     if let Some(ref v) = requested_version {
+        if !is_valid_version(v) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Invalid x-aztec-version header: version must match \
+                     ^[0-9a-zA-Z._-]+$ (got '{v}')"
+                ),
+            ));
+        }
         tracing::info!(version = %v, "Requested Aztec version");
     }
 
@@ -442,6 +463,45 @@ mod tests {
             runtime["available_parallelism"].as_u64().unwrap() > 0,
             "available_parallelism should be > 0"
         );
+    }
+
+    #[test]
+    fn valid_version_strings_accepted() {
+        assert!(is_valid_version("5.0.0"));
+        assert!(is_valid_version("5.0.0-nightly.20260307"));
+        assert!(is_valid_version("5.0.0-rc.1"));
+        assert!(is_valid_version("5.0.0-devnet.20260307"));
+        assert!(is_valid_version("1.2.3-alpha_beta"));
+    }
+
+    #[test]
+    fn invalid_version_strings_rejected() {
+        assert!(!is_valid_version(""));
+        assert!(!is_valid_version("5.0.0; rm -rf /"));
+        assert!(!is_valid_version("../../../etc/passwd"));
+        assert!(!is_valid_version("5.0.0\n"));
+        assert!(!is_valid_version("5.0.0 "));
+        assert!(!is_valid_version("v5.0.0/../../malicious"));
+        assert!(!is_valid_version(&"a".repeat(129)));
+    }
+
+    #[tokio::test]
+    async fn prove_rejects_invalid_version_header() {
+        let app = router(AppState::default());
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("x-aztec-version", "../../../etc/passwd")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
