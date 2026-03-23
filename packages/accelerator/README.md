@@ -85,13 +85,26 @@ When no specific version is requested, the accelerator looks for the `bb` binary
 3. **`~/.bb/bb`** — user-installed via the Aztec CLI
 4. **`PATH`** — system-wide installation
 
+## Site Authorization
+
+The accelerator uses a MetaMask-style approval flow. When a new website calls `/prove`, the user sees a popup asking to allow or deny access. Localhost origins are auto-approved (no popup for local development).
+
+- **Allow + Remember**: the origin is saved to `~/.aztec-accelerator/config.json` and never prompted again
+- **Allow** (without Remember): approved for this session only
+- **Deny**: the SDK receives a `403` and automatically falls back to WASM proving
+- **Timeout** (60s): auto-denied if the user doesn't respond
+
+Approved sites can be reviewed and removed from the Settings window.
+
+For the headless server binary (CI/testing), set `ALLOWED_ORIGINS=origin1,origin2` to restrict access. Without it, all origins are auto-approved.
+
 ## Tray Menu
 
 The tray menu adapts based on the build profile:
 
 **Production** (release builds):
 ```
-Start on Login
+Settings
 ─────────────
 v1.1.0 · Aztec 5.0.0-nightly.20260309
 GitHub
@@ -103,33 +116,35 @@ Quit
 Status: Idle
 ▸ Versions
   Show Logs
-  Start on Login
+  Settings
 ─────────────
 v1.1.0 · Aztec 5.0.0-nightly.20260309
 GitHub
 Quit
 ```
 
-### Auto-Start on Login
+### Settings Window
 
-When enabled, the accelerator launches automatically when you log in to your computer. Uses platform-native mechanisms (LaunchAgent on macOS, autostart on Linux).
+Click **Settings** in the tray menu to open the Settings window. From here you can:
+
+- **Approved Sites** — view and remove origins that have been granted access
+- **Start on Login** — auto-launch at login (LaunchAgent on macOS, autostart on Linux)
+- **Safari Support** (macOS only) — toggle HTTPS mode for Safari compatibility
+- **Proving Speed** — control CPU usage with a 5-level slider (Low / Light / Balanced / High / Full)
+
+Speed changes take effect immediately on the next prove request — no restart needed.
 
 ### Safari Support (macOS only)
 
 Safari blocks mixed content — an HTTPS page cannot `fetch()` from `http://127.0.0.1`. Chrome and Firefox exempt localhost, but Safari does not.
 
-To fix this, enable **Safari Support** from the tray menu:
-
-1. Click **☐ Safari Support** in the tray menu
-2. A dialog explains what will happen — click **Continue**
-3. macOS will ask for your password to trust the certificate (one-time setup)
-4. The accelerator starts an HTTPS listener on port **59834**
+To enable, toggle **Safari Support** in the Settings window. macOS will prompt for your password once to trust the certificate.
 
 The SDK automatically probes both HTTP (59833) and HTTPS (59834) in parallel via `Promise.any`. Chrome/Firefox use HTTP (faster), Safari uses HTTPS.
 
 **What it installs:** A local Certificate Authority (`Aztec Accelerator Local CA`) with Name Constraints limiting it to `127.0.0.1`, `::1`, and `localhost` only. The CA is installed in your macOS login Keychain.
 
-**To remove:** Open **Keychain Access**, search for "Aztec Accelerator Local CA", delete it, then disable Safari Support in the tray menu.
+**To remove:** Open **Keychain Access**, search for "Aztec Accelerator Local CA", delete it, then disable Safari Support in Settings.
 
 **Certificate details:**
 - CA: ECDSA P-256, 10-year validity, Name Constraints (localhost only)
