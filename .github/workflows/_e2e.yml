@@ -18,6 +18,9 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      SPONSORED_FPC_SALT:
+        required: false
 
 jobs:
   e2e-sdk:

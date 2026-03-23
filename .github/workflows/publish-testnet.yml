@@ -42,7 +42,8 @@ jobs:
     with:
       dist_tag: testnet
       latest: true
-    secrets: inherit
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   deploy-app:
     needs: e2e
