@@ -180,7 +180,7 @@
       });
     });
 
-    loadSettings();
+    loadSettings().catch((err) => console.error("Failed to load settings:", err));
   </script>
 </body>
 </html>

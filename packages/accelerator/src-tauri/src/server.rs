@@ -266,7 +266,9 @@ async fn prove(
                                 let mut cfg = cfg_lock.write().unwrap();
                                 if !cfg.approved_origins.contains(&origin) {
                                     cfg.approved_origins.push(origin.clone());
-                                    let _ = config::save(&cfg);
+                                    if let Err(e) = config::save(&cfg) {
+                                        tracing::warn!(origin = %origin, error = %e, "Failed to persist approved origin");
+                                    }
                                 }
                             }
                         }
