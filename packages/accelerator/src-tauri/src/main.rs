@@ -451,9 +451,33 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Aztec Accelerator");
+        .build(tauri::generate_context!())
+        .expect("error while building Aztec Accelerator")
+        .run(|_app, event| {
+            // Tray-only app — keep running when Settings or auth popup windows are closed.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
+
+/// On macOS, switch to Regular activation policy so the window appears in Dock/Cmd+Tab.
+/// Registers a destroy listener on the window to switch back to Accessory when all windows close.
+#[cfg(target_os = "macos")]
+fn activate_for_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            if handle.webview_windows().is_empty() {
+                let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_for_window(_app: &AppHandle, _window: &tauri::WebviewWindow) {}
 
 /// Open or focus the Settings window.
 fn open_settings_window(app: &AppHandle) {
@@ -461,12 +485,16 @@ fn open_settings_window(app: &AppHandle) {
         let _ = window.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Aztec Accelerator Settings")
-        .inner_size(500.0, 450.0)
-        .resizable(false)
-        .center()
-        .build();
+    if let Ok(window) =
+        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+            .title("Aztec Accelerator Settings")
+            .inner_size(500.0, 450.0)
+            .resizable(false)
+            .center()
+            .build()
+    {
+        activate_for_window(app, &window);
+    }
 }
 
 /// Show the authorization popup for an unknown origin.
@@ -480,13 +508,16 @@ fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<Auth
     }
 
     let url = format!("authorize.html?origin={}", urlencoding::encode(origin));
-    let _ = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    if let Ok(window) = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Authorize Site")
         .inner_size(400.0, 250.0)
         .resizable(false)
         .center()
         .always_on_top(true)
-        .build();
+        .build()
+    {
+        activate_for_window(app, &window);
+    }
 
     // Spawn 60s timeout — always resolve with Deny if still pending.
     // This handles both: (a) user ignoring the popup, and (b) user closing the

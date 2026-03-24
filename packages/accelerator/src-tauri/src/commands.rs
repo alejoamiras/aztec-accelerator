@@ -97,19 +97,13 @@ pub fn respond_auth(
     }
 }
 
-/// Sanitize an origin string for use as a Tauri window label.
-/// Window labels must be alphanumeric with hyphens/underscores.
+/// Create a unique, collision-free window label from an origin string.
+/// Uses a truncated SHA-256 hash to avoid collisions between similar origins
+/// (e.g. `example.com` vs `example_com` would collide with naive character replacement).
 pub fn sanitize_window_label(origin: &str) -> String {
-    origin
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(origin.as_bytes());
+    hash.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
