@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  id-token: write
   contents: write
   pull-requests: write
 
@@ -116,6 +117,8 @@ jobs:
         run: npx @tauri-apps/cli@^2 build --target ${{ matrix.target }}
         working-directory: packages/accelerator
         env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -131,6 +134,9 @@ jobs:
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.tar.gz
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.sig
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.sig
 
   release:
     name: Create GitHub Release
@@ -150,14 +156,60 @@ jobs:
         run: |
           mkdir -p release-files
 
-          # Find all bundle files (nested in subdirs from upload-artifact) and rename to human-friendly names
+          echo "All artifacts:"
+          find artifacts -type f | sort
+
+          # DMGs (for direct download)
           find artifacts -name '*_aarch64.dmg' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.dmg" \;
           find artifacts -name '*_x64.dmg'     -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.dmg" \;
-          find artifacts -name '*_amd64.deb'   -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \;
-          find artifacts -name '*_amd64.AppImage' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \;
+
+          # Updater .tar.gz (macOS — Tauri produces "Aztec Accelerator.app.tar.gz" per arch)
+          # The ARM and Intel builds produce identically-named files, so we match by parent dir
+          find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \; 2>/dev/null || true
+          find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \; 2>/dev/null || true
+
+          # Linux
+          find artifacts -name '*_amd64.deb'      -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \;
+          find artifacts -name '*_amd64.AppImage'  -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \;
 
           echo "Release files:"
           ls -la release-files/
+
+      - name: Generate latest.json for auto-updater
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          REPO="alejoamiras/aztec-accelerator"
+          BASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+
+          # Read signatures from .sig files in artifacts
+          DARWIN_AARCH64_SIG=$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
+          DARWIN_X86_64_SIG=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
+          LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg darwin_aarch64_sig "$DARWIN_AARCH64_SIG" \
+            --arg darwin_aarch64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \
+            --arg darwin_x86_64_sig "$DARWIN_X86_64_SIG" \
+            --arg darwin_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \
+            --arg linux_x86_64_sig "$LINUX_APPIMAGE_SIG" \
+            --arg linux_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \
+            '{
+              version: $version,
+              notes: ("Aztec Accelerator " + $version),
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { signature: $darwin_aarch64_sig, url: $darwin_aarch64_url },
+                "darwin-x86_64": { signature: $darwin_x86_64_sig, url: $darwin_x86_64_url },
+                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url }
+              }
+            }' > release-files/latest.json
+
+          echo "Generated latest.json:"
+          cat release-files/latest.json
 
       - name: Create release
         env:
@@ -167,7 +219,7 @@ jobs:
           VERSION: ${{ needs.tag.outputs.version }}
         run: |
           # Collect all bundle files into a null-delimited list
-          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0)
+          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name 'latest.json' \) -print0)
 
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts found!"
@@ -215,6 +267,21 @@ jobs:
             --title "Aztec Accelerator $VERSION" \
             --notes-file /tmp/release-notes.md \
             "${FILES[@]}"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload latest.json to S3 for auto-updater
+        run: |
+          # Uploaded under /landing/ because CloudFront routes aztec-accelerator.dev → /landing/
+          aws s3 cp release-files/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
+            --content-type application/json \
+            --cache-control "max-age=300"
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/releases/latest.json"
 
   bump-source:
     name: Bump source version

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aztec Accelerator Update</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="auth-container">
+    <h2>A newer version of Aztec Accelerator is available</h2>
+    <div class="auth-origin" id="version"></div>
+    <p style="color: var(--text-muted); font-size: 12px; margin-top: 4px; line-height: 1.5;">
+      Stay up to date automatically.<br>
+      You can change this anytime in Settings.
+    </p>
+    <div class="auth-buttons">
+      <button class="btn btn-secondary" id="skip">Skip</button>
+      <button class="btn btn-primary" id="auto">Enable Auto-Update</button>
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+
+    const params = new URLSearchParams(window.location.search);
+    const currentVersion = params.get("current") || "unknown";
+    const newVersion = params.get("version") || "unknown";
+    document.getElementById("version").textContent =
+      "v" + currentVersion + "  →  v" + newVersion;
+
+    async function respond(enableAutoUpdate) {
+      document.getElementById("auto").disabled = true;
+      document.getElementById("skip").disabled = true;
+      try {
+        await invoke("respond_update_prompt", { enableAutoUpdate });
+      } catch (err) {
+        console.error("respond_update_prompt failed:", err);
+      }
+    }
+
+    document.getElementById("auto").addEventListener("click", () => respond(true));
+    document.getElementById("skip").addEventListener("click", () => respond(false));
+  </script>
+</body>
+</html>
