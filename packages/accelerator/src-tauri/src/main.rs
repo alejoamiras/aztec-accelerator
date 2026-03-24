@@ -510,7 +510,7 @@ fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<Auth
     let url = format!("authorize.html?origin={}", urlencoding::encode(origin));
     if let Ok(window) = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Authorize Site")
-        .inner_size(400.0, 250.0)
+        .inner_size(400.0, 300.0)
         .resizable(false)
         .center()
         .always_on_top(true)
