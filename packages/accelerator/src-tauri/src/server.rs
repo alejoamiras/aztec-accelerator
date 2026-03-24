@@ -148,8 +148,14 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "bb_available": bb::find_bb(None).is_ok(),
     });
 
-    if let Some(port) = state.https_port {
-        body["https_port"] = json!(port);
+    // Report HTTPS port if Safari Support is enabled (reads live config, not static state,
+    // so runtime enable_safari_support is reflected immediately without restart).
+    let safari_enabled = state
+        .config
+        .as_ref()
+        .is_some_and(|cfg| cfg.read().unwrap().safari_support);
+    if state.https_port.is_some() || safari_enabled {
+        body["https_port"] = json!(HTTPS_PORT);
     }
 
     // Runtime diagnostics only in debug builds — avoid leaking user hardware info in production
@@ -675,5 +681,211 @@ mod tests {
         assert!(versions
             .iter()
             .any(|v| v.as_str() == Some("5.0.0-nightly.20260307")));
+    }
+
+    /// Helper: build an AppState with auth enabled and a mock popup callback.
+    fn auth_state_with_popup(
+        popup_tx: std::sync::mpsc::Sender<String>,
+    ) -> (AppState, Arc<crate::authorization::AuthorizationManager>) {
+        let auth = Arc::new(crate::authorization::AuthorizationManager::new());
+        let auth_for_state = auth.clone();
+        let cfg = crate::config::AcceleratorConfig::default();
+        let state = AppState {
+            auth_manager: Some(auth_for_state),
+            config: Some(Arc::new(std::sync::RwLock::new(cfg))),
+            show_auth_popup: Some(Arc::new(move |origin: &str| {
+                let _ = popup_tx.send(origin.to_string());
+            })),
+            prove_semaphore: Some(Arc::new(Semaphore::new(1))),
+            ..Default::default()
+        };
+        (state, auth)
+    }
+
+    #[tokio::test]
+    async fn prove_auto_approves_localhost_origin() {
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "http://localhost:5173")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Localhost is auto-approved — should NOT trigger popup, should proceed to proving
+        // (which fails because bb is not available, but that's fine — we're testing the auth gate)
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            popup_rx.try_recv().is_err(),
+            "popup should not fire for localhost"
+        );
+    }
+
+    #[tokio::test]
+    async fn prove_triggers_popup_for_unknown_origin() {
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+        let (state, auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        // Spawn a task that auto-approves after the popup fires
+        let auth_clone = auth.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            auth_clone.resolve(
+                "https://unknown-site.com",
+                crate::authorization::AuthDecision::Allow { remember: false },
+            );
+        });
+
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://unknown-site.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Popup should have been triggered
+        assert_eq!(popup_rx.recv().unwrap(), "https://unknown-site.com");
+        // After approval, should proceed (not 403)
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn prove_returns_403_when_origin_denied() {
+        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (state, auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        // Auto-deny after popup fires
+        let auth_clone = auth.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            auth_clone.resolve("https://evil.com", crate::authorization::AuthDecision::Deny);
+        });
+
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://evil.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "origin_denied");
+    }
+
+    #[tokio::test]
+    async fn prove_skips_auth_when_no_origin_header() {
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // No Origin header = auto-approved (curl, same-origin)
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            popup_rx.try_recv().is_err(),
+            "popup should not fire without Origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn prove_approves_remembered_origin() {
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+
+        // Pre-approve the origin in config
+        if let Some(ref cfg) = state.config {
+            cfg.write()
+                .unwrap()
+                .approved_origins
+                .push("https://approved-site.com".to_string());
+        }
+
+        let app = router(state);
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://approved-site.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            popup_rx.try_recv().is_err(),
+            "popup should not fire for approved origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn prove_returns_403_without_popup_in_headless() {
+        // Headless mode: auth_manager is set but show_auth_popup is None
+        let auth = Arc::new(crate::authorization::AuthorizationManager::new());
+        let cfg = crate::config::AcceleratorConfig::default();
+        let state = AppState {
+            auth_manager: Some(auth),
+            config: Some(Arc::new(std::sync::RwLock::new(cfg))),
+            show_auth_popup: None, // headless
+            ..Default::default()
+        };
+        let app = router(state);
+
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://unknown.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Headless with no popup = instant deny
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
