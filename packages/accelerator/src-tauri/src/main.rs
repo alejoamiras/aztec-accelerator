@@ -455,8 +455,12 @@ fn main() {
         .expect("error while building Aztec Accelerator")
         .run(|_app, event| {
             // Tray-only app — keep running when Settings or auth popup windows are closed.
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+            // Only prevent automatic exit (code=None, triggered by last window closing).
+            // Explicit app.exit(0) from the "Quit" menu sets code=Some(0) and must go through.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }
