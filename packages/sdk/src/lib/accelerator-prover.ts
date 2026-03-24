@@ -2,7 +2,7 @@ import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import type { CircuitSimulator } from "@aztec/simulator/client";
 import { type PrivateExecutionStep, serializePrivateExecutionSteps } from "@aztec/stdlib/kernel";
 import { ChonkProofWithPublicInputs } from "@aztec/stdlib/proofs";
-import ky from "ky";
+import ky, { HTTPError } from "ky";
 import ms from "ms";
 import sdkPkg from "../../package.json" with { type: "json" };
 import { logger } from "./logger.js";
@@ -16,7 +16,8 @@ export type AcceleratorPhase =
   | "proved"
   | "receive"
   | "fallback"
-  | "downloading";
+  | "downloading"
+  | "denied";
 
 /** Data payload for the `"proved"` phase — carries the actual proving duration. */
 export interface AcceleratorPhaseData {
@@ -318,15 +319,42 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
     this.#onPhase?.("transmit");
     this.#onPhase?.("proving");
-    const res = await ky.post(`${this.#acceleratorBaseUrl}/prove`, {
-      body: new Uint8Array(msgpack),
-      timeout: ms("10 min"),
-      retry: 0,
-      headers: {
-        "content-type": "application/octet-stream",
-        ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
-      },
-    });
+
+    let res: Awaited<ReturnType<typeof ky.post>>;
+    try {
+      res = await ky.post(`${this.#acceleratorBaseUrl}/prove`, {
+        body: new Uint8Array(msgpack),
+        timeout: ms("10 min"),
+        retry: 0,
+        headers: {
+          "content-type": "application/octet-stream",
+          ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
+        },
+      });
+    } catch (err) {
+      // 403: user denied this site, or authorization timed out — fall back to WASM
+      if (err instanceof HTTPError && err.response.status === 403) {
+        const body = await err.response
+          .json<{ error?: string; message?: string }>()
+          .catch(() => null);
+        logger.warn("Accelerator denied this origin, falling back to WASM", {
+          error: body?.error,
+          message: body?.message,
+        });
+        this.#onPhase?.("denied");
+        this.#onPhase?.("fallback");
+        this.#onPhase?.("proving");
+        const start = performance.now();
+        const proof = await super.createChonkProof(executionSteps);
+        const durationMs = Math.round(performance.now() - start);
+        logger.info("Local proof completed after denial", { durationMs });
+        this.#onPhase?.("proved", { durationMs });
+        this.#onPhase?.("receive");
+        return proof;
+      }
+      throw err;
+    }
+
     const proveDurationMs = res.headers.get("x-prove-duration-ms");
     if (proveDurationMs) {
       logger.info("Accelerator server-side timing", { proveDurationMs: Number(proveDurationMs) });

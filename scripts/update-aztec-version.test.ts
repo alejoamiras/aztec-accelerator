@@ -10,8 +10,9 @@ describe("validateVersion", () => {
     expect(validateVersion("4.1.0-rc.4")).toBe(true);
   });
 
-  test("rejects plain semver", () => {
-    expect(validateVersion("5.0.0")).toBe(false);
+  test("accepts stable semver", () => {
+    expect(validateVersion("5.0.0")).toBe(true);
+    expect(validateVersion("4.1.0")).toBe(true);
   });
 
   test("rejects invalid format", () => {
@@ -58,5 +59,23 @@ describe("updatePackageJson", () => {
     const pkg = JSON.parse(result);
     expect(pkg.dependencies["@aztec/stdlib"]).toBe("5.0.0-nightly.20260224");
     expect(pkg.devDependencies["@aztec/simulator"]).toBe("4.1.0-rc.4");
+  });
+
+  test("updates to stable version", () => {
+    const result = updatePackageJson(samplePkg, "4.1.0");
+    const pkg = JSON.parse(result);
+    expect(pkg.dependencies["@aztec/stdlib"]).toBe("4.1.0");
+    expect(pkg.dependencies["@aztec/bb-prover"]).toBe("4.1.0");
+    expect(pkg.devDependencies["@aztec/simulator"]).toBe("4.1.0");
+  });
+
+  test("updates from stable version to newer", () => {
+    const stablePkg = JSON.stringify({
+      name: "test",
+      dependencies: { "@aztec/stdlib": "4.1.0" },
+    }, null, 2);
+    const result = updatePackageJson(stablePkg, "4.2.0-rc.1");
+    const pkg = JSON.parse(result);
+    expect(pkg.dependencies["@aztec/stdlib"]).toBe("4.2.0-rc.1");
   });
 });

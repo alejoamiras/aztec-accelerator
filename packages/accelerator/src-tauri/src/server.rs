@@ -10,12 +10,16 @@ use http::Method;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::{bb, versions};
+use crate::authorization::{AuthDecision, AuthorizationManager};
+use crate::{bb, config, versions};
+use std::sync::RwLock;
+use tokio::sync::Semaphore;
 
 const PORT: u16 = 59833;
 pub const HTTPS_PORT: u16 = 59834;
@@ -23,12 +27,20 @@ pub const HTTPS_PORT: u16 = 59834;
 pub type StatusCallback = Arc<dyn Fn(&str) + Send + Sync>;
 pub type VersionsChangedCallback = Arc<dyn Fn() + Send + Sync>;
 
+/// Callback to show the authorization popup window. Takes the origin string.
+pub type ShowAuthPopupCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct AppState {
     pub on_status: Option<StatusCallback>,
     pub bundled_version: Option<String>,
     pub on_versions_changed: Option<VersionsChangedCallback>,
     pub https_port: Option<u16>,
+    pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
+    pub auth_manager: Option<Arc<AuthorizationManager>>,
+    pub show_auth_popup: Option<ShowAuthPopupCallback>,
+    /// Limits concurrent proving to 1 — bb already uses all cores.
+    pub prove_semaphore: Option<Arc<Semaphore>>,
 }
 
 pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -173,6 +185,128 @@ async fn prove(
     tracing::info!("Received /prove request");
     tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
+    // --- Origin authorization ---
+    // CORS stays permissive (Any) so the SDK can always read responses.
+    // Authorization is enforced here: unknown origins get a 403 JSON response.
+    if let Some(ref auth_manager) = state.auth_manager {
+        let origin = headers
+            .get(http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let Some(origin) = origin {
+            let approved = state.config.as_ref().is_some_and(|cfg| {
+                let cfg = cfg.read().unwrap();
+                AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
+            });
+
+            if !approved {
+                // If there is no popup callback (headless mode with ALLOWED_ORIGINS),
+                // deny immediately instead of hanging for 60s waiting for a popup
+                // that will never appear.
+                if state.show_auth_popup.is_none() {
+                    tracing::info!(origin = %origin, "Origin not approved (no popup available), denying");
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        serde_json::to_string(&serde_json::json!({
+                            "error": "origin_denied",
+                            "message": format!("Access denied for origin: {origin}")
+                        }))
+                        .unwrap(),
+                    ));
+                }
+
+                tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
+                let (rx, is_first) = auth_manager.request(&origin).map_err(|_| {
+                    tracing::warn!(origin = %origin, "Too many pending authorization requests");
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        serde_json::to_string(&serde_json::json!({
+                            "error": "too_many_requests",
+                            "message": "Too many pending authorization requests"
+                        }))
+                        .unwrap(),
+                    )
+                })?;
+
+                if is_first {
+                    if let Some(ref show_popup) = state.show_auth_popup {
+                        show_popup(&origin);
+                    }
+                }
+
+                // Wait for user decision (up to 60s)
+                let decision = tokio::time::timeout(Duration::from_secs(60), rx)
+                    .await
+                    .map_err(|_| {
+                        tracing::warn!(origin = %origin, "Authorization timed out");
+                        auth_manager.resolve(&origin, AuthDecision::Deny);
+                        (
+                            StatusCode::FORBIDDEN,
+                            serde_json::to_string(&serde_json::json!({
+                                "error": "authorization_timeout",
+                                "message": "Authorization request timed out"
+                            }))
+                            .unwrap(),
+                        )
+                    })?
+                    .map_err(|_| {
+                        (
+                            StatusCode::FORBIDDEN,
+                            serde_json::to_string(&serde_json::json!({
+                                "error": "authorization_cancelled",
+                                "message": "Authorization request was cancelled"
+                            }))
+                            .unwrap(),
+                        )
+                    })?;
+
+                match decision {
+                    AuthDecision::Allow { remember } => {
+                        tracing::info!(origin = %origin, remember, "Origin authorized");
+                        if remember {
+                            if let Some(ref cfg_lock) = state.config {
+                                let mut cfg = cfg_lock.write().unwrap();
+                                if !cfg.approved_origins.contains(&origin) {
+                                    cfg.approved_origins.push(origin.clone());
+                                    if let Err(e) = config::save(&cfg) {
+                                        tracing::warn!(origin = %origin, error = %e, "Failed to persist approved origin");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    AuthDecision::Deny => {
+                        tracing::info!(origin = %origin, "Origin denied");
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            serde_json::to_string(&serde_json::json!({
+                                "error": "origin_denied",
+                                "message": format!("Access denied for origin: {origin}")
+                            }))
+                            .unwrap(),
+                        ));
+                    }
+                }
+            }
+        }
+        // No Origin header → auto-approve (curl, same-origin, etc.)
+    }
+    // No auth_manager → auto-approve all (headless mode)
+
+    // Limit to one concurrent prove — bb already uses all cores.
+    // Held until the handler returns (success or error).
+    let _permit = if let Some(ref sem) = state.prove_semaphore {
+        Some(sem.acquire().await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Proving service shutting down".to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
+
     // Extract requested Aztec version from header (if any)
     let requested_version = headers
         .get("x-aztec-version")
@@ -239,8 +373,18 @@ async fn prove(
         None
     };
 
+    // Only pass -t flag when speed isn't "full" — bb defaults to all cores already
+    let threads = state.config.as_ref().and_then(|cfg| {
+        let cfg = cfg.read().unwrap();
+        if cfg.speed == "full" {
+            None
+        } else {
+            Some(config::speed_to_threads(&cfg.speed))
+        }
+    });
+
     let start = std::time::Instant::now();
-    let result = bb::prove(&body, version_for_prove).await;
+    let result = bb::prove(&body, version_for_prove, threads).await;
     let elapsed = start.elapsed();
 
     match &result {

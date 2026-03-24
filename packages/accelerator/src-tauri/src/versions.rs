@@ -159,9 +159,64 @@ pub fn list_cached_versions() -> Vec<String> {
     versions
 }
 
+/// Compute SHA-256 hex digest of the given bytes.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(data);
+    hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Fetch the expected SHA-256 digest for a release asset from the GitHub API.
+///
+/// GitHub stores a `digest` field (e.g. `"sha256:abcd..."`) on every release asset.
+/// This doesn't protect against a compromised GitHub account (attacker can re-upload),
+/// but catches download corruption and CDN issues.
+///
+/// TODO: Verify against upstream signatures when Aztec starts signing releases.
+async fn fetch_github_asset_digest(
+    version: &str,
+    asset_name: &str,
+) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    let api_url = format!(
+        "https://api.github.com/repos/AztecProtocol/aztec-packages/releases/tags/v{version}"
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&api_url)
+        .header("user-agent", "aztec-accelerator")
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            version,
+            status = %response.status(),
+            "Failed to fetch release metadata for digest verification"
+        );
+        return Ok(None);
+    }
+
+    let release: serde_json::Value = response.json().await?;
+    let assets = release["assets"].as_array();
+    if let Some(assets) = assets {
+        for asset in assets {
+            if asset["name"].as_str() == Some(asset_name) {
+                if let Some(digest) = asset["digest"].as_str() {
+                    // Format: "sha256:abcdef..."
+                    if let Some(hex) = digest.strip_prefix("sha256:") {
+                        return Ok(Some(hex.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Download the `bb` binary for the given Aztec version and cache it.
 ///
-/// Flow: check cache → GET tarball → extract to temp dir → atomic rename → chmod.
+/// Flow: check cache → GET tarball → verify digest → extract to temp dir → atomic rename → chmod.
 /// Returns the path to the cached `bb` binary.
 pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     let bb_path = version_bb_path(version);
@@ -186,8 +241,36 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
     tracing::info!(
         version,
         bytes = bytes.len(),
-        "Download complete, extracting"
+        "Download complete, verifying integrity"
     );
+
+    // Verify download integrity against GitHub API digest.
+    let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
+    match fetch_github_asset_digest(version, &asset_name).await {
+        Ok(Some(expected)) => {
+            let actual = sha256_hex(&bytes);
+            if actual != expected {
+                return Err(format!(
+                    "Integrity check failed for bb v{version}: expected sha256:{expected}, got sha256:{actual}"
+                )
+                .into());
+            }
+            tracing::info!(version, digest = %actual, "Download integrity verified");
+        }
+        Ok(None) => {
+            tracing::warn!(
+                version,
+                "No digest available from GitHub API — skipping integrity check"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                version,
+                error = %e,
+                "Failed to fetch digest from GitHub API — skipping integrity check"
+            );
+        }
+    }
 
     // Extract to a temporary directory, then atomically rename
     let version_dir = versions_base_dir().join(version);

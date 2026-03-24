@@ -4,11 +4,11 @@
   "version": "1.0.0-rc.6",
   "identifier": "dev.aztec.accelerator",
   "build": {
-    "frontendDist": null
+    "frontendDist": "./frontend"
   },
   "app": {
     "windows": [],
-    "withGlobalTauri": false
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,
