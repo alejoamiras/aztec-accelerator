@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
 
       - uses: dorny/paths-filter@v3
         id: filter
@@ -33,7 +34,7 @@ jobs:
       - name: Cherry-pick to nightlies
         if: steps.filter.outputs.relevant == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
