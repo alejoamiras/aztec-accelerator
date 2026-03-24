@@ -148,7 +148,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          merge-multiple: true
 
       - name: Flatten and rename artifacts
         env:
@@ -163,10 +162,9 @@ jobs:
           find artifacts -name '*_aarch64.dmg' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.dmg" \;
           find artifacts -name '*_x64.dmg'     -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.dmg" \;
 
-          # Updater .tar.gz (macOS — Tauri produces "Aztec Accelerator.app.tar.gz" per arch)
-          # The ARM and Intel builds produce identically-named files, so we match by parent dir
-          find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \; 2>/dev/null || true
-          find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \; 2>/dev/null || true
+          # Updater .tar.gz (macOS — each arch artifact is in its own subdirectory)
+          find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \;
+          find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz' -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \;
 
           # Linux
           find artifacts -name '*_amd64.deb'      -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \;
