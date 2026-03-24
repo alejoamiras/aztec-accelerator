@@ -178,21 +178,78 @@ pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> 
     Ok(())
 }
 
-/// Called from the one-time update prompt when user makes their choice.
+/// Called from the update prompt.
+/// - action="update": save auto_update preference from checkbox, then download + install
+/// - action="later": dismiss, auto_update stays None (prompt returns next launch)
 #[tauri::command]
 pub fn respond_update_prompt(
     app: tauri::AppHandle,
     config: tauri::State<'_, ConfigState>,
-    enable_auto_update: bool,
+    action: String,
+    auto_update: bool,
 ) -> Result<(), String> {
-    {
-        let mut cfg = config.write().unwrap();
-        cfg.auto_update = Some(enable_auto_update);
-        config::save(&cfg).map_err(|e| e.to_string())?;
-    }
+    // Close the prompt window
     if let Some(window) = app.get_webview_window("update-prompt") {
         let _ = window.close();
     }
-    tracing::info!(enable_auto_update, "User responded to update prompt");
+
+    match action.as_str() {
+        "update" => {
+            // Save auto-update preference from the checkbox
+            {
+                let mut cfg = config.write().unwrap();
+                cfg.auto_update = Some(auto_update);
+                let _ = config::save(&cfg);
+            }
+            tracing::info!(auto_update, "User clicked Update Now");
+            // Trigger download + install in background
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_updater::UpdaterExt;
+                tracing::info!("Re-checking for update to trigger download...");
+                let updater = match handle.updater() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        tracing::error!("Failed to build updater: {e}");
+                        return;
+                    }
+                };
+                let update = match updater.check().await {
+                    Ok(Some(u)) => u,
+                    Ok(None) => {
+                        tracing::warn!("No update found (race condition?)");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!("Update check failed: {e}");
+                        return;
+                    }
+                };
+                tracing::info!(version = %update.version, "Downloading and installing update");
+                match update
+                    .download_and_install(
+                        |chunk, total| {
+                            tracing::info!(chunk, total = total.unwrap_or(0), "Download progress");
+                        },
+                        || tracing::info!("Download complete, installing"),
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!("Update installed, restarting");
+                        handle.restart();
+                    }
+                    Err(e) => {
+                        tracing::error!("Update failed: {e}");
+                    }
+                }
+            });
+        }
+        "later" => {
+            // Keep auto_update = None so the prompt comes back next launch
+            tracing::info!("User clicked Remind Me Later");
+        }
+        _ => {}
+    }
     Ok(())
 }

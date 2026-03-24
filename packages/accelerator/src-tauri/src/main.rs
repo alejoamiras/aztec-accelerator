@@ -567,7 +567,9 @@ fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<Auth
 use tauri_plugin_updater::UpdaterExt;
 
 /// Background update check. Runs 5s after launch, then every 12 hours.
-async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
+/// Also called by `respond_update_prompt` when the user clicks "Update Now".
+pub async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
+    tracing::info!("Checking for updates...");
     let updater = match app.updater() {
         Ok(u) => u,
         Err(e) => {
@@ -579,11 +581,11 @@ async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            tracing::debug!("No update available");
+            tracing::info!("No update available");
             return;
         }
         Err(e) => {
-            tracing::debug!("Update check failed: {e}");
+            tracing::warn!("Update check failed: {e}");
             return;
         }
     };
@@ -593,12 +595,15 @@ async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
     tracing::info!(current = %current_version, new = %new_version, "Update available");
 
     let auto_update_pref = { config_state.read().unwrap().auto_update };
+    tracing::info!(?auto_update_pref, "Auto-update preference");
 
     match auto_update_pref {
         None => {
+            tracing::info!("Showing update prompt (first time)");
             show_update_prompt_window(app, &current_version, &new_version);
         }
         Some(true) => {
+            tracing::info!("Auto-update enabled, performing update");
             perform_update(app, update).await;
         }
         Some(false) => {
@@ -608,13 +613,13 @@ async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
 }
 
 /// Download, verify signature, install, and restart.
-async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
+pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
     tracing::info!(version = %update.version, "Downloading update");
 
     match update
         .download_and_install(
             |chunk_length, content_length| {
-                tracing::debug!(
+                tracing::info!(
                     chunk_length,
                     content_length = content_length.unwrap_or(0),
                     "Download progress"
