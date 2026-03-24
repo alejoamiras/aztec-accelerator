@@ -52,17 +52,20 @@ jobs:
 
       - name: Check ${{ inputs.dist_tag }} version
         id: check
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
+          if [ -n "$INPUT_VERSION" ]; then
             CURRENT=$(bun -e "console.log(JSON.parse(require('fs').readFileSync('packages/sdk/package.json','utf8')).devDependencies['@aztec/aztec.js'])")
             {
               echo "needs_update=true"
-              echo "new_version=${{ inputs.version }}"
+              echo "new_version=$INPUT_VERSION"
               echo "current_version=$CURRENT"
             } >> "$GITHUB_OUTPUT"
-            echo "Forced update to ${{ inputs.version }} (current: $CURRENT)"
+            echo "Forced update to $INPUT_VERSION (current: $CURRENT)"
           else
-            RESULT=$(bun scripts/check-aztec-update.ts "${{ inputs.dist_tag }}")
+            RESULT=$(bun scripts/check-aztec-update.ts "$INPUT_DIST_TAG")
             echo "$RESULT" | jq .
             NEEDS=$(echo "$RESULT" | jq -r .needsUpdate)
             LATEST=$(echo "$RESULT" | jq -r .latest)
@@ -73,7 +76,7 @@ jobs:
               echo "current_version=$CURRENT"
             } >> "$GITHUB_OUTPUT"
             if [ "$NEEDS" = "true" ]; then
-              echo "New ${{ inputs.dist_tag }} available: $CURRENT → $LATEST"
+              echo "New $INPUT_DIST_TAG available: $CURRENT → $LATEST"
             else
               echo "Already up to date at $CURRENT"
             fi
@@ -112,10 +115,12 @@ jobs:
         run: bun install
 
       - name: Commit and push
+        env:
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          BRANCH="${{ inputs.branch_prefix }}-${NEW_VERSION}"
+          BRANCH="${BRANCH_PREFIX}-${NEW_VERSION}"
 
           # If the branch already exists on the remote, skip — a prior run
           # already pushed it. Force-pushing would orphan the commit that
@@ -145,19 +150,26 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Create or update PR
+        env:
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          ADD_LABEL: ${{ inputs.add_label }}
+          AUTO_MERGE: ${{ inputs.auto_merge }}
+          DIST_TAG: ${{ inputs.dist_tag }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          BRANCH="${{ inputs.branch_prefix }}-${NEW_VERSION}"
+          BRANCH="${BRANCH_PREFIX}-${NEW_VERSION}"
           TITLE="chore: update @aztec/* to ${NEW_VERSION}"
 
-          BODY="$(cat <<'EOF'
-          ## Aztec ${{ inputs.dist_tag }} Update
+          BODY="$(cat <<EOF
+          ## Aztec ${DIST_TAG} Update
 
           Automated dependency bump. PR CI runs all tests (unit, e2e).
 
-          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          [Workflow run](${WORKFLOW_URL})
 
           ---
-          *Automated by [Aztec Update](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) workflow.*
+          *Automated by [Aztec Update](${WORKFLOW_URL}) workflow.*
           EOF
           )"
 
@@ -171,7 +183,7 @@ jobs:
             echo "Creating new PR"
             gh pr create \
               --head "$BRANCH" \
-              --base "${{ inputs.target_branch }}" \
+              --base "$TARGET_BRANCH" \
               --title "$TITLE" \
               --body "$BODY"
           fi
@@ -180,12 +192,12 @@ jobs:
           PR_NUM=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')
 
           # Add label if specified (e.g. triggers infra.yml for TEE + UEE deploy + e2e)
-          if [ -n "${{ inputs.add_label }}" ]; then
-            gh pr edit "$PR_NUM" --add-label "${{ inputs.add_label }}" 2>/dev/null || true
+          if [ -n "$ADD_LABEL" ]; then
+            gh pr edit "$PR_NUM" --add-label "$ADD_LABEL" 2>/dev/null || true
           fi
 
           # Merge strategy: auto-merge waits for checks, immediate merges now
-          if [ "${{ inputs.auto_merge }}" = "true" ]; then
+          if [ "$AUTO_MERGE" = "true" ]; then
             gh pr merge "$PR_NUM" --auto --squash --delete-branch
           else
             gh pr merge "$PR_NUM" --squash --delete-branch
