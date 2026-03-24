@@ -46,6 +46,9 @@ jobs:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   deploy-app:
+    # Deploy playground regardless of E2E outcome — it's a static site build
+    # that shouldn't be blocked by SDK test failures.
+    if: ${{ !cancelled() }}
     needs: e2e
     runs-on: ubuntu-latest
     steps:
