@@ -22,6 +22,13 @@
         <span class="slider"></span>
       </label>
     </div>
+    <div class="row">
+      <span>Auto-Update</span>
+      <label class="toggle">
+        <input type="checkbox" id="auto-update" />
+        <span class="slider"></span>
+      </label>
+    </div>
     <div id="safari-row" class="row" style="display:none">
       <span>Safari Support</span>
       <label class="toggle">
@@ -98,6 +105,7 @@
       CPUS = sysInfo.cpu_count;
 
       document.getElementById("autostart").checked = autostart;
+      document.getElementById("auto-update").checked = config.auto_update === true;
 
       if (sysInfo.platform === "macos") {
         document.getElementById("safari-row").style.display = "";
@@ -150,6 +158,18 @@
         .catch((err) => {
           el.checked = !el.checked;
           console.error("Failed to set autostart:", err);
+        })
+        .finally(() => { el.disabled = false; });
+    });
+
+    // Auto-update toggle
+    document.getElementById("auto-update").addEventListener("change", (e) => {
+      const el = e.target;
+      el.disabled = true;
+      invoke("set_auto_update", { enabled: el.checked })
+        .catch((err) => {
+          el.checked = !el.checked;
+          console.error("Failed to set auto_update:", err);
         })
         .finally(() => { el.disabled = false; });
     });

@@ -322,6 +322,8 @@ mod tests {
 
     #[test]
     fn leaf_cert_loads_into_rustls() {
+        // Install a default crypto provider — needed when both aws-lc-rs and ring are available
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let now = OffsetDateTime::now_utc();
         let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut ca_params = CertificateParams::default();

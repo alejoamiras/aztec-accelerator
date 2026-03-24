@@ -167,3 +167,32 @@ pub async fn enable_safari_support() -> Result<(), String> {
 pub fn disable_safari_support() -> Result<(), String> {
     Err("Safari Support is only available on macOS".to_string())
 }
+
+/// Toggle auto-update preference from Settings.
+#[tauri::command]
+pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> Result<(), String> {
+    let mut cfg = config.write().unwrap();
+    cfg.auto_update = Some(enabled);
+    config::save(&cfg).map_err(|e| e.to_string())?;
+    tracing::info!(enabled, "Auto-update preference changed via Settings");
+    Ok(())
+}
+
+/// Called from the one-time update prompt when user makes their choice.
+#[tauri::command]
+pub fn respond_update_prompt(
+    app: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+    enable_auto_update: bool,
+) -> Result<(), String> {
+    {
+        let mut cfg = config.write().unwrap();
+        cfg.auto_update = Some(enable_auto_update);
+        config::save(&cfg).map_err(|e| e.to_string())?;
+    }
+    if let Some(window) = app.get_webview_window("update-prompt") {
+        let _ = window.close();
+    }
+    tracing::info!(enable_auto_update, "User responded to update prompt");
+    Ok(())
+}

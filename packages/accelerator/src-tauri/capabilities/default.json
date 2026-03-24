@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capabilities for the accelerator",
   "platforms": ["linux", "macOS", "windows"],
-  "permissions": ["core:default", "autostart:default"]
+  "permissions": ["core:default", "autostart:default", "updater:default", "process:default"]
 }
