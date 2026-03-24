@@ -10,13 +10,13 @@
   <div class="auth-container">
     <h2>A newer version of Aztec Accelerator is available</h2>
     <div class="auth-origin" id="version"></div>
-    <p style="color: var(--text-muted); font-size: 12px; margin-top: 4px; line-height: 1.5;">
-      Stay up to date automatically.<br>
-      You can change this anytime in Settings.
-    </p>
+    <label class="auth-remember">
+      <input type="checkbox" id="auto-update" checked />
+      Keep me updated automatically
+    </label>
     <div class="auth-buttons">
-      <button class="btn btn-secondary" id="skip">Skip</button>
-      <button class="btn btn-primary" id="auto">Enable Auto-Update</button>
+      <button class="btn btn-secondary" id="later">Remind Me Later</button>
+      <button class="btn btn-primary" id="update">Update Now</button>
     </div>
   </div>
 
@@ -27,20 +27,32 @@
     const currentVersion = params.get("current") || "unknown";
     const newVersion = params.get("version") || "unknown";
     document.getElementById("version").textContent =
-      "v" + currentVersion + "  →  v" + newVersion;
+      "v" + currentVersion + "  \u2192  v" + newVersion;
 
-    async function respond(enableAutoUpdate) {
-      document.getElementById("auto").disabled = true;
-      document.getElementById("skip").disabled = true;
+    document.getElementById("update").addEventListener("click", async () => {
+      document.getElementById("update").disabled = true;
+      document.getElementById("later").disabled = true;
+      document.getElementById("update").textContent = "Updating\u2026";
+      const autoUpdate = document.getElementById("auto-update").checked;
       try {
-        await invoke("respond_update_prompt", { enableAutoUpdate });
+        await invoke("respond_update_prompt", { action: "update", autoUpdate });
       } catch (err) {
-        console.error("respond_update_prompt failed:", err);
+        console.error("Update failed:", err);
+        document.getElementById("update").textContent = "Update Now";
+        document.getElementById("update").disabled = false;
+        document.getElementById("later").disabled = false;
       }
-    }
+    });
 
-    document.getElementById("auto").addEventListener("click", () => respond(true));
-    document.getElementById("skip").addEventListener("click", () => respond(false));
+    document.getElementById("later").addEventListener("click", async () => {
+      document.getElementById("update").disabled = true;
+      document.getElementById("later").disabled = true;
+      try {
+        await invoke("respond_update_prompt", { action: "later", autoUpdate: false });
+      } catch (err) {
+        console.error("Failed:", err);
+      }
+    });
   </script>
 </body>
 </html>
