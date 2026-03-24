@@ -188,21 +188,19 @@ pub fn respond_update_prompt(
     action: String,
     auto_update: bool,
 ) -> Result<(), String> {
-    // Close the prompt window
-    if let Some(window) = app.get_webview_window("update-prompt") {
-        let _ = window.close();
-    }
-
     match action.as_str() {
         "update" => {
             // Save auto-update preference from the checkbox
             {
                 let mut cfg = config.write().unwrap();
                 cfg.auto_update = Some(auto_update);
-                let _ = config::save(&cfg);
+                if let Err(e) = config::save(&cfg) {
+                    tracing::warn!("Failed to save auto-update preference: {e}");
+                }
             }
             tracing::info!(auto_update, "User clicked Update Now");
-            // Trigger download + install in background
+            // Download + install in background. The prompt window stays open showing
+            // "Updating..." until the app restarts or the download fails.
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 use tauri_plugin_updater::UpdaterExt;
@@ -211,6 +209,7 @@ pub fn respond_update_prompt(
                     Ok(u) => u,
                     Err(e) => {
                         tracing::error!("Failed to build updater: {e}");
+                        close_update_prompt(&handle);
                         return;
                     }
                 };
@@ -218,10 +217,12 @@ pub fn respond_update_prompt(
                     Ok(Some(u)) => u,
                     Ok(None) => {
                         tracing::warn!("No update found (race condition?)");
+                        close_update_prompt(&handle);
                         return;
                     }
                     Err(e) => {
                         tracing::error!("Update check failed: {e}");
+                        close_update_prompt(&handle);
                         return;
                     }
                 };
@@ -241,15 +242,24 @@ pub fn respond_update_prompt(
                     }
                     Err(e) => {
                         tracing::error!("Update failed: {e}");
+                        close_update_prompt(&handle);
                     }
                 }
             });
         }
         "later" => {
-            // Keep auto_update = None so the prompt comes back next launch
+            close_update_prompt(&app);
             tracing::info!("User clicked Remind Me Later");
         }
-        _ => {}
+        _ => {
+            close_update_prompt(&app);
+        }
     }
     Ok(())
+}
+
+fn close_update_prompt(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("update-prompt") {
+        let _ = window.close();
+    }
 }
