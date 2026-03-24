@@ -12,13 +12,15 @@ concurrency:
   group: release-accelerator
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   tag:
     name: Create Git Tag
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
@@ -135,8 +137,6 @@ jobs:
     needs: [tag, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -215,3 +215,77 @@ jobs:
             --title "Aztec Accelerator $VERSION" \
             --notes-file /tmp/release-notes.md \
             "${FILES[@]}"
+
+  bump-source:
+    name: Bump source version
+    needs: [tag, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Compute next version
+        id: next
+        env:
+          RELEASED: ${{ needs.tag.outputs.version }}
+        run: |
+          # If rc release (1.0.0-rc.7), bump rc number (1.0.0-rc.8)
+          # If stable release (1.0.0), bump patch and start rc.1 (1.0.1-rc.1)
+          NEXT=$(bun -e "
+            const v = process.env.RELEASED;
+            const rcMatch = v.match(/^(.+)-rc\.(\d+)$/);
+            if (rcMatch) {
+              console.log(rcMatch[1] + '-rc.' + (Number(rcMatch[2]) + 1));
+            } else {
+              const parts = v.split('.');
+              parts[2] = String(Number(parts[2]) + 1);
+              console.log(parts.join('.') + '-rc.1');
+            }
+          ")
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Released $RELEASED → next source: $NEXT"
+
+      - name: Update source files
+        env:
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          cd packages/accelerator/src-tauri
+
+          # Patch tauri.conf.json
+          bun -e "
+            const conf = JSON.parse(await Bun.file('tauri.conf.json').text());
+            conf.version = process.env.NEXT_VERSION;
+            await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+          "
+
+          # Patch Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" Cargo.toml
+
+      - name: Create PR
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+          RELEASED: ${{ needs.tag.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="chore/bump-accelerator-${NEXT_VERSION}"
+          git checkout -b "$BRANCH"
+          git add packages/accelerator/src-tauri/tauri.conf.json packages/accelerator/src-tauri/Cargo.toml
+          git commit -m "chore(accelerator): bump source version to ${NEXT_VERSION}"
+          git push -u origin "$BRANCH"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(accelerator): bump source version to ${NEXT_VERSION}" \
+            --body "Automated post-release version bump after releasing ${RELEASED}."
+
+          gh pr merge "$BRANCH" --auto --squash --delete-branch
