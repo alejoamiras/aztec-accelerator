@@ -155,6 +155,10 @@ fn try_start_https(state: &AppState) -> Option<u16> {
 }
 
 fn main() {
+    // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
+    // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let log_path = log_dir();
     std::fs::create_dir_all(&log_path).ok();
 
