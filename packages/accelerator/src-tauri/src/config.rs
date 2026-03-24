@@ -9,6 +9,9 @@ pub struct AcceleratorConfig {
     pub approved_origins: Vec<String>,
     #[serde(default = "default_speed")]
     pub speed: String,
+    /// None = never asked, Some(true) = auto-update, Some(false) = manual
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
 }
 
 fn default_speed() -> String {
@@ -21,6 +24,7 @@ impl Default for AcceleratorConfig {
             safari_support: false,
             approved_origins: Vec::new(),
             speed: default_speed(),
+            auto_update: None,
         }
     }
 }
@@ -103,6 +107,7 @@ mod tests {
             safari_support: true,
             approved_origins: vec!["https://example.com".to_string()],
             speed: "balanced".to_string(),
+            auto_update: Some(true),
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         std::fs::write(&path, &json).unwrap();

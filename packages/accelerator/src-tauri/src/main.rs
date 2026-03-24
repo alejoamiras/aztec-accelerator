@@ -198,6 +198,8 @@ fn main() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(config_state.clone())
         .manage(auth_manager.clone())
         .invoke_handler(tauri::generate_handler![
@@ -210,6 +212,8 @@ fn main() {
             commands::respond_auth,
             commands::enable_safari_support,
             commands::disable_safari_support,
+            commands::set_auto_update,
+            commands::respond_update_prompt,
         ])
         .setup(move |app| {
             // Hide from Dock — tray-only app
@@ -449,6 +453,17 @@ fn main() {
                 }
             });
 
+            // Background update check: 5s after launch, then every 12 hours
+            let update_handle = app.handle().clone();
+            let update_config = config_state.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                loop {
+                    check_for_update(&update_handle, &update_config).await;
+                    tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
+                }
+            });
+
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -541,4 +556,100 @@ fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<Auth
         auth_manager.resolve(&origin_owned, AuthDecision::Deny);
         tracing::debug!(origin = %origin_owned, "Authorization timeout cleanup");
     });
+}
+
+// ── Auto-update ──────────────────────────────────────────────────────────
+
+use tauri_plugin_updater::UpdaterExt;
+
+/// Background update check. Runs 5s after launch, then every 12 hours.
+async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!("Failed to build updater: {e}");
+            return;
+        }
+    };
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            tracing::debug!("No update available");
+            return;
+        }
+        Err(e) => {
+            tracing::debug!("Update check failed: {e}");
+            return;
+        }
+    };
+
+    let new_version = update.version.clone();
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    tracing::info!(current = %current_version, new = %new_version, "Update available");
+
+    let auto_update_pref = { config_state.read().unwrap().auto_update };
+
+    match auto_update_pref {
+        None => {
+            show_update_prompt_window(app, &current_version, &new_version);
+        }
+        Some(true) => {
+            perform_update(app, update).await;
+        }
+        Some(false) => {
+            tracing::info!(version = %new_version, "Update available (manual mode)");
+        }
+    }
+}
+
+/// Download, verify signature, install, and restart.
+async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
+    tracing::info!(version = %update.version, "Downloading update");
+
+    match update
+        .download_and_install(
+            |chunk_length, content_length| {
+                tracing::debug!(
+                    chunk_length,
+                    content_length = content_length.unwrap_or(0),
+                    "Download progress"
+                );
+            },
+            || {
+                tracing::info!("Download complete, installing");
+            },
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::info!("Update installed, restarting");
+            app.restart();
+        }
+        Err(e) => {
+            tracing::error!("Update failed: {e}");
+        }
+    }
+}
+
+/// Show the one-time update prompt window.
+fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_version: &str) {
+    if app.get_webview_window("update-prompt").is_some() {
+        return;
+    }
+
+    let url = format!(
+        "update-prompt.html?current={}&version={}",
+        urlencoding::encode(current_version),
+        urlencoding::encode(new_version)
+    );
+    if let Ok(window) = WebviewWindowBuilder::new(app, "update-prompt", WebviewUrl::App(url.into()))
+        .title("Aztec Accelerator Update")
+        .inner_size(420.0, 280.0)
+        .resizable(false)
+        .center()
+        .build()
+    {
+        activate_for_window(app, &window);
+    }
 }

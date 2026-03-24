@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for the accelerator","local":true,"permissions":["core:default","autostart:default"],"platforms":["linux","macOS","windows"]}}
+{"default":{"identifier":"default","description":"Default capabilities for the accelerator","local":true,"permissions":["core:default","autostart:default","updater:default","process:default"],"platforms":["linux","macOS","windows"]}}
