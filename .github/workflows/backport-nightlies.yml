@@ -47,20 +47,21 @@ jobs:
 
           if git cherry-pick --no-commit "$MERGE_SHA" && git commit -m "backport: ${PR_TITLE} (#${PR_NUMBER})"; then
             git push origin "$BRANCH"
-            gh pr create \
+            PR_URL=$(gh pr create \
               --base nightlies \
               --head "$BRANCH" \
               --title "backport: ${PR_TITLE} (#${PR_NUMBER})" \
-              --body "Automated backport of #${PR_NUMBER} from main to nightlies." \
-              --label backport
+              --body "Automated backport of #${PR_NUMBER} from main to nightlies.")
           else
             git cherry-pick --abort || true
             git checkout -- . || true
             git push origin "$BRANCH"
-            gh pr create \
+            PR_URL=$(gh pr create \
               --base nightlies \
               --head "$BRANCH" \
               --title "backport (conflicts): ${PR_TITLE} (#${PR_NUMBER})" \
-              --body "Automated backport of #${PR_NUMBER} — has merge conflicts that need manual resolution." \
-              --label backport
+              --body "Automated backport of #${PR_NUMBER} — has merge conflicts that need manual resolution.")
           fi
+
+          # Add label separately so a missing label doesn't prevent PR creation
+          gh pr edit "$PR_URL" --add-label backport || echo "Warning: could not add 'backport' label"
