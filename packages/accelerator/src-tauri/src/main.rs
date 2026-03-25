@@ -477,7 +477,7 @@ fn main() {
             // Only prevent automatic exit (code=None, triggered by last window closing).
             // Explicit app.exit(0) from the "Quit" menu sets code=Some(0) and must go through.
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                if code.is_none() {
+                if should_prevent_exit(code) {
                     api.prevent_exit();
                 }
             }
@@ -560,6 +560,13 @@ fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<Auth
         auth_manager.resolve(&origin_owned, AuthDecision::Deny);
         tracing::debug!(origin = %origin_owned, "Authorization timeout cleanup");
     });
+}
+
+/// Returns true if the exit should be prevented.
+/// Window-close events have code=None and should be prevented (tray-only app).
+/// Explicit exits (Quit menu, restart) have code=Some(_) and must go through.
+fn should_prevent_exit(code: Option<i32>) -> bool {
+    code.is_none()
 }
 
 // ── Auto-update ──────────────────────────────────────────────────────────
@@ -660,5 +667,28 @@ fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_version
         .build()
     {
         activate_for_window(app, &window);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_prevented_for_window_close() {
+        // code=None is sent when the last window closes — must be prevented (tray-only app)
+        assert!(should_prevent_exit(None));
+    }
+
+    #[test]
+    fn exit_allowed_for_explicit_quit() {
+        // code=Some(0) is sent by app.exit(0) from the Quit menu
+        assert!(!should_prevent_exit(Some(0)));
+    }
+
+    #[test]
+    fn exit_allowed_for_restart() {
+        // code=Some(i32::MAX) is sent by app.restart() during auto-update
+        assert!(!should_prevent_exit(Some(i32::MAX)));
     }
 }
