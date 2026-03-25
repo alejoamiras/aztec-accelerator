@@ -4,7 +4,9 @@
 //!   so launchd restarts the app if it crashes.
 //! - **Linux**: Manages a systemd user service with `Restart=on-failure`.
 
-const APP_NAME: &str = "aztec-accelerator";
+/// Must match `productName` in tauri.conf.json — the auto-launch crate uses this
+/// (not the identifier) as the LaunchAgent plist filename and systemd service name.
+const APP_NAME: &str = "Aztec Accelerator";
 
 /// Patch the LaunchAgent plist created by tauri-plugin-autostart to add crash recovery keys.
 /// Call this after `manager.enable()`.
@@ -69,7 +71,7 @@ fn patch_plist_with_keepalive(content: &str) -> Option<String> {
 pub fn disable_crash_recovery() {
     // The plugin recreates the plist from scratch on enable(), so disabling
     // just means the standard disable() removes the plist entirely. Nothing extra needed.
-    tracing::debug!("macOS crash recovery disabled (plist removed by plugin)");
+    tracing::info!("macOS crash recovery disabled (plist removed by plugin)");
 }
 
 #[cfg(target_os = "macos")]
