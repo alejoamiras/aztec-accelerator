@@ -98,12 +98,23 @@ jobs:
         run: |
           ./target/debug/accelerator-server &
           SERVER_PID=$!
-          sleep 3
 
-          if ! kill -0 $SERVER_PID 2>/dev/null; then
-            echo "::error::Server crashed on startup"
-            exit 1
-          fi
+          # Poll until server is ready (max 15s)
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:59833/health > /dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "::error::Server crashed on startup"
+              exit 1
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Server not ready after 15s"
+              kill $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            sleep 0.5
+          done
 
           HEALTH=$(curl -sf http://127.0.0.1:59833/health || true)
           echo "Health response: $HEALTH"
