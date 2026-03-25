@@ -18,6 +18,15 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
+      name: "production-smoke",
+      testDir: "./e2e",
+      testMatch: "*.production-smoke.spec.ts",
+      timeout: 30_000,
+      use: {
+        baseURL: "http://localhost:4173",
+      },
+    },
+    {
       name: "local-network",
       testDir: "./e2e",
       testMatch: "*.local-network.spec.ts",
