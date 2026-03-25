@@ -8,6 +8,10 @@ const APP_NAME: &str = "aztec-accelerator";
 
 /// Patch the LaunchAgent plist created by tauri-plugin-autostart to add crash recovery keys.
 /// Call this after `manager.enable()`.
+///
+/// Inserts KeepAlive + ThrottleInterval before the LAST `</dict>` (the top-level one).
+/// Previous implementation used `.replace("</dict>", ...)` which replaced ALL occurrences
+/// and could corrupt plists with nested dicts.
 #[cfg(target_os = "macos")]
 pub fn enable_crash_recovery() {
     let plist_path = macos_plist_path();
@@ -17,22 +21,17 @@ pub fn enable_crash_recovery() {
                 tracing::debug!("LaunchAgent already has KeepAlive");
                 return;
             }
-            // Insert KeepAlive + ThrottleInterval before the closing </dict>
-            let patched = content.replace(
-                "</dict>",
-                "    <key>KeepAlive</key>\n    \
-                 <dict>\n        \
-                 <key>SuccessfulExit</key>\n        \
-                 <false/>\n    \
-                 </dict>\n    \
-                 <key>ThrottleInterval</key>\n    \
-                 <integer>5</integer>\n  \
-                 </dict>",
-            );
-            if let Err(e) = std::fs::write(&plist_path, &patched) {
-                tracing::warn!("Failed to patch LaunchAgent plist: {e}");
-            } else {
-                tracing::info!("LaunchAgent patched with KeepAlive (crash recovery)");
+            match patch_plist_with_keepalive(&content) {
+                Some(patched) => {
+                    if let Err(e) = std::fs::write(&plist_path, &patched) {
+                        tracing::warn!("Failed to write patched LaunchAgent plist: {e}");
+                    } else {
+                        tracing::info!("LaunchAgent patched with KeepAlive (crash recovery)");
+                    }
+                }
+                None => {
+                    tracing::warn!("Could not find closing </dict> in LaunchAgent plist");
+                }
             }
         }
         Err(e) => {
@@ -42,6 +41,26 @@ pub fn enable_crash_recovery() {
             );
         }
     }
+}
+
+/// Insert KeepAlive and ThrottleInterval keys before the last `</dict>` in a plist string.
+/// Returns None if no `</dict>` is found.
+#[cfg(target_os = "macos")]
+fn patch_plist_with_keepalive(content: &str) -> Option<String> {
+    let insert_pos = content.rfind("</dict>")?;
+    let keep_alive = "\
+    <key>KeepAlive</key>\n\
+    <dict>\n\
+        <key>SuccessfulExit</key>\n\
+        <false/>\n\
+    </dict>\n\
+    <key>ThrottleInterval</key>\n\
+    <integer>5</integer>\n  ";
+    let mut patched = String::with_capacity(content.len() + keep_alive.len());
+    patched.push_str(&content[..insert_pos]);
+    patched.push_str(keep_alive);
+    patched.push_str(&content[insert_pos..]);
+    Some(patched)
 }
 
 /// Remove crash recovery keys from the LaunchAgent plist.
@@ -148,4 +167,67 @@ pub fn disable_crash_recovery() {
     }
 
     tracing::info!("systemd user service disabled (crash recovery)");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn patch_plist_inserts_before_last_dict() {
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>aztec-accelerator</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Aztec Accelerator.app/Contents/MacOS/aztec-accelerator</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#;
+
+        let patched = super::patch_plist_with_keepalive(plist).unwrap();
+        assert!(patched.contains("<key>KeepAlive</key>"));
+        assert!(patched.contains("<key>ThrottleInterval</key>"));
+        assert!(patched.contains("<integer>5</integer>"));
+        // Should still have exactly one </plist> and the KeepAlive should be inside the dict
+        assert_eq!(patched.matches("</plist>").count(), 1);
+        assert_eq!(patched.matches("</dict>").count(), 2); // inner KeepAlive dict + outer
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn patch_plist_handles_nested_dicts() {
+        // Plist with a nested dict — the old .replace() would have broken this
+        let plist = r#"<dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin</string>
+    </dict>
+    <key>Label</key>
+    <string>test</string>
+</dict>"#;
+
+        let patched = super::patch_plist_with_keepalive(plist).unwrap();
+        assert!(patched.contains("<key>KeepAlive</key>"));
+        // The nested EnvironmentVariables dict should be untouched
+        assert!(patched.contains("<key>EnvironmentVariables</key>"));
+        // KeepAlive should be inserted before the LAST </dict>, not inside the nested one
+        let keepalive_pos = patched.find("<key>KeepAlive</key>").unwrap();
+        let nested_dict_end = patched.find("<string>/usr/bin</string>").unwrap();
+        assert!(
+            keepalive_pos > nested_dict_end,
+            "KeepAlive should be after the nested dict"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn patch_plist_returns_none_for_invalid() {
+        assert!(super::patch_plist_with_keepalive("not a plist").is_none());
+    }
 }
