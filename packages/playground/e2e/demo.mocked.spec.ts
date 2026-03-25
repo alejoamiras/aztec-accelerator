@@ -106,3 +106,25 @@ test("accelerator status is shown in services panel", async ({ page }) => {
   await expect(page.locator("#accelerator-status")).toBeVisible();
   await expect(page.locator("#accelerator-label")).toBeVisible();
 });
+
+// ── Expanded coverage ──
+
+test("mode switch logs the change", async ({ page }) => {
+  await mockServicesOffline(page);
+  await page.goto("/");
+  await expect(page.locator("#log")).toContainText("Checking Aztec node");
+
+  // Switch to WASM mode
+  await page.click("#mode-local");
+  await expect(page.locator("#log")).toContainText("Proving mode");
+});
+
+test("node error appears in log panel", async ({ page }) => {
+  await mockServicesOffline(page);
+  await page.goto("/");
+
+  // The log should show an error about the Aztec node not being reachable
+  await expect(page.locator("#log")).toContainText("not reachable", {
+    timeout: 5000,
+  });
+});
