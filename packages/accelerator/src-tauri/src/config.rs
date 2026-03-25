@@ -143,4 +143,52 @@ mod tests {
         let config: AcceleratorConfig = serde_json::from_str("not json").unwrap_or_default();
         assert!(!config.safari_support);
     }
+
+    #[test]
+    fn speed_rejects_invalid_values() {
+        // speed_to_threads treats unknown values as "full" (all cores)
+        let unknown = speed_to_threads("turbo");
+        let full = speed_to_threads("full");
+        assert_eq!(unknown, full);
+    }
+
+    #[test]
+    fn auto_update_defaults_to_none() {
+        let config = AcceleratorConfig::default();
+        assert_eq!(config.auto_update, None);
+    }
+
+    #[test]
+    fn auto_update_none_not_serialized() {
+        // None should be omitted from JSON (skip_serializing_if)
+        let config = AcceleratorConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("auto_update"));
+    }
+
+    #[test]
+    fn auto_update_some_serialized() {
+        let config = AcceleratorConfig {
+            auto_update: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"auto_update\":true"));
+    }
+
+    #[test]
+    fn auto_update_missing_deserializes_as_none() {
+        let config: AcceleratorConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.auto_update, None);
+    }
+
+    #[test]
+    fn approved_origins_removal() {
+        let mut config = AcceleratorConfig {
+            approved_origins: vec!["https://a.com".to_string(), "https://b.com".to_string()],
+            ..Default::default()
+        };
+        config.approved_origins.retain(|o| o != "https://a.com");
+        assert_eq!(config.approved_origins, vec!["https://b.com"]);
+    }
 }
