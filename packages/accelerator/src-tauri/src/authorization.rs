@@ -1,5 +1,5 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use tokio::sync::oneshot;
 
 /// Decision from the user about whether to authorize an origin.
@@ -48,7 +48,7 @@ impl AuthorizationManager {
         origin: &str,
     ) -> Result<(oneshot::Receiver<AuthDecision>, bool), &'static str> {
         let (tx, rx) = oneshot::channel();
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         let is_first = !pending.contains_key(origin);
         if is_first && pending.len() >= MAX_PENDING_ORIGINS {
             return Err("too many pending authorization requests");
@@ -59,7 +59,7 @@ impl AuthorizationManager {
 
     /// Resolve all pending requests for `origin` with the given decision.
     pub fn resolve(&self, origin: &str, decision: AuthDecision) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         if let Some(senders) = pending.remove(origin) {
             for tx in senders {
                 let _ = tx.send(decision);

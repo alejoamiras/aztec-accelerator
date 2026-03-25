@@ -18,7 +18,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::authorization::{AuthDecision, AuthorizationManager};
 use crate::{bb, config, versions};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use tokio::sync::Semaphore;
 
 const PORT: u16 = 59833;
@@ -153,7 +153,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let safari_enabled = state
         .config
         .as_ref()
-        .is_some_and(|cfg| cfg.read().unwrap().safari_support);
+        .is_some_and(|cfg| cfg.read().safari_support);
     if state.https_port.is_some() || safari_enabled {
         body["https_port"] = json!(HTTPS_PORT);
     }
@@ -212,7 +212,7 @@ async fn prove(
 
         if let Some(origin) = origin {
             let approved = state.config.as_ref().is_some_and(|cfg| {
-                let cfg = cfg.read().unwrap();
+                let cfg = cfg.read();
                 AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
             });
 
@@ -282,7 +282,7 @@ async fn prove(
                         tracing::info!(origin = %origin, remember, "Origin authorized");
                         if remember {
                             if let Some(ref cfg_lock) = state.config {
-                                let mut cfg = cfg_lock.write().unwrap();
+                                let mut cfg = cfg_lock.write();
                                 if !cfg.approved_origins.contains(&origin) {
                                     cfg.approved_origins.push(origin.clone());
                                     if let Err(e) = config::save(&cfg) {
@@ -402,7 +402,7 @@ async fn prove(
 
     // Only pass -t flag when speed isn't "full" — bb defaults to all cores already
     let threads = state.config.as_ref().and_then(|cfg| {
-        let cfg = cfg.read().unwrap();
+        let cfg = cfg.read();
         if cfg.speed == "full" {
             None
         } else {
@@ -692,7 +692,7 @@ mod tests {
         let cfg = crate::config::AcceleratorConfig::default();
         let state = AppState {
             auth_manager: Some(auth_for_state),
-            config: Some(Arc::new(std::sync::RwLock::new(cfg))),
+            config: Some(Arc::new(RwLock::new(cfg))),
             show_auth_popup: Some(Arc::new(move |origin: &str| {
                 let _ = popup_tx.send(origin.to_string());
             })),
@@ -833,7 +833,6 @@ mod tests {
         // Pre-approve the origin in config
         if let Some(ref cfg) = state.config {
             cfg.write()
-                .unwrap()
                 .approved_origins
                 .push("https://approved-site.com".to_string());
         }
@@ -866,7 +865,7 @@ mod tests {
         let cfg = crate::config::AcceleratorConfig::default();
         let state = AppState {
             auth_manager: Some(auth),
-            config: Some(Arc::new(std::sync::RwLock::new(cfg))),
+            config: Some(Arc::new(RwLock::new(cfg))),
             show_auth_popup: None, // headless
             ..Default::default()
         };
