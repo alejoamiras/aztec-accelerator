@@ -10,6 +10,10 @@ pub type AuthState = Arc<AuthorizationManager>;
 /// state including auth_manager, config, and show_auth_popup — not a bare Default.
 pub type SharedAppState = Arc<crate::server::AppState>;
 
+/// Holds a pending update so `respond_update_prompt` can use it directly
+/// instead of re-checking the network. Managed as Tauri state.
+pub type PendingUpdate = Arc<parking_lot::Mutex<Option<tauri_plugin_updater::Update>>>;
+
 #[tauri::command]
 pub fn get_config(config: tauri::State<'_, ConfigState>) -> AcceleratorConfig {
     config.read().clone()
@@ -180,12 +184,13 @@ pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> 
 }
 
 /// Called from the update prompt.
-/// - action="update": save auto_update preference from checkbox, then download + install
+/// - action="update": save auto_update preference, then download + install using stored Update
 /// - action="later": dismiss, auto_update stays None (prompt returns next launch)
 #[tauri::command]
 pub fn respond_update_prompt(
     app: tauri::AppHandle,
     config: tauri::State<'_, ConfigState>,
+    pending: tauri::State<'_, PendingUpdate>,
     action: String,
     auto_update: bool,
 ) -> Result<(), String> {
@@ -199,54 +204,28 @@ pub fn respond_update_prompt(
                     tracing::warn!("Failed to save auto-update preference: {e}");
                 }
             }
-            tracing::info!(auto_update, "User clicked Update Now");
-            // Download + install in background. The prompt window stays open showing
-            // "Updating..." until the app restarts or the download fails.
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                use tauri_plugin_updater::UpdaterExt;
-                tracing::info!("Re-checking for update to trigger download...");
-                let updater = match handle.updater() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        tracing::error!("Failed to build updater: {e}");
+
+            // Take the stored Update object — no redundant network re-check
+            let update = pending.lock().take();
+            match update {
+                Some(update) => {
+                    tracing::info!(
+                        version = %update.version,
+                        auto_update,
+                        "User clicked Update Now, downloading stored update"
+                    );
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::updater::perform_update(&handle, update).await;
+                        // If perform_update returns (error), close the prompt
                         close_update_prompt(&handle);
-                        return;
-                    }
-                };
-                let update = match updater.check().await {
-                    Ok(Some(u)) => u,
-                    Ok(None) => {
-                        tracing::warn!("No update found (race condition?)");
-                        close_update_prompt(&handle);
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::error!("Update check failed: {e}");
-                        close_update_prompt(&handle);
-                        return;
-                    }
-                };
-                tracing::info!(version = %update.version, "Downloading and installing update");
-                match update
-                    .download_and_install(
-                        |chunk, total| {
-                            tracing::info!(chunk, total = total.unwrap_or(0), "Download progress");
-                        },
-                        || tracing::info!("Download complete, installing"),
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::info!("Update installed, restarting");
-                        handle.restart();
-                    }
-                    Err(e) => {
-                        tracing::error!("Update failed: {e}");
-                        close_update_prompt(&handle);
-                    }
+                    });
                 }
-            });
+                None => {
+                    tracing::warn!("No pending update found — may have expired. Closing prompt.");
+                    close_update_prompt(&app);
+                }
+            }
         }
         "later" => {
             close_update_prompt(&app);

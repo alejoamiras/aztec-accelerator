@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod crash_recovery;
 pub mod server;
+pub mod updater;
 pub mod versions;
 
 use std::path::PathBuf;

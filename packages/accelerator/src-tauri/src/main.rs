@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
-use aztec_accelerator::commands::{AuthState, ConfigState, SharedAppState};
+use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
 use aztec_accelerator::server::{AppState, HTTPS_PORT};
 use aztec_accelerator::versions;
 use aztec_accelerator::{certs, commands, config, log_dir};
@@ -250,6 +250,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .manage(config_state.clone())
         .manage(auth_manager.clone())
+        .manage::<PendingUpdate>(Arc::new(parking_lot::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::get_autostart_enabled,
@@ -427,7 +428,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 loop {
-                    check_for_update(&update_handle, &update_config).await;
+                    run_update_check(&update_handle, &update_config).await;
                     tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
                 }
             });
@@ -535,79 +536,25 @@ fn should_prevent_exit(code: Option<i32>) -> bool {
 
 // ── Auto-update ──────────────────────────────────────────────────────────
 
-use tauri_plugin_updater::UpdaterExt;
+/// Background update check wrapper. Calls the shared updater module and
+/// shows the prompt window if an update is available and the user hasn't chosen yet.
+async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
+    use tauri::Manager;
+    if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
+        let auto_update_pref = { config_state.read().auto_update };
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let new_version = update.version.clone();
 
-/// Background update check. Runs 5s after launch, then every 12 hours.
-/// Also called by `respond_update_prompt` when the user clicks "Update Now".
-pub async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
-    tracing::info!("Checking for updates...");
-    let updater = match app.updater() {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!("Failed to build updater: {e}");
-            return;
+        // Store the update so respond_update_prompt can use it directly
+        if let Some(pending) = app.try_state::<PendingUpdate>() {
+            *pending.lock() = Some(update);
         }
-    };
 
-    let update = match updater.check().await {
-        Ok(Some(update)) => update,
-        Ok(None) => {
-            tracing::info!("No update available");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!("Update check failed: {e}");
-            return;
-        }
-    };
-
-    let new_version = update.version.clone();
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-    tracing::info!(current = %current_version, new = %new_version, "Update available");
-
-    let auto_update_pref = { config_state.read().auto_update };
-    tracing::info!(?auto_update_pref, "Auto-update preference");
-
-    match auto_update_pref {
-        None => {
+        if auto_update_pref.is_none() {
             tracing::info!("Showing update prompt (first time)");
             show_update_prompt_window(app, &current_version, &new_version);
-        }
-        Some(true) => {
-            tracing::info!("Auto-update enabled, performing update");
-            perform_update(app, update).await;
-        }
-        Some(false) => {
+        } else {
             tracing::info!(version = %new_version, "Update available (manual mode)");
-        }
-    }
-}
-
-/// Download, verify signature, install, and restart.
-pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
-    tracing::info!(version = %update.version, "Downloading update");
-
-    match update
-        .download_and_install(
-            |chunk_length, content_length| {
-                tracing::info!(
-                    chunk_length,
-                    content_length = content_length.unwrap_or(0),
-                    "Download progress"
-                );
-            },
-            || {
-                tracing::info!("Download complete, installing");
-            },
-        )
-        .await
-    {
-        Ok(()) => {
-            tracing::info!("Update installed, restarting");
-            app.restart();
-        }
-        Err(e) => {
-            tracing::error!("Update failed: {e}");
         }
     }
 }
