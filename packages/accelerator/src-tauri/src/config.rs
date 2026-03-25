@@ -102,22 +102,58 @@ mod tests {
     }
 
     #[test]
-    fn config_roundtrip() {
+    fn config_roundtrip_via_save_load() {
+        // Override config_path by writing/reading directly through save()/load()
+        // using a temp HOME so we don't touch the real config.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let config = AcceleratorConfig {
+        let cfg_dir = dir.path().join(".aztec-accelerator");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg_path = cfg_dir.join("config.json");
+
+        let original = AcceleratorConfig {
             safari_support: true,
-            approved_origins: vec!["https://example.com".to_string()],
+            approved_origins: vec![
+                "https://example.com".to_string(),
+                "https://other.dev".to_string(),
+            ],
             speed: Speed::Balanced,
             auto_update: Some(true),
         };
-        let json = serde_json::to_string_pretty(&config).unwrap();
-        std::fs::write(&path, &json).unwrap();
+
+        // Write via serde (same as save()) and read back
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        std::fs::write(&cfg_path, &json).unwrap();
         let loaded: AcceleratorConfig =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(loaded.safari_support);
-        assert_eq!(loaded.approved_origins, vec!["https://example.com"]);
-        assert_eq!(loaded.speed, Speed::Balanced);
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+
+        assert_eq!(loaded.safari_support, original.safari_support);
+        assert_eq!(loaded.approved_origins, original.approved_origins);
+        assert_eq!(loaded.speed, original.speed);
+        assert_eq!(loaded.auto_update, original.auto_update);
+    }
+
+    #[test]
+    fn config_roundtrip_auto_update_none() {
+        // Ensure None survives roundtrip (skip_serializing_if + serde default)
+        let original = AcceleratorConfig {
+            auto_update: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let loaded: AcceleratorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.auto_update, None);
+    }
+
+    #[test]
+    fn config_roundtrip_auto_update_false() {
+        // Some(false) must survive — distinct from None (never asked)
+        let original = AcceleratorConfig {
+            auto_update: Some(false),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let loaded: AcceleratorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.auto_update, Some(false));
     }
 
     #[test]

@@ -263,8 +263,8 @@ h2 {
   margin-top: 8px;
 }
 
-/* Authorize page */
-.auth-container {
+/* Popup pages (authorize, update prompt) */
+.popup-container {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -274,12 +274,12 @@ h2 {
   padding: 0 20px;
 }
 
-.auth-container h2 {
+.popup-container h2 {
   font-size: 14px;
   line-height: 1.4;
 }
 
-.auth-origin {
+.popup-detail {
   font-family: monospace;
   font-size: 13px;
   background: var(--surface);
@@ -291,7 +291,7 @@ h2 {
   max-width: 100%;
 }
 
-.auth-buttons {
+.popup-buttons {
   display: flex;
   gap: 10px;
   margin-top: 14px;
@@ -326,7 +326,7 @@ h2 {
   background: var(--surface-raised);
 }
 
-.auth-remember {
+.popup-remember {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -335,6 +335,6 @@ h2 {
   font-size: 12px;
 }
 
-.auth-remember input[type="checkbox"] {
+.popup-remember input[type="checkbox"] {
   accent-color: var(--accent);
 }
