@@ -10,8 +10,20 @@ echo "Starting vite preview on port 4173..."
 npx vite preview --port 4173 &
 PREVIEW_PID=$!
 
-# Wait for the server to be ready
-sleep 3
+# Poll until the server is ready (max 15s)
+echo "Waiting for preview server..."
+for i in $(seq 1 30); do
+  if curl -sf http://localhost:4173/ > /dev/null 2>&1; then
+    echo "Preview server ready after ${i}x500ms"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "::error::Preview server not ready after 15s"
+    kill "$PREVIEW_PID" 2>/dev/null || true
+    exit 1
+  fi
+  sleep 0.5
+done
 
 echo "Running production smoke tests..."
 RESULT=0
