@@ -96,7 +96,9 @@ pub async fn prove(
         output_dir.to_str().unwrap(),
     ]);
     if let Some(t) = threads {
-        cmd.args(["-t", &t.to_string()]);
+        // bb uses HARDWARE_CONCURRENCY env var to control thread count.
+        // The -t flag was repurposed to --verifier_target in recent versions.
+        cmd.env("HARDWARE_CONCURRENCY", t.to_string());
     }
     let output = cmd.output().await?;
 
