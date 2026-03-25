@@ -442,23 +442,15 @@ fn main() {
         });
 }
 
-/// On macOS, switch to Regular activation policy so the window appears in Dock/Cmd+Tab.
-/// Registers a destroy listener on the window to switch back to Accessory when all windows close.
-#[cfg(target_os = "macos")]
-fn activate_for_window(app: &AppHandle, window: &tauri::WebviewWindow) {
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    let handle = app.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Destroyed = event {
-            if handle.webview_windows().is_empty() {
-                let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            }
-        }
-    });
+/// Focus a newly created window. We stay as Accessory (tray-only) rather than
+/// switching to Regular activation policy, which would show the app in the Dock
+/// and Cmd+Tab. Trade-off: if the window gets buried behind a fullscreen app,
+/// the user must click "Settings" in the tray again to refocus it.
+/// If we ever want Dock presence, switch to Regular here and back to Accessory
+/// on window destroy — but ensure the bundle icon is set (release builds only).
+fn focus_window(window: &tauri::WebviewWindow) {
+    let _ = window.set_focus();
 }
-
-#[cfg(not(target_os = "macos"))]
-fn activate_for_window(_app: &AppHandle, _window: &tauri::WebviewWindow) {}
 
 /// Open or focus the Settings window.
 fn open_settings_window(app: &AppHandle) {
@@ -474,7 +466,7 @@ fn open_settings_window(app: &AppHandle) {
             .center()
             .build()
     {
-        activate_for_window(app, &window);
+        focus_window(&window);
     }
 }
 
@@ -497,7 +489,7 @@ fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<Auth
         .always_on_top(true)
         .build()
     {
-        activate_for_window(app, &window);
+        focus_window(&window);
     }
 
     // Spawn 60s timeout — always resolve with Deny if still pending.
@@ -570,7 +562,7 @@ fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_version
         .center()
         .build()
     {
-        activate_for_window(app, &window);
+        focus_window(&window);
     }
 }
 

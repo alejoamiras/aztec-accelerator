@@ -106,10 +106,10 @@ h2 {
   opacity: 0.5;
 }
 
-/* Origin list — scrollable, max ~3 rows */
+/* Origin list — fixed height ~3 rows, scrolls if more */
 .origin-list {
   list-style: none;
-  max-height: 108px;
+  height: 108px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
