@@ -193,125 +193,194 @@ fn is_valid_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
+type ProveError = (StatusCode, String);
+
+/// Check if the request origin is authorized. Returns Ok(()) if approved.
+async fn authorize_origin(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), ProveError> {
+    let auth_manager = match state.auth_manager {
+        Some(ref am) => am,
+        None => return Ok(()), // No auth_manager → auto-approve all (headless mode)
+    };
+
+    let origin = match headers
+        .get(http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(o) => o.to_string(),
+        None => return Ok(()), // No Origin header → auto-approve (curl, same-origin)
+    };
+
+    let approved = state.config.as_ref().is_some_and(|cfg| {
+        let cfg = cfg.read();
+        AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
+    });
+
+    if approved {
+        return Ok(());
+    }
+
+    // No popup callback = headless mode → deny immediately
+    if state.show_auth_popup.is_none() {
+        tracing::info!(origin = %origin, "Origin not approved (no popup available), denying");
+        return Err((
+            StatusCode::FORBIDDEN,
+            serde_json::to_string(&json!({
+                "error": "origin_denied",
+                "message": format!("Access denied for origin: {origin}")
+            }))
+            .unwrap(),
+        ));
+    }
+
+    tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
+    let (rx, is_first) = auth_manager.request(&origin).map_err(|_| {
+        tracing::warn!(origin = %origin, "Too many pending authorization requests");
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::to_string(&json!({"error": "too_many_requests", "message": "Too many pending authorization requests"})).unwrap(),
+        )
+    })?;
+
+    if is_first {
+        if let Some(ref show_popup) = state.show_auth_popup {
+            show_popup(&origin);
+        }
+    }
+
+    let decision = tokio::time::timeout(Duration::from_secs(60), rx)
+        .await
+        .map_err(|_| {
+            tracing::warn!(origin = %origin, "Authorization timed out");
+            auth_manager.resolve(&origin, AuthDecision::Deny);
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::to_string(&json!({"error": "authorization_timeout", "message": "Authorization request timed out"})).unwrap(),
+            )
+        })?
+        .map_err(|_| {
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::to_string(&json!({"error": "authorization_cancelled", "message": "Authorization request was cancelled"})).unwrap(),
+            )
+        })?;
+
+    match decision {
+        AuthDecision::Allow { remember } => {
+            tracing::info!(origin = %origin, remember, "Origin authorized");
+            if remember {
+                if let Some(ref cfg_lock) = state.config {
+                    let mut cfg = cfg_lock.write();
+                    if !cfg.approved_origins.contains(&origin) {
+                        cfg.approved_origins.push(origin);
+                        if let Err(e) = config::save(&cfg) {
+                            tracing::warn!(error = %e, "Failed to persist approved origin");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        AuthDecision::Deny => {
+            tracing::info!(origin = %origin, "Origin denied");
+            Err((
+                StatusCode::FORBIDDEN,
+                serde_json::to_string(&json!({
+                    "error": "origin_denied",
+                    "message": format!("Access denied for origin: {origin}")
+                }))
+                .unwrap(),
+            ))
+        }
+    }
+}
+
+/// Validate and resolve the requested Aztec version. Downloads the bb binary if needed.
+async fn resolve_version<'a>(
+    state: &AppState,
+    requested: &'a Option<String>,
+) -> Result<Option<&'a str>, ProveError> {
+    let v = match requested {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    if !is_valid_version(v) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Invalid x-aztec-version header: version must match ^[0-9a-zA-Z._-]+$ (got '{v}')"
+            ),
+        ));
+    }
+    tracing::info!(version = %v, "Requested Aztec version");
+
+    let bundled = state
+        .bundled_version
+        .as_deref()
+        .unwrap_or(env!("AZTEC_BB_VERSION"));
+
+    if v != bundled && !versions::version_bb_path(v).exists() {
+        tracing::info!(version = %v, "Version not cached, downloading");
+        if let Some(ref cb) = state.on_status {
+            cb("Status: Downloading bb...");
+        }
+
+        match versions::download_bb(v).await {
+            Ok(_) => {
+                tracing::info!(version = %v, "Download complete");
+                let bundled_owned = bundled.to_string();
+                let on_versions_changed = state.on_versions_changed.clone();
+                tokio::spawn(async move {
+                    versions::cleanup_old_versions(&bundled_owned).await;
+                    if let Some(cb) = on_versions_changed {
+                        cb();
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!(version = %v, error = %e, "Failed to download bb");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to download bb v{v}: {e}"),
+                ));
+            }
+        }
+
+        if let Some(ref cb) = state.on_status {
+            cb("Status: Proving...");
+        }
+    }
+
+    Ok(Some(v.as_str()))
+}
+
+/// Read the speed setting from config and convert to thread count.
+/// Returns None for "full" (let bb use its default).
+fn compute_threads(state: &AppState) -> Option<usize> {
+    state.config.as_ref().and_then(|cfg| {
+        let cfg = cfg.read();
+        if cfg.speed == "full" {
+            None
+        } else {
+            Some(config::speed_to_threads(&cfg.speed))
+        }
+    })
+}
+
 async fn prove(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, ProveError> {
     tracing::info!("Received /prove request");
     tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
-    // --- Origin authorization ---
-    // CORS stays permissive (Any) so the SDK can always read responses.
-    // Authorization is enforced here: unknown origins get a 403 JSON response.
-    if let Some(ref auth_manager) = state.auth_manager {
-        let origin = headers
-            .get(http::header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        if let Some(origin) = origin {
-            let approved = state.config.as_ref().is_some_and(|cfg| {
-                let cfg = cfg.read();
-                AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
-            });
-
-            if !approved {
-                // If there is no popup callback (headless mode with ALLOWED_ORIGINS),
-                // deny immediately instead of hanging for 60s waiting for a popup
-                // that will never appear.
-                if state.show_auth_popup.is_none() {
-                    tracing::info!(origin = %origin, "Origin not approved (no popup available), denying");
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        serde_json::to_string(&serde_json::json!({
-                            "error": "origin_denied",
-                            "message": format!("Access denied for origin: {origin}")
-                        }))
-                        .unwrap(),
-                    ));
-                }
-
-                tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-                let (rx, is_first) = auth_manager.request(&origin).map_err(|_| {
-                    tracing::warn!(origin = %origin, "Too many pending authorization requests");
-                    (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        serde_json::to_string(&serde_json::json!({
-                            "error": "too_many_requests",
-                            "message": "Too many pending authorization requests"
-                        }))
-                        .unwrap(),
-                    )
-                })?;
-
-                if is_first {
-                    if let Some(ref show_popup) = state.show_auth_popup {
-                        show_popup(&origin);
-                    }
-                }
-
-                // Wait for user decision (up to 60s)
-                let decision = tokio::time::timeout(Duration::from_secs(60), rx)
-                    .await
-                    .map_err(|_| {
-                        tracing::warn!(origin = %origin, "Authorization timed out");
-                        auth_manager.resolve(&origin, AuthDecision::Deny);
-                        (
-                            StatusCode::FORBIDDEN,
-                            serde_json::to_string(&serde_json::json!({
-                                "error": "authorization_timeout",
-                                "message": "Authorization request timed out"
-                            }))
-                            .unwrap(),
-                        )
-                    })?
-                    .map_err(|_| {
-                        (
-                            StatusCode::FORBIDDEN,
-                            serde_json::to_string(&serde_json::json!({
-                                "error": "authorization_cancelled",
-                                "message": "Authorization request was cancelled"
-                            }))
-                            .unwrap(),
-                        )
-                    })?;
-
-                match decision {
-                    AuthDecision::Allow { remember } => {
-                        tracing::info!(origin = %origin, remember, "Origin authorized");
-                        if remember {
-                            if let Some(ref cfg_lock) = state.config {
-                                let mut cfg = cfg_lock.write();
-                                if !cfg.approved_origins.contains(&origin) {
-                                    cfg.approved_origins.push(origin.clone());
-                                    if let Err(e) = config::save(&cfg) {
-                                        tracing::warn!(origin = %origin, error = %e, "Failed to persist approved origin");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    AuthDecision::Deny => {
-                        tracing::info!(origin = %origin, "Origin denied");
-                        return Err((
-                            StatusCode::FORBIDDEN,
-                            serde_json::to_string(&serde_json::json!({
-                                "error": "origin_denied",
-                                "message": format!("Access denied for origin: {origin}")
-                            }))
-                            .unwrap(),
-                        ));
-                    }
-                }
-            }
-        }
-        // No Origin header → auto-approve (curl, same-origin, etc.)
-    }
-    // No auth_manager → auto-approve all (headless mode)
+    authorize_origin(&state, &headers).await?;
 
     // Limit to one concurrent prove — bb already uses all cores.
-    // Held until the handler returns (success or error).
     let _permit = if let Some(ref sem) = state.prove_semaphore {
         Some(sem.acquire().await.map_err(|_| {
             (
@@ -323,92 +392,20 @@ async fn prove(
         None
     };
 
-    // Extract requested Aztec version from header (if any)
     let requested_version = headers
         .get("x-aztec-version")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.to_string());
 
-    // Validate version string to prevent URL manipulation in download URLs.
-    // Only allows semver-like strings: digits, dots, hyphens, and ASCII letters.
-    if let Some(ref v) = requested_version {
-        if !is_valid_version(v) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "Invalid x-aztec-version header: version must match \
-                     ^[0-9a-zA-Z._-]+$ (got '{v}')"
-                ),
-            ));
-        }
-        tracing::info!(version = %v, "Requested Aztec version");
-    }
-
     if let Some(ref cb) = state.on_status {
         cb("Status: Proving...");
     }
-
-    // Guard ensures status resets to Idle on any exit path (success, error, drop)
     let _guard = StatusGuard {
         cb: state.on_status.clone(),
     };
 
-    // If a specific version is requested, ensure it's available (download if needed)
-    let version_for_prove = if let Some(ref v) = requested_version {
-        let bundled = state
-            .bundled_version
-            .as_deref()
-            .unwrap_or(env!("AZTEC_BB_VERSION"));
-
-        if v != bundled && !versions::version_bb_path(v).exists() {
-            tracing::info!(version = %v, "Version not cached, downloading");
-            if let Some(ref cb) = state.on_status {
-                cb("Status: Downloading bb...");
-            }
-
-            match versions::download_bb(v).await {
-                Ok(_) => {
-                    tracing::info!(version = %v, "Download complete");
-                    // Cleanup old versions in the background
-                    let bundled_owned = bundled.to_string();
-                    let on_versions_changed = state.on_versions_changed.clone();
-                    tokio::spawn(async move {
-                        versions::cleanup_old_versions(&bundled_owned).await;
-                        if let Some(cb) = on_versions_changed {
-                            cb();
-                        }
-                    });
-                    if let Some(ref cb) = state.on_versions_changed {
-                        cb();
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(version = %v, error = %e, "Failed to download bb");
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to download bb v{v}: {e}"),
-                    ));
-                }
-            }
-
-            if let Some(ref cb) = state.on_status {
-                cb("Status: Proving...");
-            }
-        }
-        Some(v.as_str())
-    } else {
-        None
-    };
-
-    // Only pass -t flag when speed isn't "full" — bb defaults to all cores already
-    let threads = state.config.as_ref().and_then(|cfg| {
-        let cfg = cfg.read();
-        if cfg.speed == "full" {
-            None
-        } else {
-            Some(config::speed_to_threads(&cfg.speed))
-        }
-    });
+    let version_for_prove = resolve_version(&state, &requested_version).await?;
+    let threads = compute_threads(&state);
 
     let start = std::time::Instant::now();
     let result = bb::prove(&body, version_for_prove, threads).await;
@@ -886,5 +883,70 @@ mod tests {
 
         // Headless with no popup = instant deny
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── Helper unit tests ──
+
+    #[test]
+    fn compute_threads_returns_none_for_full_speed() {
+        let cfg = crate::config::AcceleratorConfig {
+            speed: "full".to_string(),
+            ..Default::default()
+        };
+        let state = AppState {
+            config: Some(Arc::new(RwLock::new(cfg))),
+            ..Default::default()
+        };
+        assert_eq!(compute_threads(&state), None);
+    }
+
+    #[test]
+    fn compute_threads_returns_some_for_non_full_speed() {
+        let cfg = crate::config::AcceleratorConfig {
+            speed: "balanced".to_string(),
+            ..Default::default()
+        };
+        let state = AppState {
+            config: Some(Arc::new(RwLock::new(cfg))),
+            ..Default::default()
+        };
+        assert!(compute_threads(&state).is_some());
+    }
+
+    #[test]
+    fn compute_threads_returns_none_without_config() {
+        let state = AppState::default();
+        assert_eq!(compute_threads(&state), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_version_passes_valid_version() {
+        let state = AppState::default();
+        let version = Some("5.0.0-rc.1".to_string());
+        let result = resolve_version(&state, &version).await;
+        // May fail on download (no network in test) but should not reject the version
+        assert!(result.is_ok() || result.is_err());
+        // The key assertion: valid version string is not rejected as BAD_REQUEST
+        if let Err((status, _)) = &result {
+            assert_ne!(*status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_version_rejects_invalid_version() {
+        let state = AppState::default();
+        let version = Some("../../../etc/passwd".to_string());
+        let result = resolve_version(&state, &version).await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn resolve_version_returns_none_without_header() {
+        let state = AppState::default();
+        let result = resolve_version(&state, &None).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
     }
 }
