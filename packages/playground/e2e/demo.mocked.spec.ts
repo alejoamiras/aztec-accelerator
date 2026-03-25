@@ -14,6 +14,19 @@ async function mockServicesOnline(page: import("@playwright/test").Page) {
   await page.route("**/aztec/status", (route) => route.fulfill({ status: 200, body: "OK" }));
 }
 
+// ── JS error safety net — catches runtime errors across all mocked tests ──
+
+const jsErrors: string[] = [];
+
+test.beforeEach(async ({ page }) => {
+  jsErrors.length = 0;
+  page.on("pageerror", (err) => jsErrors.push(err.message));
+});
+
+test.afterEach(() => {
+  expect(jsErrors, "Unexpected JS runtime errors").toEqual([]);
+});
+
 // ── Tests ──
 
 test("page loads with correct initial state", async ({ page }) => {
@@ -92,4 +105,26 @@ test("accelerator status is shown in services panel", async ({ page }) => {
 
   await expect(page.locator("#accelerator-status")).toBeVisible();
   await expect(page.locator("#accelerator-label")).toBeVisible();
+});
+
+// ── Expanded coverage ──
+
+test("mode switch logs the change", async ({ page }) => {
+  await mockServicesOffline(page);
+  await page.goto("/");
+  await expect(page.locator("#log")).toContainText("Checking Aztec node");
+
+  // Switch to WASM mode
+  await page.click("#mode-local");
+  await expect(page.locator("#log")).toContainText("Proving mode");
+});
+
+test("node error appears in log panel", async ({ page }) => {
+  await mockServicesOffline(page);
+  await page.goto("/");
+
+  // The log should show an error about the Aztec node not being reachable
+  await expect(page.locator("#log")).toContainText("not reachable", {
+    timeout: 5000,
+  });
 });
