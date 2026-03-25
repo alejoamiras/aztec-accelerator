@@ -106,6 +106,49 @@ fn build_versions_submenu(
     Ok(builder.build()?)
 }
 
+/// Build the tray menu. Used both for initial setup and for rebuilding when versions change.
+/// The `status` item is passed in because it's shared state (text updated by callbacks).
+fn build_tray_menu(
+    app: &AppHandle,
+    dev_mode: bool,
+    bundled_version: &str,
+    status: &tauri::menu::MenuItem<tauri::Wry>,
+) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
+    let app_version = env!("CARGO_PKG_VERSION");
+    let aztec_bb_version = env!("AZTEC_BB_VERSION");
+    let version_text = MenuItemBuilder::with_id(
+        "version_info",
+        format!("v{app_version} · Aztec {aztec_bb_version}"),
+    )
+    .enabled(false)
+    .build(app)?;
+    let github = MenuItemBuilder::with_id("open_github", "GitHub").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+
+    if dev_mode {
+        let versions_submenu = build_versions_submenu(app, bundled_version)?;
+        let show_logs = MenuItemBuilder::with_id("show_logs", "Show Logs").build(app)?;
+        Ok(MenuBuilder::new(app)
+            .items(&[
+                status,
+                &versions_submenu,
+                &show_logs,
+                &settings,
+                &separator,
+                &version_text,
+                &github,
+                &quit,
+            ])
+            .build()?)
+    } else {
+        Ok(MenuBuilder::new(app)
+            .items(&[&settings, &separator, &version_text, &github, &quit])
+            .build()?)
+    }
+}
+
 /// Try to start HTTPS server if Safari Support is configured and certs are valid.
 /// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
 /// Returns the HTTPS port if started, None otherwise.
@@ -238,47 +281,7 @@ fn main() {
                 }
             }
 
-            let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
-
-            // About section: version info + GitHub link (always shown)
-            let app_version = env!("CARGO_PKG_VERSION");
-            let aztec_bb_version = env!("AZTEC_BB_VERSION");
-            let version_text = MenuItemBuilder::with_id(
-                "version_info",
-                format!("v{app_version} · Aztec {aztec_bb_version}"),
-            )
-            .enabled(false)
-            .build(app)?;
-
-            let github = MenuItemBuilder::with_id("open_github", "GitHub").build(app)?;
-
-            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-
-            let menu = if dev_mode {
-                let versions_submenu =
-                    build_versions_submenu(&app.handle().clone(), &bundled_version)?;
-                let show_logs = MenuItemBuilder::with_id("show_logs", "Show Logs").build(app)?;
-                let separator = PredefinedMenuItem::separator(app)?;
-
-                MenuBuilder::new(app)
-                    .items(&[
-                        &status,
-                        &versions_submenu,
-                        &show_logs,
-                        &settings,
-                        &separator,
-                        &version_text,
-                        &github,
-                        &quit,
-                    ])
-                    .build()?
-            } else {
-                let separator = PredefinedMenuItem::separator(app)?;
-
-                MenuBuilder::new(app)
-                    .items(&[&settings, &separator, &version_text, &github, &quit])
-                    .build()?
-            };
+            let menu = build_tray_menu(&app.handle().clone(), dev_mode, &bundled_version, &status)?;
 
             let tray_icon =
                 tauri::image::Image::from_bytes(ICON_IDLE).expect("failed to load tray icon");
@@ -359,53 +362,13 @@ fn main() {
                     if !dev_mode {
                         return;
                     }
-                    match build_versions_submenu(&app_handle, &bundled_for_cb) {
-                        Ok(new_submenu) => {
-                            let status_rebuild = status.clone();
-                            let show_logs_rebuild =
-                                MenuItemBuilder::with_id("show_logs", "Show Logs")
-                                    .build(&app_handle)
-                                    .unwrap();
-                            let settings_rebuild = MenuItemBuilder::with_id("settings", "Settings")
-                                .build(&app_handle)
-                                .unwrap();
-                            let quit_rebuild = MenuItemBuilder::with_id("quit", "Quit")
-                                .build(&app_handle)
-                                .unwrap();
-
-                            let app_version = env!("CARGO_PKG_VERSION");
-                            let aztec_bb_version = env!("AZTEC_BB_VERSION");
-                            let version_text_rebuild = MenuItemBuilder::with_id(
-                                "version_info",
-                                format!("v{app_version} · Aztec {aztec_bb_version}"),
-                            )
-                            .enabled(false)
-                            .build(&app_handle)
-                            .unwrap();
-                            let github_rebuild = MenuItemBuilder::with_id("open_github", "GitHub")
-                                .build(&app_handle)
-                                .unwrap();
-                            let separator_rebuild =
-                                PredefinedMenuItem::separator(&app_handle).unwrap();
-
-                            let new_menu = MenuBuilder::new(&app_handle)
-                                .items(&[
-                                    &status_rebuild,
-                                    &new_submenu,
-                                    &show_logs_rebuild,
-                                    &settings_rebuild,
-                                    &separator_rebuild,
-                                    &version_text_rebuild,
-                                    &github_rebuild,
-                                    &quit_rebuild,
-                                ])
-                                .build()
-                                .unwrap();
+                    match build_tray_menu(&app_handle, dev_mode, &bundled_for_cb, &status) {
+                        Ok(new_menu) => {
                             let _ = tray_for_versions.set_menu(Some(new_menu));
-                            tracing::info!("Versions submenu updated");
+                            tracing::info!("Tray menu rebuilt (versions changed)");
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to rebuild versions submenu: {e}");
+                            tracing::warn!("Failed to rebuild tray menu: {e}");
                         }
                     }
                 });
