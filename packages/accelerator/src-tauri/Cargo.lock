@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "aztec-accelerator"
-version = "1.0.0-rc.9"
+version = "1.0.0-rc.16"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -226,6 +226,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "parking_lot",
  "rcgen",
  "reqwest 0.12.28",
  "rustls-pemfile",

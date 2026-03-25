@@ -9,7 +9,8 @@
 use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::config::AcceleratorConfig;
 use aztec_accelerator::server::{start, AppState};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;

@@ -1,6 +1,7 @@
 use crate::authorization::{AuthDecision, AuthorizationManager};
 use crate::config::{self, AcceleratorConfig};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use tauri::Manager;
 
 pub type ConfigState = Arc<RwLock<AcceleratorConfig>>;
@@ -11,7 +12,7 @@ pub type SharedAppState = Arc<crate::server::AppState>;
 
 #[tauri::command]
 pub fn get_config(config: tauri::State<'_, ConfigState>) -> AcceleratorConfig {
-    config.read().unwrap().clone()
+    config.read().clone()
 }
 
 #[tauri::command]
@@ -42,7 +43,7 @@ pub fn set_speed(config: tauri::State<'_, ConfigState>, speed: String) -> Result
             "Invalid speed: {speed}. Must be one of: full, high, balanced, light, low"
         ));
     }
-    let mut cfg = config.write().unwrap();
+    let mut cfg = config.write();
     cfg.speed = speed;
     config::save(&cfg).map_err(|e| e.to_string())?;
     Ok(())
@@ -53,7 +54,7 @@ pub fn remove_approved_origin(
     config: tauri::State<'_, ConfigState>,
     origin: String,
 ) -> Result<(), String> {
-    let mut cfg = config.write().unwrap();
+    let mut cfg = config.write();
     cfg.approved_origins.retain(|o| o != &origin);
     config::save(&cfg).map_err(|e| e.to_string())?;
     Ok(())
@@ -123,7 +124,7 @@ pub async fn enable_safari_support(
 
     // Save config
     {
-        let mut cfg = config.write().unwrap();
+        let mut cfg = config.write();
         cfg.safari_support = true;
         config::save(&cfg).map_err(|e| e.to_string())?;
     }
@@ -147,7 +148,7 @@ pub async fn enable_safari_support(
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
-    let mut cfg = config.write().unwrap();
+    let mut cfg = config.write();
     cfg.safari_support = false;
     config::save(&cfg).map_err(|e| e.to_string())?;
     tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
@@ -171,7 +172,7 @@ pub fn disable_safari_support() -> Result<(), String> {
 /// Toggle auto-update preference from Settings.
 #[tauri::command]
 pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> Result<(), String> {
-    let mut cfg = config.write().unwrap();
+    let mut cfg = config.write();
     cfg.auto_update = Some(enabled);
     config::save(&cfg).map_err(|e| e.to_string())?;
     tracing::info!(enabled, "Auto-update preference changed via Settings");
@@ -192,7 +193,7 @@ pub fn respond_update_prompt(
         "update" => {
             // Save auto-update preference from the checkbox
             {
-                let mut cfg = config.write().unwrap();
+                let mut cfg = config.write();
                 cfg.auto_update = Some(auto_update);
                 if let Err(e) = config::save(&cfg) {
                     tracing::warn!("Failed to save auto-update preference: {e}");

@@ -6,9 +6,10 @@ use aztec_accelerator::commands::{AuthState, ConfigState, SharedAppState};
 use aztec_accelerator::server::{AppState, HTTPS_PORT};
 use aztec_accelerator::versions;
 use aztec_accelerator::{certs, commands, config, log_dir};
+use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -116,7 +117,7 @@ fn try_start_https(state: &AppState) -> Option<u16> {
     if !certs::certs_exist() {
         tracing::warn!("Safari Support enabled but certs missing — resetting config");
         if let Some(ref cfg_lock) = state.config {
-            let mut cfg = cfg_lock.write().unwrap();
+            let mut cfg = cfg_lock.write();
             cfg.safari_support = false;
             let _ = config::save(&cfg);
         }
@@ -601,7 +602,7 @@ pub async fn check_for_update(app: &AppHandle, config_state: &ConfigState) {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     tracing::info!(current = %current_version, new = %new_version, "Update available");
 
-    let auto_update_pref = { config_state.read().unwrap().auto_update };
+    let auto_update_pref = { config_state.read().auto_update };
     tracing::info!(?auto_update_pref, "Auto-update preference");
 
     match auto_update_pref {
