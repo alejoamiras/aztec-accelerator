@@ -155,6 +155,38 @@ describe("AcceleratorProver", () => {
       serializeSpy.mockRestore();
     });
 
+    test("falls back to WASM with denied phase on 403 (origin not authorized)", async () => {
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+        "/prove": () =>
+          Response.json({ error: "origin_denied", message: "Access denied" }, { status: 403 }),
+      });
+      const serializeSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const phases: string[] = [];
+
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        onPhase: (phase) => phases.push(phase),
+      });
+
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test",
+      );
+
+      // Should emit: detect → serialize → transmit → proving → denied → fallback → proving
+      expect(phases).toContain("denied");
+      expect(phases).toContain("fallback");
+      expect(wasmSpy).toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serializeSpy.mockRestore();
+    });
+
     test("multi-version accelerator always proceeds (no WASM fallback on version mismatch)", async () => {
       mockFetch({
         "/health": () =>
