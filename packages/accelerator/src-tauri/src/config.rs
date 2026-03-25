@@ -173,8 +173,10 @@ mod tests {
 
     #[test]
     fn auto_update_some_serialized() {
-        let mut config = AcceleratorConfig::default();
-        config.auto_update = Some(true);
+        let config = AcceleratorConfig {
+            auto_update: Some(true),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"auto_update\":true"));
     }
@@ -187,9 +189,10 @@ mod tests {
 
     #[test]
     fn approved_origins_removal() {
-        let mut config = AcceleratorConfig::default();
-        config.approved_origins.push("https://a.com".to_string());
-        config.approved_origins.push("https://b.com".to_string());
+        let mut config = AcceleratorConfig {
+            approved_origins: vec!["https://a.com".to_string(), "https://b.com".to_string()],
+            ..Default::default()
+        };
         config.approved_origins.retain(|o| o != "https://a.com");
         assert_eq!(config.approved_origins, vec!["https://b.com"]);
     }
