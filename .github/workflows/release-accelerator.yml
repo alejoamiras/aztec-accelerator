@@ -173,6 +173,23 @@ jobs:
           echo "Release files:"
           ls -la release-files/
 
+          # Assert all expected files exist — fail fast if any platform is missing
+          EXPECTED=(
+            "Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.dmg"
+            "Aztec-Accelerator-${VERSION}-macOS-Intel.dmg"
+            "Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz"
+            "Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz"
+            "Aztec-Accelerator-${VERSION}-Linux-x86_64.deb"
+            "Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage"
+          )
+          for f in "${EXPECTED[@]}"; do
+            if [ ! -f "release-files/$f" ]; then
+              echo "::error::Missing expected release artifact: $f"
+              exit 1
+            fi
+          done
+          echo "All ${#EXPECTED[@]} expected artifacts present"
+
       - name: Generate latest.json for auto-updater
         env:
           VERSION: ${{ needs.tag.outputs.version }}

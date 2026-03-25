@@ -304,14 +304,37 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
     //   caused by chmod modifying the binary after the original signature was applied)
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("xattr")
+        let xattr_out = std::process::Command::new("xattr")
             .args(["-cr"])
             .arg(&final_path)
             .output();
-        let _ = std::process::Command::new("codesign")
+        if let Err(e) = &xattr_out {
+            tracing::warn!(version, error = %e, "Failed to clear quarantine xattrs");
+        } else if let Ok(out) = &xattr_out {
+            if !out.status.success() {
+                tracing::warn!(version, "xattr -cr failed with status {}", out.status);
+            }
+        }
+
+        let codesign_out = std::process::Command::new("codesign")
             .args(["--force", "--sign", "-"])
             .arg(&final_path)
             .output();
+        match &codesign_out {
+            Err(e) => {
+                tracing::error!(version, error = %e, "Failed to ad-hoc sign bb binary");
+                // Clean up — don't cache a binary that can't be signed
+                let _ = std::fs::remove_dir_all(&version_dir);
+                return Err(format!("Failed to sign bb v{version}: {e}").into());
+            }
+            Ok(out) if !out.status.success() => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                tracing::error!(version, stderr = %stderr, "codesign failed");
+                let _ = std::fs::remove_dir_all(&version_dir);
+                return Err(format!("codesign failed for bb v{version}: {}", out.status).into());
+            }
+            Ok(_) => {}
+        }
     }
 
     tracing::info!(version, "bb cached successfully");
