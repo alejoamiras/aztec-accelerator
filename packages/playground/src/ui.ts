@@ -12,9 +12,9 @@ export function $btn(id: string): HTMLButtonElement {
 
 export function setStatus(elementId: string, connected: boolean | null): void {
   const el = $(elementId);
-  el.className = `status-dot ${
-    connected === null ? "status-unknown" : connected ? "status-online" : "status-offline"
-  }`;
+  const status = connected === null ? "unknown" : connected ? "online" : "offline";
+  el.className = `status-dot status-${status}`;
+  el.dataset.status = status;
 }
 
 let logCount = 0;
