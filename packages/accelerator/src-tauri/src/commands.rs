@@ -40,13 +40,10 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn set_speed(config: tauri::State<'_, ConfigState>, speed: String) -> Result<(), String> {
-    let valid = ["full", "high", "balanced", "light", "low"];
-    if !valid.contains(&speed.as_str()) {
-        return Err(format!(
-            "Invalid speed: {speed}. Must be one of: full, high, balanced, light, low"
-        ));
-    }
+pub fn set_speed(
+    config: tauri::State<'_, ConfigState>,
+    speed: config::Speed,
+) -> Result<(), String> {
     let mut cfg = config.write();
     cfg.speed = speed;
     config::save(&cfg).map_err(|e| e.to_string())?;

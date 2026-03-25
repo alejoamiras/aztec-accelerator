@@ -362,10 +362,10 @@ async fn resolve_version<'a>(
 fn compute_threads(state: &AppState) -> Option<usize> {
     state.config.as_ref().and_then(|cfg| {
         let cfg = cfg.read();
-        if cfg.speed == "full" {
+        if cfg.speed.is_full() {
             None
         } else {
-            Some(config::speed_to_threads(&cfg.speed))
+            Some(cfg.speed.to_threads())
         }
     })
 }
@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn compute_threads_returns_none_for_full_speed() {
         let cfg = crate::config::AcceleratorConfig {
-            speed: "full".to_string(),
+            speed: crate::config::Speed::Full,
             ..Default::default()
         };
         let state = AppState {
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn compute_threads_returns_some_for_non_full_speed() {
         let cfg = crate::config::AcceleratorConfig {
-            speed: "balanced".to_string(),
+            speed: crate::config::Speed::Balanced,
             ..Default::default()
         };
         let state = AppState {

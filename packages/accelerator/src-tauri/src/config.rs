@@ -1,51 +1,50 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Proving speed level — controls how many CPU cores are used for proving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Speed {
+    Low,
+    Light,
+    Balanced,
+    High,
+    #[default]
+    Full,
+}
+
+impl Speed {
+    /// Convert to thread count based on available CPU cores.
+    pub fn to_threads(self) -> usize {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        match self {
+            Speed::Low => (cpus / 4).max(1),
+            Speed::Light => (cpus * 3 / 8).max(1),
+            Speed::Balanced => (cpus / 2).max(1),
+            Speed::High => (cpus * 3 / 4).max(1),
+            Speed::Full => cpus,
+        }
+    }
+
+    /// Returns true if this is the "full" speed (bb should use its default).
+    pub fn is_full(self) -> bool {
+        self == Speed::Full
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AcceleratorConfig {
     #[serde(default)]
     pub safari_support: bool,
     #[serde(default)]
     pub approved_origins: Vec<String>,
-    #[serde(default = "default_speed")]
-    pub speed: String,
+    #[serde(default)]
+    pub speed: Speed,
     /// None = never asked, Some(true) = auto-update, Some(false) = manual
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
-}
-
-fn default_speed() -> String {
-    "full".to_string()
-}
-
-impl Default for AcceleratorConfig {
-    fn default() -> Self {
-        Self {
-            safari_support: false,
-            approved_origins: Vec::new(),
-            speed: default_speed(),
-            auto_update: None,
-        }
-    }
-}
-
-/// Convert speed setting to thread count.
-/// - "full": all available cores
-/// - "high": 3/4 of available cores (min 1)
-/// - "balanced": half of available cores (min 1)
-/// - "light": 3/8 of available cores (min 1)
-/// - "low": quarter of available cores (min 1)
-pub fn speed_to_threads(speed: &str) -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    match speed {
-        "low" => (cpus / 4).max(1),
-        "light" => (cpus * 3 / 8).max(1),
-        "balanced" => (cpus / 2).max(1),
-        "high" => (cpus * 3 / 4).max(1),
-        _ => cpus, // "full" or unknown
-    }
 }
 
 /// Returns `~/.aztec-accelerator/config.json`.
@@ -99,7 +98,7 @@ mod tests {
         let config = AcceleratorConfig::default();
         assert!(!config.safari_support);
         assert!(config.approved_origins.is_empty());
-        assert_eq!(config.speed, "full");
+        assert_eq!(config.speed, Speed::Full);
     }
 
     #[test]
@@ -109,7 +108,7 @@ mod tests {
         let config = AcceleratorConfig {
             safari_support: true,
             approved_origins: vec!["https://example.com".to_string()],
-            speed: "balanced".to_string(),
+            speed: Speed::Balanced,
             auto_update: Some(true),
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
@@ -118,16 +117,16 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(loaded.safari_support);
         assert_eq!(loaded.approved_origins, vec!["https://example.com"]);
-        assert_eq!(loaded.speed, "balanced");
+        assert_eq!(loaded.speed, Speed::Balanced);
     }
 
     #[test]
     fn speed_to_threads_returns_valid_counts() {
-        let full = speed_to_threads("full");
-        let high = speed_to_threads("high");
-        let balanced = speed_to_threads("balanced");
-        let light = speed_to_threads("light");
-        let low = speed_to_threads("low");
+        let full = Speed::Full.to_threads();
+        let high = Speed::High.to_threads();
+        let balanced = Speed::Balanced.to_threads();
+        let light = Speed::Light.to_threads();
+        let low = Speed::Low.to_threads();
         assert!(full >= 1);
         assert!(high >= 1);
         assert!(balanced >= 1);
@@ -141,7 +140,6 @@ mod tests {
 
     #[test]
     fn load_returns_default_for_missing_file() {
-        // config_path() points to the real home dir, but load() handles missing files gracefully
         let config: AcceleratorConfig = serde_json::from_str("{}").unwrap_or_default();
         assert!(!config.safari_support);
     }
@@ -153,11 +151,21 @@ mod tests {
     }
 
     #[test]
-    fn speed_rejects_invalid_values() {
-        // speed_to_threads treats unknown values as "full" (all cores)
-        let unknown = speed_to_threads("turbo");
-        let full = speed_to_threads("full");
-        assert_eq!(unknown, full);
+    fn speed_serializes_as_lowercase() {
+        let json = serde_json::to_string(&Speed::Balanced).unwrap();
+        assert_eq!(json, "\"balanced\"");
+    }
+
+    #[test]
+    fn speed_deserializes_from_lowercase() {
+        let speed: Speed = serde_json::from_str("\"low\"").unwrap();
+        assert_eq!(speed, Speed::Low);
+    }
+
+    #[test]
+    fn speed_invalid_string_fails_deserialization() {
+        let result: Result<Speed, _> = serde_json::from_str("\"turbo\"");
+        assert!(result.is_err());
     }
 
     #[test]
