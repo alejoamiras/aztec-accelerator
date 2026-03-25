@@ -162,8 +162,13 @@ pub fn list_cached_versions() -> Vec<String> {
 /// Compute SHA-256 hex digest of the given bytes.
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write;
     let hash = Sha256::digest(data);
-    hash.iter().map(|b| format!("{b:02x}")).collect()
+    let mut hex = String::with_capacity(64);
+    for b in hash {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 /// Fetch the expected SHA-256 digest for a release asset from the GitHub API.
