@@ -60,7 +60,10 @@ pub fn config_path() -> PathBuf {
 pub fn load() -> AcceleratorConfig {
     let path = config_path();
     match std::fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "Malformed config, using defaults");
+            AcceleratorConfig::default()
+        }),
         Err(_) => AcceleratorConfig::default(),
     }
 }

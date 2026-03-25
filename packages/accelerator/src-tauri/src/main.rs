@@ -56,23 +56,16 @@ fn is_dev_mode() -> bool {
 
 /// Open a path or URL in the platform's default handler.
 fn open_in_browser(target: &impl AsRef<Path>) {
+    let path = target.as_ref();
     #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg(target.as_ref())
-            .spawn();
-    }
+    let result = std::process::Command::new("open").arg(path).spawn();
     #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(target.as_ref())
-            .spawn();
-    }
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
     #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer")
-            .arg(target.as_ref())
-            .spawn();
+    let result = std::process::Command::new("explorer").arg(path).spawn();
+
+    if let Err(e) = result {
+        tracing::warn!(path = %path.display(), error = %e, "Failed to open in browser");
     }
 }
 

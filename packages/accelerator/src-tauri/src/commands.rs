@@ -107,8 +107,13 @@ pub fn respond_auth(
 /// (e.g. `example.com` vs `example_com` would collide with naive character replacement).
 pub fn sanitize_window_label(origin: &str) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write;
     let hash = Sha256::digest(origin.as_bytes());
-    hash.iter().take(6).map(|b| format!("{b:02x}")).collect()
+    let mut hex = String::with_capacity(12);
+    for b in hash.iter().take(6) {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 /// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
