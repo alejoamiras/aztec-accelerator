@@ -14,6 +14,19 @@ async function mockServicesOnline(page: import("@playwright/test").Page) {
   await page.route("**/aztec/status", (route) => route.fulfill({ status: 200, body: "OK" }));
 }
 
+// ── JS error safety net — catches runtime errors across all mocked tests ──
+
+const jsErrors: string[] = [];
+
+test.beforeEach(async ({ page }) => {
+  jsErrors.length = 0;
+  page.on("pageerror", (err) => jsErrors.push(err.message));
+});
+
+test.afterEach(() => {
+  expect(jsErrors, "Unexpected JS runtime errors").toEqual([]);
+});
+
 // ── Tests ──
 
 test("page loads with correct initial state", async ({ page }) => {
