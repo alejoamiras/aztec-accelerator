@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aztec Accelerator Update</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="tauri-bridge.js"></script>
 </head>
 <body>
   <div class="auth-container">
@@ -21,37 +22,24 @@
   </div>
 
   <script>
-    const { invoke } = window.__TAURI__.core;
-
     const params = new URLSearchParams(window.location.search);
     const currentVersion = params.get("current") || "unknown";
     const newVersion = params.get("version") || "unknown";
     document.getElementById("version").textContent =
       "v" + currentVersion + "  \u2192  v" + newVersion;
 
-    document.getElementById("update").addEventListener("click", async () => {
-      document.getElementById("update").disabled = true;
-      document.getElementById("later").disabled = true;
-      document.getElementById("update").textContent = "Updating\u2026";
-      const autoUpdate = document.getElementById("auto-update").checked;
-      try {
-        await invoke("respond_update_prompt", { action: "update", autoUpdate });
-      } catch (err) {
-        console.error("Update failed:", err);
-        document.getElementById("update").textContent = "Update Now";
-        document.getElementById("update").disabled = false;
-        document.getElementById("later").disabled = false;
-      }
+    wireButton("update", {
+      disableAlso: "later",
+      loadingText: "Updating\u2026",
+      onClick: () => {
+        const autoUpdate = document.getElementById("auto-update").checked;
+        return invoke("respond_update_prompt", { action: "update", autoUpdate });
+      },
     });
 
-    document.getElementById("later").addEventListener("click", async () => {
-      document.getElementById("update").disabled = true;
-      document.getElementById("later").disabled = true;
-      try {
-        await invoke("respond_update_prompt", { action: "later", autoUpdate: false });
-      } catch (err) {
-        console.error("Failed:", err);
-      }
+    wireButton("later", {
+      disableAlso: "update",
+      onClick: () => invoke("respond_update_prompt", { action: "later", autoUpdate: false }),
     });
   </script>
 </body>

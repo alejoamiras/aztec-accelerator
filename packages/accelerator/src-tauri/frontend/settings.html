@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aztec Accelerator Settings</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="tauri-bridge.js"></script>
 </head>
 <body>
   <div class="section">
@@ -56,7 +57,7 @@
   </div>
 
   <script>
-    const { invoke } = window.__TAURI__.core;
+    // invoke and wireToggle are provided by tauri-bridge.js (loaded in <head>)
 
     // CPU count comes from the Rust backend (std::thread::available_parallelism),
     // NOT navigator.hardwareConcurrency which WebKit caps for fingerprinting protection.
@@ -150,42 +151,12 @@
       }
     }
 
-    // Autostart toggle
-    document.getElementById("autostart").addEventListener("change", (e) => {
-      const el = e.target;
-      el.disabled = true;
-      invoke("set_autostart", { enabled: el.checked })
-        .catch((err) => {
-          el.checked = !el.checked;
-          console.error("Failed to set autostart:", err);
-        })
-        .finally(() => { el.disabled = false; });
-    });
-
-    // Auto-update toggle
-    document.getElementById("auto-update").addEventListener("change", (e) => {
-      const el = e.target;
-      el.disabled = true;
-      invoke("set_auto_update", { enabled: el.checked })
-        .catch((err) => {
-          el.checked = !el.checked;
-          console.error("Failed to set auto_update:", err);
-        })
-        .finally(() => { el.disabled = false; });
-    });
-
-    // Safari toggle
-    document.getElementById("safari").addEventListener("change", (e) => {
-      const el = e.target;
-      el.disabled = true;
-      const cmd = el.checked ? "enable_safari_support" : "disable_safari_support";
-      invoke(cmd)
-        .catch((err) => {
-          el.checked = !el.checked;
-          console.error("Failed to toggle Safari support:", err);
-        })
-        .finally(() => { el.disabled = false; });
-    });
+    // Toggles — all use wireToggle from tauri-bridge.js
+    wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
+    wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
+    wireToggle("safari", (checked) => ({
+      cmd: checked ? "enable_safari_support" : "disable_safari_support",
+    }));
 
     // Speed slider
     const speedSlider = document.getElementById("speed");

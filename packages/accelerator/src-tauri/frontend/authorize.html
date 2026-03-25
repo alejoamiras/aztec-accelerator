@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Authorize Site</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="tauri-bridge.js"></script>
 </head>
 <body>
   <div class="auth-container">
@@ -21,27 +22,24 @@
   </div>
 
   <script>
-    const { invoke } = window.__TAURI__.core;
-
-    // Origin is passed as a query parameter
     const params = new URLSearchParams(window.location.search);
     const origin = params.get("origin") || "unknown";
     document.getElementById("origin").textContent = origin;
 
-    async function respond(allowed) {
-      // Disable buttons to prevent double-click
-      document.getElementById("allow").disabled = true;
-      document.getElementById("deny").disabled = true;
+    function respond(allowed) {
       const remember = document.getElementById("remember").checked;
-      try {
-        await invoke("respond_auth", { origin, allowed, remember });
-      } catch (err) {
-        console.error("respond_auth failed:", err);
-      }
+      return invoke("respond_auth", { origin, allowed, remember });
     }
 
-    document.getElementById("allow").addEventListener("click", () => respond(true));
-    document.getElementById("deny").addEventListener("click", () => respond(false));
+    wireButton("allow", {
+      disableAlso: "deny",
+      onClick: () => respond(true),
+    });
+
+    wireButton("deny", {
+      disableAlso: "allow",
+      onClick: () => respond(false),
+    });
   </script>
 </body>
 </html>
