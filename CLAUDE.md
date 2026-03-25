@@ -4,7 +4,7 @@
 
 - **Repo**: `alejoamiras/aztec-accelerator` (GitHub)
 - **SDK** (`/packages/sdk`): TypeScript package `@alejoamiras/aztec-accelerator` — AcceleratorProver for native proving via localhost bb binary. Extends `BBLazyPrivateKernelProver`, auto-detects accelerator on port 59833, falls back to WASM if unavailable. Dual HTTP/HTTPS probe for Safari compatibility.
-- **Accelerator** (`/packages/accelerator`): Tauri desktop app — system tray, multi-version bb cache, optional HTTPS (Safari), crash recovery. Rebranded from tee-rex to aztec-accelerator.
+- **Accelerator** (`/packages/accelerator`): Tauri desktop app — system tray, multi-version bb cache, optional HTTPS (Safari), crash recovery, site authorization (MetaMask-style origin approval), Settings window, speed control, signed auto-update (Ed25519 via tauri-plugin-updater).
 - **Playground** (`/packages/playground`): Vite + vanilla TS frontend — local WASM vs accelerated mode comparison, embedded wallet, ASCII animation. Deployed at `playground.aztec-accelerator.dev`.
 - **Landing** (`/packages/landing`): Static landing page at `aztec-accelerator.dev`.
 - **Build system**: Bun workspaces (`packages/sdk`, `packages/accelerator`, `packages/playground`, `packages/landing`)

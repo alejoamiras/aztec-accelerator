@@ -25,6 +25,7 @@ body {
   font-size: 13px;
   line-height: 1.5;
   padding: 20px;
+  overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -105,9 +106,22 @@ h2 {
   opacity: 0.5;
 }
 
-/* Origin list */
+/* Origin list — scrollable, max ~3 rows */
 .origin-list {
   list-style: none;
+  max-height: 108px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.origin-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.origin-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .origin-item {
