@@ -43,29 +43,7 @@ jobs:
         working-directory: packages/accelerator/src-tauri
     steps:
       - uses: actions/checkout@v6
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - run: bun install --frozen-lockfile
-        working-directory: .
-      - name: Copy bb sidecar
-        run: bun run --cwd packages/accelerator prebuild
-        working-directory: .
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/accelerator/src-tauri -> target
+      - uses: ./.github/actions/setup-accelerator
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -80,27 +58,7 @@ jobs:
         working-directory: packages/accelerator/src-tauri
     steps:
       - uses: actions/checkout@v6
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - run: bun install --frozen-lockfile
-        working-directory: .
-      - name: Copy bb sidecar
-        run: bun run --cwd packages/accelerator prebuild
-        working-directory: .
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/accelerator/src-tauri -> target
+      - uses: ./.github/actions/setup-accelerator
       - run: cargo test
 
   lint:
@@ -133,27 +91,7 @@ jobs:
         working-directory: packages/accelerator/src-tauri
     steps:
       - uses: actions/checkout@v6
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - run: bun install --frozen-lockfile
-        working-directory: .
-      - name: Copy bb sidecar
-        run: bun run --cwd packages/accelerator prebuild
-        working-directory: .
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/accelerator/src-tauri -> target
+      - uses: ./.github/actions/setup-accelerator
       - name: Build headless server
         run: cargo build --bin accelerator-server
       - name: Launch and health check
