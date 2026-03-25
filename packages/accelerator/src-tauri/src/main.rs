@@ -511,7 +511,7 @@ fn open_settings_window(app: &AppHandle) {
     if let Ok(window) =
         WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
             .title("Aztec Accelerator Settings")
-            .inner_size(500.0, 450.0)
+            .inner_size(500.0, 520.0)
             .resizable(false)
             .center()
             .build()

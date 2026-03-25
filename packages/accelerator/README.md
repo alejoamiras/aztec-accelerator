@@ -129,10 +129,22 @@ Click **Settings** in the tray menu to open the Settings window. From here you c
 
 - **Approved Sites** — view and remove origins that have been granted access
 - **Start on Login** — auto-launch at login (LaunchAgent on macOS, autostart on Linux)
+- **Auto-Update** — toggle automatic updates on or off
 - **Safari Support** (macOS only) — toggle HTTPS mode for Safari compatibility
 - **Proving Speed** — control CPU usage with a 5-level slider (Low / Light / Balanced / High / Full)
 
 Speed changes take effect immediately on the next prove request — no restart needed.
+
+### Auto-Update
+
+The accelerator checks for updates on launch and every 12 hours. Updates are signed with Ed25519 and verified before installation.
+
+On the first update, you'll see a prompt:
+- **Update Now** — downloads, installs, and restarts immediately
+- **Remind Me Later** — dismisses the prompt (it returns next launch)
+- **Keep me updated automatically** — checkbox that enables silent future updates
+
+With auto-update enabled, new versions are downloaded and installed in the background — the app restarts seamlessly. You can change this anytime in Settings.
 
 ### Safari Support (macOS only)
 
