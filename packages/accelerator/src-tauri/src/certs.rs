@@ -6,7 +6,6 @@ use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use time::OffsetDateTime;
 use tokio_rustls::rustls;
 
@@ -152,15 +151,19 @@ pub fn load_rustls_config(
 
 /// Approximate days remaining on the leaf certificate.
 /// Uses file modification time as a proxy for creation date.
+/// Parse the leaf certificate's notAfter field and return days until expiry.
+/// Uses the actual X.509 certificate, not file mtime (which can be wrong if
+/// the file is copied, restored from backup, or touched).
 pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let metadata = std::fs::metadata(leaf_cert_path())?;
-    let modified = metadata.modified()?;
-    let age = std::time::SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or(Duration::ZERO);
-    let cert_validity_days: i64 = 825;
-    let days_since_creation = age.as_secs() as i64 / 86400;
-    Ok(cert_validity_days - days_since_creation)
+    let pem_bytes = std::fs::read(leaf_cert_path())?;
+    let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_bytes)?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)?;
+    let not_after = cert.validity().not_after.timestamp();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    Ok((not_after - now) / 86400)
 }
 
 /// Regenerate the leaf certificate if it's expiring within 30 days.
