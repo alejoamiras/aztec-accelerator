@@ -502,12 +502,56 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Assert complete response contract — every field, correct types
         assert_eq!(json["status"], "ok");
-        assert!(json.get("version").is_some());
-        assert!(json.get("aztec_version").is_some());
-        assert!(json.get("bb_available").is_some());
-        assert!(json.get("available_versions").is_some());
-        assert!(json["available_versions"].is_array());
+        assert_eq!(json["api_version"], 1);
+        assert!(json["version"].is_string(), "version should be a string");
+        assert!(
+            json["aztec_version"].is_string(),
+            "aztec_version should be a string"
+        );
+        assert!(
+            json["bb_available"].is_boolean(),
+            "bb_available should be a boolean"
+        );
+        assert!(
+            json["available_versions"].is_array(),
+            "available_versions should be an array"
+        );
+        // Default state: no Safari support → no https_port
+        assert!(
+            json.get("https_port").is_none(),
+            "https_port should be absent without Safari support"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_includes_https_port_when_safari_enabled() {
+        let cfg = crate::config::AcceleratorConfig {
+            safari_support: true,
+            ..Default::default()
+        };
+        let state = AppState {
+            config: Some(Arc::new(RwLock::new(cfg))),
+            https_port: Some(59834),
+            ..Default::default()
+        };
+        let app = router(state);
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["https_port"], 59834);
     }
 
     #[tokio::test]
@@ -533,6 +577,13 @@ mod tests {
                 .get("access-control-allow-origin")
                 .unwrap(),
             "*"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .unwrap(),
+            "cross-origin"
         );
     }
 
@@ -685,6 +736,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_version");
+        assert!(
+            json["message"].is_string(),
+            "error message should be a string"
+        );
     }
 
     #[tokio::test]
@@ -769,12 +829,17 @@ mod tests {
         let (state, auth) = auth_state_with_popup(popup_tx);
         let app = router(state);
 
-        // Spawn a task that auto-approves after the popup fires
+        // Spawn a task that waits for the popup signal, then auto-approves.
+        // Uses popup_rx.recv() instead of sleep to avoid race conditions.
         let auth_clone = auth.clone();
+        let (popup_seen_tx, popup_seen_rx) = tokio::sync::oneshot::channel::<String>();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let origin = tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
+                .await
+                .unwrap();
+            let _ = popup_seen_tx.send(origin.clone());
             auth_clone.resolve(
-                "https://unknown-site.com",
+                &origin,
                 crate::authorization::AuthDecision::Allow { remember: false },
             );
         });
@@ -793,7 +858,7 @@ mod tests {
             .unwrap();
 
         // Popup should have been triggered
-        assert_eq!(popup_rx.recv().unwrap(), "https://unknown-site.com");
+        assert_eq!(popup_seen_rx.await.unwrap(), "https://unknown-site.com");
         // After approval, should proceed (not 403)
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
     }
@@ -830,6 +895,10 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "origin_denied");
+        assert!(
+            json["message"].is_string(),
+            "denied error should have a message"
+        );
     }
 
     #[tokio::test]
@@ -919,6 +988,72 @@ mod tests {
 
         // Headless with no popup = instant deny
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn prove_returns_429_when_too_many_pending_origins() {
+        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+        let app = router(state.clone());
+
+        // Fill the AuthorizationManager to capacity (MAX_PENDING_ORIGINS = 10)
+        let auth = state.auth_manager.as_ref().unwrap();
+        for i in 0..10 {
+            let _ = auth.request(&format!("https://origin-{i}.com"));
+        }
+
+        // The 11th distinct origin should get 429
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://one-too-many.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "too_many_requests");
+        assert!(json["message"].is_string());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prove_returns_403_on_authorization_timeout() {
+        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        // Send request from unknown origin — popup fires but nobody resolves it.
+        // start_paused = true means tokio time is auto-advanced when all tasks
+        // are waiting on timers, so the 60s timeout resolves instantly.
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://slow-user.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "authorization_timeout");
+        assert!(json["message"].is_string());
     }
 
     // ── Helper unit tests ──
