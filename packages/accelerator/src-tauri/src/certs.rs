@@ -118,15 +118,27 @@ pub fn generate_and_save() -> Result<(), Box<dyn std::error::Error + Send + Sync
 }
 
 /// Write a PEM file with 0o600 permissions (owner read/write only).
+/// On Unix, the file is created with restricted permissions atomically via OpenOptions::mode()
+/// to avoid a TOCTOU window where the file is briefly world-readable.
 fn write_pem_file(
     path: &std::path::Path,
     contents: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::write(path, contents)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)?;
     }
     Ok(())
 }

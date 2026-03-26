@@ -12,6 +12,7 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   backport:
@@ -54,16 +55,12 @@ jobs:
               --head "$BRANCH" \
               --title "backport: ${PR_TITLE} (#${PR_NUMBER})" \
               --body "Automated backport of #${PR_NUMBER} from main to nightlies.")
+            gh pr edit "$PR_URL" --add-label backport || true
           else
             git cherry-pick --abort || true
-            git checkout -- . || true
-            git push origin "$BRANCH"
-            PR_URL=$(gh pr create \
-              --base nightlies \
-              --head "$BRANCH" \
-              --title "backport (conflicts): ${PR_TITLE} (#${PR_NUMBER})" \
-              --body "Automated backport of #${PR_NUMBER} — has merge conflicts that need manual resolution.")
+            echo "Cherry-pick has conflicts — creating issue instead of empty PR"
+            gh issue create \
+              --title "Backport conflict: ${PR_TITLE} (#${PR_NUMBER})" \
+              --body "Automated cherry-pick of #${PR_NUMBER} to \`nightlies\` has conflicts. Manual backport needed." \
+              --label backport || echo "Warning: issue creation failed"
           fi
-
-          # Add label separately so a missing label doesn't prevent PR creation
-          gh pr edit "$PR_URL" --add-label backport || echo "Warning: could not add 'backport' label"

@@ -9,8 +9,25 @@
 const { invoke } = window.__TAURI__.core;
 
 /**
+ * Show a brief error hint near a control. Disappears after 3 seconds.
+ * @param {HTMLElement} anchor — element to show the error near
+ * @param {string} message
+ */
+function showErrorHint(anchor, message) {
+  // Remove any existing hint on this anchor
+  const existing = anchor.parentElement?.querySelector(".error-hint");
+  if (existing) existing.remove();
+
+  const hint = document.createElement("span");
+  hint.className = "error-hint";
+  hint.textContent = message;
+  anchor.closest(".row, .speed-section, .popup-container")?.appendChild(hint);
+  setTimeout(() => hint.remove(), 3000);
+}
+
+/**
  * Wire a checkbox toggle to a Tauri command.
- * Disables during operation, reverts on error.
+ * Disables during operation, reverts on error with visible feedback.
  *
  * @param {string} id — element ID of the checkbox input
  * @param {(checked: boolean) => {cmd: string, args?: object}} handler
@@ -26,6 +43,7 @@ function wireToggle(id, handler) {
       .catch((err) => {
         el.checked = !el.checked;
         console.error(`Failed to invoke ${cmd}:`, err);
+        showErrorHint(el, "Failed — try again");
       })
       .finally(() => {
         el.disabled = false;
@@ -61,6 +79,7 @@ function wireButton(id, opts) {
       btn.textContent = originalText;
       btn.disabled = false;
       if (otherBtn) otherBtn.disabled = false;
+      showErrorHint(btn, "Failed — try again");
     }
   });
 }

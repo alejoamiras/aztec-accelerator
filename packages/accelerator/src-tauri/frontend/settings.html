@@ -167,6 +167,7 @@
       const level = SPEED_LEVELS[Number(e.target.value)];
       invoke("set_speed", { speed: level.value }).catch((err) => {
         console.error("Failed to set speed:", err);
+        showErrorHint(speedSlider, "Failed to save");
         loadSettings();
       });
     });

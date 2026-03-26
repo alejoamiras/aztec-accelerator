@@ -338,3 +338,16 @@ h2 {
 .popup-remember input[type="checkbox"] {
   accent-color: var(--accent);
 }
+
+/* Error hints — brief inline feedback on command failure */
+.error-hint {
+  color: var(--danger);
+  font-size: 11px;
+  margin-left: 8px;
+  animation: fade-in 0.15s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
