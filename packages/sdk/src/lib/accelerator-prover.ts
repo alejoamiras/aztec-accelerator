@@ -194,12 +194,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     const httpUrl = `http://${this.#acceleratorHost}:${this.#acceleratorPort}/health`;
     const httpsUrl = `https://${this.#acceleratorHost}:${this.#acceleratorHttpsPort}/health`;
 
-    try {
-      // Probe both HTTP and HTTPS in parallel — whichever responds first wins.
-      // Chrome/Firefox: HTTP responds (~1ms), HTTPS rejection silently ignored.
-      // Safari with HTTPS enabled: HTTP blocked (mixed content), HTTPS responds.
-      // Both offline: AggregateError → { available: false }.
-      const { res: response, protocol } = await Promise.any([
+    // Probe with a single retry — the accelerator may be slow to start on first
+    // launch or after an update. Without retry, the SDK falls back to WASM unnecessarily.
+    const probe = () =>
+      Promise.any([
         fetch(httpUrl, { signal: AbortSignal.timeout(2000) }).then((res) => ({
           res,
           protocol: "http" as const,
@@ -209,6 +207,21 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           protocol: "https" as const,
         })),
       ]);
+
+    try {
+      // Probe both HTTP and HTTPS in parallel — whichever responds first wins.
+      // Chrome/Firefox: HTTP responds (~1ms), HTTPS rejection silently ignored.
+      // Safari with HTTPS enabled: HTTP blocked (mixed content), HTTPS responds.
+      // Both offline: AggregateError → retry once after 1s, then { available: false }.
+      let result: { res: Response; protocol: "http" | "https" };
+      try {
+        result = await probe();
+      } catch {
+        // First probe failed — retry once after 1s
+        await new Promise((r) => setTimeout(r, 1000));
+        result = await probe();
+      }
+      const { res: response, protocol } = result;
 
       if (!response.ok) {
         // Don't cache protocol on error — a fast error (e.g. HTTPS cert failure)

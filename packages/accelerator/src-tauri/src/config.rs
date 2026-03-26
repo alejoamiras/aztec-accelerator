@@ -34,8 +34,15 @@ impl Speed {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Current config schema version. Bump when fields are removed or renamed.
+/// Added fields with `#[serde(default)]` don't require a version bump.
+const CONFIG_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceleratorConfig {
+    /// Schema version for future migration support.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     #[serde(default)]
     pub safari_support: bool,
     #[serde(default)]
@@ -45,6 +52,22 @@ pub struct AcceleratorConfig {
     /// None = never asked, Some(true) = auto-update, Some(false) = manual
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
+}
+
+impl Default for AcceleratorConfig {
+    fn default() -> Self {
+        Self {
+            config_version: CONFIG_VERSION,
+            safari_support: false,
+            approved_origins: Vec::new(),
+            speed: Speed::default(),
+            auto_update: None,
+        }
+    }
+}
+
+fn default_config_version() -> u32 {
+    CONFIG_VERSION
 }
 
 /// Returns `~/.aztec-accelerator/config.json`.
@@ -128,6 +151,7 @@ mod tests {
             ],
             speed: Speed::Balanced,
             auto_update: Some(true),
+            ..Default::default()
         };
 
         // Write via serde (same as save()) and read back
