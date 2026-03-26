@@ -535,12 +535,14 @@ async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
             *pending.lock() = Some(update);
         }
 
-        if auto_update_pref.is_none() {
-            tracing::info!("Showing update prompt (first time)");
-            show_update_prompt_window(app, &current_version, &new_version);
-        } else {
-            tracing::info!(version = %new_version, "Update available (manual mode)");
-        }
+        // Show prompt for both None (first time) and Some(false) (manual mode).
+        // Some(true) users never reach here — check_for_update auto-installs for them.
+        tracing::info!(
+            ?auto_update_pref,
+            version = %new_version,
+            "Showing update prompt"
+        );
+        show_update_prompt_window(app, &current_version, &new_version);
     }
 }
 

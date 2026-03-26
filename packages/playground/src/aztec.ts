@@ -133,7 +133,15 @@ async function clearIndexedDB(): Promise<void> {
   await Promise.all(
     dbs
       .filter((db) => db.name && aztecPrefixes.some((prefix) => db.name!.startsWith(prefix)))
-      .map((db) => indexedDB.deleteDatabase(db.name!)),
+      .map(
+        (db) =>
+          new Promise<void>((resolve, reject) => {
+            const req = indexedDB.deleteDatabase(db.name!);
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+            req.onblocked = () => resolve(); // best-effort: proceed even if blocked
+          }),
+      ),
   );
 }
 
