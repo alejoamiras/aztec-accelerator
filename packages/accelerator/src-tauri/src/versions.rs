@@ -271,6 +271,8 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
     );
 
     // Verify download integrity against GitHub API digest.
+    // Fail closed: if we can't verify, we don't execute. The bundled bb sidecar
+    // always works without verification; this only affects on-demand downloads.
     let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
     match fetch_github_asset_digest(version, &asset_name).await {
         Ok(Some(expected)) => {
@@ -284,17 +286,13 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
             tracing::info!(version, digest = %actual, "Download integrity verified");
         }
         Ok(None) => {
-            tracing::warn!(
-                version,
-                "No digest available from GitHub API — skipping integrity check"
-            );
+            return Err(format!(
+                "Cannot verify bb v{version}: no digest available from GitHub API"
+            )
+            .into());
         }
         Err(e) => {
-            tracing::warn!(
-                version,
-                error = %e,
-                "Failed to fetch digest from GitHub API — skipping integrity check"
-            );
+            return Err(format!("Cannot verify bb v{version}: digest fetch failed: {e}").into());
         }
     }
 

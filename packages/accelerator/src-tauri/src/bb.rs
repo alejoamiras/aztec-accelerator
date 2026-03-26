@@ -1,6 +1,10 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::versions;
+
+/// Maximum time to wait for bb prove to complete before killing the process.
+const PROVE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Find the `bb` binary. When `version` is provided, the version cache is checked
 /// before the standard search chain.
@@ -100,7 +104,18 @@ pub async fn prove(
         // The -t flag was repurposed to --verifier_target in recent versions.
         cmd.env("HARDWARE_CONCURRENCY", t.to_string());
     }
-    let output = cmd.output().await?;
+    // kill_on_drop ensures the bb process is killed if the future is cancelled
+    // (e.g., client disconnect, timeout). Without it, an orphaned bb would run to
+    // completion wasting CPU while holding the prove semaphore.
+    cmd.kill_on_drop(true);
+    let child = cmd.spawn()?;
+    let output = match tokio::time::timeout(PROVE_TIMEOUT, child.wait_with_output()).await {
+        Ok(result) => result?,
+        Err(_) => {
+            tracing::error!("bb prove timed out after {:?}", PROVE_TIMEOUT);
+            return Err("bb prove timed out after 5 minutes".into());
+        }
+    };
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.is_empty() {
