@@ -344,6 +344,7 @@ fn main() {
             }
 
             let status_clone = status.clone();
+            let status_for_diagnostics = status.clone();
             let tray_clone = tray.clone();
 
             // Versions changed callback: rebuild the Versions submenu when versions change.
@@ -406,12 +407,28 @@ fn main() {
             state_with_https.https_port = https_port;
             app.manage::<SharedAppState>(Arc::new(state_with_https));
 
+            // Run startup diagnostics — surface problems as visible tray status
+            // rather than silent log entries.
+            if aztec_accelerator::bb::find_bb(None).is_err() {
+                tracing::warn!("bb binary not found at startup");
+                let _ = status_for_diagnostics.set_text("Warning: bb not found");
+            }
+
             // Spawn the HTTP server on the Tokio runtime
             let mut http_state = state;
             http_state.https_port = https_port;
+            let status_for_server = status_for_diagnostics;
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = aztec_accelerator::server::start(http_state).await {
                     tracing::error!("Accelerator server error: {e}");
+                    let msg = if e.to_string().contains("Address already in use")
+                        || e.to_string().contains("address already in use")
+                    {
+                        "Error: port 59833 in use"
+                    } else {
+                        "Error: server failed"
+                    };
+                    let _ = status_for_server.set_text(msg);
                 }
             });
 
