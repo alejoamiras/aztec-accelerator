@@ -194,6 +194,11 @@ fn is_valid_version(version: &str) -> bool {
 
 type ProveError = (StatusCode, String);
 
+/// Build a consistent JSON error response body for the /prove endpoint.
+fn json_error(error: &str, message: &str) -> String {
+    serde_json::to_string(&json!({"error": error, "message": message})).unwrap()
+}
+
 /// Check if the request origin is authorized. Returns Ok(()) if approved.
 async fn authorize_origin(
     state: &AppState,
@@ -313,8 +318,9 @@ async fn resolve_version<'a>(
     if !is_valid_version(v) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "Invalid x-aztec-version header: version must match ^[0-9a-zA-Z._-]+$ (got '{v}')"
+            json_error(
+                "invalid_version",
+                &format!("Invalid x-aztec-version header (got '{v}')"),
             ),
         ));
     }
@@ -347,7 +353,10 @@ async fn resolve_version<'a>(
                 tracing::error!(version = %v, error = %e, "Failed to download bb");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to download bb v{v}: {e}"),
+                    json_error(
+                        "download_failed",
+                        &format!("Failed to download bb v{v}: {e}"),
+                    ),
                 ));
             }
         }
@@ -392,7 +401,10 @@ async fn prove(
             tracing::warn!("Failed to read request body: {e}");
             (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                format!("Body too large or unreadable: {e}"),
+                json_error(
+                    "payload_too_large",
+                    &format!("Body too large or unreadable: {e}"),
+                ),
             )
         })?;
     tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
@@ -402,7 +414,7 @@ async fn prove(
         Some(sem.acquire().await.map_err(|_| {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Proving service shutting down".to_string(),
+                json_error("service_unavailable", "Proving service shutting down"),
             )
         })?)
     } else {
@@ -447,7 +459,12 @@ async fn prove(
         }
     }
 
-    let proof = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let proof = result.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json_error("prove_failed", &e.to_string()),
+        )
+    })?;
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &proof);
 
     let mut response = axum::Json(json!({ "proof": encoded })).into_response();
