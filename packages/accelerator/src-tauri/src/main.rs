@@ -1,53 +1,25 @@
 // Prevents additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
+mod tray;
+mod windows;
+
+use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
 use aztec_accelerator::server::{AppState, HTTPS_PORT};
-use aztec_accelerator::versions;
 use aztec_accelerator::{certs, commands, config, log_dir};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::MenuItemBuilder;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
-
-// Tray icon variants (44x44 RGBA PNGs, macOS template mode)
-static ICON_IDLE: &[u8] = include_bytes!("../icons/tray-idle.png");
-static ICON_PROVING: [&[u8]; 24] = [
-    include_bytes!("../icons/tray-proving-1.png"),
-    include_bytes!("../icons/tray-proving-2.png"),
-    include_bytes!("../icons/tray-proving-3.png"),
-    include_bytes!("../icons/tray-proving-4.png"),
-    include_bytes!("../icons/tray-proving-5.png"),
-    include_bytes!("../icons/tray-proving-6.png"),
-    include_bytes!("../icons/tray-proving-7.png"),
-    include_bytes!("../icons/tray-proving-8.png"),
-    include_bytes!("../icons/tray-proving-9.png"),
-    include_bytes!("../icons/tray-proving-10.png"),
-    include_bytes!("../icons/tray-proving-11.png"),
-    include_bytes!("../icons/tray-proving-12.png"),
-    include_bytes!("../icons/tray-proving-13.png"),
-    include_bytes!("../icons/tray-proving-14.png"),
-    include_bytes!("../icons/tray-proving-15.png"),
-    include_bytes!("../icons/tray-proving-16.png"),
-    include_bytes!("../icons/tray-proving-17.png"),
-    include_bytes!("../icons/tray-proving-18.png"),
-    include_bytes!("../icons/tray-proving-19.png"),
-    include_bytes!("../icons/tray-proving-20.png"),
-    include_bytes!("../icons/tray-proving-21.png"),
-    include_bytes!("../icons/tray-proving-22.png"),
-    include_bytes!("../icons/tray-proving-23.png"),
-    include_bytes!("../icons/tray-proving-24.png"),
-];
 
 /// Returns true in debug builds (`cargo tauri dev`), false in release.
 fn is_dev_mode() -> bool {
@@ -69,78 +41,7 @@ fn open_in_browser(target: &impl AsRef<Path>) {
     }
 }
 
-/// Build a "Versions" submenu listing the bundled + cached bb versions.
-fn build_versions_submenu(
-    app: &AppHandle,
-    bundled_version: &str,
-) -> Result<tauri::menu::Submenu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let mut builder = SubmenuBuilder::with_id(app, "versions", "Versions");
-
-    // Bundled version always first
-    let bundled_item = MenuItemBuilder::with_id(
-        format!("version_{bundled_version}"),
-        format!("{bundled_version} (bundled)"),
-    )
-    .enabled(false)
-    .build(app)?;
-    builder = builder.item(&bundled_item);
-
-    // Cached versions (exclude bundled to avoid duplicate)
-    let cached = versions::list_cached_versions();
-    for v in &cached {
-        if v != bundled_version {
-            let item = MenuItemBuilder::with_id(format!("version_{v}"), v.as_str())
-                .enabled(false)
-                .build(app)?;
-            builder = builder.item(&item);
-        }
-    }
-
-    Ok(builder.build()?)
-}
-
-/// Build the tray menu. Used both for initial setup and for rebuilding when versions change.
-/// The `status` item is passed in because it's shared state (text updated by callbacks).
-fn build_tray_menu(
-    app: &AppHandle,
-    dev_mode: bool,
-    bundled_version: &str,
-    status: &tauri::menu::MenuItem<tauri::Wry>,
-) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
-    let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
-    let app_version = env!("CARGO_PKG_VERSION");
-    let aztec_bb_version = env!("AZTEC_BB_VERSION");
-    let version_text = MenuItemBuilder::with_id(
-        "version_info",
-        format!("v{app_version} · Aztec {aztec_bb_version}"),
-    )
-    .enabled(false)
-    .build(app)?;
-    let github = MenuItemBuilder::with_id("open_github", "GitHub").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-
-    if dev_mode {
-        let versions_submenu = build_versions_submenu(app, bundled_version)?;
-        let show_logs = MenuItemBuilder::with_id("show_logs", "Show Logs").build(app)?;
-        Ok(MenuBuilder::new(app)
-            .items(&[
-                status,
-                &versions_submenu,
-                &show_logs,
-                &settings,
-                &separator,
-                &version_text,
-                &github,
-                &quit,
-            ])
-            .build()?)
-    } else {
-        Ok(MenuBuilder::new(app)
-            .items(&[&settings, &separator, &version_text, &github, &quit])
-            .build()?)
-    }
-}
+// ── HTTPS startup ────────────────────────────────────────────────────────
 
 /// Try to start HTTPS server if Safari Support is configured and certs are valid.
 /// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
@@ -190,6 +91,43 @@ fn try_start_https(state: &AppState) -> Option<u16> {
         }
     }
 }
+
+// ── Auto-update ──────────────────────────────────────────────────────────
+
+/// Background update check wrapper. Calls the shared updater module and
+/// shows the prompt window if an update is available and the user hasn't chosen yet.
+async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
+    if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
+        let auto_update_pref = { config_state.read().auto_update };
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let new_version = update.version.clone();
+
+        // Store the update so respond_update_prompt can use it directly
+        if let Some(pending) = app.try_state::<PendingUpdate>() {
+            *pending.lock() = Some(update);
+        }
+
+        // Show prompt for both None (first time) and Some(false) (manual mode).
+        // Some(true) users never reach here — check_for_update auto-installs for them.
+        tracing::info!(
+            ?auto_update_pref,
+            version = %new_version,
+            "Showing update prompt"
+        );
+        windows::show_update_prompt_window(app, &current_version, &new_version);
+    }
+}
+
+// ── Exit handling ────────────────────────────────────────────────────────
+
+/// Returns true if the exit should be prevented.
+/// Window-close events have code=None and should be prevented (tray-only app).
+/// Explicit exits (Quit menu, restart) have code=Some(_) and must go through.
+fn should_prevent_exit(code: Option<i32>) -> bool {
+    code.is_none()
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
 
 fn main() {
     // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
@@ -275,80 +213,31 @@ fn main() {
                 }
             }
 
-            let menu = build_tray_menu(&app.handle().clone(), dev_mode, &bundled_version, &status)?;
+            // ── Build tray ──
+            let menu =
+                tray::build_tray_menu(&app.handle().clone(), dev_mode, &bundled_version, &status)?;
 
-            let tray_icon =
-                tauri::image::Image::from_bytes(ICON_IDLE).expect("failed to load tray icon");
-
-            let tray = TrayIconBuilder::new()
-                .icon(tray_icon)
-                .icon_as_template(true)
-                .tooltip("Aztec Accelerator")
-                .menu(&menu)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
+            let tray =
+                tray::build_tray_icon(app, &menu, move |app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
-                    "show_logs" => {
-                        open_in_browser(&log_dir());
-                    }
+                    "show_logs" => open_in_browser(&log_dir()),
                     "open_github" => {
                         open_in_browser(&"https://github.com/alejoamiras/aztec-accelerator");
                     }
-                    "settings" => {
-                        open_settings_window(app);
-                    }
+                    "settings" => windows::open_settings_window(app),
                     _ => {}
-                })
-                .build(app)?;
+                })?;
 
-            // Tray icon animation loop — pulses outward during proving.
-            // Both set_icon + set_icon_as_template must run in a single main-thread
-            // turn to avoid a black flash between the two calls.
+            // ── Animation ──
             let is_animating = Arc::new(AtomicBool::new(false));
-            {
-                let is_animating = is_animating.clone();
-                let tray = tray.clone();
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut interval = tokio::time::interval(Duration::from_millis(50));
-                    let mut frame_idx: usize = 0;
-                    let mut was_animating = false;
-                    loop {
-                        interval.tick().await;
-                        let animating = is_animating.load(Ordering::Relaxed);
-                        if animating {
-                            let tray = tray.clone();
-                            let frame = frame_idx;
-                            let _ = handle.run_on_main_thread(move || {
-                                if let Ok(icon) =
-                                    tauri::image::Image::from_bytes(ICON_PROVING[frame])
-                                {
-                                    let _ = tray.set_icon(Some(icon));
-                                    let _ = tray.set_icon_as_template(true);
-                                }
-                            });
-                            frame_idx = (frame_idx + 1) % ICON_PROVING.len();
-                            was_animating = true;
-                        } else if was_animating {
-                            let tray = tray.clone();
-                            let _ = handle.run_on_main_thread(move || {
-                                if let Ok(icon) = tauri::image::Image::from_bytes(ICON_IDLE) {
-                                    let _ = tray.set_icon(Some(icon));
-                                    let _ = tray.set_icon_as_template(true);
-                                }
-                            });
-                            frame_idx = 0;
-                            was_animating = false;
-                        }
-                    }
-                });
-            }
+            tray::start_animation_loop(tray.clone(), app.handle().clone(), is_animating.clone());
 
+            // ── Callbacks and AppState wiring ──
             let status_clone = status.clone();
             let status_for_diagnostics = status.clone();
             let tray_clone = tray.clone();
 
             // Versions changed callback: rebuild the Versions submenu when versions change.
-            // Only needed in dev mode (production menu has no Versions submenu).
             let app_handle = app.handle().clone();
             let bundled_for_cb = bundled_version.clone();
             let tray_for_versions = tray.clone();
@@ -357,7 +246,7 @@ fn main() {
                     if !dev_mode {
                         return;
                     }
-                    match build_tray_menu(&app_handle, dev_mode, &bundled_for_cb, &status) {
+                    match tray::build_tray_menu(&app_handle, dev_mode, &bundled_for_cb, &status) {
                         Ok(new_menu) => {
                             let _ = tray_for_versions.set_menu(Some(new_menu));
                             tracing::info!("Tray menu rebuilt (versions changed)");
@@ -368,12 +257,16 @@ fn main() {
                     }
                 });
 
-            // Build the show_auth_popup callback that opens the authorization window
+            // Auth popup callback
             let app_handle_for_auth = app.handle().clone();
             let auth_manager_for_timeout = auth_manager.clone();
             let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback =
                 Arc::new(move |origin: &str| {
-                    show_auth_popup_window(&app_handle_for_auth, origin, &auth_manager_for_timeout);
+                    windows::show_auth_popup_window(
+                        &app_handle_for_auth,
+                        origin,
+                        &auth_manager_for_timeout,
+                    );
                 });
 
             let is_animating_for_status = is_animating.clone();
@@ -398,8 +291,7 @@ fn main() {
                 prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
             };
 
-            // Auto-start HTTPS if Safari Support is configured.
-            // Uses a clone of the full AppState so the HTTPS server has auth + config.
+            // ── HTTPS startup ──
             let https_port = try_start_https(&state);
 
             // Manage the shared state for Tauri commands (e.g. enable_safari_support)
@@ -407,14 +299,13 @@ fn main() {
             state_with_https.https_port = https_port;
             app.manage::<SharedAppState>(Arc::new(state_with_https));
 
-            // Run startup diagnostics — surface problems as visible tray status
-            // rather than silent log entries.
+            // ── Startup diagnostics ──
             if aztec_accelerator::bb::find_bb(None).is_err() {
                 tracing::warn!("bb binary not found at startup");
                 let _ = status_for_diagnostics.set_text("Warning: bb not found");
             }
 
-            // Spawn the HTTP server on the Tokio runtime
+            // ── HTTP server ──
             let mut http_state = state;
             http_state.https_port = https_port;
             let status_for_server = status_for_diagnostics;
@@ -432,7 +323,7 @@ fn main() {
                 }
             });
 
-            // Background update check: 5s after launch, then every 12 hours
+            // ── Background update check ──
             let update_handle = app.handle().clone();
             let update_config = config_state.clone();
             tauri::async_runtime::spawn(async move {
@@ -448,141 +339,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Aztec Accelerator")
         .run(|_app, event| {
-            // Tray-only app — keep running when Settings or auth popup windows are closed.
-            // Only prevent automatic exit (code=None, triggered by last window closing).
-            // Explicit app.exit(0) from the "Quit" menu sets code=Some(0) and must go through.
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if should_prevent_exit(code) {
                     api.prevent_exit();
                 }
             }
         });
-}
-
-/// Focus a newly created window. We stay as Accessory (tray-only) rather than
-/// switching to Regular activation policy, which would show the app in the Dock
-/// and Cmd+Tab. Trade-off: if the window gets buried behind a fullscreen app,
-/// the user must click "Settings" in the tray again to refocus it.
-/// If we ever want Dock presence, switch to Regular here and back to Accessory
-/// on window destroy — but ensure the bundle icon is set (release builds only).
-fn focus_window(window: &tauri::WebviewWindow) {
-    let _ = window.set_focus();
-}
-
-/// Open or focus the Settings window.
-fn open_settings_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.set_focus();
-        return;
-    }
-    if let Ok(window) =
-        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-            .title("Aztec Accelerator Settings")
-            .inner_size(500.0, 520.0)
-            .resizable(false)
-            .center()
-            .build()
-    {
-        focus_window(&window);
-    }
-}
-
-/// Show the authorization popup for an unknown origin.
-/// Spawns a 60s timeout that auto-denies if the user doesn't respond.
-/// If the user closes the window without responding, the timeout will still
-/// fire and resolve all pending requests for this origin with Deny.
-fn show_auth_popup_window(app: &AppHandle, origin: &str, auth_manager: &Arc<AuthorizationManager>) {
-    let label = format!("auth-{}", commands::sanitize_window_label(origin));
-    if app.get_webview_window(&label).is_some() {
-        return; // popup already open for this origin
-    }
-
-    let url = format!("authorize.html?origin={}", urlencoding::encode(origin));
-    if let Ok(window) = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Authorize Site")
-        .inner_size(400.0, 300.0)
-        .resizable(false)
-        .center()
-        .always_on_top(true)
-        .build()
-    {
-        focus_window(&window);
-    }
-
-    // Spawn 60s timeout — always resolve with Deny if still pending.
-    // This handles both: (a) user ignoring the popup, and (b) user closing the
-    // window without clicking Allow/Deny. In case (b), the window is gone but
-    // the pending senders are still in the HashMap. resolve() is a no-op if the
-    // origin was already resolved by respond_auth (senders already consumed).
-    let app_handle = app.clone();
-    let origin_owned = origin.to_string();
-    let auth_manager = auth_manager.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        // Close window if still open
-        if let Some(window) = app_handle.get_webview_window(&label) {
-            let _ = window.close();
-        }
-        // Always try to resolve — no-op if already resolved by user click
-        auth_manager.resolve(&origin_owned, AuthDecision::Deny);
-        tracing::debug!(origin = %origin_owned, "Authorization timeout cleanup");
-    });
-}
-
-/// Returns true if the exit should be prevented.
-/// Window-close events have code=None and should be prevented (tray-only app).
-/// Explicit exits (Quit menu, restart) have code=Some(_) and must go through.
-fn should_prevent_exit(code: Option<i32>) -> bool {
-    code.is_none()
-}
-
-// ── Auto-update ──────────────────────────────────────────────────────────
-
-/// Background update check wrapper. Calls the shared updater module and
-/// shows the prompt window if an update is available and the user hasn't chosen yet.
-async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
-    use tauri::Manager;
-    if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
-        let auto_update_pref = { config_state.read().auto_update };
-        let current_version = env!("CARGO_PKG_VERSION").to_string();
-        let new_version = update.version.clone();
-
-        // Store the update so respond_update_prompt can use it directly
-        if let Some(pending) = app.try_state::<PendingUpdate>() {
-            *pending.lock() = Some(update);
-        }
-
-        // Show prompt for both None (first time) and Some(false) (manual mode).
-        // Some(true) users never reach here — check_for_update auto-installs for them.
-        tracing::info!(
-            ?auto_update_pref,
-            version = %new_version,
-            "Showing update prompt"
-        );
-        show_update_prompt_window(app, &current_version, &new_version);
-    }
-}
-
-/// Show the one-time update prompt window.
-fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_version: &str) {
-    if app.get_webview_window("update-prompt").is_some() {
-        return;
-    }
-
-    let url = format!(
-        "update-prompt.html?current={}&version={}",
-        urlencoding::encode(current_version),
-        urlencoding::encode(new_version)
-    );
-    if let Ok(window) = WebviewWindowBuilder::new(app, "update-prompt", WebviewUrl::App(url.into()))
-        .title("Aztec Accelerator Update")
-        .inner_size(420.0, 280.0)
-        .resizable(false)
-        .center()
-        .build()
-    {
-        focus_window(&window);
-    }
 }
 
 #[cfg(test)]
