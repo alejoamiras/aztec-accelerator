@@ -675,6 +675,66 @@ mod tests {
     }
 
     #[test]
+    fn extract_bb_fails_on_corrupted_gzip() {
+        let corrupted = b"this is not valid gzip data at all";
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(corrupted, tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_bb_fails_on_empty_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&[], tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_bb_cleans_up_on_missing_bb() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Valid tar.gz with no "bb" entry — should fail and leave no artifacts
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let content = b"not-bb";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "other-file", &content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&tarball, tmp.path());
+        assert!(result.is_err());
+        // No "bb" file should have been created
+        assert!(!tmp.path().join("bb").exists());
+    }
+
+    #[test]
+    fn sha256_hex_produces_correct_digest() {
+        // SHA-256 of empty input is the well-known constant
+        let digest = sha256_hex(b"");
+        assert_eq!(
+            digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_detects_different_inputs() {
+        let a = sha256_hex(b"hello");
+        let b = sha256_hex(b"world");
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 64); // 32 bytes = 64 hex chars
+    }
+
+    #[test]
     fn list_cached_versions_with_temp_dir() {
         // This test creates a temp dir mimicking the versions cache structure
         let tmp = tempfile::tempdir().unwrap();
