@@ -300,9 +300,14 @@ fn main() {
             app.manage::<SharedAppState>(Arc::new(state_with_https));
 
             // ── Startup diagnostics ──
+            // Update both the status menu item text AND tray tooltip so the
+            // message is visible in production builds (where the status item
+            // is not in the tray menu but the tooltip is always visible).
+            let tray_for_diagnostics = tray.clone();
             if aztec_accelerator::bb::find_bb(None).is_err() {
                 tracing::warn!("bb binary not found at startup");
                 let _ = status_for_diagnostics.set_text("Warning: bb not found");
+                let _ = tray_for_diagnostics.set_tooltip(Some("Warning: bb not found"));
             }
 
             // ── HTTP server ──
@@ -320,6 +325,7 @@ fn main() {
                         "Error: server failed"
                     };
                     let _ = status_for_server.set_text(msg);
+                    let _ = tray_for_diagnostics.set_tooltip(Some(msg));
                 }
             });
 
