@@ -73,12 +73,12 @@ See the [Accelerator README](packages/accelerator/README.md) for installation an
 ## Development
 
 ```bash
-bun install          # Install dependencies
-bun run test         # Lint + typecheck + unit tests
-bun run lint         # Linting only (biome + pkg + rust)
-bun run lint:fix     # Auto-fix lint/format issues
-bun run playground   # Start playground dev server
-bun run sdk:build    # Build SDK
+bun install                              # Install dependencies
+bun run test                             # Lint + typecheck + unit tests
+bun run lint                             # Linting only (biome + pkg + rust)
+bun run lint:fix                         # Auto-fix lint/format issues
+bun run --cwd packages/playground dev    # Start playground dev server
+bun run --cwd packages/sdk build         # Build SDK
 ```
 
 ## Contributing
