@@ -6,6 +6,7 @@
 
 /// Must match `productName` in tauri.conf.json — the auto-launch crate uses this
 /// (not the identifier) as the LaunchAgent plist filename.
+#[cfg(target_os = "macos")]
 const APP_NAME: &str = "Aztec Accelerator";
 
 /// Hyphenated name for systemd unit files (spaces break `systemctl` arguments).
