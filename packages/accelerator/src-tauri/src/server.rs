@@ -141,6 +141,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     #[allow(unused_mut)]
     let mut body = json!({
         "status": "ok",
+        "api_version": 1,
         "version": env!("CARGO_PKG_VERSION"),
         "aztec_version": bundled,
         "available_versions": available,

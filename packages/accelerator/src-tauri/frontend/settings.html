@@ -17,23 +17,23 @@
   <div class="section">
     <h2>General</h2>
     <div class="row">
-      <span>Start on Login</span>
+      <span id="autostart-label">Start on Login</span>
       <label class="toggle">
-        <input type="checkbox" id="autostart" />
+        <input type="checkbox" id="autostart" role="switch" aria-labelledby="autostart-label" />
         <span class="slider"></span>
       </label>
     </div>
     <div class="row">
-      <span>Auto-Update</span>
+      <span id="auto-update-label">Auto-Update</span>
       <label class="toggle">
-        <input type="checkbox" id="auto-update" />
+        <input type="checkbox" id="auto-update" role="switch" aria-labelledby="auto-update-label" />
         <span class="slider"></span>
       </label>
     </div>
     <div id="safari-row" class="row" style="display:none">
-      <span>Safari Support</span>
+      <span id="safari-label">Safari Support</span>
       <label class="toggle">
-        <input type="checkbox" id="safari" />
+        <input type="checkbox" id="safari" role="switch" aria-labelledby="safari-label" />
         <span class="slider"></span>
       </label>
     </div>
@@ -43,7 +43,7 @@
         <span class="speed-value" id="speed-label">Full</span>
       </div>
       <div class="speed-track-wrap">
-        <input type="range" id="speed" class="speed-slider" min="0" max="4" step="1" value="4" />
+        <input type="range" id="speed" class="speed-slider" min="0" max="4" step="1" value="4" aria-label="Proving Speed" />
         <div class="speed-ticks">
           <span>Low</span>
           <span>Light</span>
