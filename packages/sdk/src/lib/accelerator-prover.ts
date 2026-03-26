@@ -150,11 +150,13 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     const envHttpsPort =
       typeof process !== "undefined" ? process.env?.AZTEC_ACCELERATOR_HTTPS_PORT : undefined;
 
+    const parsedPort = envPort ? Number.parseInt(envPort, 10) : NaN;
+    const parsedHttpsPort = envHttpsPort ? Number.parseInt(envHttpsPort, 10) : NaN;
     this.#acceleratorPort =
-      port ?? (envPort ? Number.parseInt(envPort, 10) : DEFAULT_ACCELERATOR_PORT);
+      port ?? (Number.isNaN(parsedPort) ? DEFAULT_ACCELERATOR_PORT : parsedPort);
     this.#acceleratorHttpsPort =
       httpsPort ??
-      (envHttpsPort ? Number.parseInt(envHttpsPort, 10) : DEFAULT_ACCELERATOR_HTTPS_PORT);
+      (Number.isNaN(parsedHttpsPort) ? DEFAULT_ACCELERATOR_HTTPS_PORT : parsedHttpsPort);
     this.#acceleratorHost = host ?? DEFAULT_ACCELERATOR_HOST;
   }
 
@@ -208,10 +210,13 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         })),
       ]);
 
-      this.#acceleratorProtocol = protocol;
-
-      if (!response.ok)
+      if (!response.ok) {
+        // Don't cache protocol on error — a fast error (e.g. HTTPS cert failure)
+        // would permanently set the wrong protocol for subsequent /prove calls.
         return { available: false, needsDownload: false, sdkAztecVersion, protocol };
+      }
+
+      this.#acceleratorProtocol = protocol;
 
       const data = (await response.json()) as {
         aztec_version?: string;
