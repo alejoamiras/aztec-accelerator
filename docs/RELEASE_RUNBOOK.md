@@ -42,6 +42,12 @@ The workflow will:
 - [ ] Download a DMG, open it, verify the app launches and the tray icon appears
 - [ ] Check "About" info in tray menu shows correct version
 - [ ] If updating from a previous version: verify the auto-updater detects the new version
+- [ ] Verify macOS notarization: `spctl --assess --verbose /Applications/Aztec\ Accelerator.app`
+- [ ] Verify updater signatures are valid (non-empty in latest.json, app accepts update)
+
+### Automated artifact checks
+
+The release workflow already asserts all 6 expected files exist before creating the GitHub Release. The `latest.json` is generated from the `.sig` files produced by Tauri's Ed25519 signing step. If signing fails, the `.sig` files will be missing and `latest.json` will have empty signatures — the auto-updater will reject the update (signature verification is mandatory in tauri-plugin-updater).
 
 ### 3. Merge the version-bump PR
 
