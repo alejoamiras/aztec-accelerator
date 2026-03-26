@@ -210,7 +210,11 @@ async fn authorize_origin(
         .and_then(|v| v.to_str().ok())
     {
         Some(o) => o.to_string(),
-        None => return Ok(()), // No Origin header → auto-approve (curl, same-origin)
+        // No Origin header → auto-approve. Browsers always send Origin on cross-origin
+        // requests, so this only applies to curl/scripts/same-origin. Non-browser clients
+        // can bypass auth by omitting Origin, but this is inherent to localhost services —
+        // CORS/Origin is a browser-only mechanism, not a general access control boundary.
+        None => return Ok(()),
     };
 
     let approved = state.config.as_ref().is_some_and(|cfg| {

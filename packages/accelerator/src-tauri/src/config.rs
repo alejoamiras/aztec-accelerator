@@ -80,11 +80,21 @@ pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error 
         }
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, &json)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(json.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &json)?;
     }
     Ok(())
 }
