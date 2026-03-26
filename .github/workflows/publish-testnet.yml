@@ -8,6 +8,10 @@ on:
       - "packages/playground/**"
   workflow_dispatch:
 
+concurrency:
+  group: publish-testnet
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: write
@@ -16,12 +20,13 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     outputs:
       sdk: ${{ steps.filter.outputs.sdk }}
       playground: ${{ steps.filter.outputs.playground }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -46,13 +51,13 @@ jobs:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   deploy-app:
-    # Deploy playground regardless of E2E outcome — it's a static site build
-    # that shouldn't be blocked by SDK test failures.
-    if: ${{ !cancelled() }}
+    # Deploy playground unless E2E explicitly failed — skip on cancel, proceed on skip/success.
+    if: ${{ !cancelled() && needs.e2e.result != 'failure' }}
     needs: e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
 
@@ -64,7 +69,7 @@ jobs:
           SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
         run: bun run --cwd packages/playground build
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
