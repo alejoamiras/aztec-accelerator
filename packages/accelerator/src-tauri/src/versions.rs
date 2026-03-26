@@ -386,9 +386,12 @@ fn extract_bb_from_tarball(
 
         // Look for a file named "bb" at any level in the archive
         if path.file_name().and_then(|n| n.to_str()) == Some("bb") {
-            let entry_type = entry.header().entry_type();
-            if entry_type.is_symlink() || entry_type.is_hard_link() {
-                return Err("bb entry in tarball is a symlink or hard link".into());
+            if entry.header().entry_type() != tar::EntryType::Regular {
+                return Err(format!(
+                    "bb entry in tarball is not a regular file (type: {:?})",
+                    entry.header().entry_type()
+                )
+                .into());
             }
             entry.unpack(dest.join("bb"))?;
             return Ok(());
@@ -667,7 +670,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = extract_bb_from_tarball(&tarball, tmp.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("symlink"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file"));
     }
 
     #[test]
