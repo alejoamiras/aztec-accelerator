@@ -241,6 +241,30 @@ describe("AcceleratorProver", () => {
       expect(status.sdkAztecVersion).toBe(SDK_AZTEC_VERSION);
     });
 
+    test("does not cache protocol on non-ok health response", async () => {
+      // First check: accelerator returns 500 — protocol should NOT be cached
+      mockFetch({
+        "/health": () => new Response("Internal Server Error", { status: 500 }),
+      });
+
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const status1 = await prover.checkAcceleratorStatus();
+      expect(status1.available).toBe(false);
+
+      // Second check: accelerator is healthy — should re-probe and find it
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+      });
+      const status2 = await prover.checkAcceleratorStatus();
+      expect(status2.available).toBe(true);
+      expect(status2.protocol).toBeDefined();
+    });
+
     test("returns available: false on legacy version mismatch", async () => {
       mockFetch({
         "/health": () => Response.json({ status: "ok", aztec_version: "0.0.0-fake" }),
@@ -352,6 +376,36 @@ describe("AcceleratorProver", () => {
       // accelerated mode falls back to WASM when offline
       expect(wasmSpy).toHaveBeenCalled();
       wasmSpy.mockRestore();
+    });
+
+    test("invalid env port falls back to default", async () => {
+      const { fetchedUrls } = mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+      });
+
+      const originalPort = process.env.AZTEC_ACCELERATOR_PORT;
+      process.env.AZTEC_ACCELERATOR_PORT = "not-a-number";
+
+      try {
+        const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+        await prover.checkAcceleratorStatus();
+
+        // Should use default port 59833, not NaN
+        const healthUrls = fetchedUrls.filter((u) => u.includes("/health"));
+        expect(healthUrls.some((u) => u.includes(":59833"))).toBe(true);
+        expect(healthUrls.every((u) => !u.includes("NaN"))).toBe(true);
+      } finally {
+        if (originalPort === undefined) {
+          delete process.env.AZTEC_ACCELERATOR_PORT;
+        } else {
+          process.env.AZTEC_ACCELERATOR_PORT = originalPort;
+        }
+      }
     });
 
     test("env vars override default ports", async () => {
