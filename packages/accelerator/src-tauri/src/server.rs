@@ -1,6 +1,5 @@
 use axum::{
-    body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -374,15 +373,29 @@ fn compute_threads(state: &AppState) -> Option<usize> {
     })
 }
 
+const MAX_BODY_SIZE: usize = 50 * 1024 * 1024; // 50MB
+
 async fn prove(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Result<impl IntoResponse, ProveError> {
     tracing::info!("Received /prove request");
-    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
-    authorize_origin(&state, &headers).await?;
+    // Extract headers before consuming the request body. Run authorization FIRST
+    // so unapproved origins are rejected without buffering the (potentially large) body.
+    let (parts, raw_body) = request.into_parts();
+    authorize_origin(&state, &parts.headers).await?;
+
+    let body = axum::body::to_bytes(raw_body, MAX_BODY_SIZE)
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to read request body: {e}");
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Body too large or unreadable: {e}"),
+            )
+        })?;
+    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
     // Limit to one concurrent prove — bb already uses all cores.
     let _permit = if let Some(ref sem) = state.prove_semaphore {
@@ -396,7 +409,8 @@ async fn prove(
         None
     };
 
-    let requested_version = headers
+    let requested_version = parts
+        .headers
         .get("x-aztec-version")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.to_string());

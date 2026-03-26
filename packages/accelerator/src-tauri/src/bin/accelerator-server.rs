@@ -51,6 +51,7 @@ async fn main() {
     let state = AppState {
         auth_manager,
         config,
+        prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
         ..Default::default()
     };
 

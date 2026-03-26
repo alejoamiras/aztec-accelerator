@@ -5,8 +5,12 @@
 //! - **Linux**: Manages a systemd user service with `Restart=on-failure`.
 
 /// Must match `productName` in tauri.conf.json — the auto-launch crate uses this
-/// (not the identifier) as the LaunchAgent plist filename and systemd service name.
+/// (not the identifier) as the LaunchAgent plist filename.
 const APP_NAME: &str = "Aztec Accelerator";
+
+/// Hyphenated name for systemd unit files (spaces break `systemctl` arguments).
+#[cfg(target_os = "linux")]
+const SYSTEMD_NAME: &str = "aztec-accelerator";
 
 /// Patch the LaunchAgent plist created by tauri-plugin-autostart to add crash recovery keys.
 /// Call this after `manager.enable()`.
@@ -107,7 +111,7 @@ pub fn enable_crash_recovery() {
         return;
     }
 
-    let service_path = service_dir.join(format!("{APP_NAME}.service"));
+    let service_path = service_dir.join(format!("{SYSTEMD_NAME}.service"));
     let service_content = format!(
         "[Unit]\n\
          Description=Aztec Accelerator\n\
@@ -115,7 +119,7 @@ pub fn enable_crash_recovery() {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={exe}\n\
+         ExecStart=\"{exe}\"\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          StartLimitBurst=5\n\
@@ -135,7 +139,7 @@ pub fn enable_crash_recovery() {
         .args(["--user", "daemon-reload"])
         .output();
     let result = std::process::Command::new("systemctl")
-        .args(["--user", "enable", APP_NAME])
+        .args(["--user", "enable", SYSTEMD_NAME])
         .output();
 
     match result {
@@ -157,14 +161,14 @@ pub fn enable_crash_recovery() {
 #[cfg(target_os = "linux")]
 pub fn disable_crash_recovery() {
     let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", APP_NAME])
+        .args(["--user", "disable", SYSTEMD_NAME])
         .output();
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output();
 
     if let Some(config_dir) = dirs::config_dir() {
-        let service_path = config_dir.join(format!("systemd/user/{APP_NAME}.service"));
+        let service_path = config_dir.join(format!("systemd/user/{SYSTEMD_NAME}.service"));
         let _ = std::fs::remove_file(&service_path);
     }
 

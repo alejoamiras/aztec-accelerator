@@ -1,5 +1,16 @@
 use std::error::Error;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// HTTP client with reasonable timeouts for downloading bb binaries and checking digests.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(30))
+        .user_agent("aztec-accelerator")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// Network tier derived from a version string's prerelease suffix.
 /// Controls how many cached bb versions are retained per tier.
@@ -185,10 +196,8 @@ async fn fetch_github_asset_digest(
     let api_url = format!(
         "https://api.github.com/repos/AztecProtocol/aztec-packages/releases/tags/v{version}"
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = http_client()
         .get(&api_url)
-        .header("user-agent", "aztec-accelerator")
         .header("accept", "application/vnd.github+json")
         .send()
         .await?;
@@ -233,13 +242,25 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
     let url = download_url(version);
     tracing::info!(version, %url, "Downloading bb");
 
-    let response = reqwest::get(&url).await?;
+    let response = http_client().get(&url).send().await?;
     if !response.status().is_success() {
         return Err(format!(
             "Failed to download bb v{version}: HTTP {}",
             response.status()
         )
         .into());
+    }
+
+    // Soft Content-Length guard — reject obviously oversized responses.
+    // Some CDNs use chunked encoding with no Content-Length, so skip if absent.
+    const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024; // 500MB
+    if let Some(len) = response.content_length() {
+        if len > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "Download too large ({len} bytes, max {MAX_DOWNLOAD_BYTES}) for bb v{version}"
+            )
+            .into());
+        }
     }
 
     let bytes = response.bytes().await?;
@@ -365,6 +386,10 @@ fn extract_bb_from_tarball(
 
         // Look for a file named "bb" at any level in the archive
         if path.file_name().and_then(|n| n.to_str()) == Some("bb") {
+            let entry_type = entry.header().entry_type();
+            if entry_type.is_symlink() || entry_type.is_hard_link() {
+                return Err("bb entry in tarball is a symlink or hard link".into());
+            }
             entry.unpack(dest.join("bb"))?;
             return Ok(());
         }
@@ -617,6 +642,32 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not found in tarball"));
+    }
+
+    #[test]
+    fn extract_bb_rejects_symlink_entry() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Create a tar.gz with a symlink named "bb" pointing to /etc/passwd
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_link(&mut header, "bb", "/etc/passwd")
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&tarball, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlink"));
     }
 
     #[test]
