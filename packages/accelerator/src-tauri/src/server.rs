@@ -1025,10 +1025,36 @@ mod tests {
         assert!(json["message"].is_string());
     }
 
-    // NOTE: prove_returns_403_on_authorization_timeout would require tokio test-util
-    // feature for time::pause/advance to avoid a real 60s wait. Deferred — the timeout
-    // logic is simple (tokio::time::timeout on line 267) and the JSON shape is covered
-    // by the same json_error() helper tested in the 429 test above.
+    #[tokio::test(start_paused = true)]
+    async fn prove_returns_403_on_authorization_timeout() {
+        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        // Send request from unknown origin — popup fires but nobody resolves it.
+        // start_paused = true means tokio time is auto-advanced when all tasks
+        // are waiting on timers, so the 60s timeout resolves instantly.
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .header("origin", "https://slow-user.com")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "authorization_timeout");
+        assert!(json["message"].is_string());
+    }
 
     // ── Helper unit tests ──
 
