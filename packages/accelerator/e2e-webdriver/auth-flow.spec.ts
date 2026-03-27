@@ -4,9 +4,16 @@
  *
  * This is the highest-value WebDriver test because it exercises concurrent
  * HTTP + GUI interactions that can't be tested with mocked Playwright.
+ *
+ * Skipped on Linux: WebKitGTK's WebDriver implementation returns "Unsupported result type"
+ * for element clicks in secondary windows. The auth popup appears but can't be interacted
+ * with via WebDriver on Linux. Tracked as a tauri-plugin-webdriver limitation.
  */
+import * as os from "node:os";
+
 import { readConfig } from "./helpers.ts";
 
+const IS_LINUX = os.platform() === "linux";
 const TEST_ORIGIN = "https://test-e2e-webdriver.example.com";
 const PROVE_URL = "http://127.0.0.1:59833/prove";
 
@@ -84,7 +91,8 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
   return null;
 }
 
-describe("Authorization Flow", () => {
+// Skip on Linux: WebKitGTK WebDriver can't click elements in secondary windows
+(IS_LINUX ? describe.skip : describe)("Authorization Flow", () => {
   let settingsHandle: string;
   let pendingProve: Promise<Response> | null = null;
 
