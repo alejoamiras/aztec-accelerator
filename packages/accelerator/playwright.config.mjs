@@ -1,8 +1,9 @@
 import { defineConfig } from "@playwright/test";
-import { dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const frontendDir = join(__dirname, "src-tauri", "frontend");
 
 export default defineConfig({
   use: {
@@ -13,7 +14,7 @@ export default defineConfig({
     command: "bunx serve -l 3456 --no-clipboard .",
     port: 3456,
     reuseExistingServer: true,
-    cwd: __dirname,
+    cwd: frontendDir,
   },
   projects: [
     {
