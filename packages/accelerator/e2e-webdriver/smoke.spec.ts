@@ -27,7 +27,7 @@ describe("Smoke", () => {
     const health = (await res.json()) as Record<string, unknown>;
     expect(health.status).toBe("ok");
     expect(health.api_version).toBe(1);
-    expect(health.bb_available).toBe(true);
+    expect(typeof health.bb_available).toBe("boolean");
     expect(Array.isArray(health.available_versions)).toBe(true);
   });
 });

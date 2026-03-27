@@ -16,7 +16,6 @@
     "@wdio/mocha-framework": "^9",
     "@wdio/spec-reporter": "^9",
     "serve": "^14.2.4",
-    "tsx": "^4.21.0",
     "webdriverio": "^9"
   }
 }

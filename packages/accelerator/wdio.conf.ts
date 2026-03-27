@@ -6,15 +6,18 @@
  */
 export const config: WebdriverIO.Config = {
   runner: "local",
-  autoCompileOpts: { tsNodeOpts: { transpileOnly: true } },
-
   hostname: "127.0.0.1",
   port: 4445,
   path: "/",
 
   framework: "mocha",
   reporters: ["spec"],
-  specs: ["./e2e-webdriver/**/*.spec.ts"],
+  // Explicit order: smoke first (basic health), settings, auth-flow last (most complex)
+  specs: [
+    "./e2e-webdriver/smoke.spec.ts",
+    "./e2e-webdriver/settings.spec.ts",
+    "./e2e-webdriver/auth-flow.spec.ts",
+  ],
 
   // Tests share a single app instance + config file — run sequentially
   maxInstances: 1,
