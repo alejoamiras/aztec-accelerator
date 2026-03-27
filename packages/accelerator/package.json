@@ -6,10 +6,16 @@
   "type": "module",
   "scripts": {
     "prebuild": "bun scripts/copy-bb.ts",
-    "test:e2e:ui": "bunx playwright test --config playwright.config.mjs"
+    "test:e2e:ui": "bunx playwright test --config playwright.config.mjs",
+    "test:e2e:webdriver": "npx @wdio/cli run ./wdio.conf.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "serve": "^14.2.4"
+    "@wdio/cli": "^9",
+    "@wdio/local-runner": "^9",
+    "@wdio/mocha-framework": "^9",
+    "@wdio/spec-reporter": "^9",
+    "serve": "^14.2.4",
+    "webdriverio": "^9"
   }
 }

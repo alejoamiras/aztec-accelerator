@@ -172,13 +172,22 @@ fn main() {
     let config_state: ConfigState = Arc::new(RwLock::new(config::load()));
     let auth_manager: AuthState = Arc::new(AuthorizationManager::new());
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_process::init());
+
+    #[cfg(feature = "webdriver")]
+    {
+        builder = builder.plugin(tauri_plugin_webdriver::init());
+        tracing::info!("WebDriver plugin registered (port 4445)");
+    }
+
+    builder
         .manage(config_state.clone())
         .manage(auth_manager.clone())
         .manage::<PendingUpdate>(Arc::new(parking_lot::Mutex::new(None)))
@@ -309,6 +318,10 @@ fn main() {
                 let _ = status_for_diagnostics.set_text("Warning: bb not found");
                 let _ = tray_for_diagnostics.set_tooltip(Some("Warning: bb not found"));
             }
+
+            // ── WebDriver: open Settings window so WebDriver has a browsing context ──
+            #[cfg(feature = "webdriver")]
+            windows::open_settings_window(app.handle());
 
             // ── HTTP server ──
             let mut http_state = state;
