@@ -129,6 +129,26 @@ jobs:
           echo "Smoke test passed"
           kill $SERVER_PID 2>/dev/null || true
 
+  desktop-ui:
+    name: Desktop UI Tests
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - run: bunx playwright install --with-deps chromium
+      - run: bun run --cwd packages/accelerator test:e2e:ui
+
   e2e:
     name: E2E
     needs: changes
@@ -142,7 +162,7 @@ jobs:
   accelerator-status:
     name: Accelerator Status
     if: always()
-    needs: [changes, clippy, test, lint, smoke, e2e]
+    needs: [changes, clippy, test, lint, smoke, desktop-ui, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

@@ -188,6 +188,26 @@ test("safari row hidden on Linux", async ({ page }) => {
   await expect(page.locator("#safari-row")).not.toBeVisible();
 });
 
+test("safari toggle calls enable/disable commands", async ({ page }) => {
+  await page.goto("/settings.html");
+
+  // Enable safari — should call enable_safari_support
+  await page.locator("#safari").evaluate((el: HTMLInputElement) => {
+    el.checked = true;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const enableCalls = await callsFor(page, "enable_safari_support");
+  expect(enableCalls.length).toBe(1);
+
+  // Disable safari — should call disable_safari_support
+  await page.locator("#safari").evaluate((el: HTMLInputElement) => {
+    el.checked = false;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const disableCalls = await callsFor(page, "disable_safari_support");
+  expect(disableCalls.length).toBe(1);
+});
+
 test("auto-update toggle calls set_auto_update", async ({ page }) => {
   await page.goto("/settings.html");
 
@@ -201,9 +221,8 @@ test("auto-update toggle calls set_auto_update", async ({ page }) => {
   expect(calls[0].args).toEqual({ enabled: true });
 });
 
-test("bootstrap failure logs error without crashing", async ({ page }) => {
-  // Make get_config reject — loadSettings() should catch and log
-  jsErrors.length = 0; // Allow the expected error
+test("bootstrap failure renders page without origins or speed", async ({ page }) => {
+  // Make get_config reject — loadSettings() catches and logs
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_config", () => {
       throw new Error("Config unavailable");
@@ -211,12 +230,12 @@ test("bootstrap failure logs error without crashing", async ({ page }) => {
   });
   await page.goto("/settings.html");
 
-  // Page should still be rendered (not blank)
+  // Page should render but with default/empty state — no origins loaded
   await expect(page.locator("body")).toBeVisible();
-
-  // The error is caught by loadSettings().catch() — logged to console, not pageerror.
-  // Clear the jsErrors so afterEach doesn't fail on it
-  jsErrors.length = 0;
+  // Speed label stays at its HTML default "Full" (loadSettings never ran updateSpeedUI)
+  await expect(page.locator("#speed-label")).toHaveText("Full");
+  // Origins list should be empty (renderOrigins never called)
+  await expect(page.locator(".origin-item")).toHaveCount(0);
 });
 
 test("speed error shows hint and reloads settings", async ({ page }) => {

@@ -57,12 +57,13 @@ test("deny calls respond_auth with correct args", async ({ page }) => {
   });
 });
 
-test("both buttons disabled after successful click", async ({ page }) => {
+test("buttons disabled after invoke prevents double-click", async ({ page }) => {
   await page.goto("/authorize.html?origin=https%3A%2F%2Fexample.com");
 
   await page.getByRole("button", { name: "Allow" }).click();
 
-  // wireButton success path: buttons stay disabled (no window close in mock)
+  // wireButton disables both buttons on success. In production, Rust closes the
+  // window immediately — here we verify the frontend prevents double-clicks.
   await expect(page.getByRole("button", { name: "Allow" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Deny" })).toBeDisabled();
 });

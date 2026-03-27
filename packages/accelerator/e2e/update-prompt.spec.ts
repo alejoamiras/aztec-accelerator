@@ -69,6 +69,17 @@ test("both buttons disabled during operation", async ({ page }) => {
   await expect(page.locator("#later")).toBeDisabled();
 });
 
+test("uncheck auto-update sends autoUpdate false on Update Now", async ({ page }) => {
+  await page.goto("/update-prompt.html?current=1.0.0&version=1.1.0");
+
+  // Uncheck "Keep me updated automatically"
+  await page.locator("#auto-update").uncheck();
+  await page.getByRole("button", { name: "Update Now" }).click();
+
+  const calls = await callsFor(page, "respond_update_prompt");
+  expect(calls[0].args).toEqual({ action: "update", autoUpdate: false });
+});
+
 test("missing version params shows unknown", async ({ page }) => {
   await page.goto("/update-prompt.html");
   await expect(page.locator("#version")).toContainText("vunknown");
