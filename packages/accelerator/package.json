@@ -4,6 +4,11 @@
   "private": true,
   "description": "Native proving accelerator for Aztec transactions — bypasses browser WASM throttling",
   "scripts": {
-    "prebuild": "bun scripts/copy-bb.ts"
+    "prebuild": "bun scripts/copy-bb.ts",
+    "test:e2e:ui": "cd src-tauri/frontend && bunx playwright test --config playwright.config.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "serve": "^14.2.4"
   }
 }
