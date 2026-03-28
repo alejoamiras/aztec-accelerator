@@ -5,9 +5,9 @@
  * This is the highest-value WebDriver test because it exercises concurrent
  * HTTP + GUI interactions that can't be tested with mocked Playwright.
  *
- * Skipped on Linux: WebKitGTK's WebDriver implementation returns "Unsupported result type"
- * for element clicks in secondary windows. The auth popup appears but can't be interacted
- * with via WebDriver on Linux. Tracked as a tauri-plugin-webdriver limitation.
+ * On Linux (WebKitGTK), native WebDriver elementClick() returns "Unsupported result type"
+ * even though the click fires successfully. We work around this by using JavaScript clicks
+ * on Linux while keeping native clicks on macOS.
  */
 import * as os from "node:os";
 
@@ -18,9 +18,25 @@ const TEST_ORIGIN = "https://test-e2e-webdriver.example.com";
 const PROVE_URL = "http://127.0.0.1:59833/prove";
 
 /**
+ * Click an element by CSS selector. Uses JS click on Linux (WebKitGTK native
+ * elementClick returns malformed response), native click on macOS.
+ */
+async function clickBy(selector: string): Promise<void> {
+  if (IS_LINUX) {
+    await browser.execute((sel: string) => {
+      (document.querySelector(sel) as HTMLElement)?.click();
+    }, selector);
+    // Small pause — JS click is async, give the IPC time to process
+    await browser.pause(200);
+  } else {
+    const el = await browser.$(selector);
+    await el.click();
+  }
+}
+
+/**
  * Remove the test origin via the Settings UI (Remove button).
  * This triggers the real IPC call which updates both in-memory config and disk.
- * Writing directly to the config file would only update disk, leaving stale in-memory state.
  */
 async function removeTestOriginViaUI(): Promise<void> {
   const url = await browser.getUrl();
@@ -29,11 +45,9 @@ async function removeTestOriginViaUI(): Promise<void> {
     await browser.pause(500);
   }
 
-  // Wait for settings page JS to finish loading (speed-label is populated by loadSettings())
   const speedLabel = await browser.$("#speed-label");
   await speedLabel.waitForExist({ timeout: 5000 });
 
-  // Refresh to ensure we see the latest config
   await browser.refresh();
   await browser.pause(500);
 
@@ -42,9 +56,18 @@ async function removeTestOriginViaUI(): Promise<void> {
     const span = await item.$("span");
     const text = await span.getText();
     if (text === TEST_ORIGIN) {
-      const removeBtn = await item.$("button");
-      await removeBtn.click();
-      await browser.pause(500);
+      if (IS_LINUX) {
+        const btn = await item.$("button");
+        const btnId = await btn.getProperty("id");
+        await browser.execute((id: string) => {
+          document.getElementById(id)?.click();
+        }, btnId as string);
+        await browser.pause(500);
+      } else {
+        const removeBtn = await item.$("button");
+        await removeBtn.click();
+        await browser.pause(500);
+      }
       return;
     }
   }
@@ -67,7 +90,6 @@ async function closeExtraWindows(settingsHandle: string): Promise<void> {
 /**
  * Fire a /prove POST with an unknown origin. The request blocks until the
  * auth popup is resolved (Allow/Deny) or the 60s server timeout fires.
- * Uses Node fetch — Origin header is allowed outside browser context.
  */
 function fireProveRequest(): Promise<Response> {
   return fetch(PROVE_URL, {
@@ -91,8 +113,7 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
   return null;
 }
 
-// Skip on Linux: WebKitGTK WebDriver can't click elements in secondary windows
-(IS_LINUX ? describe.skip : describe)("Authorization Flow", () => {
+describe("Authorization Flow", () => {
   let settingsHandle: string;
   let pendingProve: Promise<Response> | null = null;
 
@@ -102,13 +123,11 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
   });
 
   beforeEach(async () => {
-    // Ensure clean state: close extra windows, switch to Settings
     await closeExtraWindows(settingsHandle);
     await browser.pause(300);
   });
 
   afterEach(async () => {
-    // Consume any dangling /prove request so it doesn't leak into the next test
     if (pendingProve) {
       await pendingProve.catch(() => {});
       pendingProve = null;
@@ -139,27 +158,22 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
     await originText.waitForExist({ timeout: 3000 });
     expect(await originText.getText()).toBe(TEST_ORIGIN);
 
-    // Remember is checked by default
     const remember = await browser.$("#remember");
     expect(await remember.isSelected()).toBe(true);
 
-    // Click Allow
-    const allowBtn = await browser.$("#allow");
-    await allowBtn.click();
+    // Click Allow — use JS click on Linux (WebKitGTK elementClick returns malformed response)
+    await clickBy("#allow");
 
-    // /prove should resolve with non-403 (allowed, but proof data is invalid → 500 or similar)
     const proveResponse = await pendingProve;
     pendingProve = null;
     expect(proveResponse.status).not.toBe(403);
 
-    // Origin saved to config (Remember was checked)
     const config = readConfig();
     const origins = (config.approved_origins as string[]) || [];
     expect(origins).toContain(TEST_ORIGIN);
 
     await browser.switchToWindow(settingsHandle);
 
-    // Clean up for next test: remove the origin via UI
     await browser.refresh();
     await browser.pause(500);
     await removeTestOriginViaUI();
@@ -175,16 +189,12 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
 
     await browser.switchToWindow(authWindowHandle!);
 
-    // Click Deny
-    const denyBtn = await browser.$("#deny");
-    await denyBtn.click();
+    await clickBy("#deny");
 
-    // /prove should return 403 (denied)
     const proveResponse = await pendingProve;
     pendingProve = null;
     expect(proveResponse.status).toBe(403);
 
-    // Origin should NOT be in config
     const config = readConfig();
     const origins = (config.approved_origins as string[]) || [];
     expect(origins).not.toContain(TEST_ORIGIN);
@@ -202,21 +212,18 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
 
     await browser.switchToWindow(authWindowHandle!);
 
-    // Uncheck Remember
+    // Uncheck Remember via JS click
+    await clickBy("#remember");
+    // Verify it's unchecked (native isSelected works fine on Linux)
     const remember = await browser.$("#remember");
-    await remember.click();
     expect(await remember.isSelected()).toBe(false);
 
-    // Click Allow
-    const allowBtn = await browser.$("#allow");
-    await allowBtn.click();
+    await clickBy("#allow");
 
-    // /prove should resolve with non-403 (allowed for this request)
     const proveResponse = await pendingProve;
     pendingProve = null;
     expect(proveResponse.status).not.toBe(403);
 
-    // Origin should NOT be saved to config (Remember was unchecked)
     const config = readConfig();
     const origins = (config.approved_origins as string[]) || [];
     expect(origins).not.toContain(TEST_ORIGIN);
