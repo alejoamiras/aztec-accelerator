@@ -56,18 +56,17 @@ async function removeTestOriginViaUI(): Promise<void> {
     const span = await item.$("span");
     const text = await span.getText();
     if (text === TEST_ORIGIN) {
-      if (IS_LINUX) {
-        const btn = await item.$("button");
-        const btnId = await btn.getProperty("id");
-        await browser.execute((id: string) => {
-          document.getElementById(id)?.click();
-        }, btnId as string);
-        await browser.pause(500);
-      } else {
-        const removeBtn = await item.$("button");
-        await removeBtn.click();
-        await browser.pause(500);
-      }
+      // Use JS click to trigger IPC — native clicks return malformed response on WebKitGTK
+      await browser.execute((origin: string) => {
+        const items = document.querySelectorAll(".origin-item");
+        for (const li of items) {
+          if (li.querySelector("span")?.textContent === origin) {
+            (li.querySelector("button") as HTMLElement)?.click();
+            return;
+          }
+        }
+      }, TEST_ORIGIN);
+      await browser.pause(500);
       return;
     }
   }
