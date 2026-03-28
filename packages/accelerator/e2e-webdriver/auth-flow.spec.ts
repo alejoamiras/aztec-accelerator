@@ -21,17 +21,27 @@ const PROVE_URL = "http://127.0.0.1:59833/prove";
  * Click an element by CSS selector. Uses JS click on Linux (WebKitGTK native
  * elementClick returns malformed response), native click on macOS.
  */
+/**
+ * Click an element by CSS selector. On Linux (WebKitGTK), both native elementClick
+ * and browser.execute() return "Unsupported result type" — but the click DOES fire.
+ * The error occurs because the click handler closes the window (e.g. respond_auth),
+ * and the WebDriver response is lost. We catch and ignore these errors.
+ */
 async function clickBy(selector: string): Promise<void> {
-  if (IS_LINUX) {
-    await browser.execute((sel: string) => {
-      (document.querySelector(sel) as HTMLElement)?.click();
-    }, selector);
-    // Small pause — JS click is async, give the IPC time to process
-    await browser.pause(200);
-  } else {
-    const el = await browser.$(selector);
-    await el.click();
+  try {
+    if (IS_LINUX) {
+      await browser.execute((sel: string) => {
+        (document.querySelector(sel) as HTMLElement)?.click();
+      }, selector);
+    } else {
+      const el = await browser.$(selector);
+      await el.click();
+    }
+  } catch {
+    // On WebKitGTK, clicks that close the window return "Unsupported result type"
+    // or "No window could be found" — but the click succeeded. Ignore the error.
   }
+  await browser.pause(300);
 }
 
 /**
