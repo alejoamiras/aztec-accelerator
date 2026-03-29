@@ -15,6 +15,8 @@ async function mockServicesOnline(page: import("@playwright/test").Page) {
 }
 
 // ── Tests ──
+// Assertions use data-* attributes (data-active, data-status) instead of CSS
+// classes, so design refactors don't break tests.
 
 test("page loads with correct initial state", async ({ page }) => {
   await mockServicesOffline(page);
@@ -24,34 +26,28 @@ test("page loads with correct initial state", async ({ page }) => {
   await expect(page.locator("#embedded-ui")).toBeVisible({ timeout: 10000 });
 
   // Accelerated mode button is active by default
-  const accelBtn = page.locator("#mode-accelerated");
-  await expect(accelBtn).toHaveClass(/mode-active/);
-
-  // Local mode button is not active
-  const localBtn = page.locator("#mode-local");
-  await expect(localBtn).not.toHaveClass(/mode-active/);
+  await expect(page.locator("#mode-accelerated")).toHaveAttribute("data-active", "true");
+  await expect(page.locator("#mode-local")).toHaveAttribute("data-active", "false");
 
   // Action buttons are disabled
   await expect(page.locator("#deploy-btn")).toBeDisabled();
   await expect(page.locator("#token-flow-btn")).toBeDisabled();
 });
 
-test("mode buttons toggle active class", async ({ page }) => {
+test("mode buttons toggle active state", async ({ page }) => {
   await mockServicesOffline(page);
   await page.goto("/");
-
-  // Wait for init to settle
   await expect(page.locator("#log")).toContainText("Checking Aztec node");
 
   // Click Local
   await page.click("#mode-local");
-  await expect(page.locator("#mode-local")).toHaveClass(/mode-active/);
-  await expect(page.locator("#mode-accelerated")).not.toHaveClass(/mode-active/);
+  await expect(page.locator("#mode-local")).toHaveAttribute("data-active", "true");
+  await expect(page.locator("#mode-accelerated")).toHaveAttribute("data-active", "false");
 
   // Click Accelerated
   await page.click("#mode-accelerated");
-  await expect(page.locator("#mode-accelerated")).toHaveClass(/mode-active/);
-  await expect(page.locator("#mode-local")).not.toHaveClass(/mode-active/);
+  await expect(page.locator("#mode-accelerated")).toHaveAttribute("data-active", "true");
+  await expect(page.locator("#mode-local")).toHaveAttribute("data-active", "false");
 });
 
 test("service dots show online when Aztec node responds OK", async ({ page }) => {
@@ -67,16 +63,16 @@ test("service dots show online when Aztec node responds OK", async ({ page }) =>
 
   await page.goto("/");
 
-  // Aztec dot should turn green
-  await expect(page.locator("#aztec-status")).toHaveClass(/status-online/);
+  // Aztec dot should be online
+  await expect(page.locator("#aztec-status")).toHaveAttribute("data-status", "online");
 });
 
 test("service dots show offline when Aztec node fails", async ({ page }) => {
   await mockServicesOffline(page);
   await page.goto("/");
 
-  // Aztec dot should be red
-  await expect(page.locator("#aztec-status")).toHaveClass(/status-offline/);
+  // Aztec dot should be offline
+  await expect(page.locator("#aztec-status")).toHaveAttribute("data-status", "offline");
 });
 
 test("log panel shows checking Aztec node message on load", async ({ page }) => {
