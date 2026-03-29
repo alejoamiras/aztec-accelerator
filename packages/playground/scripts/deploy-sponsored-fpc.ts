@@ -23,6 +23,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { L1FeeJuicePortalManager } from "@aztec/aztec.js/ethereum";
 import { FeeJuicePaymentMethodWithClaim } from "@aztec/aztec.js/fee";
@@ -149,7 +150,7 @@ async function bootstrapAccount(): Promise<{
     messageLeafIndex: claim.messageLeafIndex,
   });
   const { receipt } = await deployMethod.send({
-    from: AztecAddress.ZERO,
+    from: NO_FROM,
     fee: { paymentMethod: feeMethod },
     wait: { returnReceipt: true },
   });

@@ -4,7 +4,8 @@ import {
   AcceleratorProver,
 } from "@alejoamiras/aztec-accelerator";
 import { getInitialTestAccountsData } from "@aztec/accounts/testing/lazy";
-import { AztecAddress } from "@aztec/aztec.js/addresses";
+import { NO_FROM } from "@aztec/aztec.js/account";
+import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import { NO_WAIT } from "@aztec/aztec.js/contracts";
 import { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee";
 import { Fr } from "@aztec/aztec.js/fields";
@@ -493,7 +494,7 @@ export async function deployTestAccount(
     log(`Account: ${accountManager.address.toString()}`);
 
     const sendOpts = {
-      from: state.proofsRequired ? AztecAddress.ZERO : state.registeredAddresses[0],
+      from: state.proofsRequired ? NO_FROM : state.registeredAddresses[0],
       skipClassPublication: true,
       fee: { paymentMethod: state.feePaymentMethod! },
       // Account constructor initializes private storage — needs its own nullifier key in scope.
@@ -501,7 +502,7 @@ export async function deployTestAccount(
     };
 
     // Step 2: Simulate (captures witness gen timing)
-    // Simulate may fail with AztecAddress.ZERO (first deploy on live networks)
+    // Simulate may fail with NO_FROM (first deploy on live networks)
     onStep("simulating deploy");
     log("Simulating deploy...");
     stepStart = Date.now();
@@ -661,7 +662,7 @@ export async function runTokenFlow(
       const bobDeploy = await bobManager.getDeployMethod();
       // Account constructor initializes private storage — needs its own nullifier key in scope.
       const bobSendOpts = {
-        from: AztecAddress.ZERO,
+        from: NO_FROM,
         skipClassPublication: true,
         fee,
         additionalScopes: [bobManager.address],
