@@ -114,6 +114,11 @@ jobs:
         run: |
           echo "Waiting for WebDriver (:4445) and HTTP (:59833)..."
           for i in $(seq 1 90); do
+            if ! kill -0 "$TAURI_PID" 2>/dev/null; then
+              echo "::error::App process crashed during startup"
+              cat /tmp/tauri.log 2>/dev/null || true
+              exit 1
+            fi
             if curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && \
                curl -sf http://127.0.0.1:59833/health >/dev/null 2>&1; then
               echo "Both servers ready after $((i * 2))s"

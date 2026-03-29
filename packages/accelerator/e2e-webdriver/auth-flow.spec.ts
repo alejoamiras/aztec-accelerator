@@ -18,10 +18,6 @@ const TEST_ORIGIN = "https://test-e2e-webdriver.example.com";
 const PROVE_URL = "http://127.0.0.1:59833/prove";
 
 /**
- * Click an element by CSS selector. Uses JS click on Linux (WebKitGTK native
- * elementClick returns malformed response), native click on macOS.
- */
-/**
  * Click an element by CSS selector. On Linux (WebKitGTK), both native elementClick
  * and browser.execute() return "Unsupported result type" — but the click DOES fire.
  * The error occurs because the click handler closes the window (e.g. respond_auth),
@@ -31,7 +27,9 @@ async function clickBy(selector: string): Promise<void> {
   try {
     if (IS_LINUX) {
       await browser.execute((sel: string) => {
-        (document.querySelector(sel) as HTMLElement)?.click();
+        const el = document.querySelector(sel) as HTMLElement;
+        if (!el) throw new Error(`clickBy: element not found for "${sel}"`);
+        el.click();
       }, selector);
     } else {
       const el = await browser.$(selector);
