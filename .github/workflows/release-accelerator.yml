@@ -54,9 +54,17 @@ jobs:
             echo "Created and pushed tag $TAG"
           fi
 
+  e2e-webdriver:
+    name: Pre-release E2E Gate
+    needs: tag
+    uses: ./.github/workflows/_e2e-webdriver.yml
+    with:
+      runner: macos-latest
+      mode: release
+
   build:
     name: Build (${{ matrix.target }})
-    needs: tag
+    needs: [tag, e2e-webdriver]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:

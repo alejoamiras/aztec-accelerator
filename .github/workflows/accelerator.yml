@@ -26,6 +26,7 @@ jobs:
               - 'bun.lock'
               - '.github/workflows/accelerator.yml'
               - '.github/workflows/_e2e.yml'
+              - '.github/workflows/_e2e-webdriver.yml'
               - '.github/actions/**'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
@@ -159,16 +160,33 @@ jobs:
     with:
       build_accelerator: true
 
+  e2e-webdriver:
+    name: E2E WebDriver (${{ matrix.platform }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-latest
+          - platform: linux
+            runner: ubuntu-latest
+    uses: ./.github/workflows/_e2e-webdriver.yml
+    with:
+      runner: ${{ matrix.runner }}
+      mode: dev
+
   accelerator-status:
     name: Accelerator Status
     if: always()
-    needs: [changes, clippy, test, lint, smoke, desktop-ui, e2e]
+    needs: [changes, clippy, test, lint, smoke, desktop-ui, e2e, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.e2e.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

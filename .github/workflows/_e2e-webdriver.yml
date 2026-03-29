@@ -1,0 +1,155 @@
+name: _E2E WebDriver (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "GitHub Actions runner (e.g. ubuntu-latest, macos-latest)"
+        required: true
+        type: string
+      mode:
+        description: "'dev' or 'release'"
+        required: false
+        type: string
+        default: "dev"
+
+jobs:
+  e2e-webdriver:
+    name: WebDriver E2E (${{ inputs.mode }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.mode == 'release' && 35 || 25 }}
+    defaults:
+      run:
+        working-directory: packages/accelerator
+    steps:
+      - uses: actions/checkout@v6
+
+      # ── Toolchain (cross-platform) ──
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/accelerator/src-tauri -> target
+          key: e2e-webdriver-${{ inputs.mode }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+        working-directory: .
+
+      # ── Linux system deps (xvfb + webkit2gtk) ──
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb stalonetray dbus-x11 \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+
+      # ── Prebuild (copies bb sidecar + writes AZTEC_VERSION) ──
+      - run: bun run --cwd packages/accelerator prebuild
+        working-directory: .
+
+      # ── Build (release mode only) ──
+      - name: Build app (release)
+        if: inputs.mode == 'release'
+        working-directory: packages/accelerator/src-tauri
+        run: cargo build --release --features webdriver
+
+      # ── Launch app ──
+      - name: Launch app (dev, macOS)
+        if: inputs.mode == 'dev' && runner.os == 'macOS'
+        run: |
+          npx @tauri-apps/cli@^2 dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
+          echo "TAURI_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Launch app (dev, Linux)
+        if: inputs.mode == 'dev' && runner.os == 'Linux'
+        env:
+          NO_AT_BRIDGE: 1
+        run: |
+          # Start Xvfb + D-Bus session + system tray host (stalonetray)
+          Xvfb :99 -screen 0 1280x1024x24 &
+          export DISPLAY=:99
+          sleep 1
+          eval "$(dbus-launch --sh-syntax)"
+          stalonetray -d none --geometry 1x1+0+0 --kludges force_icons_size &
+          sleep 1
+          npx @tauri-apps/cli@^2 dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
+          {
+            echo "TAURI_PID=$!"
+            echo "DISPLAY=:99"
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+          } >> "$GITHUB_ENV"
+
+      - name: Launch app (release, macOS)
+        if: inputs.mode == 'release' && runner.os == 'macOS'
+        run: |
+          ./src-tauri/target/release/aztec-accelerator > /tmp/tauri.log 2>&1 &
+          echo "TAURI_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Launch app (release, Linux)
+        if: inputs.mode == 'release' && runner.os == 'Linux'
+        env:
+          NO_AT_BRIDGE: 1
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 &
+          export DISPLAY=:99
+          sleep 1
+          eval "$(dbus-launch --sh-syntax)"
+          stalonetray -d none --geometry 1x1+0+0 --kludges force_icons_size &
+          sleep 1
+          ./src-tauri/target/release/aztec-accelerator > /tmp/tauri.log 2>&1 &
+          {
+            echo "TAURI_PID=$!"
+            echo "DISPLAY=:99"
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+          } >> "$GITHUB_ENV"
+
+      # ── Wait for readiness ──
+      - name: Wait for app
+        run: |
+          echo "Waiting for WebDriver (:4445) and HTTP (:59833)..."
+          for i in $(seq 1 90); do
+            if ! kill -0 "$TAURI_PID" 2>/dev/null; then
+              echo "::error::App process crashed during startup"
+              cat /tmp/tauri.log 2>/dev/null || true
+              exit 1
+            fi
+            if curl -sf http://127.0.0.1:4445/status >/dev/null 2>&1 && \
+               curl -sf http://127.0.0.1:59833/health >/dev/null 2>&1; then
+              echo "Both servers ready after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Servers not ready after 180s"
+          cat /tmp/tauri.log 2>/dev/null || true
+          exit 1
+
+      # ── Run tests ──
+      - name: Run WebDriver E2E tests
+        run: bun run test:e2e:webdriver
+
+      # ── Artifacts on failure ──
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: webdriver-e2e-logs-${{ runner.os }}-${{ inputs.mode }}
+          path: /tmp/tauri.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # ── Cleanup ──
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$TAURI_PID" 2>/dev/null || true
+          pkill -P "$TAURI_PID" 2>/dev/null || true
+          pkill -f "aztec-accelerator" 2>/dev/null || true
+          pkill -f stalonetray 2>/dev/null || true
+          pkill -f Xvfb 2>/dev/null || true
