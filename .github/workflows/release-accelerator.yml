@@ -53,6 +53,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
       - name: Create and push tag
         env:
           TAG: ${{ needs.validate.outputs.tag }}
