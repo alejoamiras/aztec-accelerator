@@ -20,7 +20,9 @@ jobs:
           filters: |
             relevant:
               - 'packages/playground/**'
+              - '!packages/playground/**/*.md'
               - 'packages/sdk/**'
+              - '!packages/sdk/**/*.md'
               - 'tsconfig.json'
               - 'biome.json'
               - 'package.json'
