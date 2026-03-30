@@ -18,17 +18,16 @@ permissions:
   pull-requests: write
 
 jobs:
-  tag:
-    name: Create Git Tag
+  validate:
+    name: Validate Version
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-      version: ${{ steps.tag.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Validate version format
+      - name: Validate and output version
+        id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -36,16 +35,28 @@ jobs:
             echo "::error::Invalid version format: '$INPUT_VERSION'. Expected semver (e.g. 1.0.0 or 1.0.0-rc.1)"
             exit 1
           fi
-
-      - name: Create and push tag
-        id: tag
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          TAG="accelerator-v${INPUT_VERSION}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=accelerator-v${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
           echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
 
+  e2e-webdriver:
+    name: Pre-release E2E Gate
+    needs: validate
+    uses: ./.github/workflows/_e2e-webdriver.yml
+    with:
+      runner: macos-latest
+      mode: release
+
+  tag:
+    name: Create Git Tag
+    needs: [validate, e2e-webdriver]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create and push tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping creation"
           else
@@ -54,17 +65,9 @@ jobs:
             echo "Created and pushed tag $TAG"
           fi
 
-  e2e-webdriver:
-    name: Pre-release E2E Gate
-    needs: tag
-    uses: ./.github/workflows/_e2e-webdriver.yml
-    with:
-      runner: macos-latest
-      mode: release
-
   build:
     name: Build (${{ matrix.target }})
-    needs: [tag, e2e-webdriver]
+    needs: [validate, tag]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -110,7 +113,7 @@ jobs:
 
       - name: Patch version in tauri.conf.json
         env:
-          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           cd packages/accelerator/src-tauri
           bun -e "
@@ -121,7 +124,7 @@ jobs:
 
       - name: Patch version in Cargo.toml
         env:
-          RELEASE_VERSION: ${{ needs.tag.outputs.version }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           cd packages/accelerator/src-tauri
           sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
@@ -157,7 +160,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [tag, build]
+    needs: [validate, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -168,7 +171,7 @@ jobs:
 
       - name: Flatten and rename artifacts
         env:
-          VERSION: ${{ needs.tag.outputs.version }}
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
           mkdir -p release-files
 
@@ -209,8 +212,8 @@ jobs:
 
       - name: Generate latest.json for auto-updater
         env:
-          VERSION: ${{ needs.tag.outputs.version }}
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           REPO="alejoamiras/aztec-accelerator"
           BASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
@@ -255,8 +258,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-          VERSION: ${{ needs.tag.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
           # Collect all bundle files into a null-delimited list
           mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name 'latest.json' \) -print0)
@@ -276,6 +279,9 @@ jobs:
           fi
 
           echo "Creating release $RELEASE_TAG..."
+
+          # Read the bundled Aztec/bb version (different from the app version)
+          AZTEC_VER=$(cat packages/accelerator/src-tauri/AZTEC_VERSION)
 
           # Write release notes to file (avoids heredoc/YAML indentation issues)
           cat > /tmp/release-notes.md << NOTES
@@ -297,7 +303,7 @@ jobs:
           The app is **code-signed and notarized** by Apple. Double-click the DMG, drag to Applications, and launch.
 
           ### Aztec Version
-          Built against Aztec \`${VERSION}\`.
+          Built against Aztec \`${AZTEC_VER}\`.
           NOTES
 
           # Strip leading whitespace from each line (YAML indentation artifact)
@@ -325,7 +331,7 @@ jobs:
 
   bump-source:
     name: Bump source version
-    needs: [tag, release]
+    needs: [validate, release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -340,7 +346,7 @@ jobs:
       - name: Compute next version
         id: next
         env:
-          RELEASED: ${{ needs.tag.outputs.version }}
+          RELEASED: ${{ needs.validate.outputs.version }}
         run: |
           # If rc release (1.0.0-rc.7), bump rc number (1.0.0-rc.8)
           # If stable release (1.0.0), bump patch and start rc.1 (1.0.1-rc.1)
@@ -378,7 +384,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           NEXT_VERSION: ${{ steps.next.outputs.version }}
-          RELEASED: ${{ needs.tag.outputs.version }}
+          RELEASED: ${{ needs.validate.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

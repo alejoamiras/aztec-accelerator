@@ -289,7 +289,7 @@ fn main() {
                         tracing::error!("set_tooltip failed: {e}");
                     }
                     let active = text.contains("Proving") || text.contains("Downloading");
-                    is_animating_for_status.store(active, Ordering::Relaxed);
+                    is_animating_for_status.store(active, Ordering::Release);
                 })),
                 bundled_version: Some(bundled_version),
                 on_versions_changed: Some(on_versions_changed),
