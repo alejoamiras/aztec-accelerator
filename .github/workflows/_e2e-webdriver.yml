@@ -83,6 +83,7 @@ jobs:
             echo "TAURI_PID=$!"
             echo "DISPLAY=:99"
             echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+            echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
           } >> "$GITHUB_ENV"
 
       - name: Launch app (release, macOS)
@@ -107,13 +108,15 @@ jobs:
             echo "TAURI_PID=$!"
             echo "DISPLAY=:99"
             echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+            echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
           } >> "$GITHUB_ENV"
 
       # ── Wait for readiness ──
       - name: Wait for app
         run: |
           echo "Waiting for WebDriver (:4445) and HTTP (:59833)..."
-          for i in $(seq 1 90); do
+          # 300 iterations x 2s = 600s (10 min) — cold Rust cache can take 5+ min
+          for i in $(seq 1 300); do
             if ! kill -0 "$TAURI_PID" 2>/dev/null; then
               echo "::error::App process crashed during startup"
               cat /tmp/tauri.log 2>/dev/null || true
@@ -126,7 +129,7 @@ jobs:
             fi
             sleep 2
           done
-          echo "::error::Servers not ready after 180s"
+          echo "::error::Servers not ready after 600s"
           cat /tmp/tauri.log 2>/dev/null || true
           exit 1
 
@@ -153,3 +156,4 @@ jobs:
           pkill -f "aztec-accelerator" 2>/dev/null || true
           pkill -f stalonetray 2>/dev/null || true
           pkill -f Xvfb 2>/dev/null || true
+          kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true

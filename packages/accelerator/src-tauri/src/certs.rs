@@ -197,7 +197,10 @@ pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + S
         }
     }
 
-    // Load existing CA from PEM and re-sign
+    // Load existing CA from PEM for signing the new leaf.
+    // from_ca_cert_pem preserves serial number, validity dates, and all extensions
+    // from the original cert, so self_signed produces byte-identical DER — the
+    // Keychain trust entry (matched by certificate fingerprint) remains valid.
     let ca_key_pem = std::fs::read_to_string(ca_key_path())?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
 

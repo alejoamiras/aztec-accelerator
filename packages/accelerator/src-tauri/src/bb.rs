@@ -95,9 +95,13 @@ pub async fn prove(
         "--scheme",
         "chonk",
         "--ivc_inputs_path",
-        input_path.to_str().unwrap(),
+        input_path
+            .to_str()
+            .ok_or("temp input path contains non-UTF-8 characters")?,
         "-o",
-        output_dir.to_str().unwrap(),
+        output_dir
+            .to_str()
+            .ok_or("temp output path contains non-UTF-8 characters")?,
     ]);
     if let Some(t) = threads {
         // bb uses HARDWARE_CONCURRENCY env var to control thread count.
