@@ -168,10 +168,11 @@ describe("Authorization Flow", () => {
     expect(authWindowHandle).not.toBeNull();
 
     await browser.switchToWindow(authWindowHandle!);
-    expect(await browser.getTitle()).toBe("Authorize Site");
 
+    // Wait for the auth popup page to load before checking title/content
     const originText = await browser.$("#origin");
-    await originText.waitForExist({ timeout: 3000 });
+    await originText.waitForExist({ timeout: 5000 });
+    expect(await browser.getTitle()).toBe("Authorize Site");
     expect(await originText.getText()).toBe(TEST_ORIGIN);
 
     const remember = await browser.$("#remember");
