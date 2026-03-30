@@ -35,9 +35,18 @@ async function clickBy(selector: string): Promise<void> {
       const el = await browser.$(selector);
       await el.click();
     }
-  } catch {
+  } catch (err) {
     // On WebKitGTK, clicks that close the window return "Unsupported result type"
-    // or "No window could be found" — but the click succeeded. Ignore the error.
+    // or "No window could be found" — but the click succeeded. Only swallow these
+    // known errors; re-throw genuine failures (wrong selector, element not found).
+    const msg = String(err);
+    if (
+      !msg.includes("Unsupported result") &&
+      !msg.includes("No window") &&
+      !msg.includes("no such window")
+    ) {
+      throw err;
+    }
   }
   await browser.pause(300);
 }

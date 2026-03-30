@@ -83,6 +83,7 @@ jobs:
             echo "TAURI_PID=$!"
             echo "DISPLAY=:99"
             echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+            echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
           } >> "$GITHUB_ENV"
 
       - name: Launch app (release, macOS)
@@ -107,6 +108,7 @@ jobs:
             echo "TAURI_PID=$!"
             echo "DISPLAY=:99"
             echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+            echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
           } >> "$GITHUB_ENV"
 
       # ── Wait for readiness ──
@@ -153,3 +155,4 @@ jobs:
           pkill -f "aztec-accelerator" 2>/dev/null || true
           pkill -f stalonetray 2>/dev/null || true
           pkill -f Xvfb 2>/dev/null || true
+          kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true

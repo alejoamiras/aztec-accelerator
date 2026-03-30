@@ -220,6 +220,14 @@ jobs:
           DARWIN_X86_64_SIG=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
           LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
 
+          # Assert all signatures are present — empty sigs produce broken auto-updates
+          for sig_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG; do
+            if [ -z "${!sig_name}" ]; then
+              echo "::error::Missing signature: $sig_name — cannot generate latest.json"
+              exit 1
+            fi
+          done
+
           jq -n \
             --arg version "$VERSION" \
             --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
