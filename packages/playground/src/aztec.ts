@@ -330,8 +330,20 @@ export interface StepTiming {
 
 const EXPLORER_BASE = "https://testnet.aztecscan.xyz/tx-effects";
 
-/** Captured from the `"proved"` phase callback — read and reset after each send. */
-let _lastProveMs: number | undefined;
+/** Create a scoped prove-timing tracker. Avoids module-level shared state. */
+function createProveTracker() {
+  let ms: number | undefined;
+  return {
+    set(value: number) {
+      ms = value;
+    },
+    take(): number | undefined {
+      const v = ms;
+      ms = undefined;
+      return v;
+    },
+  };
+}
 
 export interface DeployResult {
   address: string;
@@ -403,8 +415,9 @@ async function executeStep(opts: {
   sendOpts: Record<string, unknown>;
   log: LogFn;
   onConfirming: () => void;
+  proveTracker: ReturnType<typeof createProveTracker>;
 }): Promise<{ timing: StepTiming; txHash: string }> {
-  const { step, method, sendOpts, log, onConfirming } = opts;
+  const { step, method, sendOpts, log, onConfirming, proveTracker } = opts;
   const stepStart = Date.now();
 
   const simResult = await method.simulate({ ...sendOpts, includeMetadata: true });
@@ -413,8 +426,7 @@ async function executeStep(opts: {
   const sendStart = Date.now();
   const hash = await sendWithRetry(method, sendOpts, log);
   const proveSendMs = Date.now() - sendStart;
-  const proveMs = _lastProveMs;
-  _lastProveMs = undefined;
+  const proveMs = proveTracker.take();
 
   onConfirming();
   const confirmStart = Date.now();
@@ -466,10 +478,11 @@ export async function deployTestAccount(
   const mode = state.uiMode;
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
+  const proveTracker = createProveTracker();
   state.prover?.setOnPhase(
     onPhase
       ? (phase, data) => {
-          if (phase === "proved" && data?.durationMs) _lastProveMs = data.durationMs;
+          if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
           onPhase(phase, data);
         }
       : null,
@@ -528,8 +541,7 @@ export async function deployTestAccount(
 
     const txHash = await sendWithRetry(deployMethod, sendOpts, log);
     const proveSendMs = Date.now() - stepStart;
-    const proveMs = _lastProveMs;
-    _lastProveMs = undefined;
+    const proveMs = proveTracker.take();
 
     onStep("confirming");
     const confirmStart = Date.now();
@@ -580,10 +592,11 @@ export async function deployToken(
   const alice = state.registeredAddresses[state.selectedAccountIndex];
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
+  const proveTracker = createProveTracker();
   state.prover?.setOnPhase(
     onPhase
       ? (phase, data) => {
-          if (phase === "proved" && data?.durationMs) _lastProveMs = data.durationMs;
+          if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
           onPhase(phase, data);
         }
       : null,
@@ -603,6 +616,7 @@ export async function deployToken(
       sendOpts: { from: alice, fee: { paymentMethod: state.feePaymentMethod! } },
       log,
       onConfirming: () => onStep("confirming token deploy"),
+      proveTracker,
     });
     steps.push(tokenStep);
 
@@ -636,10 +650,11 @@ export async function runTokenFlow(
   const fee = { paymentMethod: state.feePaymentMethod! };
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
+  const proveTracker = createProveTracker();
   state.prover?.setOnPhase(
     onPhase
       ? (phase, data) => {
-          if (phase === "proved" && data?.durationMs) _lastProveMs = data.durationMs;
+          if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
           onPhase(phase, data);
         }
       : null,
@@ -673,6 +688,7 @@ export async function runTokenFlow(
         sendOpts: bobSendOpts,
         log,
         onConfirming: () => onStep("confirming bob"),
+        proveTracker,
       });
       bob = bobManager.address;
       state.registeredAddresses.push(bob);
@@ -694,6 +710,7 @@ export async function runTokenFlow(
       sendOpts: { from: alice, fee },
       log,
       onConfirming: () => onStep("confirming token deploy"),
+      proveTracker,
     });
     const token = TokenContract.at(tokenDeploy.address!, state.wallet);
     steps.push(tokenStep);
@@ -712,6 +729,7 @@ export async function runTokenFlow(
       sendOpts: { from: alice, fee },
       log,
       onConfirming: () => onStep("confirming mint"),
+      proveTracker,
     });
     steps.push(mintStep);
     log(
@@ -729,6 +747,7 @@ export async function runTokenFlow(
       sendOpts: { from: alice, fee },
       log,
       onConfirming: () => onStep("confirming transfer"),
+      proveTracker,
     });
     steps.push(transferStep);
     log(

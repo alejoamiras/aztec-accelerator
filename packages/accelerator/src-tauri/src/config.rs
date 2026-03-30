@@ -103,6 +103,10 @@ pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error 
         }
     }
     let json = serde_json::to_string_pretty(config)?;
+
+    // Write to a temp file then rename for atomicity — if the process crashes
+    // mid-write, the original config.json is untouched.
+    let tmp_path = path.with_extension("json.tmp");
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -112,13 +116,14 @@ pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error 
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(&tmp_path)?;
         file.write_all(json.as_bytes())?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, &json)?;
+        std::fs::write(&tmp_path, &json)?;
     }
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 

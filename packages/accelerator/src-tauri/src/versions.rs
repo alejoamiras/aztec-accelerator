@@ -113,6 +113,19 @@ pub fn download_url(version: &str) -> String {
     )
 }
 
+/// Extract a sort key from a version string. Parses the numeric suffix after
+/// the prerelease label (e.g., "rc.10" → 10) so RC versions sort numerically
+/// rather than lexicographically ("rc.2" < "rc.10").
+/// For date-based suffixes (nightly, devnet), lexicographic order is already correct.
+fn version_sort_key(version: &str) -> (String, u64) {
+    if let Some((base, prerelease)) = version.rsplit_once('.') {
+        if let Ok(n) = prerelease.parse::<u64>() {
+            return (base.to_string(), n);
+        }
+    }
+    (version.to_string(), 0)
+}
+
 /// Determine which cached versions should be evicted per the retention policy.
 ///
 /// - Groups versions by tier
@@ -131,8 +144,9 @@ pub fn versions_to_evict(cached: &[String], bundled_version: &str) -> Vec<String
     let mut to_evict = Vec::new();
     for (tier, mut versions) in by_tier {
         if let Some(limit) = tier.retention_limit() {
-            // Sort ascending (oldest first for date-based suffixes)
-            versions.sort();
+            // Sort ascending (oldest first). Use version-aware sort: for RC versions,
+            // parse the numeric suffix so "rc.2" < "rc.10" (not lexicographic where "rc.10" < "rc.2").
+            versions.sort_by_key(|v| version_sort_key(v));
             // Remove bundled from the candidate list (it's always kept)
             versions.retain(|v| v.as_str() != bundled_version);
             // Evict oldest non-bundled versions until we're within the limit
@@ -486,6 +500,23 @@ mod tests {
         ];
         let evicted = versions_to_evict(&cached, "5.0.0");
         assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn rc_versions_sort_numerically_not_lexicographically() {
+        // With lexicographic sort, rc.10 < rc.2 — wrong!
+        // With numeric sort, rc.1 < rc.2 < rc.3 < rc.10 — correct.
+        let cached: Vec<String> = vec![
+            "4.0.0-rc.1".into(),
+            "4.0.0-rc.2".into(),
+            "4.0.0-rc.3".into(),
+            "4.0.0-rc.10".into(),
+            "4.0.0-rc.11".into(),
+            "4.0.0-rc.20".into(),
+        ];
+        // Testnet tier: keep 5, evict 1 (oldest = rc.1)
+        let evicted = versions_to_evict(&cached, "4.0.0-rc.20");
+        assert_eq!(evicted, vec!["4.0.0-rc.1"]);
     }
 
     #[test]

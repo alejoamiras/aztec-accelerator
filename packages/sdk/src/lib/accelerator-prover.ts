@@ -407,6 +407,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   }
 
   #getAztecVersion(): string | undefined {
-    return (sdkPkg.dependencies as Record<string, string | undefined>)["@aztec/stdlib"];
+    // Strip semver range prefixes (^, ~, >=) in case the dependency isn't pinned.
+    // The server's is_valid_version rejects non-alphanumeric characters.
+    return (sdkPkg.dependencies as Record<string, string | undefined>)["@aztec/stdlib"]?.replace(
+      /^[^0-9]*/,
+      "",
+    );
   }
 }
