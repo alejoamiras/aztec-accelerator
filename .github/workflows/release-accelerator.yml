@@ -158,9 +158,81 @@ jobs:
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.sig
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.sig
 
+  smoke:
+    name: Post-build Smoke
+    needs: [validate, build]
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: accelerator-macos-arm64
+          path: artifacts
+
+      - name: Mount DMG and launch
+        run: |
+          DMG=$(find artifacts -name '*.dmg' | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::No DMG found in artifacts"
+            ls -la artifacts/
+            exit 1
+          fi
+          echo "Mounting $DMG..."
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator
+
+          # Find and launch the app binary
+          APP_BIN=$(find /Volumes/AztecAccelerator -name "aztec-accelerator" -path "*/MacOS/*" | head -1)
+          if [ -z "$APP_BIN" ]; then
+            echo "::error::Binary not found in DMG"
+            find /Volumes/AztecAccelerator -type f
+            exit 1
+          fi
+          echo "Launching $APP_BIN..."
+          "$APP_BIN" > /tmp/smoke.log 2>&1 &
+          echo "SMOKE_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 30); do
+            if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
+              echo "::error::App crashed on launch"
+              cat /tmp/smoke.log
+              exit 1
+            fi
+            if curl -sf http://127.0.0.1:59833/health > /dev/null 2>&1; then
+              echo "Health check passed after $((i * 2))s"
+              HEALTH=$(curl -sf http://127.0.0.1:59833/health)
+              echo "$HEALTH" | jq .
+              echo "$HEALTH" | jq -e '.status == "ok"' > /dev/null
+              echo "$HEALTH" | jq -e '.api_version == 1' > /dev/null
+              echo "Post-build smoke passed"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Health check failed after 60s"
+          cat /tmp/smoke.log
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$SMOKE_PID" 2>/dev/null || true
+          pkill -f "aztec-accelerator" 2>/dev/null || true
+          hdiutil detach /Volumes/AztecAccelerator 2>/dev/null || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: post-build-smoke-logs
+          path: /tmp/smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   release:
     name: Create GitHub Release
-    needs: [validate, build]
+    needs: [validate, build, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
