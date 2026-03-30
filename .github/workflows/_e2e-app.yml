@@ -37,7 +37,13 @@ jobs:
         with:
           skip_cli: ${{ inputs.aztec_node_url != 'http://localhost:8080' }}
 
+      - uses: actions/cache@v5
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/playground/package.json') }}
       - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
         run: bunx playwright install --with-deps chromium
 
       - uses: ./.github/actions/start-services

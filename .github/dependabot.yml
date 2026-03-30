@@ -9,6 +9,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # @aztec/* packages are managed by scripts/update-aztec-version.ts
+      # and the _aztec-update.yml workflow — not by dependabot.
+      - dependency-name: "@aztec/*"
   - package-ecosystem: "cargo"
     directory: "/packages/accelerator/src-tauri"
     schedule:

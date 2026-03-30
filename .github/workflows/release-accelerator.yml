@@ -136,7 +136,7 @@ jobs:
         run: bun run --cwd packages/accelerator prebuild
 
       - name: Build Tauri bundle
-        run: npx @tauri-apps/cli@^2 build --target ${{ matrix.target }}
+        run: bunx tauri build --target ${{ matrix.target }}
         working-directory: packages/accelerator
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

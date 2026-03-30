@@ -147,7 +147,13 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
+      - uses: actions/cache@v5
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/accelerator/package.json') }}
       - run: bunx playwright install --with-deps chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
       - run: bun run --cwd packages/accelerator test:e2e:ui
 
   e2e:
