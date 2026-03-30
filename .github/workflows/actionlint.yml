@@ -45,12 +45,21 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/cache@v5
+        id: actionlint-cache
+        with:
+          path: ./actionlint
+          key: actionlint-v1.7.11-${{ runner.os }}
       - name: Download actionlint
+        if: steps.actionlint-cache.outputs.cache-hit != 'true'
         id: get_actionlint
         run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.11/scripts/download-actionlint.bash)
         shell: bash
       - name: Run actionlint
-        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        run: |
+          ACTIONLINT="${{ steps.get_actionlint.outputs.executable }}"
+          [ -z "$ACTIONLINT" ] && ACTIONLINT="./actionlint"
+          "$ACTIONLINT" -color
         shell: bash
 
   shellcheck:

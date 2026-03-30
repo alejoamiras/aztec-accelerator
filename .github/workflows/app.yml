@@ -89,7 +89,13 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
+      - uses: actions/cache@v5
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/playground/package.json') }}
       - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
         run: bunx playwright install --with-deps chromium
       - run: bun run --cwd packages/playground test:e2e
 
@@ -110,7 +116,13 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
+      - uses: actions/cache@v5
+        id: pw-cache-prod
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/playground/package.json') }}
       - name: Install Playwright browsers
+        if: steps.pw-cache-prod.outputs.cache-hit != 'true'
         run: bunx playwright install --with-deps chromium
       - run: bun run --cwd packages/playground test:e2e:production-smoke
 
