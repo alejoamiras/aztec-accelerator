@@ -126,6 +126,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   #acceleratorHttpsPort: number;
   #acceleratorHost: string;
   #acceleratorProtocol: "http" | "https" | null = null;
+  #statusCache: { result: AcceleratorStatus; timestamp: number } | null = null;
+  static readonly #STATUS_CACHE_TTL = 10_000; // 10 seconds
   #forceLocal = false;
 
   constructor(options?: AcceleratorProverOptions) {
@@ -190,6 +192,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    * Use it to show "Accelerator connected" / "Offline" in your UI before a prove call.
    */
   async checkAcceleratorStatus(): Promise<AcceleratorStatus> {
+    // Return cached result if still fresh — avoids re-probing on every proof call
+    // and eliminates the 1s retry delay when the accelerator is offline.
+    if (
+      this.#statusCache &&
+      Date.now() - this.#statusCache.timestamp < AcceleratorProver.#STATUS_CACHE_TTL
+    ) {
+      return this.#statusCache.result;
+    }
+
     const sdkAztecVersion = this.#getAztecVersion();
     const httpUrl = `http://${this.#acceleratorHost}:${this.#acceleratorPort}/health`;
     const httpsUrl = `https://${this.#acceleratorHost}:${this.#acceleratorHttpsPort}/health`;
@@ -207,6 +218,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           protocol: "https" as const,
         })),
       ]);
+
+    const cacheAndReturn = (status: AcceleratorStatus): AcceleratorStatus => {
+      this.#statusCache = { result: status, timestamp: Date.now() };
+      return status;
+    };
 
     try {
       // Probe both HTTP and HTTPS in parallel — whichever responds first wins.
@@ -226,7 +242,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       if (!response.ok) {
         // Don't cache protocol on error — a fast error (e.g. HTTPS cert failure)
         // would permanently set the wrong protocol for subsequent /prove calls.
-        return { available: false, needsDownload: false, sdkAztecVersion, protocol };
+        return cacheAndReturn({
+          available: false,
+          needsDownload: false,
+          sdkAztecVersion,
+          protocol,
+        });
       }
 
       this.#acceleratorProtocol = protocol;
@@ -250,14 +271,14 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           needsDownload,
           protocol,
         });
-        return {
+        return cacheAndReturn({
           available: true,
           needsDownload,
           acceleratorVersion,
           availableVersions,
           sdkAztecVersion,
           protocol,
-        };
+        });
       }
 
       // Legacy protocol: exact version match
@@ -267,25 +288,25 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             accelerator: acceleratorVersion,
             sdk: sdkAztecVersion,
           });
-          return {
+          return cacheAndReturn({
             available: false,
             needsDownload: false,
             acceleratorVersion,
             sdkAztecVersion,
             protocol,
-          };
+          });
         }
       }
-      return {
+      return cacheAndReturn({
         available: true,
         needsDownload: false,
         acceleratorVersion,
         sdkAztecVersion,
         protocol,
-      };
+      });
     } catch {
       this.#acceleratorProtocol = null;
-      return { available: false, needsDownload: false, sdkAztecVersion };
+      return cacheAndReturn({ available: false, needsDownload: false, sdkAztecVersion });
     }
   }
 

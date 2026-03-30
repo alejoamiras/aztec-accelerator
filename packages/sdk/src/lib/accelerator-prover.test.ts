@@ -283,6 +283,10 @@ describe("AcceleratorProver", () => {
       const status1 = await prover.checkAcceleratorStatus();
       expect(status1.available).toBe(false);
 
+      // Advance past the status cache TTL (10s) so the next call re-probes
+      const realNow = Date.now;
+      Date.now = () => realNow() + 11_000;
+
       // Second check: accelerator is healthy — should re-probe and find it
       mockFetch({
         "/health": () =>
@@ -295,6 +299,8 @@ describe("AcceleratorProver", () => {
       const status2 = await prover.checkAcceleratorStatus();
       expect(status2.available).toBe(true);
       expect(status2.protocol).toBeDefined();
+
+      Date.now = realNow; // restore
     });
 
     test("returns available: false on legacy version mismatch", async () => {

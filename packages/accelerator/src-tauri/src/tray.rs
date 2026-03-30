@@ -144,7 +144,7 @@ pub fn start_animation_loop(tray: TrayIcon, handle: AppHandle, is_animating: Arc
         let mut was_animating = false;
         loop {
             interval.tick().await;
-            let animating = is_animating.load(Ordering::Relaxed);
+            let animating = is_animating.load(Ordering::Acquire);
             if animating {
                 let tray = tray.clone();
                 let frame = frame_idx;
