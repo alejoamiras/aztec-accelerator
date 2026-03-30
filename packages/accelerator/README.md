@@ -220,7 +220,7 @@ bun run --filter accelerator prebuild
 cd packages/accelerator/src-tauri
 cargo tauri dev
 
-# Run tests
+# Run Rust tests (~90 tests)
 cargo test
 
 # Build release bundle (.dmg / .deb / .AppImage)
@@ -229,3 +229,48 @@ cargo tauri build
 # Quick-run the production menu locally (release build, no bundling)
 cargo run --release
 ```
+
+## Testing
+
+### Rust unit tests (~90)
+```bash
+cargo test --manifest-path packages/accelerator/src-tauri/Cargo.toml
+```
+
+### Playwright UI mock tests (28)
+Tests the Settings, Authorization, and Update Prompt windows with mocked Tauri IPC:
+```bash
+bun run --cwd packages/accelerator test:e2e:ui
+```
+
+### WebDriver E2E tests (9)
+Real end-to-end tests that launch the actual Tauri app via `tauri-plugin-webdriver` and drive it with WebdriverIO. Covers smoke (app health), settings (speed persistence), and auth flow (Allow/Deny/Remember).
+
+```bash
+# Terminal 1: launch app with WebDriver
+cargo tauri dev --features webdriver
+
+# Terminal 2: run tests
+bun run --cwd packages/accelerator test:e2e:webdriver
+```
+
+These run on both macOS and Linux in CI as a PR gate (`accelerator.yml`) and pre-release gate (`release-accelerator.yml`).
+
+### Cross-version download test
+Tests the full bb binary download pipeline (HTTP → SHA-256 → extract → cache). Gated behind `ACCELERATOR_DOWNLOAD_TEST=1`:
+```bash
+ACCELERATOR_DOWNLOAD_TEST=1 cargo test download_and_verify -- --nocapture
+```
+
+## Release Pipeline
+
+Releases are triggered via `gh workflow run release-accelerator.yml -f version=X.Y.Z`.
+
+```
+validate → e2e-webdriver gate → tag → build (3 platforms) → post-build smoke → release → bump
+```
+
+- **E2E gate**: builds with `--features webdriver`, runs 9 WebDriver tests (macOS, release mode)
+- **Post-build smoke**: mounts the signed DMG, launches the app, polls `/health`
+- **Release**: creates GitHub Release with DMGs/debs/AppImages + `latest.json` for auto-updater
+- **Bump**: auto-creates PR to bump source version

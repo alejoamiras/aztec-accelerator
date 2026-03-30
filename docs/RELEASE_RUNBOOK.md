@@ -16,15 +16,14 @@
 gh workflow run release-accelerator.yml -f version=X.Y.Z
 ```
 
-The workflow will:
-1. Validate version format (semver regex)
-2. Create and push a git tag `accelerator-vX.Y.Z`
-3. Build for macOS (Apple Silicon + Intel) and Linux (x86_64)
-4. Sign updater artifacts with Ed25519 (`TAURI_SIGNING_PRIVATE_KEY`)
-5. Notarize macOS builds (Apple Developer ID)
-6. Create a GitHub Release with all assets
-7. Generate and upload `latest.json` to S3 for auto-updater
-8. Create a version-bump PR for the next RC
+The workflow pipeline:
+1. **Validate** — check semver format, output version strings
+2. **E2E WebDriver gate** — build with `--features webdriver`, run 9 WebDriver tests (macOS, release mode)
+3. **Create tag** — push `accelerator-vX.Y.Z` (only after E2E passes)
+4. **Build** — 3 platforms: macOS ARM, macOS Intel, Linux x86_64
+5. **Post-build smoke** — mount macOS DMG, launch signed app, poll `/health`
+6. **Release** — create GitHub Release, validate signatures, upload `latest.json` to S3
+7. **Bump** — auto-create PR for next RC version
 
 ### 2. Post-release verification
 
