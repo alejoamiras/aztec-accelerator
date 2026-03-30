@@ -63,7 +63,7 @@ jobs:
       - name: Launch app (dev, macOS)
         if: inputs.mode == 'dev' && runner.os == 'macOS'
         run: |
-          npx @tauri-apps/cli@^2 dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
+          bunx tauri dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
           echo "TAURI_PID=$!" >> "$GITHUB_ENV"
 
       - name: Launch app (dev, Linux)
@@ -78,7 +78,7 @@ jobs:
           eval "$(dbus-launch --sh-syntax)"
           stalonetray -d none --geometry 1x1+0+0 --kludges force_icons_size &
           sleep 1
-          npx @tauri-apps/cli@^2 dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
+          bunx tauri dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
           {
             echo "TAURI_PID=$!"
             echo "DISPLAY=:99"
