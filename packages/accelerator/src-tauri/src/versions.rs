@@ -787,4 +787,64 @@ mod tests {
         assert!(v2_dir.join("bb").exists());
         assert!(!v3_dir.join("bb").exists());
     }
+
+    /// Full download E2E: download a real bb binary from GitHub, verify SHA-256,
+    /// extract, and confirm the binary is cached and executable.
+    /// Gated behind ACCELERATOR_DOWNLOAD_TEST to avoid network calls in regular CI.
+    #[tokio::test]
+    async fn download_and_verify_bb() {
+        if std::env::var("ACCELERATOR_DOWNLOAD_TEST").is_err() {
+            eprintln!(
+                "Skipping download_and_verify_bb (set ACCELERATOR_DOWNLOAD_TEST=1 to enable)"
+            );
+            return;
+        }
+
+        // Use the bundled version — guaranteed to exist on GitHub releases
+        let version = std::env::var("AZTEC_BB_VERSION").unwrap_or("4.2.0-aztecnr-rc.2".to_string());
+
+        // Delete cached version to force a fresh download
+        let cached_dir = versions_base_dir().join(&version);
+        if cached_dir.exists() {
+            std::fs::remove_dir_all(&cached_dir).unwrap();
+        }
+        assert!(
+            !version_bb_path(&version).exists(),
+            "cache should be cleared"
+        );
+
+        // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
+        let bb_path = download_bb(&version)
+            .await
+            .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
+
+        // Verify the binary was cached in the right location
+        assert_eq!(bb_path, version_bb_path(&version));
+        assert!(bb_path.exists(), "bb binary should exist after download");
+
+        // Verify it's a real file (not a directory or symlink)
+        let metadata = std::fs::metadata(&bb_path).unwrap();
+        assert!(metadata.is_file(), "bb should be a regular file");
+        assert!(
+            metadata.len() > 1_000_000,
+            "bb binary should be >1MB (got {} bytes)",
+            metadata.len()
+        );
+
+        // Verify it's executable (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            assert!(
+                mode & 0o111 != 0,
+                "bb should be executable (mode: {mode:#o})"
+            );
+        }
+
+        // Clean up — don't leave test artifacts in the user's cache
+        if cached_dir.exists() {
+            std::fs::remove_dir_all(&cached_dir).unwrap();
+        }
+    }
 }
