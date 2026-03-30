@@ -349,6 +349,78 @@ describe("AcceleratorProver", () => {
       expect(status.protocol).toBeUndefined();
     });
 
+    test("returns cached status within TTL without re-probing", async () => {
+      let probeCount = 0;
+      mockFetch({
+        "/health": () => {
+          probeCount++;
+          return Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          });
+        },
+      });
+
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+
+      const status1 = await prover.checkAcceleratorStatus();
+      expect(status1.available).toBe(true);
+      const probesAfterFirst = probeCount;
+
+      // Second call within TTL — should return cached result, no new probe
+      const status2 = await prover.checkAcceleratorStatus();
+      expect(status2.available).toBe(true);
+      expect(probeCount).toBe(probesAfterFirst); // no additional probes
+    });
+
+    test("re-probes after status cache TTL expires", async () => {
+      let probeCount = 0;
+      mockFetch({
+        "/health": () => {
+          probeCount++;
+          return Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          });
+        },
+      });
+
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+
+      await prover.checkAcceleratorStatus();
+      const probesAfterFirst = probeCount;
+
+      // Advance past TTL (10s)
+      const realNow = Date.now;
+      Date.now = () => realNow() + 11_000;
+
+      await prover.checkAcceleratorStatus();
+      expect(probeCount).toBeGreaterThan(probesAfterFirst); // re-probed
+
+      Date.now = realNow;
+    });
+
+    test("caches offline status and skips 1s retry on repeat calls", async () => {
+      mockFetchOffline();
+
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+
+      // First call: probes + retries (takes ~1s due to retry delay)
+      const start = performance.now();
+      const status1 = await prover.checkAcceleratorStatus();
+      const firstCallMs = performance.now() - start;
+      expect(status1.available).toBe(false);
+
+      // Second call within TTL: should return immediately from cache (< 50ms)
+      const start2 = performance.now();
+      const status2 = await prover.checkAcceleratorStatus();
+      const secondCallMs = performance.now() - start2;
+      expect(status2.available).toBe(false);
+      expect(secondCallMs).toBeLessThan(50); // cached, no probe or retry delay
+    });
+
     test("detected protocol is used for subsequent /prove calls", async () => {
       const { fetchedUrls } = mockFetch({
         "/health": () =>
