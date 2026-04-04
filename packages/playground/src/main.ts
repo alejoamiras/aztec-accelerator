@@ -54,7 +54,9 @@ function updateModeUI(mode: UiMode): void {
   };
 
   for (const [key, btn] of Object.entries(buttons)) {
-    btn.className = key === mode ? ACTIVE_BTN : INACTIVE_BTN;
+    const active = key === mode;
+    btn.className = active ? ACTIVE_BTN : INACTIVE_BTN;
+    btn.dataset.active = String(active);
   }
 }
 

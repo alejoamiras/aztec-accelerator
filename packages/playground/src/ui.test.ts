@@ -53,24 +53,23 @@ describe("setStatus", () => {
 
   test("sets status-online when connected=true", () => {
     setStatus("aztec-status", true);
-    const el = $("aztec-status");
+    const el = $("aztec-status") as HTMLElement;
     expect(el.className).toContain("status-online");
-    expect(el.className).not.toContain("status-offline");
-    expect(el.className).not.toContain("status-unknown");
+    expect(el.dataset.status).toBe("online");
   });
 
   test("sets status-offline when connected=false", () => {
     setStatus("aztec-status", false);
-    const el = $("aztec-status");
+    const el = $("aztec-status") as HTMLElement;
     expect(el.className).toContain("status-offline");
-    expect(el.className).not.toContain("status-online");
+    expect(el.dataset.status).toBe("offline");
   });
 
   test("sets status-unknown when connected=null", () => {
     setStatus("aztec-status", null);
-    const el = $("aztec-status");
+    const el = $("aztec-status") as HTMLElement;
     expect(el.className).toContain("status-unknown");
-    expect(el.className).not.toContain("status-online");
+    expect(el.dataset.status).toBe("unknown");
   });
 });
 
