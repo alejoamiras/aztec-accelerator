@@ -265,6 +265,14 @@ function confirmFrames(): FrameFn {
     box([`> broadcasting tx...  ${spin(tick)}`, `  ${progressBar(tick, 22)}`], "round", "proof ✓");
 }
 
+function provedFrames(): FrameFn {
+  return () => box(["  proof complete         ✓", "  waiting for response..."], "single", "PROVED");
+}
+
+function deniedFrames(): FrameFn {
+  return () => box(["  site not authorized    ✗", "  falling back to wasm"], "round", "⚠ DENIED");
+}
+
 /** Return the frame generator for a given (mode, phase) combination. */
 export function getFrameFn(mode: UiMode, phase: AnimationPhase): FrameFn {
   switch (phase) {
@@ -283,6 +291,10 @@ export function getFrameFn(mode: UiMode, phase: AnimationPhase): FrameFn {
     case "proving":
     case "app:prove":
       return provingFrames(mode);
+    case "proved":
+      return provedFrames();
+    case "denied":
+      return deniedFrames();
     case "receive":
       return receiveFrames();
     case "app:confirm":
