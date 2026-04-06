@@ -103,6 +103,9 @@ export default defineConfig(({ mode, command }) => {
     build: {
       target: "esnext",
     },
+    esbuild: {
+      target: "esnext",
+    },
     resolve: {
       alias: {
         ...(command === "build" && {
