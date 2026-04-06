@@ -90,7 +90,21 @@ console.log("");
 const nodeInfo = await node.getNodeInfo();
 console.log(`  Connected — chain ${nodeInfo.l1ChainId}, version ${nodeInfo.nodeVersion}`);
 
-const portalManager = await L1FeeJuicePortalManager.new(node, l1Client, logger);
+// Wrap L1 client to boost gas for portal transactions (devnet Inbox needs more gas than estimation provides)
+const boostedL1Client = new Proxy(l1Client, {
+  get(target, prop, receiver) {
+    if (prop === "writeContract") {
+      return (args: any) =>
+        target.writeContract({ ...args, gas: args.gas ? args.gas * 2n : 500_000n });
+    }
+    return Reflect.get(target, prop, receiver);
+  },
+});
+const portalManager = await L1FeeJuicePortalManager.new(
+  node,
+  boostedL1Client as typeof l1Client,
+  logger,
+);
 console.log(`  Fee Juice token: ${portalManager.getTokenManager().tokenAddress.toString()}\n`);
 
 // FeeJuice protocol contract at canonical address 0x05
@@ -204,7 +218,6 @@ if (!fundOnly) {
       from: deployerAddress,
       contractAddressSalt: salt,
       universalDeploy: true,
-      skipClassPublication: true,
       wait: { returnReceipt: true },
     });
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
