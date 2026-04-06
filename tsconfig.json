@@ -1,11 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES2025",
+    "target": "ESNext",
     "moduleResolution": "NodeNext",
     "module": "NodeNext",
 
-    // Bun types for bun:test, Bun.spawn, etc.
-    "types": ["bun-types"],
+    // Bun types for bun:test, Bun.spawn, etc. (TS6+ requires explicit @types)
+    "types": ["bun"],
 
     // compatibility
     "esModuleInterop": true,
