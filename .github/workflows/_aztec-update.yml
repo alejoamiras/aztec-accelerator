@@ -152,6 +152,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Close stale update PRs
+        env:
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
+        run: |
+          CURRENT_BRANCH="${BRANCH_PREFIX}-${NEW_VERSION}"
+          gh pr list \
+            --base "$TARGET_BRANCH" \
+            --state open \
+            --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"${BRANCH_PREFIX}-\")) | select(.headRefName != \"${CURRENT_BRANCH}\") | .number" \
+          | while read -r pr_num; do
+              echo "Closing stale PR #$pr_num"
+              gh pr close "$pr_num" --delete-branch --comment "Superseded by ${NEW_VERSION} update."
+            done
+
       - name: Create or update PR
         env:
           BRANCH_PREFIX: ${{ inputs.branch_prefix }}

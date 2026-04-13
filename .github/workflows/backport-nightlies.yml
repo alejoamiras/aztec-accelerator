@@ -12,7 +12,6 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 jobs:
   backport:
@@ -48,19 +47,22 @@ jobs:
 
           git checkout -b "$BRANCH" origin/nightlies
 
-          if git cherry-pick --no-commit "$MERGE_SHA" && git commit -m "backport: ${PR_TITLE} (#${PR_NUMBER})"; then
-            git push origin "$BRANCH"
-            PR_URL=$(gh pr create \
-              --base nightlies \
-              --head "$BRANCH" \
-              --title "backport: ${PR_TITLE} (#${PR_NUMBER})" \
-              --body "Automated backport of #${PR_NUMBER} from main to nightlies.")
-            gh pr edit "$PR_URL" --add-label backport || true
+          if git cherry-pick --no-commit -m 1 "$MERGE_SHA"; then
+            if git diff --cached --quiet; then
+              echo "Cherry-pick produced no changes — already applied on nightlies"
+            else
+              git commit -m "backport: ${PR_TITLE} (#${PR_NUMBER})"
+              git push origin "$BRANCH"
+              gh pr create \
+                --base nightlies \
+                --head "$BRANCH" \
+                --title "backport: ${PR_TITLE} (#${PR_NUMBER})" \
+                --body "Automated backport of #${PR_NUMBER} from main to nightlies." \
+                --label backport
+              gh pr merge "$BRANCH" --auto --squash --delete-branch \
+                || echo "::warning::Auto-merge could not be enabled — merge manually"
+            fi
           else
             git cherry-pick --abort || true
-            echo "Cherry-pick has conflicts — creating issue instead of empty PR"
-            gh issue create \
-              --title "Backport conflict: ${PR_TITLE} (#${PR_NUMBER})" \
-              --body "Automated cherry-pick of #${PR_NUMBER} to \`nightlies\` has conflicts. Manual backport needed." \
-              --label backport || echo "Warning: issue creation failed"
+            echo "::warning::Cherry-pick of #${PR_NUMBER} to nightlies has conflicts — skipping"
           fi
