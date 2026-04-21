@@ -65,7 +65,6 @@ let workerCount = 0;
 export function installWorkerDiagnostics(): void {
   const OriginalWorker = globalThis.Worker;
 
-  // @ts-expect-error — replacing global Worker constructor
   globalThis.Worker = class PatchedWorker extends OriginalWorker {
     constructor(scriptURL: string | URL, options?: WorkerOptions) {
       super(scriptURL, options);
@@ -118,7 +117,6 @@ const wasmAllocations: { initial: number; maximum?: number; shared: boolean }[] 
 export function installWasmDiagnostics(): void {
   const OriginalMemory = WebAssembly.Memory;
 
-  // @ts-expect-error — replacing global WebAssembly.Memory constructor
   WebAssembly.Memory = class PatchedMemory extends OriginalMemory {
     constructor(descriptor: WebAssembly.MemoryDescriptor) {
       super(descriptor);

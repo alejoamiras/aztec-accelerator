@@ -36,41 +36,21 @@ That's the minimal setup. The prover auto-detects the accelerator and falls back
 
 ### 3. Wire into EmbeddedWallet (browser dApps)
 
-This is the recommended pattern for browser-based Aztec applications:
+This is the recommended pattern for browser-based Aztec applications. Pass the prover via the unified `pxe` option and let `EmbeddedWallet.create()` handle PXE setup, IndexedDB stores, and account contract loading:
 
 ```typescript
 import { AcceleratorProver } from "@alejoamiras/aztec-accelerator";
-import { createAztecNodeClient } from "@aztec/aztec.js/node";
-import { createPXE, getPXEConfig } from "@aztec/pxe/client/lazy";
-import { EmbeddedWallet, WalletDB } from "@aztec/wallets/embedded";
-import { createStore } from "@aztec/kv-store/indexeddb";
+import { EmbeddedWallet } from "@aztec/wallets/embedded";
 
-// 1. Prover
-const prover = new AcceleratorProver();
-
-// 2. Aztec node
-const node = createAztecNodeClient(aztecNodeUrl);
-const l1Contracts = await node.getL1ContractAddresses();
-
-// 3. PXE with accelerated prover
-const pxeConfig = getPXEConfig();
-pxeConfig.proverEnabled = true;
-pxeConfig.l1Contracts = l1Contracts;
-
-const pxe = await createPXE(node, pxeConfig, {
-  proverOrOptions: prover,  // <-- inject here
+const wallet = await EmbeddedWallet.create(aztecNodeUrl, {
+  pxe: {
+    proverEnabled: true,
+    proverOrOptions: new AcceleratorProver(), // <-- inject here
+  },
 });
-
-// 4. Wallet
-const store = await createStore(`wallet-${l1Contracts.rollupAddress}`, {
-  dataDirectory: "wallet",
-  dataStoreMapSizeKb: 2e10,
-});
-const walletDB = WalletDB.init(store);
-const wallet = new EmbeddedWallet(pxe, node, walletDB);
 ```
 
-Every transaction through this wallet automatically uses native proving when available.
+Every transaction through this wallet automatically uses native proving when available. For local sandbox development, set `proverEnabled: false` to skip proof generation.
 
 ### 4. Wire into AccountManager (simpler setup)
 

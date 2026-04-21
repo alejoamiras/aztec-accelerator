@@ -160,7 +160,7 @@ export function showResult(
   prefix: string,
   mode: string,
   durationMs: number,
-  tag: string,
+  tag: string | undefined,
   steps?: StepTiming[],
 ): void {
   $(`${prefix}results`).classList.remove("hidden");
@@ -170,7 +170,7 @@ export function showResult(
   timeEl.className = "text-3xl font-bold tabular-nums text-brand-accent font-mono";
 
   const tagEl = $(`${prefix}tag-${mode}`);
-  tagEl.textContent = tag;
+  tagEl.textContent = tag ?? "";
   tagEl.className = `mt-1.5 text-[10px] uppercase tracking-widest ${
     tag === "token flow"
       ? "text-brand-accent/70"
