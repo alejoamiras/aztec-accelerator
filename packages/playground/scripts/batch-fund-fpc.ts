@@ -235,8 +235,10 @@ async function waitForBlocks(n: number, timeoutMs = 600_000) {
 const { EmbeddedWallet: EW } = await import("@aztec/wallets/embedded");
 const wallet = await EW.create(node, {
   ephemeral: true,
-  pxeConfig: { proverEnabled: true },
-  pxeOptions: { proverOrOptions: new WASMSimulator() },
+  pxe: {
+    proverEnabled: true,
+    proverOrOptions: new WASMSimulator(),
+  },
 });
 const accountManager = await wallet.createSchnorrAccount(Fr.random(), Fr.random());
 const deployerAddress = accountManager.address;

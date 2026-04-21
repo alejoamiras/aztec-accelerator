@@ -12,12 +12,10 @@ import { Fr } from "@aztec/aztec.js/fields";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
 import type { TxHash } from "@aztec/aztec.js/tx";
 import type { Wallet } from "@aztec/aztec.js/wallet";
-import { createStore } from "@aztec/kv-store/indexeddb";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
-import { createPXE, getPXEConfig } from "@aztec/pxe/client/lazy";
 import { getContractInstanceFromInstantiationParams } from "@aztec/stdlib/contract";
-import { EmbeddedWallet, WalletDB } from "@aztec/wallets/embedded";
+import { EmbeddedWallet } from "@aztec/wallets/embedded";
 
 export type LogFn = (
   msg: string,
@@ -130,7 +128,7 @@ export async function checkAztecNode(): Promise<{ reachable: boolean; nodeVersio
 
 async function clearIndexedDB(): Promise<void> {
   const dbs = await indexedDB.databases();
-  const aztecPrefixes = ["pxe-", "wallet-", "aztec-"];
+  const aztecPrefixes = ["pxe-", "pxe_data_", "wallet-", "wallet_data_", "aztec-"];
   await Promise.all(
     dbs
       .filter((db) => db.name && aztecPrefixes.some((prefix) => db.name!.startsWith(prefix)))
@@ -147,59 +145,17 @@ async function clearIndexedDB(): Promise<void> {
 }
 
 /**
- * Lazy account contracts provider — mirrors @aztec/wallets internal implementation.
- * Uses dynamic imports so Vite can code-split the account contract artifacts.
- */
-const lazyAccountContracts = {
-  async getSchnorrAccountContract(signingKey: import("@aztec/foundation/curves/bn254").Fq) {
-    const { SchnorrAccountContract } = await import("@aztec/accounts/schnorr/lazy");
-    return new SchnorrAccountContract(signingKey);
-  },
-  async getEcdsaRAccountContract(signingKey: Buffer) {
-    const { EcdsaRAccountContract } = await import("@aztec/accounts/ecdsa/lazy");
-    return new EcdsaRAccountContract(signingKey);
-  },
-  async getEcdsaKAccountContract(signingKey: Buffer) {
-    const { EcdsaKAccountContract } = await import("@aztec/accounts/ecdsa/lazy");
-    return new EcdsaKAccountContract(signingKey);
-  },
-  async getStubAccountContractArtifact() {
-    const { getStubAccountContractArtifact } = await import("@aztec/accounts/stub/lazy");
-    return getStubAccountContractArtifact();
-  },
-  async createStubAccount(address: import("@aztec/stdlib/contract").CompleteAddress) {
-    const { createStubAccount } = await import("@aztec/accounts/stub/lazy");
-    return createStubAccount(address);
-  },
-  async getMulticallContract() {
-    const { getCanonicalMultiCallEntrypoint } = await import(
-      "@aztec/protocol-contracts/multi-call-entrypoint/lazy"
-    );
-    return getCanonicalMultiCallEntrypoint();
-  },
-};
-
-/**
  * Connect to the Aztec node and set up the AcceleratorProver.
  * Shared by both embedded and external wallet paths.
  */
-export async function initializeNode(log: LogFn): Promise<{
-  rollupAddress: import("@aztec/aztec.js/addresses").EthAddress;
-  l1Contracts: Awaited<
-    ReturnType<ReturnType<typeof createAztecNodeClient>["getL1ContractAddresses"]>
-  >;
-}> {
+export async function initializeNode(log: LogFn): Promise<void> {
   log("Creating AcceleratorProver...");
   state.prover = new AcceleratorProver();
 
   log("Connecting to Aztec node...");
   state.node = createAztecNodeClient(AZTEC_NODE_URL);
-  const [nodeInfo, l1Contracts] = await Promise.all([
-    state.node.getNodeInfo(),
-    state.node.getL1ContractAddresses(),
-  ]);
+  const nodeInfo = await state.node.getNodeInfo();
 
-  const rollupAddress = l1Contracts.rollupAddress;
   state.proofsRequired = nodeInfo.l1ChainId !== 31337;
 
   // Allow forcing proofs via ?forceProofs=true for testing IVC locally
@@ -213,8 +169,6 @@ export async function initializeNode(log: LogFn): Promise<{
     `Connected — chain ${nodeInfo.l1ChainId} (proofs ${state.proofsRequired ? "required" : "simulated"})`,
     "success",
   );
-
-  return { rollupAddress, l1Contracts };
 }
 
 /**
@@ -238,32 +192,16 @@ export async function initializeFPC(wallet: Wallet, log: LogFn): Promise<void> {
 }
 
 async function doInitializeWallet(log: LogFn): Promise<boolean> {
-  const { rollupAddress, l1Contracts } = await initializeNode(log);
+  await initializeNode(log);
 
   log("Creating wallet (may take a moment)...");
-  // Mirrors BrowserEmbeddedWallet.create() but injects our AcceleratorProver.
-  // Pass l1Contracts in the config to avoid extra fetches during PXE init.
-  // Only enable proving on live networks (sandbox uses simulated proofs).
-  const pxeConfig = getPXEConfig();
-  pxeConfig.dataDirectory = `pxe-${rollupAddress}`;
-  pxeConfig.proverEnabled = state.proofsRequired;
-  pxeConfig.l1Contracts = l1Contracts;
-
-  log("Initializing PXE...");
-  const pxe = await createPXE(state.node, pxeConfig, {
-    proverOrOptions: state.prover,
+  state.embeddedWallet = await EmbeddedWallet.create(state.node!, {
+    pxe: {
+      proverEnabled: state.proofsRequired,
+      proverOrOptions: state.prover!,
+      dataStoreMapSizeKb: 2e10,
+    },
   });
-  log("PXE initialized", "success");
-
-  log("Creating wallet DB...");
-  const walletDBStore = await createStore(`wallet-${rollupAddress}`, {
-    dataDirectory: "wallet",
-    dataStoreMapSizeKb: 2e10,
-  });
-  const walletDB = WalletDB.init(walletDBStore, (msg) => log(msg));
-  log("Wallet DB created", "success");
-
-  state.embeddedWallet = new EmbeddedWallet(pxe, state.node, walletDB, lazyAccountContracts);
   state.wallet = state.embeddedWallet;
   log("Wallet created", "success");
 
@@ -368,8 +306,11 @@ interface SimTimings {
 }
 
 /** Extract our SimStepDetail from a simulate() result with includeMetadata: true. */
-function extractSimDetail(simResult: { stats: { timings: SimTimings } }): SimStepDetail {
-  const t = simResult.stats.timings;
+function extractSimDetail(simResult: {
+  stats?: { timings: SimTimings };
+}): SimStepDetail | undefined {
+  const t = simResult.stats?.timings;
+  if (!t) return undefined;
   return {
     syncMs: t.sync ?? 0,
     totalMs: t.total ?? 0,

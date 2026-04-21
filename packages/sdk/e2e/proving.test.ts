@@ -51,8 +51,10 @@ describe("AcceleratorProver", () => {
       wallet = await EmbeddedWallet.create(node, {
         ephemeral: true,
         // Always generate real proofs — dummy proofs hide real issues.
-        pxeConfig: { proverEnabled: true },
-        pxeOptions: { proverOrOptions: prover },
+        pxe: {
+          proverEnabled: true,
+          proverOrOptions: prover,
+        },
       });
 
       // Derive Sponsored FPC address and register in PXE.
