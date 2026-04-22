@@ -373,9 +373,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     } catch (err) {
       // 403: user denied this site, or authorization timed out — fall back to WASM
       if (err instanceof HTTPError && err.response.status === 403) {
-        const body = await err.response
-          .json<{ error?: string; message?: string }>()
-          .catch(() => null);
+        // ky 2.x pre-parses the error body into err.data (response body is already consumed).
+        const body =
+          err.data && typeof err.data === "object"
+            ? (err.data as { error?: string; message?: string })
+            : undefined;
         logger.warn("Accelerator denied this origin, falling back to WASM", {
           error: body?.error,
           message: body?.message,
