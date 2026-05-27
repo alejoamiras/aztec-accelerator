@@ -18,6 +18,8 @@ Download the latest release from [GitHub Releases](https://github.com/alejoamira
 | macOS (Intel) | `.dmg` |
 | Linux (x86_64) | `.deb`, `.AppImage` |
 
+**Running CI tests?** The release also ships a [headless server tarball](#headless-server-for-ci-test-acceleration) for accelerating end-to-end tests on GitHub-hosted runners.
+
 ### macOS Gatekeeper
 
 The app is code-signed and notarized by Apple. It should open without any Gatekeeper warnings. If macOS still blocks it (e.g., a local build), allow it via:
@@ -59,7 +61,7 @@ Every `/prove` response includes an `x-prove-duration-ms` header with the actual
 
 ### Port
 
-The default port is `59833`. Override it with the `AZTEC_ACCELERATOR_PORT` environment variable (must match on both SDK and accelerator sides).
+The default port is `59833`. The SDK reads `AZTEC_ACCELERATOR_PORT` to override the client-side target. The server itself currently does **not** honor this env var — it always binds `127.0.0.1:59833`. If you need to change the port on both sides, that requires a code change to `server.rs`.
 
 ### Automatic Version Management
 
@@ -96,7 +98,75 @@ The accelerator uses a MetaMask-style approval flow. When a new website calls `/
 
 Approved sites can be reviewed and removed from the Settings window.
 
-For the headless server binary (CI/testing), set `ALLOWED_ORIGINS=origin1,origin2` to restrict access. Without it, all origins are auto-approved.
+For the headless server binary (CI/testing), set `ALLOWED_ORIGINS=origin1,origin2` to restrict browser-driven access. See the [Headless Server section](#headless-server-for-ci-test-acceleration) below for the full security model.
+
+## Headless Server for CI Test Acceleration
+
+> **For CI test acceleration only. Not for production. Not for shared or self-hosted CI runners.**
+>
+> The headless server is a stripped-down build of the accelerator with no tray, no window, and no GUI dependencies. It exists so external Aztec dApp teams can install the accelerator on their CI runners and speed up E2E test proving (native `bb` instead of WASM).
+>
+> **Security caveats — read before deploying:**
+>
+> - The server listens on `127.0.0.1` only. On a single-tenant CI runner (GitHub-hosted) this is the auth boundary.
+> - `ALLOWED_ORIGINS` only gates **browser-driven** callers via the `Origin` header. Non-browser callers (curl, another process on the same host) can omit the header and bypass the check. This is acceptable for single-tenant CI but **unsafe for shared/self-hosted runners or any production environment**.
+> - The tarball is shipped with a SHA-256 sidecar only, not a cryptographic signature. Verify the checksum before extracting.
+> - Do not run this as a service. Do not expose it on a public interface. Do not use on a multi-tenant host.
+
+### Download
+
+Each [GitHub release](https://github.com/alejoamiras/aztec-accelerator/releases) ships four tarballs:
+
+| Platform | Tarball |
+|---|---|
+| macOS (Apple Silicon) | `accelerator-server-${VERSION}-macos-arm64.tar.gz` |
+| macOS (Intel)         | `accelerator-server-${VERSION}-macos-x86_64.tar.gz` |
+| Linux (x86_64)        | `accelerator-server-${VERSION}-linux-x86_64.tar.gz` |
+| Linux (ARM64)         | `accelerator-server-${VERSION}-linux-arm64.tar.gz` |
+
+Each has a matching `.sha256` sidecar file.
+
+### Install in GitHub Actions (Linux x86_64 example)
+
+```yaml
+- name: Install aztec-accelerator headless server
+  env:
+    ACCELERATOR_VERSION: "1.0.1"
+  run: |
+    BASE_URL="https://github.com/alejoamiras/aztec-accelerator/releases/download/accelerator-v${ACCELERATOR_VERSION}"
+    TARBALL="accelerator-server-${ACCELERATOR_VERSION}-linux-x86_64.tar.gz"
+    curl -sSfL "${BASE_URL}/${TARBALL}" -o "${TARBALL}"
+    curl -sSfL "${BASE_URL}/${TARBALL}.sha256" -o "${TARBALL}.sha256"
+    shasum -a 256 -c "${TARBALL}.sha256"
+    tar -xzf "${TARBALL}"
+    sudo mv accelerator-server /usr/local/bin/
+
+- name: Start headless accelerator
+  env:
+    ALLOWED_ORIGINS: http://localhost:5173
+  run: accelerator-server > accelerator.log 2>&1 &
+```
+
+The accelerator will download the matching `bb` binary on the first prove request (from Aztec's GitHub releases) and cache it in `~/.aztec-accelerator/versions/`. Subsequent runs reuse the cache.
+
+### Configuration
+
+| Env var | Effect |
+|---|---|
+| `ALLOWED_ORIGINS` | Comma-separated list of origins pre-approved for browser-driven `/prove` calls. If unset, all browser origins are auto-approved on the headless server. |
+| `BB_BINARY_PATH` | Path to a pre-installed `bb` binary, bypassing the auto-download. |
+| `RUST_LOG` | Standard `tracing-subscriber` filter (e.g. `info`, `debug`). |
+
+### Verifying it's running
+
+```sh
+curl http://127.0.0.1:59833/health
+# {"status":"ok","api_version":1,"version":"...","aztec_version":"...","available_versions":[...],"bb_available":true}
+```
+
+### Source
+
+The headless server is `cargo build --bin accelerator-server` against the same `packages/accelerator/src-tauri` crate as the desktop app — it just uses a different `main()` that skips the Tauri runtime. See `src/bin/accelerator-server.rs`.
 
 ## Tray Menu
 
@@ -267,10 +337,11 @@ ACCELERATOR_DOWNLOAD_TEST=1 cargo test download_and_verify -- --nocapture
 Releases are triggered via `gh workflow run release-accelerator.yml -f version=X.Y.Z`.
 
 ```
-validate → e2e-webdriver gate → tag → build (3 platforms) → post-build smoke → release → bump
+validate → e2e-webdriver gate → tag → build (3 Tauri + 4 headless platforms) → post-build smoke → release → bump
 ```
 
 - **E2E gate**: builds with `--features webdriver`, runs 9 WebDriver tests (macOS, release mode)
+- **Build**: Tauri bundles for 3 platforms (macOS arm64/x86_64, Linux x86_64) + headless `accelerator-server` for 4 platforms (macOS arm64/x86_64, Linux x86_64/arm64)
 - **Post-build smoke**: mounts the signed DMG, launches the app, polls `/health`
-- **Release**: creates GitHub Release with DMGs/debs/AppImages + `latest.json` for auto-updater
+- **Release**: creates GitHub Release with DMGs/debs/AppImages + headless tarballs (with SHA-256 sidecars) + `latest.json` for auto-updater
 - **Bump**: auto-creates PR to bump source version
