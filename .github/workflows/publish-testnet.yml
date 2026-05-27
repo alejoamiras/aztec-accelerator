@@ -1,11 +1,6 @@
 name: Publish Testnet
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "packages/sdk/**"
-      - "packages/playground/**"
   workflow_dispatch:
 
 concurrency:

@@ -25,6 +25,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
       - name: Validate and output version
         id: version
@@ -35,8 +36,17 @@ jobs:
             echo "::error::Invalid version format: '$INPUT_VERSION'. Expected semver (e.g. 1.0.0 or 1.0.0-rc.1)"
             exit 1
           fi
-          echo "tag=accelerator-v${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$INPUT_VERSION" =~ - ]]; then
+            IS_PRERELEASE=true
+          else
+            IS_PRERELEASE=false
+          fi
+          {
+            echo "tag=accelerator-v${INPUT_VERSION}"
+            echo "version=$INPUT_VERSION"
+            echo "is_prerelease=$IS_PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$INPUT_VERSION  is_prerelease=$IS_PRERELEASE"
 
   e2e-webdriver:
     name: Pre-release E2E Gate
@@ -46,30 +56,9 @@ jobs:
       runner: macos-latest
       mode: release
 
-  tag:
-    name: Create Git Tag
-    needs: [validate, e2e-webdriver]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-tags: true
-      - name: Create and push tag
-        env:
-          TAG: ${{ needs.validate.outputs.tag }}
-        run: |
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping creation"
-          else
-            git tag "$TAG"
-            git push origin "$TAG"
-            echo "Created and pushed tag $TAG"
-          fi
-
   build:
     name: Build (${{ matrix.target }})
-    needs: [validate, tag]
+    needs: [validate, e2e-webdriver]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -162,9 +151,9 @@ jobs:
 
   build-headless:
     name: Build Headless (${{ matrix.platform }})
-    needs: [validate, tag]
+    needs: [validate, e2e-webdriver]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -304,9 +293,30 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  tag:
+    name: Create Git Tag
+    needs: [validate, build, build-headless, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
+      - name: Create and push tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping creation"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Created and pushed tag $TAG"
+          fi
+
   release:
     name: Create GitHub Release
-    needs: [validate, build, build-headless, smoke]
+    needs: [validate, build, build-headless, smoke, tag]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -371,6 +381,7 @@ jobs:
           echo "All ${#EXPECTED[@]} expected artifacts present"
 
       - name: Generate latest.json for auto-updater
+        if: needs.validate.outputs.is_prerelease == 'false'
         env:
           VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
@@ -420,6 +431,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           VERSION: ${{ needs.validate.outputs.version }}
+          IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
         run: |
           # Collect all bundle files into a null-delimited list
           mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name 'accelerator-server-*.tar.gz' -o -name 'accelerator-server-*.tar.gz.sha256' -o -name 'latest.json' \) -print0)
@@ -488,17 +500,29 @@ jobs:
           # Strip leading whitespace from each line (YAML indentation artifact)
           sed -i 's/^          //' /tmp/release-notes.md
 
-          gh release create "$RELEASE_TAG" \
-            --title "Aztec Accelerator $VERSION" \
-            --notes-file /tmp/release-notes.md \
-            "${FILES[@]}"
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            gh release create "$RELEASE_TAG" \
+              --title "Aztec Accelerator $VERSION" \
+              --notes-file /tmp/release-notes.md \
+              --prerelease \
+              --latest=false \
+              "${FILES[@]}"
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "Aztec Accelerator $VERSION" \
+              --notes-file /tmp/release-notes.md \
+              --latest \
+              "${FILES[@]}"
+          fi
 
       - uses: aws-actions/configure-aws-credentials@v6
+        if: needs.validate.outputs.is_prerelease == 'false'
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Upload latest.json to S3 for auto-updater
+        if: needs.validate.outputs.is_prerelease == 'false'
         run: |
           # Uploaded under /landing/ because CloudFront routes aztec-accelerator.dev → /landing/
           aws s3 cp release-files/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
@@ -511,6 +535,7 @@ jobs:
   bump-source:
     name: Bump source version
     needs: [validate, release]
+    if: needs.validate.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

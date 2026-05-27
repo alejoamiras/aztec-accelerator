@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Release & Maintenance 2026-05-27 — ELI5 (v2)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fg: #1a1a1a; --muted: #666; --accent: #b35900; --bg: #fafafa; --card: #fff; --rule: #eaeaea; }
+  html, body { background: var(--bg); color: var(--fg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 3rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.55;
+    font-size: 16px;
+  }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.35rem; }
+  h3 { font-size: 1rem; margin-top: 1.75rem; margin-bottom: 0.5rem; }
+  p, ul, ol { margin: 0.6rem 0; }
+  ul, ol { padding-left: 1.25rem; }
+  li { margin: 0.3rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; background: #f0f0f0; padding: 0.05em 0.3em; border-radius: 3px; }
+  .meta { color: var(--muted); font-size: 0.92rem; margin-top: 0; }
+  .warn { background: #fff8ef; border-left: 3px solid var(--accent); padding: 0.6rem 0.9rem; margin: 1rem 0; }
+  .card { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.2rem; margin: 0.9rem 0; }
+  .tag { display: inline-block; font-size: 0.78rem; color: var(--muted); background: #eee; padding: 0.1rem 0.45rem; border-radius: 10px; margin-right: 0.4rem; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0; }
+  a { color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; }
+  th, td { border-bottom: 1px solid var(--rule); padding: 0.4rem 0.6rem; text-align: left; }
+  th { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Release &amp; Maintenance — ELI5 (v2, post-audit)</h1>
+<p class="meta">2026-05-27 · Tier B (plan + dual audit), v1 had two critical bugs that the audits caught</p>
+
+<p>You want to: turn off the @aztec auto-update firehose, sweep stale branches, and cut a stable release of the SDK and accelerator (the accelerator release being the first one to ship the headless tarballs). Codex and Opus reviewed v1 and broke it twice — the SDK couldn't publish as planned (invalid version string), and the &quot;dry-run&quot; release wasn't actually a dry-run. v2 fixes both.</p>
+
+<p>Full plan: <code>plan.md</code> in this folder.</p>
+
+<h2>What v1 got wrong</h2>
+
+<div class="warn">
+  <p><strong>Bug 1:</strong> v1 said &quot;publish SDK at <code>4.2.0</code>&quot;. But <code>4.2.0</code> is already on npm, and the publish script appends a revision suffix — producing <code>4.2.0.1</code>, which is <strong>not valid semver</strong> (we verified with <code>node-semver</code>). npm would have rejected the publish.</p>
+  <p><strong>v2 fix:</strong> Fix the script so stable bases use <code>4.2.0-revision.1</code> (valid semver) instead. Small (~10 line) change folded into PR A.</p>
+</div>
+
+<div class="warn">
+  <p><strong>Bug 2:</strong> v1 said &quot;trigger a <code>-rc.2</code> dry-run to validate the headless build matrix.&quot; But the current release workflow has <strong>no concept of a dry-run</strong> — it ALWAYS generates production <code>latest.json</code>, uploads to prod S3, and opens a bump-source PR. An <code>-rc.2</code> would have auto-updated existing users to an rc release.</p>
+  <p><strong>v2 fix:</strong> Restructure the workflow in PR A to detect prerelease versions (anything with a <code>-</code>) and skip the latest.json, S3 upload, and bump-source for them. The workflow also gets fixed so the tag job runs AFTER the build succeeds (previously: tag pushed even on failed builds).</p>
+</div>
+
+<div class="warn">
+  <p><strong>Bug 3:</strong> v1's branch-cleanup script would delete branches whose PRs were just CLOSED (not merged). If you reused a branch name after a PR was abandoned, you'd lose the new commits.</p>
+  <p><strong>v2 fix:</strong> Only delete branches whose tip SHA matches a MERGED PR's merge commit. Plus, the actual branch count is 11, not 129 (I miscounted local tracking refs).</p>
+</div>
+
+<h2>The three tracks (revised)</h2>
+
+<div class="card">
+  <p><span class="tag">PR A</span> Deprecate the @aztec auto-update workflows (schedule-only triggers off) + fix 3 pre-existing workflow bugs + fix the publish-version script.</p>
+</div>
+<div class="card">
+  <p><span class="tag">Shell</span> Branch cleanup: close 2 superseded auto-PRs, delete 7 auto-generated remote branches (with SHA verification), triage 2 orphan branches by hand.</p>
+</div>
+<div class="card">
+  <p><span class="tag">PR B</span> Forward-roll <code>@aztec/*</code> from <code>4.2.0-rc.1</code> to <code>4.2.0</code> in <strong>both</strong> SDK and playground package.json (caught by audit — v1 only mentioned SDK).</p>
+</div>
+<div class="card">
+  <p><span class="tag">Dispatch 1</span> Trigger <code>publish-testnet.yml</code> to publish SDK as <code>4.2.0-revision.1</code> tagged <code>latest</code>+<code>testnet</code>.</p>
+</div>
+<div class="card">
+  <p><span class="tag">Dispatch 2</span> <code>-rc.2</code> dry-run of accelerator release. Now genuinely safe (post-PR-A fixes).</p>
+</div>
+<div class="card">
+  <p><span class="tag">Dispatch 3</span> Accelerator <code>1.0.1</code> stable. First release with headless tarballs publicly available.</p>
+</div>
+
+<hr>
+
+<h2>What's in PR A (the heavyweight)</h2>
+
+<table>
+<tr><th>Sub-task</th><th>Why</th></tr>
+<tr><td>A.1 — Disable schedules, delete <code>backport-nightlies.yml</code>, set <code>auto_merge: false</code></td><td>Your call: manual control.</td></tr>
+<tr><td>A.2 — Fix <code>get-sdk-publish-version.ts</code> for stable bases</td><td>Otherwise SDK publish fails on invalid semver. Bug 1 fix.</td></tr>
+<tr><td>A.3 — Restructure <code>release-accelerator.yml</code>: tag-after-build + prerelease handling</td><td>Otherwise <code>-rc.2</code> would auto-update users to an rc, and a failed build would leave a tag pushed. Bug 2 fix.</td></tr>
+<tr><td>A.4 — Bump ARM64 <code>build-headless</code> timeout 30→45 min</td><td>LTO + ARM64 cold cache may exceed 30 min.</td></tr>
+<tr><td>A.5 — Add <code>packages/sdk/package.json</code> to <code>accelerator.yml</code> paths filter</td><td>Otherwise PR B's @aztec bump wouldn't fire the accelerator E2E. Caught by opus.</td></tr>
+<tr><td>A.6 — Update <code>CLAUDE.md</code></td><td>Reflect new workflow_dispatch-only state.</td></tr>
+</table>
+
+<hr>
+
+<h2>The release version names</h2>
+
+<table>
+<tr><th>Component</th><th>From</th><th>To</th><th>Note</th></tr>
+<tr><td>SDK on npm (<code>latest</code>)</td><td><code>4.2.0-rc.1</code></td><td><code>4.2.0-revision.1</code></td><td>New publish with current main's code; valid semver via the A.2 fix</td></tr>
+<tr><td>@aztec deps on main</td><td><code>4.2.0-rc.1</code></td><td><code>4.2.0</code></td><td>Forward-roll to the stable</td></tr>
+<tr><td>Accelerator</td><td><code>1.0.0</code> (last release)</td><td><code>1.0.1</code></td><td>First release shipping headless tarballs</td></tr>
+</table>
+
+<p>The <code>-revision.N</code> suffix is technically a prerelease per semver, but semantically &quot;a revision of <code>4.2.0</code>&quot; is honest. dApps using <code>^4.2.0</code> in their package.json would NOT pick it up (prerelease &lt; stable); only consumers using <code>latest</code> would.</p>
+
+<hr>
+
+<h2>What's still open</h2>
+
+<ol>
+  <li><strong>Playground deploy under workflow_dispatch</strong>: After PR A removes the on-push trigger on <code>publish-testnet.yml</code>, the playground's auto-deploy on every push to main also goes away. Is that desired? (The <code>deploy-app</code> job still fires on dispatch, but only on dispatch.) Plan flags this for confirmation at the approval gate.</li>
+  <li><strong>Orphan branches</strong>: <code>feat/landing-redesign</code> and <code>fix/update-prompt-ux-and-download</code>. No PR record; can't auto-determine if they're still active work. Plan defers to your manual triage.</li>
+</ol>
+
+<hr>
+
+<h2>Audit feedback adopted vs rejected</h2>
+
+<p>The plan has a final table tracking which audit findings became changes vs which were rejected. Short version:</p>
+
+<ul>
+  <li><strong>Adopted</strong> (10 fixes): SDK version-string bug, fake dry-run, branch predicate hole, playground forward-roll, branch count, auto_merge survives, paths filter, ARM64 timeout, tag-before-build, prerelease detection.</li>
+  <li><strong>Rejected</strong> (4 deferred as follow-ups): force-push edge cases (mitigated by SHA verification), tag-push token concern (no current symptom), signature key rotation window (key unchanged), <code>cargo audit</code> in CI.</li>
+</ul>
+
+</body>
+</html>

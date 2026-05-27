@@ -1,8 +1,6 @@
 name: Aztec Stable Update
 
 on:
-  schedule:
-    - cron: "0 10 * * 3" # Weekly Wednesday 10:00 UTC
   workflow_dispatch:
     inputs:
       version:
@@ -27,5 +25,5 @@ jobs:
       dist_tag: rc
       target_branch: main
       branch_prefix: chore/aztec-stable
-      auto_merge: true
+      auto_merge: false
       version: ${{ inputs.version || '' }}

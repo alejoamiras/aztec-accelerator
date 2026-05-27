@@ -22,6 +22,7 @@ jobs:
               - 'packages/accelerator/**'
               - '!packages/accelerator/**/*.md'
               - 'packages/sdk/src/**'
+              - 'packages/sdk/package.json'
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'

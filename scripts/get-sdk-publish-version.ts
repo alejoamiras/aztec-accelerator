@@ -3,9 +3,19 @@
  * base Aztec version has already been published to npm.
  *
  * Usage: bun scripts/get-sdk-publish-version.ts <base-version>
- * Output: 5.0.0-nightly.20260224      (if not yet published)
- *    or:  5.0.0-nightly.20260224.1    (if base already exists)
- *    or:  5.0.0-nightly.20260224.2    (if .1 already exists)
+ *
+ * Prerelease bases (contain "-") use dot-appended revisions, which extend
+ * the existing prerelease identifier and remain valid semver:
+ *   5.0.0-nightly.20260224      (if not yet published)
+ *   5.0.0-nightly.20260224.1    (if base already exists)
+ *   5.0.0-nightly.20260224.2    (if .1 already exists)
+ *
+ * Stable bases use a "-revision.N" suffix to produce valid semver
+ * (a stable + "." + number is NOT valid semver, so we can't reuse the
+ * dot-append trick):
+ *   4.2.0                       (if not yet published)
+ *   4.2.0-revision.1            (if 4.2.0 already exists)
+ *   4.2.0-revision.2            (if -revision.1 already exists)
  */
 
 const PACKAGE_NAME = "@alejoamiras/aztec-accelerator";
@@ -22,14 +32,20 @@ export function resolvePublishVersion(
 		return baseVersion;
 	}
 
-	const prefix = `${baseVersion}.`;
+	const isPrerelease = baseVersion.includes("-");
+	const prefix = isPrerelease
+		? `${baseVersion}.`
+		: `${baseVersion}-revision.`;
 	const revisions = publishedVersions
 		.filter((v) => v.startsWith(prefix))
 		.map((v) => Number(v.slice(prefix.length)))
 		.filter((n) => Number.isInteger(n) && n > 0);
 
 	const maxRevision = revisions.length > 0 ? Math.max(...revisions) : 0;
-	return `${baseVersion}.${maxRevision + 1}`;
+	const nextRevision = maxRevision + 1;
+	return isPrerelease
+		? `${baseVersion}.${nextRevision}`
+		: `${baseVersion}-revision.${nextRevision}`;
 }
 
 async function getPublishedVersions(): Promise<string[]> {

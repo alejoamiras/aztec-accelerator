@@ -1,11 +1,6 @@
 name: Publish Nightlies
 
 on:
-  push:
-    branches: [nightlies]
-    paths:
-      - "packages/sdk/**"
-      - "packages/playground/**"
   workflow_dispatch:
 
 concurrency:
