@@ -184,11 +184,21 @@ jobs:
           workspaces: packages/accelerator/src-tauri -> target
           key: headless-${{ matrix.target }}
 
-      - name: Install libssl-dev (Linux)
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+
+      - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
 
       - name: Patch version in Cargo.toml
         env:
@@ -197,6 +207,9 @@ jobs:
           cd packages/accelerator/src-tauri
           sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
           rm -f Cargo.toml.bak
+
+      - name: Copy bb sidecar
+        run: bun run --cwd packages/accelerator prebuild
 
       - name: Build accelerator-server
         working-directory: packages/accelerator/src-tauri
