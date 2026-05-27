@@ -42,4 +42,24 @@ describe("resolvePublishVersion", () => {
       resolvePublishVersion("4.1.0-rc.4", ["4.1.0-rc.4"]),
     ).toBe("4.1.0-rc.4.1");
   });
+
+  test("stable base returns -revision.1 when already published", () => {
+    expect(resolvePublishVersion("4.2.0", ["4.2.0"])).toBe("4.2.0-revision.1");
+  });
+
+  test("stable base returns -revision.2 when -revision.1 already published", () => {
+    expect(
+      resolvePublishVersion("4.2.0", ["4.2.0", "4.2.0-revision.1"]),
+    ).toBe("4.2.0-revision.2");
+  });
+
+  test("stable base unchanged when not yet published", () => {
+    expect(resolvePublishVersion("4.3.0", [])).toBe("4.3.0");
+  });
+
+  test("stable base does not confuse prereleases with revisions", () => {
+    expect(
+      resolvePublishVersion("4.2.0", ["4.2.0", "4.2.0-rc.1", "4.2.0-rc.2"]),
+    ).toBe("4.2.0-revision.1");
+  });
 });
