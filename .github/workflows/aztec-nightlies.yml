@@ -1,8 +1,6 @@
 name: Aztec Nightlies Update
 
 on:
-  schedule:
-    - cron: "0 13 * * *" # 13:00 UTC daily
   workflow_dispatch:
     inputs:
       version:
@@ -28,5 +26,5 @@ jobs:
       target_branch: nightlies
       branch_prefix: chore/aztec-nightlies
       add_label: test-infra
-      auto_merge: true
+      auto_merge: false
       version: ${{ inputs.version || '' }}
