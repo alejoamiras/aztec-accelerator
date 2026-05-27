@@ -160,6 +160,78 @@ jobs:
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.sig
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.sig
 
+  build-headless:
+    name: Build Headless (${{ matrix.platform }})
+    needs: [validate, tag]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            platform: macos-arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            platform: macos-x86_64
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            platform: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/accelerator/src-tauri -> target
+          key: headless-${{ matrix.target }}
+
+      - name: Install libssl-dev (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Patch version in Cargo.toml
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          cd packages/accelerator/src-tauri
+          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+
+      - name: Build accelerator-server
+        working-directory: packages/accelerator/src-tauri
+        run: cargo build --release --bin accelerator-server --target ${{ matrix.target }}
+
+      - name: Package and checksum
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          cd packages/accelerator/src-tauri/target/${{ matrix.target }}/release
+          TARBALL="accelerator-server-${VERSION}-${PLATFORM}.tar.gz"
+          tar -czf "$TARBALL" accelerator-server
+          shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
+          shasum -a 256 -c "$TARBALL.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: accelerator-server-${{ matrix.platform }}
+          path: |
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz.sha256
+
   smoke:
     name: Post-build Smoke
     needs: [validate, build]
@@ -234,7 +306,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build, smoke]
+    needs: [validate, build, build-headless, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -266,6 +338,10 @@ jobs:
           find artifacts -name '*_amd64.deb'      -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \;
           find artifacts -name '*_amd64.AppImage'  -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \;
 
+          # Headless server tarballs + checksums (named accelerator-server-${VERSION}-<platform>.tar.gz)
+          find artifacts -name 'accelerator-server-*.tar.gz' -exec mv {} release-files/ \;
+          find artifacts -name 'accelerator-server-*.tar.gz.sha256' -exec mv {} release-files/ \;
+
           echo "Release files:"
           ls -la release-files/
 
@@ -277,6 +353,14 @@ jobs:
             "Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz"
             "Aztec-Accelerator-${VERSION}-Linux-x86_64.deb"
             "Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage"
+            "accelerator-server-${VERSION}-macos-arm64.tar.gz"
+            "accelerator-server-${VERSION}-macos-arm64.tar.gz.sha256"
+            "accelerator-server-${VERSION}-macos-x86_64.tar.gz"
+            "accelerator-server-${VERSION}-macos-x86_64.tar.gz.sha256"
+            "accelerator-server-${VERSION}-linux-x86_64.tar.gz"
+            "accelerator-server-${VERSION}-linux-x86_64.tar.gz.sha256"
+            "accelerator-server-${VERSION}-linux-arm64.tar.gz"
+            "accelerator-server-${VERSION}-linux-arm64.tar.gz.sha256"
           )
           for f in "${EXPECTED[@]}"; do
             if [ ! -f "release-files/$f" ]; then
@@ -338,7 +422,7 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           # Collect all bundle files into a null-delimited list
-          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name 'latest.json' \) -print0)
+          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name 'accelerator-server-*.tar.gz' -o -name 'accelerator-server-*.tar.gz.sha256' -o -name 'latest.json' \) -print0)
 
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts found!"
@@ -378,6 +462,24 @@ jobs:
           ### macOS: First Launch
 
           The app is **code-signed and notarized** by Apple. Double-click the DMG, drag to Applications, and launch.
+
+          ### Headless server for CI test acceleration
+
+          > **For CI test acceleration only. Not for production.** Listens on \`127.0.0.1\` only.
+          > Tested on GitHub-hosted (single-tenant) runners. The built-in \`ALLOWED_ORIGINS\`
+          > access control only gates browser-driven callers; on shared or self-hosted runners,
+          > other processes on the same host can bypass it. Do not deploy this binary as a service.
+
+          | Platform | File |
+          |---|---|
+          | macOS (Apple Silicon) | \`accelerator-server-${VERSION}-macos-arm64.tar.gz\` |
+          | macOS (Intel)         | \`accelerator-server-${VERSION}-macos-x86_64.tar.gz\` |
+          | Linux (x86_64)        | \`accelerator-server-${VERSION}-linux-x86_64.tar.gz\` |
+          | Linux (ARM64)         | \`accelerator-server-${VERSION}-linux-arm64.tar.gz\` |
+
+          Each tarball ships with a \`.sha256\` sidecar. Verify before extracting. See [Headless
+          server section in the accelerator README](https://github.com/alejoamiras/aztec-accelerator/blob/main/packages/accelerator/README.md#headless-server-for-ci-test-acceleration)
+          for the install one-liner and \`ALLOWED_ORIGINS\` configuration.
 
           ### Aztec Version
           Built against Aztec \`${AZTEC_VER}\`.
