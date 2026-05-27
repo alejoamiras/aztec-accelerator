@@ -10,10 +10,10 @@
 - **Build system**: Bun workspaces (`packages/sdk`, `packages/accelerator`, `packages/playground`, `packages/landing`)
 - **Linting/Formatting**: Biome (lint + format), shellcheck, actionlint, sort-package-json, OpenTofu fmt, cargo fmt (Rust)
 - **Commit hygiene**: Husky + lint-staged + commitlint (conventional commits)
-- **CI**: GitHub Actions (PR gates: `accelerator.yml`, `sdk.yml`, `app.yml`, `actionlint.yml`; deploy: `deploy-landing.yml`, `publish-testnet.yml`, `publish-nightlies.yml`; reusable: `_e2e.yml`, `_e2e-app.yml`, `_e2e-webdriver.yml`, `_publish-sdk.yml`, `_aztec-update.yml`; automation: `aztec-nightlies.yml`, `aztec-stable.yml`; release: `release-accelerator.yml`)
+- **CI**: GitHub Actions (PR gates: `accelerator.yml`, `sdk.yml`, `app.yml`, `actionlint.yml`; deploy: `deploy-landing.yml`; publish (workflow_dispatch only): `publish-testnet.yml`, `publish-nightlies.yml`; reusable: `_e2e.yml`, `_e2e-app.yml`, `_e2e-webdriver.yml`, `_publish-sdk.yml`, `_aztec-update.yml`; @aztec bump tooling (workflow_dispatch only, no auto-merge): `aztec-nightlies.yml`, `aztec-stable.yml`; release: `release-accelerator.yml`)
 - **Testing**: 9 WebDriver E2E tests (macOS + Linux) via `tauri-plugin-webdriver` + WebdriverIO, 28 Playwright UI mock tests, ~90 Rust unit tests, ~96 TS unit tests. WebDriver tests run as PR gate and pre-release gate.
 - **TypeScript**: 6.0 with ES2025 target. Biome for lint/format.
-- **Release pipeline**: `validate → e2e-webdriver gate → tag → build (3 platforms) → post-build DMG smoke → release → bump-source`
+- **Release pipeline**: `validate → e2e-webdriver gate → build (3 Tauri + 4 headless platforms) → smoke → tag → release → bump-source`. Prerelease versions (`X.Y.Z-rc.N`) skip the S3 `latest.json` upload and `bump-source` jobs and are marked `--prerelease` on GitHub.
 - **Infrastructure** (`/infra/tofu`): S3 + CloudFront for static site hosting. CloudFront function routes by Host header: `aztec-accelerator.dev` → `/landing/`, `playground.aztec-accelerator.dev` → `/playground/`
 
 ## Quick Start
