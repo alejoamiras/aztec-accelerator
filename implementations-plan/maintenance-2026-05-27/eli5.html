@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maintenance 2026-05-27 — ELI5</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fg: #1a1a1a; --muted: #666; --accent: #b35900; --bg: #fafafa; --card: #fff; --rule: #eaeaea; }
+  html, body { background: var(--bg); color: var(--fg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 3rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.55;
+    font-size: 16px;
+  }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.35rem; }
+  h3 { font-size: 1rem; margin-top: 1.75rem; margin-bottom: 0.5rem; }
+  p, ul { margin: 0.6rem 0; }
+  ul { padding-left: 1.25rem; }
+  li { margin: 0.3rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; background: #f0f0f0; padding: 0.05em 0.3em; border-radius: 3px; }
+  .meta { color: var(--muted); font-size: 0.92rem; margin-top: 0; }
+  .warn { background: #fff8ef; border-left: 3px solid var(--accent); padding: 0.6rem 0.9rem; margin: 1rem 0; }
+  .card { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.2rem; margin: 0.9rem 0; }
+  .tag { display: inline-block; font-size: 0.78rem; color: var(--muted); background: #eee; padding: 0.1rem 0.45rem; border-radius: 10px; margin-right: 0.4rem; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>Maintenance — ELI5</h1>
+<p class="meta">2026-05-27 · three PRs, one revised plan</p>
+
+<p>The accelerator project hasn't had a checkup in a while. This work does three things: bumps dependencies that piled up, kills the dependabot noise, and ships the headless server as a release artifact so other dApp teams can grab it for their CI.</p>
+
+<p>Plan file: <code>plan.md</code> (in this folder).</p>
+
+<h2>The three PRs at a glance</h2>
+
+<div class="card">
+  <p><span class="tag">PR 1</span> Bump the non-Aztec dependencies that built up + delete <code>dependabot.yml</code>.</p>
+</div>
+<div class="card">
+  <p><span class="tag">PR 2</span> Bump Tauri 2.10 → 2.11 on its own. (Tauri is the big load-bearing one — if it breaks, it should fail alone, not drag everything else down.)</p>
+</div>
+<div class="card">
+  <p><span class="tag">PR 3</span> Ship the headless accelerator as a downloadable tarball on each release, so other teams can install it on CI with one <code>curl</code>.</p>
+</div>
+
+<hr>
+
+<h2>PR 1 — the boring hygiene one</h2>
+
+<h3>What</h3>
+<p>Combine all the small dependabot bumps (lint-staged, commitlint, vite-plugin-node-polyfills, axum, tracing-appender, tokio, tauri-build) into one PR. Then delete <code>.github/dependabot.yml</code> so dependabot stops opening weekly PRs.</p>
+
+<h3>Why</h3>
+<p>Most of these PRs sat for weeks. We don't auto-merge them. Instead of trickling them in one-at-a-time, do one batch every now and then. Dependabot's weekly schedule isn't earning its keep.</p>
+
+<h3>The catch</h3>
+<div class="warn">
+  <p>Dependabot also files PRs for <strong>security CVEs</strong>, not just version bumps. Deleting the config removes that signal too. Worse: the repo-level toggles for "Dependabot alerts" and "automated security fixes" are <strong>also off</strong> (checked via <code>gh api</code>). After this PR, we have zero automated security signal.</p>
+  <p>You explicitly accepted this trade-off in exchange for less noise. The plan documents it in the PR body so it's not silently regressing later.</p>
+</div>
+
+<hr>
+
+<h2>PR 2 — Tauri 2.11</h2>
+
+<h3>What</h3>
+<p>Bump <code>tauri</code> 2.10.3 → 2.11.0 alone.</p>
+
+<h3>Why on its own</h3>
+<p>Tauri ships the entire desktop-app runtime: the tray icon, the window manager, IPC, the updater plugin. A "minor" version isn't actually small. If something regresses, we want to roll back <em>just</em> Tauri without losing all the other bumps from PR 1.</p>
+
+<h3>The safety net</h3>
+<p>The WebDriver end-to-end tests on the PR-gate workflow will exercise the tray, the popup, and the update plugin against the new Tauri. If those go red, we know before merge.</p>
+
+<hr>
+
+<h2>PR 3 — the headless tarball</h2>
+
+<h3>What you asked for</h3>
+<p>You're running E2E tests in another project that uses the accelerator. WASM proving is slow. If your CI could just install the accelerator and run it locally, your tests would speed up. Today, the only way is to clone our repo and <code>cargo build</code> — annoying.</p>
+
+<h3>What we already have</h3>
+<p>There's a binary called <code>accelerator-server</code> in our repo. It's the same HTTP server the desktop app runs, but with no tray and no window — pure background process. We use it on our own CI already. It just isn't <strong>published</strong> anywhere.</p>
+
+<h3>What PR 3 does</h3>
+<ul>
+  <li>Adds 4 cross-compiled tarballs to every release: macOS Apple Silicon, macOS Intel, Linux x86_64, Linux ARM64.</li>
+  <li>Each tarball gets a SHA-256 sidecar file for integrity checking.</li>
+  <li>README + release notes get a section that says "here's how to install this on CI" with a one-liner.</li>
+</ul>
+
+<h3>The important caveat</h3>
+<div class="warn">
+  <p><strong>This binary is for CI test acceleration only. Not production.</strong></p>
+  <p>The "auth check" (<code>ALLOWED_ORIGINS</code>) only works against web browsers — they send an <code>Origin</code> header that the server inspects. Anything that isn't a browser (curl, another process on the same machine) can skip that header and the server lets it in.</p>
+  <p>On a GitHub-hosted CI runner that's <strong>fine</strong>: each job gets a fresh, single-tenant VM. Nothing else is on the machine. The "only listens on localhost" rule IS the security boundary.</p>
+  <p>On a <strong>shared or self-hosted</strong> CI runner, other jobs or processes could hit the accelerator. The release notes say this loudly, in the warning box at the top of the headless section. Don't deploy this as a service.</p>
+</div>
+
+<h3>What we are deliberately NOT doing in PR 3</h3>
+<ul>
+  <li>Not adding a real auth token (would need a follow-up plan).</li>
+  <li>Not signing the binary or adding GitHub artifact attestation.</li>
+  <li>Not making the server's port configurable (today: hardcoded 59833 — the README at line 62 currently <em>lies</em> about this and PR 3 fixes that one-liner).</li>
+  <li>Not adding a Windows tarball or an npm wrapper package.</li>
+</ul>
+
+<hr>
+
+<h2>What codex caught that I had wrong</h2>
+
+<p>Two embarrassing ones worth flagging so you know what changed in v2 of the plan:</p>
+
+<ul>
+  <li>I claimed there was a <code>bunfig.toml</code> with a 7-day npm min-age gate. <strong>There isn't.</strong> I pulled that from personal-default memory and didn't verify. Track A's "supply chain mitigation" section was hand-wavy as a result.</li>
+  <li>I claimed <code>bun audit</code> covers the CVE-PR loss when we delete dependabot.yml. <strong>It doesn't</strong> — bun audit doesn't open PRs, doesn't cover cargo, doesn't cover github-actions. The plan now says clearly that we're accepting zero automated CVE signal.</li>
+</ul>
+
+<p>Codex also flagged: the <code>ALLOWED_ORIGINS</code> auth model is misleading, the port collision on multi-job hosts is real, <code>reqwest</code> in our Cargo pulls native-tls so Linux ARM64 needs <code>libssl-dev</code>, <code>sha256sum</code> isn't on macOS (use <code>shasum -a 256</code>), and the release workflow tags before building so a failed headless build leaves a tag pushed. All of these are now in the plan.</p>
+
+<hr>
+
+<h2>Open questions</h2>
+
+<p>None blocking — you answered the three that mattered:</p>
+
+<ul>
+  <li><strong>Track A bundling:</strong> Split Tauri to its own PR. <em>Done.</em></li>
+  <li><strong>Track B (dependabot):</strong> Just delete it, accept no CVE coverage. <em>Acknowledged in the plan.</em></li>
+  <li><strong>Track C scope:</strong> Ship the tarball but be loud about "CI-only, not production." <em>Done — warning blocks in release notes + README.</em></li>
+</ul>
+
+<hr>
+
+<h2>Sequence</h2>
+
+<ol>
+  <li>Merge PR 1 (bumps + dependabot deletion).</li>
+  <li>Merge PR 2 (Tauri 2.11) once WebDriver E2E is green.</li>
+  <li>Merge PR 3 (release tarballs). Trigger a throwaway <code>-rc</code> release after merge to validate the headless build matrix end-to-end before any stable release.</li>
+</ol>
+
+</body>
+</html>
