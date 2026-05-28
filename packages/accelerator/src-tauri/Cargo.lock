@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "aztec-accelerator"
-version = "1.0.1-rc.1"
+version = "1.0.2-rc.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
