@@ -352,6 +352,12 @@ h2 {
   margin-bottom: 6px;
 }
 
+/* `display: flex` above would otherwise override the user agent's
+   `[hidden] { display: none }`. Re-assert hidden semantics explicitly. */
+.recognized-row[hidden] {
+  display: none;
+}
+
 .verified-check {
   width: 16px;
   height: 16px;
