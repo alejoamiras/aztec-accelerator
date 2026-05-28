@@ -79,15 +79,54 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Load config from disk. Returns default if missing or malformed.
+///
+/// Also runs a one-shot migration on `approved_origins`: canonicalizes each entry
+/// via [`crate::authorization::canonicalize_origin`] and drops entries that fail
+/// canonicalization (logged). Dedupes survivors. If the canonicalized set differs
+/// from what was loaded, rewrites the file on disk so the migration only runs once.
 pub fn load() -> AcceleratorConfig {
     let path = config_path();
-    match std::fs::read_to_string(&path) {
+    let mut config = match std::fs::read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
             tracing::warn!(path = %path.display(), error = %e, "Malformed config, using defaults");
             AcceleratorConfig::default()
         }),
         Err(_) => AcceleratorConfig::default(),
+    };
+    if migrate_approved_origins(&mut config.approved_origins) {
+        if let Err(e) = save(&config) {
+            tracing::warn!(error = %e, "Failed to persist canonicalized approved_origins");
+        }
     }
+    config
+}
+
+/// Canonicalize each entry in `origins`, dropping un-canonicalizable entries
+/// and deduping survivors (order-preserving). Returns `true` if the resulting
+/// set differs from the input (caller should re-save).
+fn migrate_approved_origins(origins: &mut Vec<String>) -> bool {
+    use crate::authorization::canonicalize_origin;
+    let original = std::mem::take(origins);
+    let mut dropped: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in &original {
+        match canonicalize_origin(entry) {
+            Some(canon) => {
+                if seen.insert(canon.clone()) {
+                    origins.push(canon);
+                }
+            }
+            None => dropped.push(entry.clone()),
+        }
+    }
+    if !dropped.is_empty() {
+        tracing::warn!(
+            count = dropped.len(),
+            dropped = ?dropped,
+            "Dropped un-canonicalizable approved_origins entries during migration"
+        );
+    }
+    origins.as_slice() != original.as_slice()
 }
 
 /// Save config to disk. Creates parent directories if needed.
@@ -281,5 +320,75 @@ mod tests {
         };
         config.approved_origins.retain(|o| o != "https://a.com");
         assert_eq!(config.approved_origins, vec!["https://b.com"]);
+    }
+
+    // ─── migrate_approved_origins ───────────────────────────────────
+
+    #[test]
+    fn migrate_no_change_when_already_canonical() {
+        let mut origins = vec![
+            "https://nulo.sh".to_string(),
+            "chrome-extension://abc".to_string(),
+        ];
+        let changed = migrate_approved_origins(&mut origins);
+        assert!(!changed);
+        assert_eq!(
+            origins,
+            vec![
+                "https://nulo.sh".to_string(),
+                "chrome-extension://abc".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn migrate_canonicalizes_mixed_case_and_default_port() {
+        let mut origins = vec![
+            "HTTPS://NULO.SH:443".to_string(),
+            "https://faucet.nulo.sh/".to_string(),
+        ];
+        let changed = migrate_approved_origins(&mut origins);
+        assert!(changed);
+        assert_eq!(
+            origins,
+            vec![
+                "https://nulo.sh".to_string(),
+                "https://faucet.nulo.sh".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn migrate_dedupes_after_canonicalization() {
+        let mut origins = vec![
+            "https://nulo.sh".to_string(),
+            "HTTPS://nulo.sh".to_string(),
+            "https://nulo.sh:443".to_string(),
+        ];
+        let changed = migrate_approved_origins(&mut origins);
+        assert!(changed);
+        assert_eq!(origins, vec!["https://nulo.sh".to_string()]);
+    }
+
+    #[test]
+    fn migrate_drops_uncanonicalizable() {
+        let mut origins = vec![
+            "https://nulo.sh".to_string(),
+            "not a url".to_string(),
+            "https://nulo.sh/admin".to_string(),
+        ];
+        let changed = migrate_approved_origins(&mut origins);
+        assert!(changed);
+        assert_eq!(origins, vec!["https://nulo.sh".to_string()]);
+    }
+
+    #[test]
+    fn migrate_preserves_order() {
+        let mut origins = vec!["https://b.com".to_string(), "https://a.com".to_string()];
+        migrate_approved_origins(&mut origins);
+        assert_eq!(
+            origins,
+            vec!["https://b.com".to_string(), "https://a.com".to_string()],
+        );
     }
 }
