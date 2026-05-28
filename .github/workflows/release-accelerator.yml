@@ -13,15 +13,15 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  id-token: write
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   validate:
     name: Validate Version
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -61,6 +61,8 @@ jobs:
     needs: [validate, e2e-webdriver]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -77,30 +79,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-accelerator
         with:
-          targets: ${{ matrix.target }}
+          rust-target: ${{ matrix.target }}
+          rust-cache-key: release-${{ matrix.target }}
+          rust-components: ""
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/accelerator/src-tauri -> target
-          key: release-${{ matrix.target }}
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - run: bun install --frozen-lockfile
-
-      - name: Install system dependencies (Linux)
-        if: matrix.platform == 'linux-x86_64'
+      - name: Patch version in Cargo.toml
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+          cd packages/accelerator/src-tauri
+          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
+          rm -f Cargo.toml.bak
 
       - name: Patch version in tauri.conf.json
         env:
@@ -112,17 +103,6 @@ jobs:
             conf.version = process.env.RELEASE_VERSION;
             await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
           "
-
-      - name: Patch version in Cargo.toml
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          cd packages/accelerator/src-tauri
-          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
-          rm -f Cargo.toml.bak
-
-      - name: Copy bb sidecar
-        run: bun run --cwd packages/accelerator prebuild
 
       - name: Build Tauri bundle
         run: bunx tauri build --target ${{ matrix.target }}
@@ -175,30 +155,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-accelerator
         with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/accelerator/src-tauri -> target
-          key: headless-${{ matrix.target }}
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - run: bun install --frozen-lockfile
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+          rust-target: ${{ matrix.target }}
+          rust-cache-key: headless-${{ matrix.target }}
+          rust-components: ""
 
       - name: Patch version in Cargo.toml
         env:
@@ -207,9 +168,6 @@ jobs:
           cd packages/accelerator/src-tauri
           sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
           rm -f Cargo.toml.bak
-
-      - name: Copy bb sidecar
-        run: bun run --cwd packages/accelerator prebuild
 
       - name: Build accelerator-server
         working-directory: packages/accelerator/src-tauri
@@ -239,6 +197,8 @@ jobs:
     needs: [validate, build]
     runs-on: macos-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -311,6 +271,8 @@ jobs:
     needs: [validate, build, build-headless, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -332,6 +294,9 @@ jobs:
     needs: [validate, build, build-headless, smoke, tag]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write     # gh release create
+      id-token: write     # OIDC for aws-actions/configure-aws-credentials
     steps:
       - uses: actions/checkout@v6
 
@@ -551,6 +516,9 @@ jobs:
     if: needs.validate.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write       # commit + push branch
+      pull-requests: write  # gh pr create
     steps:
       - uses: actions/checkout@v6
         with:

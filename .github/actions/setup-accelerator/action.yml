@@ -1,10 +1,57 @@
 name: Setup Accelerator
-description: Install system deps, Bun, Rust toolchain, copy bb sidecar — common setup for accelerator CI jobs.
+description: Install system deps, Bun, Rust toolchain, copy bb sidecar — common environment setup for accelerator CI jobs.
+
+inputs:
+  rust-target:
+    description: |
+      Optional Rust target triple for cross-toolchain install (e.g. `x86_64-apple-darwin`).
+      NOTE: the prebuild step (`packages/accelerator/scripts/copy-bb.ts`) chooses the bb sidecar
+      from the HOST `process.platform`/`process.arch`. Cross-compile is NOT supported by this
+      composite; callers must run on a matching host. This input only configures the
+      `dtolnay/rust-toolchain` `targets:` field. When set, the composite asserts host == target
+      and fails fast if they diverge.
+    required: false
+    default: ""
+  rust-cache-key:
+    description: |
+      Extra cache key suffix for `Swatinem/rust-cache`. Used to isolate caches between build
+      kinds (e.g. `release-${target}` vs `headless-${target}` vs empty for PR-gate).
+      Append-only — rust-cache adds it after its automatic key.
+    required: false
+    default: ""
+  rust-components:
+    description: |
+      Comma-separated Rust components. Default `clippy,rustfmt` preserves PR-gate behavior;
+      release jobs should pass an empty string to skip unused components.
+    required: false
+    default: "clippy,rustfmt"
 
 runs:
   using: composite
   steps:
-    - name: Install system dependencies
+    - name: Assert host matches rust-target
+      if: inputs.rust-target != ''
+      shell: bash
+      env:
+        REQUESTED_TARGET: ${{ inputs.rust-target }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+      run: |
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)   HOST="x86_64-unknown-linux-gnu" ;;
+          Linux-ARM64) HOST="aarch64-unknown-linux-gnu" ;;
+          macOS-ARM64) HOST="aarch64-apple-darwin" ;;
+          macOS-X64)   HOST="x86_64-apple-darwin" ;;
+          *) echo "::error::Unsupported runner os/arch: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+        esac
+        if [ "$HOST" != "$REQUESTED_TARGET" ]; then
+          echo "::error::rust-target ($REQUESTED_TARGET) does not match host triple ($HOST). The prebuild step chooses bb sidecar by host arch; cross-compile is not supported. Use a runner whose host triple matches the requested target."
+          exit 1
+        fi
+        echo "Host=$HOST matches rust-target=$REQUESTED_TARGET"
+
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         sudo apt-get update
@@ -23,14 +70,16 @@ runs:
     - run: bun install --frozen-lockfile
       shell: bash
 
-    - name: Copy bb sidecar
-      shell: bash
-      run: bun run --cwd packages/accelerator prebuild
-
     - uses: dtolnay/rust-toolchain@stable
       with:
-        components: clippy, rustfmt
+        components: ${{ inputs.rust-components }}
+        targets: ${{ inputs.rust-target }}
 
     - uses: Swatinem/rust-cache@v2
       with:
         workspaces: packages/accelerator/src-tauri -> target
+        key: ${{ inputs.rust-cache-key }}
+
+    - name: Copy bb sidecar
+      shell: bash
+      run: bun run --cwd packages/accelerator prebuild

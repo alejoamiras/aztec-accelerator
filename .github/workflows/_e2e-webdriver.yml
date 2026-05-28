@@ -18,36 +18,26 @@ jobs:
     name: WebDriver E2E (${{ inputs.mode }})
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.mode == 'release' && 35 || 25 }}
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: packages/accelerator
     steps:
       - uses: actions/checkout@v6
 
-      # ── Toolchain (cross-platform) ──
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # ── Shared env setup (Bun, Rust toolchain + cache, Linux Tauri deps, bb sidecar) ──
+      - uses: ./.github/actions/setup-accelerator
         with:
-          workspaces: packages/accelerator/src-tauri -> target
-          key: e2e-webdriver-${{ inputs.mode }}
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - uses: actions/cache@v5
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: ${{ runner.os }}-bun-
-      - run: bun install --frozen-lockfile
-        working-directory: .
+          rust-cache-key: e2e-webdriver-${{ inputs.mode }}
+          rust-components: ""
 
-      # ── Linux: display server + system tray ──
+      # ── Linux: WebDriver-specific extras (xvfb + tray + dbus) ──
       - name: Setup display (Linux)
         if: runner.os == 'Linux'
+        working-directory: .
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb stalonetray dbus-x11 \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+          sudo apt-get install -y xvfb stalonetray dbus-x11
           Xvfb :99 -screen 0 1280x1024x24 &
           sleep 1
           eval "$(dbus-launch --sh-syntax)"
@@ -59,10 +49,6 @@ jobs:
             echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
             echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID"
           } >> "$GITHUB_ENV"
-
-      # ── Prebuild (copies bb sidecar + writes AZTEC_VERSION) ──
-      - run: bun run --cwd packages/accelerator prebuild
-        working-directory: .
 
       # ── Build (release mode only) ──
       - name: Build app (release)
