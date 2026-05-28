@@ -1,0 +1,25 @@
+[package]
+name = "accelerator-server"
+version = "1.0.2-rc.1"
+description = "Headless Aztec Accelerator HTTP server (no GUI, no Tauri runtime)"
+edition = "2021"
+rust-version = "1.77.2"
+
+# Sibling crate to `../src-tauri`. Lives in a separate Cargo package so that
+# `tauri build` (which scans `cargo metadata` and bundles every `[[bin]]` in
+# the same package as the desktop main into the .app's `MacOS/` folder) does
+# NOT pick it up. This is the structural fix for the 1.0.1 macOS auto-update
+# breakage: 1.0.1 silently included `accelerator-server` alongside the main
+# binary in the desktop bundle, which changed the bundle signature shape and
+# broke `amfid` revalidation on in-place updates from 1.0.0.
+
+[dependencies]
+# Depend on the desktop crate as a library — gives us the shared
+# server/authorization/config modules without duplicating code. The Tauri
+# transitive deps come along for the ride (compile-time cost, not runtime),
+# but the produced binary is purely the headless server.
+aztec-accelerator = { path = "../src-tauri" }
+parking_lot = "0.12"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

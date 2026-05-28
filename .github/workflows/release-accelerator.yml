@@ -197,20 +197,18 @@ jobs:
           rm -f Cargo.toml.bak
 
       - name: Build accelerator-server
-        working-directory: packages/accelerator/src-tauri
-        # `--features server` is REQUIRED — without it the bin has
-        # `required-features = ["server"]` and cargo refuses to build it.
-        # The feature gate also keeps `accelerator-server` from being
-        # auto-included in the desktop .app's MacOS/ folder during the
-        # parallel `build` job (which builds with default features).
-        run: cargo build --release --features server --bin accelerator-server --target ${{ matrix.target }}
+        working-directory: packages/accelerator/server
+        # `accelerator-server` lives in its own crate (separate from
+        # `src-tauri`) so that `tauri build` cannot pick it up as a
+        # stowaway in the desktop .app's MacOS/ folder.
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package and checksum
         env:
           VERSION: ${{ needs.validate.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
         run: |
-          cd packages/accelerator/src-tauri/target/${{ matrix.target }}/release
+          cd packages/accelerator/server/target/${{ matrix.target }}/release
           TARBALL="accelerator-server-${VERSION}-${PLATFORM}.tar.gz"
           tar -czf "$TARBALL" accelerator-server
           shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
@@ -221,8 +219,8 @@ jobs:
         with:
           name: accelerator-server-${{ matrix.platform }}
           path: |
-            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz
-            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz.sha256
+            packages/accelerator/server/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz
+            packages/accelerator/server/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz.sha256
 
   smoke:
     name: Post-build Smoke
