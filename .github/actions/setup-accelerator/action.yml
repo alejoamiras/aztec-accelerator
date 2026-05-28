@@ -77,7 +77,9 @@ runs:
 
     - uses: Swatinem/rust-cache@v2
       with:
-        workspaces: packages/accelerator/src-tauri -> target
+        workspaces: |
+          packages/accelerator/src-tauri -> target
+          packages/accelerator/server -> target
         key: ${{ inputs.rust-cache-key }}
 
     - name: Copy bb sidecar
