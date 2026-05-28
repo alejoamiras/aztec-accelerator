@@ -96,7 +96,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
       - name: Build headless server
-        run: cargo build --bin accelerator-server
+        # `--features server` enables the gated bin (see Cargo.toml).
+        run: cargo build --features server --bin accelerator-server
       - name: Launch and health check
         run: |
           ./target/debug/accelerator-server &
@@ -147,7 +148,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
       - name: Build release headless server (linux-x86_64)
-        run: cargo build --release --bin accelerator-server
+        # `--features server` enables the gated bin (see Cargo.toml).
+        run: cargo build --release --features server --bin accelerator-server
       - name: Package and checksum
         run: |
           cd target/release

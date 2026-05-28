@@ -117,6 +117,33 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # Bundle-structure invariant: every desktop .app MUST contain EXACTLY
+      # the binaries we declare. A stowaway (extra bin) or a missing required
+      # one (e.g. `bb` sidecar dropped) is a hard fail — this exact bug
+      # broke the 1.0.0 → 1.0.1 macOS auto-update (Tauri auto-included
+      # `accelerator-server` because Cargo's bin auto-discovery picked up
+      # `src/bin/accelerator-server.rs`). Cheap CI guard so it never recurs.
+      - name: Assert bundle structure (macOS only)
+        if: startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin')
+        working-directory: packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos
+        run: |
+          APP=$(find . -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::No .app bundle found"
+            exit 1
+          fi
+          EXPECTED=$(printf 'aztec-accelerator\nbb\n' | sort)
+          ACTUAL=$(cd "$APP/Contents/MacOS" && find . -maxdepth 1 -mindepth 1 -type f -exec basename {} \; | sort)
+          echo "Expected MacOS/ contents:"
+          echo "$EXPECTED"
+          echo "Actual MacOS/ contents:"
+          echo "$ACTUAL"
+          if ! diff <(echo "$EXPECTED") <(echo "$ACTUAL") > /dev/null; then
+            echo "::error::Bundle MacOS/ contents drifted — see above. Update Cargo.toml [[bin]] declarations + this invariant if the change is intentional."
+            exit 1
+          fi
+          echo "Bundle structure OK"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -171,7 +198,12 @@ jobs:
 
       - name: Build accelerator-server
         working-directory: packages/accelerator/src-tauri
-        run: cargo build --release --bin accelerator-server --target ${{ matrix.target }}
+        # `--features server` is REQUIRED — without it the bin has
+        # `required-features = ["server"]` and cargo refuses to build it.
+        # The feature gate also keeps `accelerator-server` from being
+        # auto-included in the desktop .app's MacOS/ folder during the
+        # parallel `build` job (which builds with default features).
+        run: cargo build --release --features server --bin accelerator-server --target ${{ matrix.target }}
 
       - name: Package and checksum
         env:

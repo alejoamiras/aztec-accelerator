@@ -67,13 +67,14 @@ jobs:
       - name: Build headless accelerator server
         if: inputs.build_accelerator
         working-directory: packages/accelerator/src-tauri
-        run: cargo build --bin accelerator-server
+        # `--features server` enables the gated bin (see Cargo.toml).
+        run: cargo build --features server --bin accelerator-server
 
       - name: Start headless accelerator server
         if: inputs.build_accelerator
         run: |
           cd packages/accelerator/src-tauri
-          cargo run --bin accelerator-server > /tmp/accelerator.log 2>&1 &
+          cargo run --features server --bin accelerator-server > /tmp/accelerator.log 2>&1 &
           echo "ACCELERATOR_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for accelerator
