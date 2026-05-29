@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CI Reliability Plan — ELI5</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#666; --line:#e5e5e5; --accent:#2a6; --warn:#b85; --bg:#fcfcfa; --code:#f3f3f0; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink); background: var(--bg); line-height: 1.65;
+    max-width: 760px; margin: 0 auto; padding: 48px 24px 96px;
+  }
+  h1 { font-size: 28px; line-height: 1.25; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 32px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 44px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 28px 0 6px; }
+  p, li { font-size: 16px; }
+  .lead { font-size: 17px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13.5px;
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin: 16px 0; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+         padding: 2px 9px; border-radius: 999px; margin-right: 8px; vertical-align: 2px; }
+  .t-fix  { background: #e6f4ec; color: #1d7a46; }
+  .t-hard { background: #eef0fb; color: #3a4cb0; }
+  .t-defer{ background: #f0efe9; color: #8a7d4e; }
+  .t-drop { background: #f6e9e9; color: #9a4b4b; }
+  .analogy { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; margin: 12px 0; color:#333; }
+  .why { color: var(--muted); font-size: 15px; }
+  .q { font-weight: 600; margin-top: 18px; }
+  a { color: #2a6; }
+  .foot { margin-top: 40px; color: var(--muted); font-size: 14px; }
+  .pill { font-size:12.5px; color:var(--muted); }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<h1>What broke CI, and how we're fixing it</h1>
+<p class="sub">Plain-language companion to <a href="plan.md">plan.md</a> · evidence in <a href="diagnosis.md">diagnosis.md</a> · 2026-05-29</p>
+
+<p class="lead">Short version: <strong>shipping version 1.0.2 accidentally broke our own test pipeline.</strong> The fix is small and safe. This page explains why it happened and what each change does, without jargon.</p>
+
+<h2>The story: how releasing 1.0.2 broke the tests</h2>
+
+<p>The desktop app checks for updates in the background. When it finds a newer version, it pops up a little "Update available" window.</p>
+
+<div class="analogy">
+Think of our automated UI tests like a robot clicking through the app. The robot is told: "look at the <em>Settings</em> window and check the speed label is there." It works fine — <em>until</em> a surprise pop-up window jumps in front. Now the robot is staring at the pop-up, not Settings, and reports "I can't find the speed label!" — and the test fails.
+</div>
+
+<p>Here's the twist that made it happen <em>now</em>:</p>
+<ul>
+  <li>Our test builds carry the in-development version number <code>1.0.2-rc.1</code>.</li>
+  <li>For weeks, the newest <em>published</em> release was <code>1.0.1</code> — older than our test build — so the update check found nothing and stayed quiet.</li>
+  <li>The moment we published <strong>1.0.2</strong>, our test build (<code>1.0.2-rc.1</code>) suddenly saw "1.0.2 is newer than me!" and started popping the update window mid-test.</li>
+</ul>
+
+<p class="why">That's why nothing in our code changed but the tests started failing: the trigger was <em>external</em> — a new release appearing on the update server. Same test runners, same browser engine, same code. Only the outside world changed.</p>
+
+<p>We confirmed this exactly from the test machine's own log: it printed <code>Update available 1.0.2-rc.1 → 1.0.2</code>, then <code>Showing update prompt</code>, and right after, <code>asset not found: settings.html</code> — the robot lost the Settings window.</p>
+
+<h2>The fixes, one at a time</h2>
+
+<div class="card">
+<span class="tag t-fix">THE FIX · PR-A</span>
+<h3>WS1 — Stop test/dev builds from checking for updates</h3>
+<p>A throwaway test build has no business phoning the real update server or popping a window. We switch the update check <strong>off</strong> for two kinds of builds: the ones used by the robot tests, and the ones developers run on their own machines while coding.</p>
+<p class="why"><strong>Why this also un-jams everything:</strong> the robot test build is exactly one of the builds we're switching off. So the moment this fix runs, the pop-up can't appear, the test passes, and the whole pipeline goes green again — no special admin override needed.</p>
+<p class="why">There are two off-switches kept as safety valves: an emergency "never update" flag, and an opt-in "yes, actually check" flag for the rare developer who <em>wants</em> to test updates locally. The normal shipped app is untouched — it still auto-updates exactly as before.</p>
+</div>
+
+<div class="card">
+<span class="tag t-hard">SAFETY NET · PR-B</span>
+<h3>WS2 — Make the robot re-find the Settings window itself</h3>
+<p>Even with pop-ups gone, we teach the test robot to explicitly look for the Settings window before checking it — instead of assuming it's already looking at the right one. And if Settings genuinely isn't there, the test <em>fails loudly</em> rather than papering over it.</p>
+<p class="why">This is insurance: any future stray window can't silently break the tests the same way.</p>
+</div>
+
+<div class="card">
+<span class="tag t-hard">SUPPLY CHAIN · PR-B</span>
+<h3>WS3 — Pin the headless server's ingredients list</h3>
+<p>The standalone "headless server" we ship for other teams' CI didn't have a locked-down ingredients list (a <code>Cargo.lock</code>). That means its exact dependency versions were decided fresh at build time instead of from a reviewed, committed file. We commit that list and build strictly against it.</p>
+<p class="why">Reviewed + reproducible builds = a smaller window for a supply-chain surprise to sneak in.</p>
+</div>
+
+<div class="card">
+<span class="tag t-hard">GUARD RAIL · PR-B</span>
+<h3>WS5 — Make the "what's inside the app bundle" check stricter</h3>
+<p>Remember the 1.0.1 disaster? An extra binary sneaked into the macOS app bundle and broke auto-update. We already added a guard that checks the bundle's contents — but it only looked at regular files and could miss, say, a sneaky shortcut or folder. We tighten it to check <em>everything</em> at that level, exactly.</p>
+<p class="why">This guard is also why we're comfortable <em>not</em> building a giant automated update test right now — it already catches that whole class of bug for free (see below).</p>
+</div>
+
+<div class="card">
+<span class="tag t-defer">DOCUMENT NOW, AUTOMATE LATER</span>
+<h3>WS6 — How we'll test the actual update path</h3>
+<p>The dream is an automated test that installs the old version, lets it update, and confirms it still launches. It turns out that's genuinely hard to automate safely: the updater cryptographically checks every download against a built-in key, so a fake test-server download would either need the real production signing key (too risky for CI) or a fake key (then you're not testing the real thing).</p>
+<p class="why">So for now we write a short <strong>manual checklist</strong> to run before each release, and leave the automated version as its own future project. The stricter bundle check (WS5) already guards the specific failure that bit us in 1.0.1.</p>
+</div>
+
+<div class="card">
+<span class="tag t-drop">DROPPED</span>
+<h3>WS4 — A fix we discovered we didn't need</h3>
+<p>We thought the headless server might report the wrong version number. On closer inspection (and a second opinion that corrected an earlier one), the version it reports actually comes from a shared component we <em>already</em> stamp correctly at release time. So there was no real bug. We dropped it, keeping only an optional tiny nicety if we ever want a <code>--version</code> command.</p>
+</div>
+
+<h2>Two things we deliberately are NOT doing</h2>
+<ul>
+  <li><strong>No release.</strong> We're landing fixes onto the main branch and cutting a version another day. No rush.</li>
+  <li><strong>No big architectural refactor yet.</strong> The headless server still quietly drags the desktop UI framework along for the ride. Cleaning that up ("a shared core library both can use") is real work and gets its own plan later — not bundled into this firefight.</li>
+</ul>
+
+<h2>How we checked our own thinking</h2>
+<p>Per our usual process, three independent plans were drafted — ours, one from a different AI model family (codex), and one from a separate reviewer agent — then merged. They caught real things we'd have gotten wrong:</p>
+<ul>
+  <li>Our first instinct (switch off updates only for robot builds) would have left an unused chunk of code that trips the linter. Corrected.</li>
+  <li>We almost used a too-strict build flag (<code>--frozen</code>) that fails on cold caches; switched to the right one (<code>--locked</code>).</li>
+  <li>The "wrong version number" fix (WS4) was based on a misunderstanding; dropped.</li>
+</ul>
+<p class="why">Final verdict from the cross-check: <em>"ship-to-approval: the plan is sound."</em></p>
+
+<h2>Open questions for the human</h2>
+
+<p class="q">1. The dropped fix (WS4) — really drop it, or add a small <code>accelerator-server --version</code> command?</p>
+<p class="why">Context: nothing is broken either way. A <code>--version</code> command is a minor convenience for people running the headless server. Low value. The recommendation is to drop it.</p>
+
+<p class="q">2. Do we trust the "self-unblocking" claim enough to leave branch protection untouched?</p>
+<p class="why">Context: we believe the fix makes its own pull-request pass the checks normally, so we never have to weaken the merge rules. If that prediction is somehow wrong, the fallback is a one-time manual override on that single PR — never a standing change. Recommendation: proceed as planned, keep the rules intact.</p>
+
+<p class="q">3. Where should the manual update-testing checklist live, and should the release workflow link to it?</p>
+<p class="why">Context: a small doc-placement choice. Leaning: a <code>UPDATER_TESTING.md</code> next to the app, with a one-line reminder in the release pipeline.</p>
+
+<p class="foot">Sequence: PR-A (the fix, un-jams the pipeline) → PR-B (the three safety/hardening changes) → the checklist doc. Nothing ships to users until a future, deliberate release.</p>
+
+</body>
+</html>
