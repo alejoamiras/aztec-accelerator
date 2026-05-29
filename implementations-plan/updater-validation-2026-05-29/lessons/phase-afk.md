@@ -39,3 +39,10 @@
 - Root cause: build artifact basename is `Aztec Accelerator.app.tar.gz` (SPACE). latest.json url has the space → updater requests it %20-encoded → feed server's `path.split('/').pop()` didn't URL-decode → 404.
 - Fix: `decodeURIComponent` the basename in updater-feed-server.ts.
 - Note: the swap/restart/amfid path (the actual 1.0.1 crux) is still unexercised — rc.2 will reach it once the download succeeds.
+
+### Side-blocker — Playwright CDN too slow even for 10-min timeouts
+- #240's Local Network E2E (and rc.1) hit cdn.playwright.dev delivering full
+  Chrome for Testing (~150MB) at <250KB/s → exceeded BOTH 600s attempts (21min job).
+- apt `--with-deps` was fast; the chromium ZIP download was the stall.
+- Fix: `--only-shell chromium` (downloads the ~50-80MB headless shell; these
+  tests run headless). codex-endorsed. Applied to all 4 install sites.
