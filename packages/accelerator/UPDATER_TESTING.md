@@ -43,11 +43,29 @@ entry + a per-run local CA trusted on the runner), and N-1 verifies it against
 its **embedded prod pubkey**. No private key, no throwaway key — the job is
 `contents: read` only.
 
-**Status:** macOS (Apple Silicon + Intel), **advisory** until validated on a
-`1.0.3-rc` dry-run, then promoted to release-blocking. A follow-up adds the
-Linux AppImage leg + a standing negative test (a corrupted `.sig` must be
-rejected). Until macOS is blocking, run the manual steps above before promoting
-an rc to stable.
+**What it proves — and what it doesn't.** N-1 (latest stable) and N (the build
+under test) are *both* post-fix, so a green **positive** leg proves the live
+signed-updater path works end-to-end (endpoint → TLS → download → signature
+verify → in-place swap → bare-spawn relaunch → `/health == N`). It does **not**
+by itself prove the gate would *catch* a 1.0.1-class regression — the
+deterministic guard for that exact class is the **bundle-shape invariant** in
+the `build` job. To give the gate some teeth, a **negative** leg serves a
+corrupted `.sig` and asserts the update is **rejected** (`/health` never reports
+N) — proving the gate can fail, not just pass. Full detection of a
+*validly-signed but bad* bundle would require an ephemeral CI signing key + a
+CI-keyed N-1 (deferred).
+
+**Robustness baked in:** the macOS build emits updater artifacts via
+`tauri build --bundles app` (no `hdiutil`) and bundles the DMG in a separate
+retried step, so the chronic GH-runner DMG flake can't suppress updater signal;
+`update-smoke` runs per-arch independent of a sibling arch's build failure; and
+the N-1 selection aborts if it resolves to the same version under test (no
+no-op pass).
+
+**Status:** macOS (Apple Silicon + Intel) positive + an arm64 negative leg,
+**advisory** until validated on a `1.0.3-rc` dry-run, then promoted to
+release-blocking. A follow-up adds the Linux AppImage leg. Until macOS is
+blocking, run the manual steps above before promoting an rc to stable.
 
 A `-rc` dry-run is safe for real users: prereleases skip the S3 `latest.json`
 upload and are marked `--prerelease --latest=false`, so the prod updater feed

@@ -42,6 +42,9 @@ const server = Bun.serve({
 
     if (path === "/releases/latest.json") {
       const body = await Bun.file(latestJsonPath).text();
+      // Logged so the smoke test can assert the feed was actually hit (guards
+      // against a no-op "pass" where the updater never reached our feed).
+      console.log(`feed-server: ${req.method} ${path} -> 200`);
       return new Response(body, {
         headers: { "content-type": "application/json" },
       });
@@ -55,13 +58,14 @@ const server = Bun.serve({
     if (name) {
       const file = Bun.file(`${serveDir}/${name}`);
       if (await file.exists()) {
+        console.log(`feed-server: ${req.method} ${path} -> 200 (${name})`);
         return new Response(file, {
           headers: { "content-type": "application/octet-stream" },
         });
       }
     }
 
-    console.error(`feed-server: 404 ${path}`);
+    console.error(`feed-server: ${req.method} ${path} -> 404`);
     return new Response("not found", { status: 404 });
   },
 });

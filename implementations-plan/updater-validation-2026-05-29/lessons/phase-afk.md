@@ -46,3 +46,13 @@
 - apt `--with-deps` was fast; the chromium ZIP download was the stall.
 - Fix: `--only-shell chromium` (downloads the ~50-80MB headless shell; these
   tests run headless). codex-endorsed. Applied to all 4 install sites.
+
+### Attempt 2 — 1.0.3-rc.2 (run 26651570300)
+- After #240 (url-decode) + #240's --only-shell flake fix merged.
+- First run to reach download→verify→in-place swap→app.restart()→relaunch (the amfid crux).
+
+**Attempt 2 (rc.2): Intel Tauri build flaked on bundle_dmg.sh** (app signed +
+notarized OK; only DMG creation failed — same transient flake as the 1.0.1
+release on macos-15-intel). update-smoke skipped (needs build). Rerunning the
+failed Intel build → update-smoke then runs. Not an updater-step failure; not
+counted against the 3-attempt budget.

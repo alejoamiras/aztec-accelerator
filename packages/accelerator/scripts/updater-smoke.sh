@@ -28,6 +28,12 @@ N_ARTIFACTS_DIR="$3"
 N1_DMG="$4"
 REPO_ROOT="$5"
 
+# positive (default): expect the update to apply (/health reports N).
+# negative: serve a CORRUPTED .sig and assert the update is REJECTED — proves
+#           the gate has teeth (a green positive run alone is consistent with a
+#           test that can never fail). Set via UPDATER_SMOKE_MODE.
+MODE="${UPDATER_SMOKE_MODE:-positive}"
+
 APP="/Applications/Aztec Accelerator.app"
 APP_BIN="$APP/Contents/MacOS/aztec-accelerator"
 HEALTH="http://127.0.0.1:59833/health"
@@ -51,6 +57,10 @@ cleanup() {
   hdiutil detach "/Volumes/AztecAccelerator-N1" 2>/dev/null
   # best-effort: drop the hosts line we added
   sudo sed -i '' "/$HOST/d" /etc/hosts 2>/dev/null
+  # best-effort: remove the test CA we trusted (matters only on non-ephemeral /
+  # self-hosted runners; GH-hosted VMs are torn down after the job).
+  sudo security delete-certificate -c "updater-smoke-local-CA" \
+    /Library/Keychains/System.keychain 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -63,6 +73,14 @@ N_BASENAME="$(basename "$N_TARBALL")"
 cp "$N_TARBALL" "$SERVE_DIR/$N_BASENAME"
 N_SIG="$(cat "$N_SIG_FILE")"
 log "N artifact: $N_BASENAME"
+
+# Negative control: corrupt the signature so it cannot validate against the
+# embedded pubkey. The tarball itself is the real one — only the .sig is bad,
+# so the updater downloads it and MUST reject it at verification (no swap).
+if [ "$MODE" = "negative" ]; then
+  N_SIG="$(printf '%s' "$N_SIG" | rev)"
+  log "NEGATIVE mode: serving a CORRUPTED signature — expecting REJECTION (no update)"
+fi
 
 # ── Local CA + leaf cert (SAN = the prod host) ──
 log "generating local CA + leaf (SAN=$HOST)"
@@ -126,19 +144,60 @@ log "launching N-1 (expecting auto-update → N)"
 "$APP_BIN" > "$WORK/app.log" 2>&1 &
 APP_PID=$!
 
-# ── Poll /health until version == N (the strict success criterion: N-1 also
-#    answers /health 'ok' with its OWN version, so only version==N counts) ──
+dump_logs() {
+  echo "── app log ──"; cat "$WORK/app.log" 2>/dev/null || true
+  echo "── feed log ──"; cat "$WORK/feed.log" 2>/dev/null || true
+  echo "── last /health ──"; curl -s "$HEALTH" 2>/dev/null || true
+}
+
+if [ "$MODE" = "negative" ]; then
+  # Teeth check: the corrupted signature MUST be rejected. /health must NEVER
+  # report N (no swap). If it ever does, signature verification has no teeth.
+  log "NEGATIVE: asserting /health never reports $N_VERSION (corrupt sig rejected), 120s"
+  for _ in $(seq 1 60); do
+    GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+    if [ "$GOT" = "$N_VERSION" ]; then
+      echo "::error::NEGATIVE FAILED — a CORRUPTED signature was ACCEPTED; app updated to $N_VERSION. The updater is not verifying signatures."
+      dump_logs
+      exit 1
+    fi
+    sleep 2
+  done
+  # Rule out a vacuous pass: the updater must actually have queried our feed
+  # (and thus received the corrupted sig). If it never hit latest.json, the
+  # "no update" result proves nothing.
+  if ! grep -q "/releases/latest.json" "$WORK/feed.log" 2>/dev/null; then
+    echo "::error::NEGATIVE inconclusive — the updater never queried the feed (no latest.json hit), so rejection was not actually exercised."
+    dump_logs
+    exit 1
+  fi
+  log "SUCCESS (negative) — updater queried the feed, got the bad sig, and refused to update to $N_VERSION"
+  dump_logs
+  exit 0
+fi
+
+# ── Positive: poll /health until version == N (the strict success criterion:
+#    N-1 also answers /health 'ok' with its OWN version, so only version==N
+#    counts) ──
 log "polling $HEALTH for version == $N_VERSION (up to 300s)"
 for _ in $(seq 1 150); do
   GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
   if [ "$GOT" = "$N_VERSION" ]; then
-    log "SUCCESS — updated app reports version $GOT"
+    # Guard against a no-op pass: the version flip must have come from OUR feed.
+    # The updater downloads the artifact then verifies it, so a real update hits
+    # both latest.json and the download URL.
+    if ! grep -q "/releases/latest.json" "$WORK/feed.log" 2>/dev/null \
+       || ! grep -q "/releases/download/" "$WORK/feed.log" 2>/dev/null; then
+      echo "::error::/health reports $N_VERSION but the feed log lacks latest.json and/or download/ hits — the update did not flow through our feed."
+      dump_logs
+      exit 1
+    fi
+    log "SUCCESS — updated to $GOT via the local feed (latest.json + download/ both served)"
     exit 0
   fi
   sleep 2
 done
 
 echo "::error::updater smoke failed — /health never reported version $N_VERSION"
-echo "── app log ──"; cat "$WORK/app.log" 2>/dev/null || true
-echo "── last /health ──"; curl -s "$HEALTH" 2>/dev/null || true
+dump_logs
 exit 1
