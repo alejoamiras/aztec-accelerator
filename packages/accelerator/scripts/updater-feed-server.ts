@@ -49,7 +49,9 @@ const server = Bun.serve({
 
     // Any other path → serve the basename from the artifacts dir.
     // (latest.json points download URLs at /releases/download/<file>.)
-    const name = path.split("/").pop() ?? "";
+    // URL-decode: the Tauri bundle name has a space ("Aztec Accelerator.app.tar.gz"),
+    // which the updater requests %20-encoded — decode it to match the on-disk file.
+    const name = decodeURIComponent(path.split("/").pop() ?? "");
     if (name) {
       const file = Bun.file(`${serveDir}/${name}`);
       if (await file.exists()) {

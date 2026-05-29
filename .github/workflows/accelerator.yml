@@ -190,7 +190,7 @@ jobs:
           # progressing and legitimately exceeds a few minutes; too-short a
           # timeout kills a healthy download. 2 attempts covers a transient blip.
           for i in 1 2; do
-            if timeout 600 bunx playwright install --with-deps chromium; then exit 0; fi
+            if timeout 600 bunx playwright install --with-deps --only-shell chromium; then exit 0; fi
             echo "::warning::playwright install attempt $i failed/timed out; retrying"
             sleep 15
           done
