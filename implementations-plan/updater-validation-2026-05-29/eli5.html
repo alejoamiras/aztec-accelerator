@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Updater Validation Plan — ELI5</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#666; --line:#e5e5e5; --accent:#2a6; --warn:#b85; --bg:#fcfcfa; --code:#f3f3f0; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink); background: var(--bg); line-height: 1.65; max-width: 720px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 27px; margin: 0 0 4px; } .sub { color: var(--muted); margin: 0 0 32px; font-size: 15px; }
+  h2 { font-size: 19px; margin: 40px 0 12px; padding-top: 18px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15.5px; margin: 24px 0 6px; } p, li { font-size: 16px; } .lead { font-size: 17px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px 20px; margin:16px 0; }
+  .analogy { border-left:3px solid var(--accent); padding:4px 0 4px 16px; margin:12px 0; color:#333; }
+  .why { color: var(--muted); font-size: 15px; } a { color:#2a6; } ul { padding-left: 22px; }
+  .step { background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px 18px; margin:10px 0; }
+  .step b { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>A test that asks: "if we ship this, can people actually update to it?"</h1>
+<p class="sub">Plain-language companion to <a href="plan.md">plan.md</a> · 2026-05-29</p>
+
+<p class="lead">1.0.1 was a disaster because a freshly-built app <em>installed fine</em> but <strong>broke when an older version auto-updated into it</strong>. Our tests only ever checked fresh installs. This plan adds the missing test: actually perform the update, before we publish.</p>
+
+<h2>Why 1.0.1 slipped through</h2>
+
+<div class="analogy">
+Think of it like a door. We tested "does a brand-new door open?" — yes. We never tested "if you swap this door into an existing frame while someone's standing there, does it still open?" — and that's the one that jammed.
+</div>
+
+<p>The auto-updater swaps the new app in <em>on top of</em> the running old one, then relaunches. In 1.0.1 that swap changed the app's internal shape just enough that macOS's security check (amfid) hung forever on relaunch. A fresh install never does that swap, so our fresh-install test stayed green while real users got a frozen app.</p>
+
+<h2>The new test, in plain terms</h2>
+
+<p>During a release, after we've built and signed the new version (call it <strong>N</strong>), and <em>before</em> we publish it, a new CI job does exactly what a real user would:</p>
+
+<div class="step"><b>1.</b> Download the <strong>previous</strong> released version (N-1) and install it for real (into <code>/Applications</code>, the writable spot — not a read-only disk image, or the swap couldn't happen and we'd be fooling ourselves).</div>
+<div class="step"><b>2.</b> Quietly point that N-1 app at a <strong>pretend update server</strong> running on the CI machine, which offers our just-built N.</div>
+<div class="step"><b>3.</b> Let N-1 auto-update to N, swap, and relaunch — untouched, exactly as a user's would.</div>
+<div class="step"><b>4.</b> Check the app came back to life and reports the new version (<code>/health</code> says "I'm N"). If it hangs (the 1.0.1 symptom) → <strong>the release is blocked.</strong></div>
+
+<h2>Two clever bits worth knowing</h2>
+
+<div class="card">
+<h3>We need no secret keys</h3>
+<p>The updater only trusts downloads signed with our private key. Our build already signs N with it. So the test just <em>serves the already-signed N</em> — the old app checks the signature against the public key baked inside it, and it matches. The test job never touches the secret signing key. Cleanest possible security posture.</p>
+</div>
+
+<div class="card">
+<h3>How we fake the update server without changing the app</h3>
+<p>The app's update address is hard-wired to <code>aztec-accelerator.dev</code>. On the CI machine we (a) make that name resolve to "this machine," and (b) run a little local server there with a trusted certificate for that name. The app can't tell the difference — so we test the <strong>exact binary we're about to ship</strong>, with zero test-only code added to it.</p>
+<p class="why">We confirmed this works by checking how the app validates certificates: it uses the operating system's trust store, so a certificate we install on the CI machine is honored. (The alternative — shipping special "test mode" code in the real app — was rejected.)</p>
+</div>
+
+<h2>Rollout: careful on purpose</h2>
+<ul>
+  <li><strong>macOS blocks releases from day one</strong> — both Apple Silicon and Intel (we ship both; testing only one would be a blind spot). This is where the real risk lives.</li>
+  <li><strong>Linux starts as advisory</strong> (runs, but doesn't block) until we've seen it pass cleanly on a pre-release once. Linux's AppImage self-update is the fiddliest part to run on CI machines, and we don't want an untested setup blocking real releases. Promote it to blocking once proven.</li>
+</ul>
+
+<h2>The part that makes it trustworthy</h2>
+<p>A test that always passes is worthless. So there's a permanent <strong>negative check</strong>: we feed it a deliberately-corrupted download and confirm it <em>rejects</em> it. And "success" only counts if the updated app reports the <em>new</em> version — not merely "I'm alive" (the old version is also alive). That way the gate can't silently rot into always-green.</p>
+
+<h2>Open questions for the human</h2>
+<p class="q"><strong>1.</strong> On macOS CI, will a freshly-downloaded notarized N-1 launch headlessly without a Gatekeeper prompt? (It's notarized, so it should — we'll confirm on the first dry-run.)</p>
+<p class="why"><strong>2.</strong> Linux AppImage: will it run natively on the CI runner, or need an extract-and-run workaround? If the latter, that changes the very update path we're testing — so we validate it early and keep Linux advisory until it's clean.</p>
+
+<p class="why" style="margin-top:32px">Reviewed by codex + an independent reviewer agent. Verdict: design sound; ship with macOS blocking, Linux advisory until proven. We'll prove it on a <code>1.0.3-rc</code> dry-run before it ever gates a real release.</p>
+
+</body>
+</html>

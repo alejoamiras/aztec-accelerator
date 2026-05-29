@@ -41,10 +41,18 @@ jobs:
         id: pw-cache
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/playground/package.json') }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
       - name: Install Playwright browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium
+        timeout-minutes: 12
+        run: |
+          for i in 1 2 3; do
+            if timeout 180 bunx playwright install --with-deps chromium; then exit 0; fi
+            echo "::warning::playwright install attempt $i failed/timed out; retrying"
+            sleep $((i * 10))
+          done
+          echo "::error::playwright install failed after 3 attempts"
+          exit 1
 
       - uses: ./.github/actions/start-services
         with:
