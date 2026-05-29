@@ -318,6 +318,35 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Release-time updater gate (macOS, first increment). ADVISORY for now —
+  # intentionally NOT in `tag.needs`, so it runs + reports on every release
+  # (incl. -rc dry-runs) without blocking, until proven on a 1.0.3-rc dry-run.
+  # Follow-up will add Linux (AppImage) + a standing negative test and promote
+  # macOS to release-blocking (add to tag.needs). See
+  # implementations-plan/updater-validation-2026-05-29/plan.md.
+  update-smoke:
+    name: Updater Smoke (${{ matrix.platform-key }})
+    needs: [validate, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            platform-key: darwin-aarch64
+            n-artifact: accelerator-macos-arm64
+            n1-dmg-glob: "*macOS-Apple-Silicon.dmg"
+          - runner: macos-15-intel
+            platform-key: darwin-x86_64
+            n-artifact: accelerator-macos-x86_64
+            n1-dmg-glob: "*macOS-Intel.dmg"
+    uses: ./.github/workflows/_e2e-updater.yml
+    with:
+      runner: ${{ matrix.runner }}
+      platform-key: ${{ matrix.platform-key }}
+      n-version: ${{ needs.validate.outputs.version }}
+      n-artifact: ${{ matrix.n-artifact }}
+      n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
+
   tag:
     name: Create Git Tag
     needs: [validate, build, build-headless, smoke]

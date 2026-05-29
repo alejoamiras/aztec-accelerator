@@ -87,7 +87,10 @@ Update `packages/accelerator/UPDATER_TESTING.md` (currently stale per codex — 
 
 ## Sequencing
 
-Own PR (`ci/updater-validation`), after the ci-speed PR (independent, but lands second to keep release-path changes isolated). Validate on a `1.0.3-rc` dry-run before relying on it to gate a stable cut.
+- **PR1 (this branch, `ci/updater-validation`)** — macOS-first increment, **advisory** (not in `tag.needs`): `updater-feed-server.ts` + `updater-smoke.sh` + `_e2e-updater.yml` + the `update-smoke` matrix job (macOS arm64 + Intel). Validated by a `1.0.3-rc` dry-run (safe: prereleases don't touch the prod feed).
+- **PR2 (follow-up)** — once the dry-run is green: add the Linux AppImage leg + the standing negative test (corrupt `.sig` must fail), and promote macOS to **release-blocking** (add `update-smoke` to `tag.needs`).
+
+Lands after the ci-speed PR to keep release-path changes isolated.
 
 ## Open questions (final pass)
 

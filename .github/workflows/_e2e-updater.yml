@@ -1,0 +1,80 @@
+name: _Updater Smoke (reusable)
+
+# Release-time gate: install the previous stable (N-1), let it auto-update to
+# the just-built+signed build (N) via a local feed impersonating the prod
+# endpoint, and assert it relaunches reporting version N. Reproduces the 1.0.1
+# failure class (macOS amfid hang after the in-place .app swap). macOS only in
+# this first increment; Linux (AppImage) + a standing negative test land in a
+# follow-up once this is proven on a 1.0.3-rc dry-run.
+#
+# Needs no signing key: it serves the already-prod-signed N artifact and N-1
+# validates it against its embedded pubkey. See updater-smoke.sh.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub runner (macos-latest | macos-15-intel)
+        required: true
+        type: string
+      platform-key:
+        description: Tauri updater platform key (darwin-aarch64 | darwin-x86_64)
+        required: true
+        type: string
+      n-version:
+        description: The version being released (N)
+        required: true
+        type: string
+      n-artifact:
+        description: This run's build artifact name (e.g. accelerator-macos-arm64)
+        required: true
+        type: string
+      n1-dmg-glob:
+        description: Glob for the N-1 release DMG asset (e.g. *macOS-Apple-Silicon.dmg)
+        required: true
+        type: string
+
+jobs:
+  updater-smoke:
+    name: Updater Smoke
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Download N artifacts (this run)
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.n-artifact }}
+          path: n-artifacts
+
+      - name: Download latest stable (N-1) DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          N1_TAG=$(gh release list --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          if [ -z "$N1_TAG" ]; then
+            echo "::error::no stable release found to use as N-1"
+            exit 1
+          fi
+          echo "N-1 = $N1_TAG"
+          mkdir -p n1
+          gh release download "$N1_TAG" --pattern "${{ inputs.n1-dmg-glob }}" --dir n1
+
+      - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
+        run: |
+          DMG=$(find n1 -name '*.dmg' | head -1)
+          if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi
+          bash packages/accelerator/scripts/updater-smoke.sh \
+            "${{ inputs.n-version }}" \
+            "${{ inputs.platform-key }}" \
+            n-artifacts \
+            "$DMG" \
+            "$GITHUB_WORKSPACE"
