@@ -114,3 +114,36 @@ sig-rejection" to "proven detection of a 1.0.1-class hang."
   DMG retry (while the .app still exists); remove the standalone step.
 - Note: rc.4 will exercise the amfid swap+relaunch crux for the FIRST time
   (rc.1 404'd pre-download, rc.2 never built, rc.3 never uploaded the artifact).
+
+## Post-merge codex audit (session 019e7554) — hardening PR
+
+Audited the merged state. Codex confirmed the split is sound and the positive
+path + bundle-shape invariant are solid, but found real holes (all fixed on
+`ci/updater-gate-audit-hardening`):
+
+1. **[SHIPPED-ARTIFACT]** No regression from the split (verified empirically:
+   1.0.2 combined-build and rc.4 split-build are IDENTICAL — `.app` stapled +
+   `spctl` "accepted, Notarized Developer ID"; `.dmg` unstapled in BOTH, which
+   is tauri's normal posture, Gatekeeper assesses the `.app`). But the smoke job
+   never verified notarization → added `codesign --verify --deep --strict` +
+   `xcrun stapler validate` on the `.app` (catches a future unstapled/unsigned
+   ship that "launches fine" yet fails a real user's Gatekeeper).
+2. **[FALSE-PASS]** The negative leg's anti-vacuous guard grepped the feed log
+   for `latest.json` — but the script's OWN readiness probe curls latest.json,
+   so it was always true. Switched the proof to a `/releases/download/` hit
+   (only the app requests that). Same fix applied to the positive guard (dropped
+   the vacuous latest.json clause).
+3. **[FALSE-PASS]** Negative corruption used `rev` on the `.sig`, which can fail
+   as malformed-base64 BEFORE crypto verification. Switched to serving the
+   GENUINE signature with a TAMPERED tarball (append a byte) → the app downloads
+   it and the minisign check over the tampered bytes fails → real verification
+   teeth.
+4. **[SECURITY]** Tightened the `/etc/hosts` cleanup to delete only the exact
+   anchored line (not any line mentioning the host) — self-hosted hygiene.
+5. **[CORRECTNESS]** Rerun guard was a suffix glob (false-matches
+   accelerator-v11.0.3 vs 1.0.3) → exact tag compare `accelerator-v$N_VERSION`.
+
+Empirical stapling check (local, on the real artifacts):
+- 1.0.2 .app: `stapler validate` OK, `spctl` accepted; .dmg unstapled.
+- 1.0.3-rc.4 .app: `stapler validate` OK, `spctl` accepted; .dmg unstapled.
+→ split is byte-equivalent in notarization posture; no user-facing regression.

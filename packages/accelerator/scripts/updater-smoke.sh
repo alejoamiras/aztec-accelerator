@@ -55,8 +55,9 @@ cleanup() {
   pkill -f "Aztec Accelerator.app" 2>/dev/null
   [ -n "$FEED_PID" ] && sudo kill "$FEED_PID" 2>/dev/null
   hdiutil detach "/Volumes/AztecAccelerator-N1" 2>/dev/null
-  # best-effort: drop the hosts line we added
-  sudo sed -i '' "/$HOST/d" /etc/hosts 2>/dev/null
+  # best-effort: drop ONLY the exact line we added (anchored), not any line
+  # mentioning the host — avoids clobbering an unrelated entry on self-hosted.
+  sudo sed -i '' "/^127\\.0\\.0\\.1 $HOST\$/d" /etc/hosts 2>/dev/null
   # best-effort: remove the test CA we trusted (matters only on non-ephemeral /
   # self-hosted runners; GH-hosted VMs are torn down after the job).
   sudo security delete-certificate -c "updater-smoke-local-CA" \
@@ -74,12 +75,15 @@ cp "$N_TARBALL" "$SERVE_DIR/$N_BASENAME"
 N_SIG="$(cat "$N_SIG_FILE")"
 log "N artifact: $N_BASENAME"
 
-# Negative control: corrupt the signature so it cannot validate against the
-# embedded pubkey. The tarball itself is the real one — only the .sig is bad,
-# so the updater downloads it and MUST reject it at verification (no swap).
+# Negative control: serve the GENUINE signature but a TAMPERED tarball (append a
+# byte). The updater downloads the artifact, then the minisign check over the
+# tampered bytes MUST fail against the embedded pubkey — exercising real
+# cryptographic verification (not a malformed-base64 parse error, which a
+# corrupted .sig would hit before any verification). The genuine sig is left
+# untouched so the only thing wrong is the artifact↔signature mismatch.
 if [ "$MODE" = "negative" ]; then
-  N_SIG="$(printf '%s' "$N_SIG" | rev)"
-  log "NEGATIVE mode: serving a CORRUPTED signature — expecting REJECTION (no update)"
+  printf 'x' >> "$SERVE_DIR/$N_BASENAME"
+  log "NEGATIVE mode: serving a TAMPERED tarball with the genuine signature — expecting REJECTION (no update)"
 fi
 
 # ── Local CA + leaf cert (SAN = the prod host) ──
@@ -151,27 +155,27 @@ dump_logs() {
 }
 
 if [ "$MODE" = "negative" ]; then
-  # Teeth check: the corrupted signature MUST be rejected. /health must NEVER
-  # report N (no swap). If it ever does, signature verification has no teeth.
-  log "NEGATIVE: asserting /health never reports $N_VERSION (corrupt sig rejected), 120s"
+  # Teeth check: the tampered tarball MUST be rejected. /health must NEVER report
+  # N (no swap). If it ever does, signature verification has no teeth.
+  log "NEGATIVE: asserting /health never reports $N_VERSION (tampered artifact rejected), 120s"
   for _ in $(seq 1 60); do
     GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
     if [ "$GOT" = "$N_VERSION" ]; then
-      echo "::error::NEGATIVE FAILED — a CORRUPTED signature was ACCEPTED; app updated to $N_VERSION. The updater is not verifying signatures."
+      echo "::error::NEGATIVE FAILED — a TAMPERED artifact was ACCEPTED; app updated to $N_VERSION. The updater is not verifying signatures."
       dump_logs
       exit 1
     fi
     sleep 2
   done
-  # Rule out a vacuous pass: the updater must actually have queried our feed
-  # (and thus received the corrupted sig). If it never hit latest.json, the
-  # "no update" result proves nothing.
-  if ! grep -q "/releases/latest.json" "$WORK/feed.log" 2>/dev/null; then
-    echo "::error::NEGATIVE inconclusive — the updater never queried the feed (no latest.json hit), so rejection was not actually exercised."
+  # Rule out a VACUOUS pass: the app must actually have DOWNLOADED the artifact
+  # (then rejected it). We assert a /releases/download/ hit — NOT latest.json,
+  # which our own readiness probe above curls, so it can't prove the app ran.
+  if ! grep -q "/releases/download/" "$WORK/feed.log" 2>/dev/null; then
+    echo "::error::NEGATIVE inconclusive — the updater never downloaded the artifact (no download/ hit), so signature rejection was not actually exercised."
     dump_logs
     exit 1
   fi
-  log "SUCCESS (negative) — updater queried the feed, got the bad sig, and refused to update to $N_VERSION"
+  log "SUCCESS (negative) — updater downloaded the tampered artifact and refused to update to $N_VERSION"
   dump_logs
   exit 0
 fi
@@ -184,15 +188,15 @@ for _ in $(seq 1 150); do
   GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
   if [ "$GOT" = "$N_VERSION" ]; then
     # Guard against a no-op pass: the version flip must have come from OUR feed.
-    # The updater downloads the artifact then verifies it, so a real update hits
-    # both latest.json and the download URL.
-    if ! grep -q "/releases/latest.json" "$WORK/feed.log" 2>/dev/null \
-       || ! grep -q "/releases/download/" "$WORK/feed.log" 2>/dev/null; then
-      echo "::error::/health reports $N_VERSION but the feed log lacks latest.json and/or download/ hits — the update did not flow through our feed."
+    # Assert a /releases/download/ hit — the app only requests that when it
+    # actually downloads N. (We do NOT assert latest.json: our own readiness
+    # probe curls it, so it can't prove the app fetched the feed.)
+    if ! grep -q "/releases/download/" "$WORK/feed.log" 2>/dev/null; then
+      echo "::error::/health reports $N_VERSION but the feed log has no download/ hit — the update did not flow through our feed."
       dump_logs
       exit 1
     fi
-    log "SUCCESS — updated to $GOT via the local feed (latest.json + download/ both served)"
+    log "SUCCESS — updated to $GOT via the local feed (artifact downloaded)"
     exit 0
   fi
   sleep 2

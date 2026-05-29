@@ -308,6 +308,17 @@ jobs:
             find /Volumes/AztecAccelerator -type f
             exit 1
           fi
+
+          # Gatekeeper / notarization verification: an unstapled or improperly
+          # signed DMG can still "launch fine" in CI yet be REJECTED on a real
+          # user's first double-click. These offline checks catch that class
+          # (which a launch-only smoke misses).
+          APP_PATH=$(find /Volumes/AztecAccelerator -maxdepth 1 -name '*.app' | head -1)
+          echo "Verifying signature + stapled notarization of $APP_PATH..."
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          echo "Signature + stapled notarization OK"
+
           echo "Launching $APP_BIN..."
           "$APP_BIN" > /tmp/smoke.log 2>&1 &
           echo "SMOKE_PID=$!" >> "$GITHUB_ENV"

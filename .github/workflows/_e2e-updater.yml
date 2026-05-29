@@ -74,12 +74,12 @@ jobs:
           # Guard against a no-op pass: if N-1 resolves to the SAME version under
           # test (e.g. a re-run after N is already the latest stable), the updater
           # has nothing to do and `/health == N` would pass trivially (false pass).
-          case "$N1_TAG" in
-            *"$N_VERSION")
-              echo "::error::N-1 ($N1_TAG) matches the version under test ($N_VERSION) — no-op no-update would pass trivially. Aborting."
-              exit 1
-              ;;
-          esac
+          # Exact tag compare (tags are `accelerator-v<version>`) — a suffix match
+          # would false-trip on e.g. accelerator-v11.0.3 vs 1.0.3.
+          if [ "$N1_TAG" = "accelerator-v$N_VERSION" ]; then
+            echo "::error::N-1 ($N1_TAG) is the version under test (accelerator-v$N_VERSION) — no-op no-update would pass trivially. Aborting."
+            exit 1
+          fi
           mkdir -p n1
           gh release download "$N1_TAG" --pattern "${{ inputs.n1-dmg-glob }}" --dir n1
 
