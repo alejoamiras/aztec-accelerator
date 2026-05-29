@@ -73,9 +73,10 @@ jobs:
 
       - name: Start headless accelerator server
         if: inputs.build_accelerator
+        # Run the binary built in the previous step directly — `cargo run`
+        # re-resolves/re-checks the build graph on every invocation.
         run: |
-          cd packages/accelerator/server
-          cargo run > /tmp/accelerator.log 2>&1 &
+          packages/accelerator/server/target/debug/accelerator-server > /tmp/accelerator.log 2>&1 &
           echo "ACCELERATOR_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for accelerator
