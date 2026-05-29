@@ -104,10 +104,25 @@ jobs:
             await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
           "
 
+      # macOS: build + sign + NOTARIZE the .app and updater artifacts
+      # (.app.tar.gz/.sig) WITHOUT the DMG, assert the bundle-structure
+      # invariant, THEN bundle the DMG in a retried loop — all in one step so
+      # the signing secrets live in a single place. Rationale:
+      #   - The updater never needs the DMG, so producing updater artifacts via
+      #     `--bundles app` makes them immune to the chronic DMG-bundling flake
+      #     (generic hdiutil/create-dmg flakiness on GH runners, esp.
+      #     macos-15-intel — actions/runner-images#7522; the app signs +
+      #     notarizes fine, only `bundle_dmg.sh` dies). update-smoke can then
+      #     validate even when the DMG flakes.
+      #   - Retrying ONLY the DMG step is cheap (the .app is already notarized
+      #     above — no re-notarization) and self-heals the transient failure.
+      #   - The invariant MUST run before the DMG step: `tauri bundle dmg` makes
+      #     tauri "clean" the .app out of bundle/macos once the DMG exists.
+      # Linux: unchanged single `tauri build` (deb + AppImage + updater sig).
       - name: Build Tauri bundle
-        run: bunx tauri build --target ${{ matrix.target }}
         working-directory: packages/accelerator
         env:
+          TARGET: ${{ matrix.target }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -116,36 +131,54 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      # Bundle-structure invariant: every desktop .app MUST contain EXACTLY
-      # the binaries we declare. A stowaway (extra bin) or a missing required
-      # one (e.g. `bb` sidecar dropped) is a hard fail — this exact bug
-      # broke the 1.0.0 → 1.0.1 macOS auto-update (Tauri auto-included
-      # `accelerator-server` because Cargo's bin auto-discovery picked up
-      # `src/bin/accelerator-server.rs`). Cheap CI guard so it never recurs.
-      - name: Assert bundle structure (macOS only)
-        if: startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin')
-        working-directory: packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos
         run: |
-          APP=$(find . -maxdepth 1 -name '*.app' | head -1)
-          if [ -z "$APP" ]; then
-            echo "::error::No .app bundle found"
+          set -euo pipefail
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            bunx tauri build --target "$TARGET"
+            exit 0
+          fi
+          # 1) App + updater artifacts (no hdiutil; notarized here, once).
+          bunx tauri build --target "$TARGET" --bundles app
+          MACOS_DIR="src-tauri/target/$TARGET/release/bundle/macos"
+          if ! ls "$MACOS_DIR"/*.app.tar.gz >/dev/null 2>&1 \
+             || ! ls "$MACOS_DIR"/*.app.tar.gz.sig >/dev/null 2>&1; then
+            echo "::error::--bundles app did not emit updater artifacts (.app.tar.gz/.sig) in $MACOS_DIR"
+            ls -la "$MACOS_DIR" 2>/dev/null || true
             exit 1
           fi
-          # Exact entry-set check, ANY type (not just regular files): a stray
-          # symlink or directory in MacOS/ would also change the signed bundle's
-          # shape and must fail too (the 1.0.1 hang was a bundle-shape change).
-          EXPECTED=$(printf 'aztec-accelerator\nbb\n' | sort)
-          ACTUAL=$(cd "$APP/Contents/MacOS" && find . -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)
-          echo "Expected MacOS/ contents:"
-          echo "$EXPECTED"
-          echo "Actual MacOS/ contents:"
-          echo "$ACTUAL"
-          if ! diff <(echo "$EXPECTED") <(echo "$ACTUAL") > /dev/null; then
-            echo "::error::Bundle MacOS/ contents drifted — see above. Update Cargo.toml [[bin]] declarations + this invariant if the change is intentional."
+          # 2) Bundle-structure invariant — assert NOW, while the .app exists
+          #    (step 3 cleans it out). Every desktop .app MUST contain EXACTLY
+          #    the binaries we declare; a stowaway (e.g. accelerator-server — the
+          #    1.0.0→1.0.1 auto-update break) or a missing `bb` sidecar is a hard
+          #    fail. ANY type counts: a stray symlink/dir in MacOS/ also changes
+          #    the signed bundle shape.
+          APP="$(find "$MACOS_DIR" -maxdepth 1 -name '*.app' | head -1)"
+          if [ -z "$APP" ]; then
+            echo "::error::No .app bundle found in $MACOS_DIR"
+            ls -la "$MACOS_DIR" 2>/dev/null || true
+            exit 1
+          fi
+          EXPECTED="$(printf 'aztec-accelerator\nbb\n' | sort)"
+          ACTUAL="$(cd "$APP/Contents/MacOS" && find . -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)"
+          echo "Expected MacOS/ contents:"; echo "$EXPECTED"
+          echo "Actual MacOS/ contents:"; echo "$ACTUAL"
+          if ! diff <(echo "$EXPECTED") <(echo "$ACTUAL") >/dev/null; then
+            echo "::error::Bundle MacOS/ contents drifted — see above. Update Cargo.toml [[bin]] declarations + this invariant if intentional."
             exit 1
           fi
           echo "Bundle structure OK"
+          # 3) DMG only — the chronic flake. Retry just this (no re-notarization).
+          for attempt in 1 2 3; do
+            if bunx tauri bundle --target "$TARGET" --bundles dmg --verbose; then
+              exit 0
+            fi
+            echo "::warning::DMG bundling attempt $attempt/3 failed (transient hdiutil flake)"
+            if [ "$attempt" = 3 ]; then
+              echo "::error::DMG bundling failed after 3 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -325,8 +358,13 @@ jobs:
   # macOS to release-blocking (add to tag.needs). See
   # implementations-plan/updater-validation-2026-05-29/plan.md.
   update-smoke:
-    name: Updater Smoke (${{ matrix.platform-key }})
+    name: Updater Smoke (${{ matrix.platform-key }} / ${{ matrix.mode }})
     needs: [validate, build]
+    # Decoupled from a full `build` success: each arch downloads ONLY its own
+    # arch's (DMG-independent) updater artifact, so a flaky DMG on one arch
+    # (e.g. macos-15-intel) must not suppress the healthy arch's updater signal.
+    # Run whenever validate produced its outputs and the run isn't cancelled.
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -335,10 +373,22 @@ jobs:
             platform-key: darwin-aarch64
             n-artifact: accelerator-macos-arm64
             n1-dmg-glob: "*macOS-Apple-Silicon.dmg"
+            mode: positive
           - runner: macos-15-intel
             platform-key: darwin-x86_64
             n-artifact: accelerator-macos-x86_64
             n1-dmg-glob: "*macOS-Intel.dmg"
+            mode: positive
+          # Negative control (teeth): serve a CORRUPTED .sig and assert the
+          # updater REJECTS it (never reaches version N). Proves the gate can
+          # actually fail — without this, a green positive run is consistent with
+          # a test that always passes. arm64 only: the signature-verification
+          # path is arch-independent, no need to also burn the flakier Intel runner.
+          - runner: macos-latest
+            platform-key: darwin-aarch64
+            n-artifact: accelerator-macos-arm64
+            n1-dmg-glob: "*macOS-Apple-Silicon.dmg"
+            mode: negative
     uses: ./.github/workflows/_e2e-updater.yml
     with:
       runner: ${{ matrix.runner }}
@@ -346,6 +396,7 @@ jobs:
       n-version: ${{ needs.validate.outputs.version }}
       n-artifact: ${{ matrix.n-artifact }}
       n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
+      mode: ${{ matrix.mode }}
 
   tag:
     name: Create Git Tag

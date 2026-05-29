@@ -33,6 +33,11 @@ on:
         description: Glob for the N-1 release DMG asset (e.g. *macOS-Apple-Silicon.dmg)
         required: true
         type: string
+      mode:
+        description: "positive (expect the update to apply) | negative (serve a corrupted .sig, expect rejection)"
+        required: false
+        default: positive
+        type: string
 
 jobs:
   updater-smoke:
@@ -58,6 +63,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          N_VERSION: ${{ inputs.n-version }}
         run: |
           N1_TAG=$(gh release list --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
           if [ -z "$N1_TAG" ]; then
@@ -65,10 +71,21 @@ jobs:
             exit 1
           fi
           echo "N-1 = $N1_TAG"
+          # Guard against a no-op pass: if N-1 resolves to the SAME version under
+          # test (e.g. a re-run after N is already the latest stable), the updater
+          # has nothing to do and `/health == N` would pass trivially (false pass).
+          case "$N1_TAG" in
+            *"$N_VERSION")
+              echo "::error::N-1 ($N1_TAG) matches the version under test ($N_VERSION) — no-op no-update would pass trivially. Aborting."
+              exit 1
+              ;;
+          esac
           mkdir -p n1
           gh release download "$N1_TAG" --pattern "${{ inputs.n1-dmg-glob }}" --dir n1
 
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
+        env:
+          UPDATER_SMOKE_MODE: ${{ inputs.mode }}
         run: |
           DMG=$(find n1 -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi
