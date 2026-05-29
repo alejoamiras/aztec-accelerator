@@ -105,8 +105,9 @@ jobs:
           "
 
       # macOS: build + sign + NOTARIZE the .app and updater artifacts
-      # (.app.tar.gz/.sig) WITHOUT the DMG, then bundle the DMG in a separate
-      # RETRIED step. Rationale:
+      # (.app.tar.gz/.sig) WITHOUT the DMG, assert the bundle-structure
+      # invariant, THEN bundle the DMG in a retried loop — all in one step so
+      # the signing secrets live in a single place. Rationale:
       #   - The updater never needs the DMG, so producing updater artifacts via
       #     `--bundles app` makes them immune to the chronic DMG-bundling flake
       #     (generic hdiutil/create-dmg flakiness on GH runners, esp.
@@ -115,6 +116,8 @@ jobs:
       #     validate even when the DMG flakes.
       #   - Retrying ONLY the DMG step is cheap (the .app is already notarized
       #     above — no re-notarization) and self-heals the transient failure.
+      #   - The invariant MUST run before the DMG step: `tauri bundle dmg` makes
+      #     tauri "clean" the .app out of bundle/macos once the DMG exists.
       # Linux: unchanged single `tauri build` (deb + AppImage + updater sig).
       - name: Build Tauri bundle
         working-directory: packages/accelerator
@@ -143,7 +146,28 @@ jobs:
             ls -la "$MACOS_DIR" 2>/dev/null || true
             exit 1
           fi
-          # 2) DMG only — the chronic flake. Retry just this (no re-notarization).
+          # 2) Bundle-structure invariant — assert NOW, while the .app exists
+          #    (step 3 cleans it out). Every desktop .app MUST contain EXACTLY
+          #    the binaries we declare; a stowaway (e.g. accelerator-server — the
+          #    1.0.0→1.0.1 auto-update break) or a missing `bb` sidecar is a hard
+          #    fail. ANY type counts: a stray symlink/dir in MacOS/ also changes
+          #    the signed bundle shape.
+          APP="$(find "$MACOS_DIR" -maxdepth 1 -name '*.app' | head -1)"
+          if [ -z "$APP" ]; then
+            echo "::error::No .app bundle found in $MACOS_DIR"
+            ls -la "$MACOS_DIR" 2>/dev/null || true
+            exit 1
+          fi
+          EXPECTED="$(printf 'aztec-accelerator\nbb\n' | sort)"
+          ACTUAL="$(cd "$APP/Contents/MacOS" && find . -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)"
+          echo "Expected MacOS/ contents:"; echo "$EXPECTED"
+          echo "Actual MacOS/ contents:"; echo "$ACTUAL"
+          if ! diff <(echo "$EXPECTED") <(echo "$ACTUAL") >/dev/null; then
+            echo "::error::Bundle MacOS/ contents drifted — see above. Update Cargo.toml [[bin]] declarations + this invariant if intentional."
+            exit 1
+          fi
+          echo "Bundle structure OK"
+          # 3) DMG only — the chronic flake. Retry just this (no re-notarization).
           for attempt in 1 2 3; do
             if bunx tauri bundle --target "$TARGET" --bundles dmg --verbose; then
               exit 0
@@ -155,36 +179,6 @@ jobs:
             fi
             sleep 10
           done
-
-      # Bundle-structure invariant: every desktop .app MUST contain EXACTLY
-      # the binaries we declare. A stowaway (extra bin) or a missing required
-      # one (e.g. `bb` sidecar dropped) is a hard fail — this exact bug
-      # broke the 1.0.0 → 1.0.1 macOS auto-update (Tauri auto-included
-      # `accelerator-server` because Cargo's bin auto-discovery picked up
-      # `src/bin/accelerator-server.rs`). Cheap CI guard so it never recurs.
-      - name: Assert bundle structure (macOS only)
-        if: startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin')
-        working-directory: packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos
-        run: |
-          APP=$(find . -maxdepth 1 -name '*.app' | head -1)
-          if [ -z "$APP" ]; then
-            echo "::error::No .app bundle found"
-            exit 1
-          fi
-          # Exact entry-set check, ANY type (not just regular files): a stray
-          # symlink or directory in MacOS/ would also change the signed bundle's
-          # shape and must fail too (the 1.0.1 hang was a bundle-shape change).
-          EXPECTED=$(printf 'aztec-accelerator\nbb\n' | sort)
-          ACTUAL=$(cd "$APP/Contents/MacOS" && find . -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)
-          echo "Expected MacOS/ contents:"
-          echo "$EXPECTED"
-          echo "Actual MacOS/ contents:"
-          echo "$ACTUAL"
-          if ! diff <(echo "$EXPECTED") <(echo "$ACTUAL") > /dev/null; then
-            echo "::error::Bundle MacOS/ contents drifted — see above. Update Cargo.toml [[bin]] declarations + this invariant if the change is intentional."
-            exit 1
-          fi
-          echo "Bundle structure OK"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

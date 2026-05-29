@@ -95,3 +95,22 @@ sig-rejection" to "proven detection of a 1.0.1-class hang."
 - Next: PR → re-trigger `1.0.3-rc.3` dry-run → confirm Intel build self-heals,
   both positive update-smoke legs go green, and the negative leg goes green
   (rejection). Bound: 3 dry-run attempts per root cause.
+
+## Attempt log
+
+### rc.3 (run 26654932580, from branch) — DMG flake + decoupling PROVEN; ordering bug found
+- ✅ DMG flake FIXED: "Build Tauri bundle" passed on BOTH macOS legs, incl.
+  macos-15-intel (flaked 3× before). The split (`--bundles app` + retried
+  `tauri bundle --bundles dmg`) self-heals it.
+- ✅ Decoupling works: all 3 update-smoke legs RAN (not skipped) despite the
+  build matrix failing → `if: !cancelled()` does its job. (They then failed
+  downstream because the build's artifact upload was skipped — see below.)
+- ❌ Ordering bug I introduced: `tauri bundle --bundles dmg` makes tauri
+  "Cleaning [tauri_bundler::bundle] …/Aztec Accelerator.app" — it removes the
+  .app from bundle/macos once the DMG exists. My SEPARATE "Assert bundle
+  structure" step then ran AFTER that and hit "No .app bundle found" → build leg
+  failed → Upload skipped → update-smoke legs failed at artifact download.
+- Fix: inline the invariant into the build step BETWEEN the app build and the
+  DMG retry (while the .app still exists); remove the standalone step.
+- Note: rc.4 will exercise the amfid swap+relaunch crux for the FIRST time
+  (rc.1 404'd pre-download, rc.2 never built, rc.3 never uploaded the artifact).
