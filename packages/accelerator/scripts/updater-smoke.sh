@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Release-time updater smoke test (macOS).
+#
+# Proves a user on the previous stable (N-1) can auto-update to the just-built,
+# just-signed build (N) AND the result relaunches successfully — the exact
+# failure class that shipped in 1.0.1 (amfid hang after the in-place .app swap),
+# which fresh-install smoke does not catch.
+#
+# How it works (no signing key needed):
+#   - We serve the ALREADY prod-signed N artifact from a local HTTPS server
+#     impersonating aztec-accelerator.dev (hosts entry + a trusted local CA).
+#   - N-1 (unmodified, as shipped) fetches its hardcoded endpoint, downloads N,
+#     verifies the .sig against its embedded prod pubkey, swaps in place, and
+#     restarts. We then poll /health until it reports version == N.
+#
+# Usage:
+#   updater-smoke.sh <n-version> <platform-key> <n-artifacts-dir> <n1-dmg> <repo-root>
+#     n-version       e.g. 1.0.3-rc.1   (the version being released)
+#     platform-key    darwin-aarch64 | darwin-x86_64
+#     n-artifacts-dir dir with N's *.app.tar.gz + *.app.tar.gz.sig
+#     n1-dmg          path to the downloaded N-1 .dmg
+#     repo-root       repo root (to locate the feed server script)
+set -euo pipefail
+
+N_VERSION="$1"
+PLATFORM_KEY="$2"
+N_ARTIFACTS_DIR="$3"
+N1_DMG="$4"
+REPO_ROOT="$5"
+
+APP="/Applications/Aztec Accelerator.app"
+APP_BIN="$APP/Contents/MacOS/aztec-accelerator"
+HEALTH="http://127.0.0.1:59833/health"
+HOST="aztec-accelerator.dev"
+CONFIG_DIR="$HOME/.aztec-accelerator"
+WORK="$(mktemp -d)"
+SERVE_DIR="$WORK/serve"
+mkdir -p "$SERVE_DIR"
+
+FEED_PID=""
+APP_PID=""
+
+log() { echo "── $* ──"; }
+
+# shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT`
+cleanup() {
+  set +e
+  [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
+  pkill -f "Aztec Accelerator.app" 2>/dev/null
+  [ -n "$FEED_PID" ] && sudo kill "$FEED_PID" 2>/dev/null
+  hdiutil detach "/Volumes/AztecAccelerator-N1" 2>/dev/null
+  # best-effort: drop the hosts line we added
+  sudo sed -i '' "/$HOST/d" /etc/hosts 2>/dev/null
+}
+trap cleanup EXIT
+
+# ── Locate N's signed updater artifact ──
+N_TARBALL="$(find "$N_ARTIFACTS_DIR" -name '*.app.tar.gz' | head -1)"
+N_SIG_FILE="$(find "$N_ARTIFACTS_DIR" -name '*.app.tar.gz.sig' | head -1)"
+[ -n "$N_TARBALL" ] || { echo "::error::no *.app.tar.gz in $N_ARTIFACTS_DIR"; exit 1; }
+[ -n "$N_SIG_FILE" ] || { echo "::error::no *.app.tar.gz.sig in $N_ARTIFACTS_DIR"; exit 1; }
+N_BASENAME="$(basename "$N_TARBALL")"
+cp "$N_TARBALL" "$SERVE_DIR/$N_BASENAME"
+N_SIG="$(cat "$N_SIG_FILE")"
+log "N artifact: $N_BASENAME"
+
+# ── Local CA + leaf cert (SAN = the prod host) ──
+log "generating local CA + leaf (SAN=$HOST)"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/ca.key" -out "$WORK/ca.pem" \
+  -days 2 -subj "/CN=updater-smoke-local-CA" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes -keyout "$WORK/leaf.key" -out "$WORK/leaf.csr" \
+  -subj "/CN=$HOST" >/dev/null 2>&1
+cat > "$WORK/leaf.ext" <<EXT
+subjectAltName=DNS:$HOST
+extendedKeyUsage=serverAuth
+EXT
+openssl x509 -req -in "$WORK/leaf.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca.key" \
+  -CAcreateserial -out "$WORK/leaf.pem" -days 2 -extfile "$WORK/leaf.ext" >/dev/null 2>&1
+
+# ── Trust the CA (System keychain) + impersonate the host ──
+log "trusting CA + adding hosts entry"
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$WORK/ca.pem"
+echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
+
+# ── Synthesize latest.json for N ──
+jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
+  --arg url "https://$HOST/releases/download/$N_BASENAME" \
+  '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
+    platforms: { ($key): { signature:$sig, url:$url } }}' > "$WORK/latest.json"
+log "latest.json:"; cat "$WORK/latest.json"
+
+# ── Start the local HTTPS feed on :443 ──
+log "starting feed server on :443"
+# sudo for :443; the redirect is opened by this (user) shell so feed.log lands
+# in the user-owned workdir — intended, hence SC2024 is not a concern here.
+# shellcheck disable=SC2024
+sudo "$(command -v bun)" "$REPO_ROOT/packages/accelerator/scripts/updater-feed-server.ts" \
+  --cert "$WORK/leaf.pem" --key "$WORK/leaf.key" \
+  --latest-json "$WORK/latest.json" --serve-dir "$SERVE_DIR" > "$WORK/feed.log" 2>&1 &
+FEED_PID=$!
+for _ in $(seq 1 20); do
+  curl -sf "https://$HOST/releases/latest.json" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+curl -sf "https://$HOST/releases/latest.json" >/dev/null || { echo "::error::feed server not reachable"; cat "$WORK/feed.log"; exit 1; }
+
+# ── Install N-1 into /Applications (writable — so the in-place swap + amfid
+#    revalidation path that broke 1.0.1 is actually exercised; NOT the
+#    read-only DMG-mount pattern the existing smoke job uses) ──
+log "installing N-1 from $N1_DMG → /Applications"
+rm -rf "$APP"
+hdiutil attach "$N1_DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator-N1 >/dev/null
+N1_APP="$(find /Volumes/AztecAccelerator-N1 -maxdepth 1 -name '*.app' | head -1)"
+ditto "$N1_APP" "$APP"
+hdiutil detach /Volumes/AztecAccelerator-N1 >/dev/null
+# Approximate the post-Gatekeeper state of a Finder-dragged notarized install
+# so N-1 launches headlessly (the update path to N is what we're testing).
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+# ── Pre-seed auto-update so N-1 updates without UI ──
+mkdir -p "$CONFIG_DIR"
+echo '{"config_version":1,"safari_support":false,"approved_origins":[],"speed":"full","auto_update":true}' > "$CONFIG_DIR/config.json"
+
+# ── Launch N-1; it should auto-update to N and relaunch ──
+log "launching N-1 (expecting auto-update → N)"
+"$APP_BIN" > "$WORK/app.log" 2>&1 &
+APP_PID=$!
+
+# ── Poll /health until version == N (the strict success criterion: N-1 also
+#    answers /health 'ok' with its OWN version, so only version==N counts) ──
+log "polling $HEALTH for version == $N_VERSION (up to 300s)"
+for _ in $(seq 1 150); do
+  GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+  if [ "$GOT" = "$N_VERSION" ]; then
+    log "SUCCESS — updated app reports version $GOT"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "::error::updater smoke failed — /health never reported version $N_VERSION"
+echo "── app log ──"; cat "$WORK/app.log" 2>/dev/null || true
+echo "── last /health ──"; curl -s "$HEALTH" 2>/dev/null || true
+exit 1

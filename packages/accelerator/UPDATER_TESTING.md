@@ -31,11 +31,25 @@ macOS install.
 6. **Confirm:** the app downloads, swaps, and **relaunches without hanging**. The tray icon returns; `curl -s http://127.0.0.1:59833/health` still answers; the version now reflects **N** (check the tray "vX.Y.Z" line, or `accelerator-server --version` for the headless build).
 7. If the app hangs at launch after the swap (no tray, process stuck at 0% CPU): **do not promote.** That is the 1.0.1 failure mode — investigate the bundle shape / signature before shipping.
 
-## Future automation (own plan)
+## Automated gate (`update-smoke`)
 
-An automated updater-path E2E would need to run **post-build** (after the
-signed bundle exists — the current release E2E gate runs before signing) and
-either (a) as a privileged release smoke using the real artifacts + feed, or
-(b) with a test-only, Rust-only updater endpoint/pubkey override signed by a
-throwaway key (never exposed to the frontend or HTTP surface). Tracked as a
-separate effort; not blocking releases today given the bundle invariant above.
+This is now partly automated. The `update-smoke` job in `release-accelerator.yml`
+(reusable `_e2e-updater.yml` + `scripts/updater-smoke.sh` + `updater-feed-server.ts`)
+runs the macOS install→update→relaunch check during every release, post-build.
+
+**It needs no signing key.** It serves the **already prod-signed** N artifact
+from a local HTTPS server impersonating `aztec-accelerator.dev` (an `/etc/hosts`
+entry + a per-run local CA trusted on the runner), and N-1 verifies it against
+its **embedded prod pubkey**. No private key, no throwaway key — the job is
+`contents: read` only.
+
+**Status:** macOS (Apple Silicon + Intel), **advisory** until validated on a
+`1.0.3-rc` dry-run, then promoted to release-blocking. A follow-up adds the
+Linux AppImage leg + a standing negative test (a corrupted `.sig` must be
+rejected). Until macOS is blocking, run the manual steps above before promoting
+an rc to stable.
+
+A `-rc` dry-run is safe for real users: prereleases skip the S3 `latest.json`
+upload and are marked `--prerelease --latest=false`, so the prod updater feed
+keeps pointing at the current stable — auto-update users never see the rc. The
+gate's feed is also local-only.
