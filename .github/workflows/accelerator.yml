@@ -184,14 +184,17 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
       - name: Install Playwright browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 12
+        timeout-minutes: 22
         run: |
-          for i in 1 2 3; do
-            if timeout 180 bunx playwright install --with-deps chromium; then exit 0; fi
+          # 10 min/attempt: the chromium CDN download (~150MB) is slow-but-
+          # progressing and legitimately exceeds a few minutes; too-short a
+          # timeout kills a healthy download. 2 attempts covers a transient blip.
+          for i in 1 2; do
+            if timeout 600 bunx playwright install --with-deps chromium; then exit 0; fi
             echo "::warning::playwright install attempt $i failed/timed out; retrying"
-            sleep $((i * 10))
+            sleep 15
           done
-          echo "::error::playwright install failed after 3 attempts"
+          echo "::error::playwright install failed after 2 attempts"
           exit 1
       - run: bun run --cwd packages/accelerator test:e2e:ui
 
