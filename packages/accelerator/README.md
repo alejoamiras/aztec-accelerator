@@ -20,6 +20,18 @@ Download the latest release from [GitHub Releases](https://github.com/alejoamira
 
 **Running CI tests?** The release also ships a [headless server tarball](#headless-server-for-ci-test-acceleration) for accelerating end-to-end tests on GitHub-hosted runners.
 
+### Upgrading from 1.0.1 (macOS)
+
+> **If you previously auto-updated from 1.0.0 to 1.0.1 on macOS and your app now hangs on launch**, the in-place bundle swap broke `amfid`'s signature cache. **1.0.2 fixes the underlying cause** but cannot fix your already-broken install — you need a manual reinstall:
+>
+> 1. Force-quit any stuck `aztec-accelerator` processes (Activity Monitor → `×`).
+> 2. Drag `/Applications/Aztec Accelerator.app` to Trash. Empty Trash.
+> 3. Download the **1.0.2 DMG** from the latest release and install fresh.
+>
+> Your config at `~/.aztec-accelerator/config.json` (approved origins, speed, auto-update preference) is preserved across reinstall.
+>
+> See the [1.0.2 release notes](https://github.com/alejoamiras/aztec-accelerator/releases/tag/accelerator-v1.0.2) for the full root-cause writeup.
+
 ### macOS Gatekeeper
 
 The app is code-signed and notarized by Apple. It should open without any Gatekeeper warnings. If macOS still blocks it (e.g., a local build), allow it via:
@@ -104,7 +116,7 @@ For the headless server binary (CI/testing), set `ALLOWED_ORIGINS=origin1,origin
 
 > **For CI test acceleration only. Not for production. Not for shared or self-hosted CI runners.**
 >
-> The headless server is a stripped-down build of the accelerator with no tray, no window, and no GUI dependencies. It exists so external Aztec dApp teams can install the accelerator on their CI runners and speed up E2E test proving (native `bb` instead of WASM).
+> The headless server is a build of the accelerator with no tray and no window. It exists so external Aztec dApp teams can install the accelerator on their CI runners and speed up E2E test proving (native `bb` instead of WASM). The current build still pulls Tauri in transitively (a shared-core extraction is on the 1.0.3+ roadmap), so the Linux tarball needs `libwebkit2gtk-4.1`, `libgtk-3`, and friends present on the runner; on GitHub-hosted `ubuntu-latest` they ship pre-installed.
 >
 > **Security caveats — read before deploying:**
 >
@@ -131,7 +143,7 @@ Each has a matching `.sha256` sidecar file.
 ```yaml
 - name: Install aztec-accelerator headless server
   env:
-    ACCELERATOR_VERSION: "1.0.1"
+    ACCELERATOR_VERSION: "1.0.2"
   run: |
     BASE_URL="https://github.com/alejoamiras/aztec-accelerator/releases/download/accelerator-v${ACCELERATOR_VERSION}"
     TARBALL="accelerator-server-${ACCELERATOR_VERSION}-linux-x86_64.tar.gz"
@@ -166,7 +178,15 @@ curl http://127.0.0.1:59833/health
 
 ### Source
 
-The headless server is `cargo build --bin accelerator-server` against the same `packages/accelerator/src-tauri` crate as the desktop app — it just uses a different `main()` that skips the Tauri runtime. See `src/bin/accelerator-server.rs`.
+The headless server is its own Cargo crate at `packages/accelerator/server/`, separate from the desktop `src-tauri/` crate so that `tauri build` cannot pick it up and stowaway it into the desktop `.app` bundle (the root cause of the 1.0.1 auto-update breakage). It depends on `aztec-accelerator` (the desktop crate's library target) via a path dep to reuse the shared `server`, `authorization`, and `config` modules.
+
+Build it with:
+
+```sh
+cargo build --release --manifest-path packages/accelerator/server/Cargo.toml
+```
+
+The binary lands at `packages/accelerator/server/target/release/accelerator-server`. The entry point is `packages/accelerator/server/src/main.rs` — same logic as the embedded server in the desktop app, just bootstrapped without Tauri's main loop.
 
 ## Tray Menu
 
