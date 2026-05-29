@@ -81,6 +81,10 @@ pub fn show_auth_popup_window(
 }
 
 /// Show the update prompt window.
+///
+/// Only called from the background update check, which is compiled out for
+/// `webdriver` builds — so this is too, to keep those builds warning-clean.
+#[cfg(not(feature = "webdriver"))]
 pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_version: &str) {
     if app.get_webview_window("update-prompt").is_some() {
         return;
