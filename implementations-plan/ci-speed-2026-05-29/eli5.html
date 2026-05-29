@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CI Speed Plan — ELI5</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#666; --line:#e5e5e5; --accent:#2a6; --bg:#fcfcfa; --code:#f3f3f0; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink); background: var(--bg); line-height: 1.65; max-width: 720px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 27px; margin: 0 0 4px; } .sub { color: var(--muted); margin: 0 0 32px; font-size: 15px; }
+  h2 { font-size: 19px; margin: 40px 0 12px; padding-top: 18px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15.5px; margin: 24px 0 6px; } p, li { font-size: 16px; } .lead { font-size: 17px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13.5px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px 20px; margin:16px 0; }
+  .analogy { border-left:3px solid var(--accent); padding:4px 0 4px 16px; margin:12px 0; color:#333; }
+  .why { color: var(--muted); font-size: 15px; } a { color:#2a6; } ul { padding-left: 22px; }
+  .num { font-variant-numeric: tabular-nums; font-weight:600; }
+</style>
+</head>
+<body>
+
+<h1>Making CI faster (and stop the hangs)</h1>
+<p class="sub">Plain-language companion to <a href="plan.md">plan.md</a> · 2026-05-29</p>
+
+<p class="lead">Two annoyances: our test pipeline rebuilds something it shouldn't have to, and one test job keeps freezing. Both are small, low-risk fixes.</p>
+
+<h2>Problem 1: we throw away a cache we should keep</h2>
+
+<div class="analogy">
+"Caching" in CI = saving the result of slow work so the next run reuses it instead of redoing it. Like keeping your groceries in the fridge instead of re-shopping every meal.
+</div>
+
+<p>We compile a Rust program (the "headless server") in one of the test jobs. Compiling it from scratch takes minutes. We <em>do</em> have a cache for it — but it's pointing at the <strong>wrong shelf</strong>.</p>
+
+<p>Back when we split the server into its own sub-project (the 1.0.2 fix), the place it gets built <strong>moved</strong> — from <code>src-tauri/target</code> to <code>server/target</code>. But this one test job's cache still points at the old location. So every run, it opens an empty fridge, finds nothing, and re-shops (re-compiles) the whole thing.</p>
+
+<p class="why"><strong>The cost, measured:</strong> the test job that builds the server takes <span class="num">5m40s</span>; the equivalent job that doesn't build it takes <span class="num">1m56s</span>. About <span class="num">3.5 minutes</span> wasted every run, on every PR, for weeks.</p>
+
+<div class="card">
+<h3>The fix</h3>
+<p>Point the cache at the right shelf: <code>server&nbsp;→&nbsp;target</code> (not <code>src-tauri&nbsp;→&nbsp;target</code>). One line. We double-checked every other build job — they all cache correctly; this was the only stray one.</p>
+<p class="why">Subtle point both reviewers debated: should we cache <em>both</em> shelves? No — in this particular job everything gets built into the <code>server</code> shelf, so caching the other one would just save an empty folder. Cache exactly what's used.</p>
+</div>
+
+<h2>Problem 2: the test job that keeps freezing</h2>
+
+<p>One job (the "Local Network E2E") has hung ~5 times today. It freezes while installing the browser it needs for testing (Playwright/Chromium). We've had to cancel + rerun it over and over.</p>
+
+<p>It's not a missing cache — the cache exists. The freeze is the <em>install command itself</em> stalling: partly an <code>apt</code> (system-package) step that runs every time, partly a slow download server. When it stalls, nothing times it out, so it just sits there until the 45-minute job limit.</p>
+
+<div class="card">
+<h3>The fix (three small, robust changes)</h3>
+<ul>
+  <li><strong>Time-box it:</strong> give the install step a 5-minute limit so a stall <em>fails fast</em> instead of hanging for 45 minutes.</li>
+  <li><strong>Retry it:</strong> 3 attempts with backoff, so a one-off network blip self-heals.</li>
+  <li><strong>Fix the cache key:</strong> today different jobs key the cache differently and coarsely. Key it on the exact browser version so the cache reliably hits (and we stop re-downloading).</li>
+</ul>
+<p class="why">We deliberately keep using Playwright's own browser (not a system one) because that's what the tests are written against — swapping it would change what we're actually testing.</p>
+</div>
+
+<h2>What we're deliberately NOT doing</h2>
+<p>You asked for high-ROI, low-risk only — so no exotic build-cache tools (sccache), no restructuring the slow release build, no touching the release pipeline we just stabilized. Just the two fixes above, both pure CI-config (revert = delete the change, no impact on what we ship).</p>
+
+<h2>How we'll know it worked</h2>
+<p>We record job timings before and after (comparing "warm cache" runs, since the very first run after a cache change is always cold). Target: the server-building job drops ~3 minutes, and the Playwright hang basically disappears.</p>
+
+<p class="why" style="margin-top:32px">Reviewed by a second AI model (codex) and an independent reviewer agent; both signed off ("ship it"). One open tweak: confirm the exact one-liner that reads the installed Playwright version for the cache key.</p>
+
+</body>
+</html>

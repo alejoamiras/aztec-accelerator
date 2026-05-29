@@ -59,10 +59,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: inputs.build_accelerator
 
+      # This job builds the server crate FROM packages/accelerator/server, so
+      # Cargo writes all artifacts (incl. the src-tauri path-dep) under
+      # server/target. Cache that dir — caching src-tauri/target here is dead
+      # weight (nothing builds into it in this job). NOTE: keep in sync with the
+      # setup-accelerator composite if this is ever refactored to share setup.
       - uses: Swatinem/rust-cache@v2
         if: inputs.build_accelerator
         with:
-          workspaces: packages/accelerator/src-tauri -> target
+          workspaces: packages/accelerator/server -> target
+          key: e2e-accelerator
 
       - name: Build headless accelerator server
         if: inputs.build_accelerator

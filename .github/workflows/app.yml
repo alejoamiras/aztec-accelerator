@@ -95,10 +95,21 @@ jobs:
         id: pw-cache
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/playground/package.json') }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
       - name: Install Playwright browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium
+        timeout-minutes: 22
+        run: |
+          # 10 min/attempt: the chromium CDN download (~150MB) is slow-but-
+          # progressing and legitimately exceeds a few minutes; too-short a
+          # timeout kills a healthy download. 2 attempts covers a transient blip.
+          for i in 1 2; do
+            if timeout 600 bunx playwright install --with-deps chromium; then exit 0; fi
+            echo "::warning::playwright install attempt $i failed/timed out; retrying"
+            sleep 15
+          done
+          echo "::error::playwright install failed after 2 attempts"
+          exit 1
       - run: bun run --cwd packages/playground test:e2e
 
   production-smoke:
@@ -122,10 +133,21 @@ jobs:
         id: pw-cache-prod
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/playground/package.json') }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
       - name: Install Playwright browsers
         if: steps.pw-cache-prod.outputs.cache-hit != 'true'
-        run: bunx playwright install --with-deps chromium
+        timeout-minutes: 22
+        run: |
+          # 10 min/attempt: the chromium CDN download (~150MB) is slow-but-
+          # progressing and legitimately exceeds a few minutes; too-short a
+          # timeout kills a healthy download. 2 attempts covers a transient blip.
+          for i in 1 2; do
+            if timeout 600 bunx playwright install --with-deps chromium; then exit 0; fi
+            echo "::warning::playwright install attempt $i failed/timed out; retrying"
+            sleep 15
+          done
+          echo "::error::playwright install failed after 2 attempts"
+          exit 1
       - run: bun run --cwd packages/playground test:e2e:production-smoke
 
   local-network-e2e:
