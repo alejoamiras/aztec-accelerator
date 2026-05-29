@@ -49,9 +49,12 @@ signed-updater path works end-to-end (endpoint → TLS → download → signatur
 verify → in-place swap → bare-spawn relaunch → `/health == N`). It does **not**
 by itself prove the gate would *catch* a 1.0.1-class regression — the
 deterministic guard for that exact class is the **bundle-shape invariant** in
-the `build` job. To give the gate some teeth, a **negative** leg serves a
-corrupted `.sig` and asserts the update is **rejected** (`/health` never reports
-N) — proving the gate can fail, not just pass. Full detection of a
+the `build` job. To give the gate some teeth, a **negative** leg serves the
+**genuine signature with a tampered tarball** (one appended byte) and asserts
+the update is **rejected** — proven by an actual `download/` hit in the feed log
+(the app fetched the artifact) followed by `/health` *never* reporting N (the
+cryptographic check over the tampered bytes failed). This exercises real
+signature verification, not a malformed-blob parse error. Full detection of a
 *validly-signed but bad* bundle would require an ephemeral CI signing key + a
 CI-keyed N-1 (deferred).
 
