@@ -4,7 +4,7 @@
  * The Settings window is auto-opened as the bootstrap window in webdriver mode.
  * Tests interact with the real Tauri IPC bridge (no mocks).
  */
-import { readConfig } from "./helpers.ts";
+import { ensureSettingsWindow, readConfig } from "./helpers.ts";
 
 const SPEED_LEVELS = ["low", "light", "balanced", "high", "full"];
 
@@ -12,6 +12,8 @@ describe("Settings", () => {
   let originalSpeedIndex: number;
 
   before(async () => {
+    // Anchor on the Settings window before reading/driving it.
+    await ensureSettingsWindow();
     const config = readConfig();
     const speed = (config.speed as string) || "full";
     originalSpeedIndex = Math.max(SPEED_LEVELS.indexOf(speed), 0);

@@ -18,6 +18,17 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    // Minimal arg handling: `--version` / `-V` prints the crate version and exits.
+    // The version comes from this crate's Cargo.toml (patched per-release by the
+    // release workflow), giving the headless tarball a self-report surface.
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("accelerator-server {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()

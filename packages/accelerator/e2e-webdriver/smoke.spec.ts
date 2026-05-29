@@ -4,7 +4,15 @@
  * This is the most basic pre-release gate: if the app can't start, render a window,
  * and serve /health, something is fundamentally broken.
  */
+import { ensureSettingsWindow } from "./helpers.ts";
+
 describe("Smoke", () => {
+  before(async () => {
+    // Anchor on the Settings window — a stray window must not silently break
+    // the assumed-active-window assertions below.
+    await ensureSettingsWindow();
+  });
+
   it("should have the Settings window open", async () => {
     // The bootstrap window (Settings) opens automatically in webdriver mode
     const title = await browser.getTitle();
