@@ -390,10 +390,10 @@ jobs:
             n-artifact: accelerator-macos-x86_64
             n1-dmg-glob: "*macOS-Intel.dmg"
             mode: positive
-          # Negative control (teeth): serve a CORRUPTED .sig and assert the
-          # updater REJECTS it (never reaches version N). Proves the gate can
-          # actually fail — without this, a green positive run is consistent with
-          # a test that always passes. arm64 only: the signature-verification
+          # Negative control (teeth): serve a TAMPERED tarball (genuine signature)
+          # and assert the updater REJECTS it (never reaches version N). Proves the
+          # gate can actually fail — without this, a green positive run is consistent
+          # with a test that always passes. arm64 only: the signature-verification
           # path is arch-independent, no need to also burn the flakier Intel runner.
           - runner: macos-latest
             platform-key: darwin-aarch64

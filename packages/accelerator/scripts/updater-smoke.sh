@@ -29,7 +29,7 @@ N1_DMG="$4"
 REPO_ROOT="$5"
 
 # positive (default): expect the update to apply (/health reports N).
-# negative: serve a CORRUPTED .sig and assert the update is REJECTED — proves
+# negative: serve a TAMPERED tarball and assert the update is REJECTED — proves
 #           the gate has teeth (a green positive run alone is consistent with a
 #           test that can never fail). Set via UPDATER_SMOKE_MODE.
 MODE="${UPDATER_SMOKE_MODE:-positive}"
@@ -55,9 +55,11 @@ cleanup() {
   pkill -f "Aztec Accelerator.app" 2>/dev/null
   [ -n "$FEED_PID" ] && sudo kill "$FEED_PID" 2>/dev/null
   hdiutil detach "/Volumes/AztecAccelerator-N1" 2>/dev/null
-  # best-effort: drop ONLY the exact line we added (anchored), not any line
+  # best-effort: drop ONLY the exact line we added (anchored + dots escaped, so
+  # the host's literal '.' can't match an arbitrary char), not any line
   # mentioning the host — avoids clobbering an unrelated entry on self-hosted.
-  sudo sed -i '' "/^127\\.0\\.0\\.1 $HOST\$/d" /etc/hosts 2>/dev/null
+  host_re="${HOST//./\\.}"
+  sudo sed -i '' "/^127\\.0\\.0\\.1 $host_re\$/d" /etc/hosts 2>/dev/null
   # best-effort: remove the test CA we trusted (matters only on non-ephemeral /
   # self-hosted runners; GH-hosted VMs are torn down after the job).
   sudo security delete-certificate -c "updater-smoke-local-CA" \

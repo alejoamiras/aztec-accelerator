@@ -34,7 +34,7 @@ on:
         required: true
         type: string
       mode:
-        description: "positive (expect the update to apply) | negative (serve a corrupted .sig, expect rejection)"
+        description: "positive (expect the update to apply) | negative (serve a tampered tarball, expect rejection)"
         required: false
         default: positive
         type: string

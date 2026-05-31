@@ -147,3 +147,27 @@ Empirical stapling check (local, on the real artifacts):
 - 1.0.2 .app: `stapler validate` OK, `spctl` accepted; .dmg unstapled.
 - 1.0.3-rc.4 .app: `stapler validate` OK, `spctl` accepted; .dmg unstapled.
 → split is byte-equivalent in notarization posture; no user-facing regression.
+
+## Second codex re-audit (resumed session 019e7554) — fixes confirmed
+
+Re-audited the merged state (5ca4ba1). Codex confirmed ALL 5 prior-finding
+fixes are correct (the build split is solid; no new bugs introduced):
+- #2 download/ proof, #3 tampered-tarball, #5 exact-tag guard: fully correct.
+- #1 notarization checks: right target (.app), local/read-only, "no new flake
+  vector".
+- #4 hosts anchor: safer but the host's '.' was still an unescaped regex meta →
+  fixed here (escape dots via `${HOST//./\\.}`; verified a decoy
+  `aztecXacceleratorXdev` line survives).
+
+Residual (polish PR `ci/updater-gate-audit-polish`):
+- Escaped the /etc/hosts dot (above).
+- Fixed 3 stale "corrupted .sig" comments → "tampered tarball" (the code tampers
+  the tarball now). Left the one intentional contrast comment that explains WHY.
+
+DEFERRED to the promote-to-blocking follow-up (codex's one substantive open
+item): **Intel direct-download DMG is not on a blocking path** — the release-
+blocking `smoke` job only downloads + verifies the arm64 DMG; Intel's shipped
+DMG is covered only by advisory update-smoke (updater tarball, not the DMG).
+Low probability (Intel shares arm64's signing config, which we verify) but a
+real gap. Cheap close: also run codesign/stapler on the Intel `.app` in the
+existing smoke job (arch-agnostic; no Intel runner/launch needed).
