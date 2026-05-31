@@ -1,11 +1,13 @@
 use crate::authorization::{AuthDecision, AuthorizationManager};
 use crate::config::{self, AcceleratorConfig};
+use crate::verified_sites::VerifiedSitesRegistry;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tauri::Manager;
 
 pub type ConfigState = Arc<RwLock<AcceleratorConfig>>;
 pub type AuthState = Arc<AuthorizationManager>;
+pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
 /// Shared AppState so HTTPS servers spawned later (e.g. enabling Safari) get the full
 /// state including auth_manager, config, and show_auth_popup — not a bare Default.
 pub type SharedAppState = Arc<crate::server::AppState>;
@@ -75,6 +77,23 @@ pub fn get_system_info() -> SystemInfo {
             .map(|n| n.get())
             .unwrap_or(1),
     }
+}
+
+/// DTO returned to the authorization popup when an origin is on the recognized list.
+/// `description` is intentionally NOT exposed — keep endorsement copy out of the popup.
+#[derive(serde::Serialize)]
+pub struct VerifiedSiteDto {
+    pub display_name: String,
+}
+
+#[tauri::command]
+pub fn get_verified_info(
+    origin: String,
+    state: tauri::State<'_, VerifiedSitesState>,
+) -> Option<VerifiedSiteDto> {
+    state.lookup(&origin).map(|s| VerifiedSiteDto {
+        display_name: s.display_name.clone(),
+    })
 }
 
 #[tauri::command]

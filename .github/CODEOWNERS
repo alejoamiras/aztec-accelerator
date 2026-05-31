@@ -1,0 +1,9 @@
+# CODEOWNERS for aztec-accelerator
+#
+# Lines are file globs; the listed users/teams are auto-requested as PR reviewers.
+# Required reviews are configured via branch protection on `main`.
+
+# Verified-sites registry — changes go through the curator
+packages/accelerator/verified-sites.json        @alejoamiras
+packages/accelerator/verified-sites.schema.json @alejoamiras
+packages/accelerator/VERIFIED_SITES.md          @alejoamiras

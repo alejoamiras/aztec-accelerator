@@ -288,6 +288,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "which",
  "x509-parser 0.18.1",

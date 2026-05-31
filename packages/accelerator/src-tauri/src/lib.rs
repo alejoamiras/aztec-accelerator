@@ -6,6 +6,7 @@ pub mod config;
 pub mod crash_recovery;
 pub mod server;
 pub mod updater;
+pub mod verified_sites;
 pub mod versions;
 
 use std::path::PathBuf;

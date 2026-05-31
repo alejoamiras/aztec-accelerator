@@ -7,7 +7,7 @@ mod windows;
 use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
 use aztec_accelerator::server::{AppState, HTTPS_PORT};
-use aztec_accelerator::{certs, commands, config, log_dir};
+use aztec_accelerator::{certs, commands, config, log_dir, verified_sites};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -228,6 +228,9 @@ fn main() {
     builder
         .manage(config_state.clone())
         .manage(auth_manager.clone())
+        .manage::<commands::VerifiedSitesState>(Arc::new(
+            verified_sites::VerifiedSitesRegistry::load(),
+        ))
         .manage::<PendingUpdate>(Arc::new(parking_lot::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
@@ -236,6 +239,7 @@ fn main() {
             commands::set_speed,
             commands::remove_approved_origin,
             commands::get_system_info,
+            commands::get_verified_info,
             commands::respond_auth,
             commands::enable_safari_support,
             commands::disable_safari_support,

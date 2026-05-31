@@ -339,6 +339,37 @@ h2 {
   accent-color: var(--accent);
 }
 
+/* Recognized-site badge inside the authorization popup */
+.recognized-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+/* `display: flex` above would otherwise override the user agent's
+   `[hidden] { display: none }`. Re-assert hidden semantics explicitly. */
+.recognized-row[hidden] {
+  display: none;
+}
+
+.verified-check {
+  width: 16px;
+  height: 16px;
+  fill: #16a34a;
+  flex-shrink: 0;
+}
+
+.origin-line {
+  font-family: monospace;
+  font-size: 13px;
+}
+
 /* Error hints — brief inline feedback on command failure */
 .error-hint {
   color: var(--danger);

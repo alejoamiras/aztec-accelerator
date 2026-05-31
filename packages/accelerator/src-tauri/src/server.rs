@@ -210,16 +210,31 @@ async fn authorize_origin(
         None => return Ok(()), // No auth_manager → auto-approve all (headless mode)
     };
 
-    let origin = match headers
+    let raw_origin = match headers
         .get(http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
     {
-        Some(o) => o.to_string(),
+        Some(o) => o,
         // No Origin header → auto-approve. Browsers always send Origin on cross-origin
         // requests, so this only applies to curl/scripts/same-origin. Non-browser clients
         // can bypass auth by omitting Origin, but this is inherent to localhost services —
         // CORS/Origin is a browser-only mechanism, not a general access control boundary.
         None => return Ok(()),
+    };
+
+    let origin = match crate::authorization::canonicalize_origin(raw_origin) {
+        Some(canon) => canon,
+        None => {
+            tracing::warn!(raw_origin = %raw_origin, "Invalid Origin header (path/query/userinfo/unknown scheme); rejecting");
+            return Err((
+                StatusCode::BAD_REQUEST,
+                serde_json::to_string(&json!({
+                    "error": "invalid_origin",
+                    "message": "Origin header is not a valid RFC 6454 origin",
+                }))
+                .unwrap(),
+            ));
+        }
     };
 
     let approved = state.config.as_ref().is_some_and(|cfg| {

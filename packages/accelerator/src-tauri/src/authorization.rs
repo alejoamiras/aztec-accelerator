@@ -1,6 +1,61 @@
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
+use url::Url;
+
+/// Canonicalize an origin string per RFC 6454 to a single comparable form.
+///
+/// Tuple-origin schemes (`http`, `https`, `ws`, `wss`):
+///   - lowercased scheme + `://` + lowercased host + (non-default port)
+///   - empty hosts and trailing-dot hosts both normalize/reject correctly
+///
+/// Opaque-origin schemes (`chrome-extension`, `moz-extension`, `safari-web-extension`):
+///   - exact scheme match (not prefix), no port allowed
+///   - lowercased extension ID
+///
+/// Universal rejections:
+///   - path other than empty or `/`
+///   - non-empty query, fragment, username, or password
+///
+/// Returns `None` for unparseable or disallowed input.
+pub fn canonicalize_origin(input: &str) -> Option<String> {
+    let url = Url::parse(input).ok()?;
+
+    if !url.path().is_empty() && url.path() != "/" {
+        return None;
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+
+    match url.scheme() {
+        "http" | "https" | "ws" | "wss" => {
+            let host = url.host_str()?.to_ascii_lowercase();
+            let host = host.trim_end_matches('.');
+            if host.is_empty() {
+                return None;
+            }
+            Some(match url.port() {
+                Some(p) => format!("{}://{}:{}", url.scheme(), host, p),
+                None => format!("{}://{}", url.scheme(), host),
+            })
+        }
+        scheme @ ("chrome-extension" | "moz-extension" | "safari-web-extension") => {
+            if url.port().is_some() {
+                return None;
+            }
+            let id = url.host_str()?.to_ascii_lowercase();
+            if id.is_empty() {
+                return None;
+            }
+            Some(format!("{scheme}://{id}"))
+        }
+        _ => None,
+    }
+}
 
 /// Decision from the user about whether to authorize an origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +147,10 @@ impl AuthorizationManager {
     }
 
     /// Returns true if the origin is approved (auto-approved or in the approved list).
+    ///
+    /// The input `origin` is expected to ALREADY be canonical (use [`canonicalize_origin`]
+    /// at request ingress). Persisted entries in `approved_origins` are likewise canonical
+    /// (enforced by [`crate::config::load`]'s migration step).
     pub fn is_approved(origin: &str, approved_origins: &[String]) -> bool {
         Self::is_auto_approved(origin) || approved_origins.iter().any(|o| o == origin)
     }
@@ -182,5 +241,143 @@ mod tests {
         assert!(mgr.request("https://one-too-many.com").is_err());
         // Piggybacking on an existing origin should still work
         assert!(mgr.request("https://site0.com").is_ok());
+    }
+
+    // ─── canonicalize_origin ────────────────────────────────────────────
+
+    #[test]
+    fn canon_default_https_port_elided() {
+        assert_eq!(
+            canonicalize_origin("https://nulo.sh:443"),
+            Some("https://nulo.sh".to_string()),
+        );
+        assert_eq!(
+            canonicalize_origin("https://nulo.sh"),
+            Some("https://nulo.sh".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_default_http_port_elided() {
+        assert_eq!(
+            canonicalize_origin("http://example.com:80"),
+            Some("http://example.com".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_non_default_port_kept() {
+        assert_eq!(
+            canonicalize_origin("https://nulo.sh:8443"),
+            Some("https://nulo.sh:8443".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_lowercase_host_and_scheme() {
+        assert_eq!(
+            canonicalize_origin("HTTPS://NULO.SH"),
+            Some("https://nulo.sh".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_trailing_dot_stripped() {
+        assert_eq!(
+            canonicalize_origin("https://nulo.sh."),
+            Some("https://nulo.sh".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_root_path_accepted() {
+        assert_eq!(
+            canonicalize_origin("https://nulo.sh/"),
+            Some("https://nulo.sh".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_rejects_path_content() {
+        assert!(canonicalize_origin("https://nulo.sh/admin").is_none());
+        assert!(canonicalize_origin("https://nulo.sh//").is_none());
+    }
+
+    #[test]
+    fn canon_rejects_query() {
+        assert!(canonicalize_origin("https://nulo.sh?x=1").is_none());
+    }
+
+    #[test]
+    fn canon_rejects_fragment() {
+        assert!(canonicalize_origin("https://nulo.sh#frag").is_none());
+    }
+
+    #[test]
+    fn canon_rejects_userinfo() {
+        assert!(canonicalize_origin("https://user@nulo.sh").is_none());
+        assert!(canonicalize_origin("https://user:pass@nulo.sh").is_none());
+    }
+
+    #[test]
+    fn canon_rejects_empty_host() {
+        // Bare "https://" doesn't even parse, but explicit empty/trim-to-empty must reject.
+        assert!(canonicalize_origin("https://.").is_none());
+    }
+
+    #[test]
+    fn canon_chrome_extension_lowercased() {
+        assert_eq!(
+            canonicalize_origin("chrome-extension://BAFBIOGFMIBDOJBHPHGPBMBFOKMHBPEH"),
+            Some("chrome-extension://bafbiogfmibdojbhphgpbmbfokmhbpeh".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_chrome_extension_trailing_slash_stripped() {
+        assert_eq!(
+            canonicalize_origin("chrome-extension://bafbiogfmibdojbhphgpbmbfokmhbpeh/"),
+            Some("chrome-extension://bafbiogfmibdojbhphgpbmbfokmhbpeh".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_extension_rejects_port() {
+        assert!(canonicalize_origin("chrome-extension://abc:1234").is_none());
+    }
+
+    #[test]
+    fn canon_rejects_prefix_lookalike_scheme() {
+        // exact scheme match required — `chrome-extension-malicious` must NOT collapse
+        // into a canonical form that aliases a real chrome-extension origin.
+        assert!(canonicalize_origin("chrome-extension-malicious://abc").is_none());
+    }
+
+    #[test]
+    fn canon_rejects_unknown_scheme() {
+        assert!(canonicalize_origin("file:///etc/passwd").is_none());
+        assert!(canonicalize_origin("data:text/html,hi").is_none());
+        assert!(canonicalize_origin("javascript:alert(1)").is_none());
+    }
+
+    #[test]
+    fn canon_is_idempotent() {
+        let cases = [
+            "https://nulo.sh",
+            "https://nulo.sh:8443",
+            "chrome-extension://abc",
+        ];
+        for c in cases {
+            let once = canonicalize_origin(c).unwrap();
+            let twice = canonicalize_origin(&once).unwrap();
+            assert_eq!(once, twice, "non-idempotent for {c}");
+        }
+    }
+
+    #[test]
+    fn canon_rejects_garbage() {
+        assert!(canonicalize_origin("").is_none());
+        assert!(canonicalize_origin("not a url").is_none());
+        assert!(canonicalize_origin("//nulo.sh").is_none());
     }
 }

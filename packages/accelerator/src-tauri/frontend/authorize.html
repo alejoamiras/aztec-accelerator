@@ -10,7 +10,15 @@
 <body>
   <div class="popup-container">
     <h2>A site wants to use the Aztec Accelerator</h2>
-    <div class="popup-detail" id="origin"></div>
+    <div class="popup-detail">
+      <div id="recognized" class="recognized-row" hidden>
+        <span class="recognized-name"></span>
+        <svg class="verified-check" aria-label="Verified by Aztec Accelerator maintainers" role="img" viewBox="0 0 24 24">
+          <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+        </svg>
+      </div>
+      <div id="origin" class="origin-line"></div>
+    </div>
     <label class="popup-remember">
       <input type="checkbox" id="remember" checked />
       Remember this site
@@ -25,6 +33,17 @@
     const params = new URLSearchParams(window.location.search);
     const origin = params.get("origin") || "unknown";
     document.getElementById("origin").textContent = origin;
+
+    // Fetch recognition info; render badge if the origin is on the curated list.
+    // Safe on error: an IPC failure falls through to the unrecognized rendering.
+    invoke("get_verified_info", { origin })
+      .then((info) => {
+        if (!info) return;
+        const recognized = document.getElementById("recognized");
+        recognized.querySelector(".recognized-name").textContent = info.display_name;
+        recognized.hidden = false;
+      })
+      .catch(() => {});
 
     function respond(allowed) {
       const remember = document.getElementById("remember").checked;
