@@ -12,9 +12,14 @@ use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+// Only the background update loop uses Duration; that loop is gated off for webdriver builds.
+#[cfg(not(feature = "webdriver"))]
 use std::time::Duration;
 use tauri::menu::MenuItemBuilder;
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
+// AppHandle is only referenced by the (webdriver-gated) update-check fn.
+#[cfg(not(feature = "webdriver"))]
+use tauri::AppHandle;
 use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -94,8 +99,41 @@ fn try_start_https(state: &AppState) -> Option<u16> {
 
 // ── Auto-update ──────────────────────────────────────────────────────────
 
+/// Whether the background update poller should run.
+///
+/// A non-production build must never poll the prod updater feed or pop the
+/// update-prompt window:
+/// - `webdriver` builds are handled at compile time (this fn + the spawn site
+///   are `#[cfg(not(feature = "webdriver"))]`), so the poller cannot exist there.
+/// - `debug_assertions` (a developer's `cargo tauri dev`, and the `_e2e.yml`
+///   `cargo run` desktop app) are disabled by default — opt back in with
+///   `AZTEC_ACCEL_FORCE_UPDATE_CHECK=1`.
+/// - `AZTEC_ACCEL_NO_UPDATE=1` is a universal kill switch (logged, for audit).
+///
+/// The shipped release desktop binary (release profile, no `webdriver`, no env
+/// overrides) returns `true` — auto-update behavior is unchanged.
+#[cfg(not(feature = "webdriver"))]
+fn should_poll_for_updates() -> bool {
+    if std::env::var("AZTEC_ACCEL_NO_UPDATE").is_ok() {
+        tracing::warn!("AZTEC_ACCEL_NO_UPDATE set — background update checks suppressed");
+        return false;
+    }
+    if cfg!(debug_assertions) && std::env::var("AZTEC_ACCEL_FORCE_UPDATE_CHECK").is_err() {
+        tracing::info!(
+            "Debug build — background update checks disabled (set AZTEC_ACCEL_FORCE_UPDATE_CHECK=1 to enable)"
+        );
+        return false;
+    }
+    true
+}
+
 /// Background update check wrapper. Calls the shared updater module and
 /// shows the prompt window if an update is available and the user hasn't chosen yet.
+///
+/// Not compiled for `webdriver` builds: the prompt window would steal the
+/// active WebDriver browsing context mid-test (see
+/// implementations-plan/ci-reliability-2026-05-29/diagnosis.md).
+#[cfg(not(feature = "webdriver"))]
 async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
     if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
         let auto_update_pref = { config_state.read().auto_update };
@@ -347,15 +385,22 @@ fn main() {
             });
 
             // ── Background update check ──
-            let update_handle = app.handle().clone();
-            let update_config = config_state.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                loop {
-                    run_update_check(&update_handle, &update_config).await;
-                    tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
-                }
-            });
+            // Compile-gated off for `webdriver` builds (the prompt window would
+            // steal WebDriver's active context mid-test); runtime-gated off for
+            // dev/CI builds via `should_poll_for_updates`. The shipped release
+            // desktop binary polls normally.
+            #[cfg(not(feature = "webdriver"))]
+            if should_poll_for_updates() {
+                let update_handle = app.handle().clone();
+                let update_config = config_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    loop {
+                        run_update_check(&update_handle, &update_config).await;
+                        tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
+                    }
+                });
+            }
 
             Ok(())
         })

@@ -93,6 +93,21 @@ jobs:
       - name: Run WebDriver E2E tests
         run: bun run test:e2e:webdriver
 
+      # ── Regression guard: the background update check MUST be compiled out
+      #    of webdriver builds. If the prompt window ever appears, it steals the
+      #    active WebDriver context mid-test (see the 1.0.2 CI flake). Runs even
+      #    on test failure so it always gives signal.
+      - name: Assert no update prompt fired
+        if: always()
+        working-directory: .
+        run: |
+          if grep -q "Showing update prompt" /tmp/tauri.log 2>/dev/null; then
+            echo "::error::Update prompt fired in a webdriver build — the update check is not gated. See implementations-plan/ci-reliability-2026-05-29/diagnosis.md"
+            grep -n "Showing update prompt\|Update available" /tmp/tauri.log || true
+            exit 1
+          fi
+          echo "OK — no update prompt in webdriver build"
+
       # ── Artifacts on failure ──
       - name: Upload logs
         if: failure()

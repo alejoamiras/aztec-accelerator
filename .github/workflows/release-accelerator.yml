@@ -104,10 +104,25 @@ jobs:
             await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
           "
 
+      # macOS: build + sign + NOTARIZE the .app and updater artifacts
+      # (.app.tar.gz/.sig) WITHOUT the DMG, assert the bundle-structure
+      # invariant, THEN bundle the DMG in a retried loop — all in one step so
+      # the signing secrets live in a single place. Rationale:
+      #   - The updater never needs the DMG, so producing updater artifacts via
+      #     `--bundles app` makes them immune to the chronic DMG-bundling flake
+      #     (generic hdiutil/create-dmg flakiness on GH runners, esp.
+      #     macos-15-intel — actions/runner-images#7522; the app signs +
+      #     notarizes fine, only `bundle_dmg.sh` dies). update-smoke can then
+      #     validate even when the DMG flakes.
+      #   - Retrying ONLY the DMG step is cheap (the .app is already notarized
+      #     above — no re-notarization) and self-heals the transient failure.
+      #   - The invariant MUST run before the DMG step: `tauri bundle dmg` makes
+      #     tauri "clean" the .app out of bundle/macos once the DMG exists.
+      # Linux: unchanged single `tauri build` (deb + AppImage + updater sig).
       - name: Build Tauri bundle
-        run: bunx tauri build --target ${{ matrix.target }}
         working-directory: packages/accelerator
         env:
+          TARGET: ${{ matrix.target }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -116,6 +131,54 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            bunx tauri build --target "$TARGET"
+            exit 0
+          fi
+          # 1) App + updater artifacts (no hdiutil; notarized here, once).
+          bunx tauri build --target "$TARGET" --bundles app
+          MACOS_DIR="src-tauri/target/$TARGET/release/bundle/macos"
+          if ! ls "$MACOS_DIR"/*.app.tar.gz >/dev/null 2>&1 \
+             || ! ls "$MACOS_DIR"/*.app.tar.gz.sig >/dev/null 2>&1; then
+            echo "::error::--bundles app did not emit updater artifacts (.app.tar.gz/.sig) in $MACOS_DIR"
+            ls -la "$MACOS_DIR" 2>/dev/null || true
+            exit 1
+          fi
+          # 2) Bundle-structure invariant — assert NOW, while the .app exists
+          #    (step 3 cleans it out). Every desktop .app MUST contain EXACTLY
+          #    the binaries we declare; a stowaway (e.g. accelerator-server — the
+          #    1.0.0→1.0.1 auto-update break) or a missing `bb` sidecar is a hard
+          #    fail. ANY type counts: a stray symlink/dir in MacOS/ also changes
+          #    the signed bundle shape.
+          APP="$(find "$MACOS_DIR" -maxdepth 1 -name '*.app' | head -1)"
+          if [ -z "$APP" ]; then
+            echo "::error::No .app bundle found in $MACOS_DIR"
+            ls -la "$MACOS_DIR" 2>/dev/null || true
+            exit 1
+          fi
+          EXPECTED="$(printf 'aztec-accelerator\nbb\n' | sort)"
+          ACTUAL="$(cd "$APP/Contents/MacOS" && find . -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)"
+          echo "Expected MacOS/ contents:"; echo "$EXPECTED"
+          echo "Actual MacOS/ contents:"; echo "$ACTUAL"
+          if ! diff <(echo "$EXPECTED") <(echo "$ACTUAL") >/dev/null; then
+            echo "::error::Bundle MacOS/ contents drifted — see above. Update Cargo.toml [[bin]] declarations + this invariant if intentional."
+            exit 1
+          fi
+          echo "Bundle structure OK"
+          # 3) DMG only — the chronic flake. Retry just this (no re-notarization).
+          for attempt in 1 2 3; do
+            if bunx tauri bundle --target "$TARGET" --bundles dmg --verbose; then
+              exit 0
+            fi
+            echo "::warning::DMG bundling attempt $attempt/3 failed (transient hdiutil flake)"
+            if [ "$attempt" = 3 ]; then
+              echo "::error::DMG bundling failed after 3 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -165,20 +228,42 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          cd packages/accelerator/src-tauri
-          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
-          rm -f Cargo.toml.bak
+          # Patch BOTH the desktop lib crate (its version is what /health reports
+          # via env! from the shared lib) AND the server crate (its version is
+          # what `accelerator-server --version` reports).
+          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" packages/accelerator/src-tauri/Cargo.toml
+          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" packages/accelerator/server/Cargo.toml
+          rm -f packages/accelerator/src-tauri/Cargo.toml.bak packages/accelerator/server/Cargo.toml.bak
 
       - name: Build accelerator-server
-        working-directory: packages/accelerator/src-tauri
-        run: cargo build --release --bin accelerator-server --target ${{ matrix.target }}
+        working-directory: packages/accelerator/server
+        # `accelerator-server` lives in its own crate (separate from
+        # `src-tauri`) so that `tauri build` cannot pick it up as a
+        # stowaway in the desktop .app's MacOS/ folder. The committed
+        # server/Cargo.lock pins transitive deps (cargo resolves FROM it by
+        # default). We do NOT pass --locked here: this step patches the
+        # src-tauri path-dep version above, which would make --locked reject
+        # the (intentionally) now-stale lock. Reviewability comes from the
+        # lock being committed + diffed in PRs.
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Assert server self-reports the release version
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          GOT=$("packages/accelerator/server/target/${{ matrix.target }}/release/accelerator-server" --version)
+          echo "accelerator-server --version → $GOT"
+          if [ "$GOT" != "accelerator-server $RELEASE_VERSION" ]; then
+            echo "::error::Version mismatch: expected 'accelerator-server $RELEASE_VERSION', got '$GOT'"
+            exit 1
+          fi
 
       - name: Package and checksum
         env:
           VERSION: ${{ needs.validate.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
         run: |
-          cd packages/accelerator/src-tauri/target/${{ matrix.target }}/release
+          cd packages/accelerator/server/target/${{ matrix.target }}/release
           TARBALL="accelerator-server-${VERSION}-${PLATFORM}.tar.gz"
           tar -czf "$TARBALL" accelerator-server
           shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
@@ -189,8 +274,8 @@ jobs:
         with:
           name: accelerator-server-${{ matrix.platform }}
           path: |
-            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz
-            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz.sha256
+            packages/accelerator/server/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz
+            packages/accelerator/server/target/${{ matrix.target }}/release/accelerator-server-*.tar.gz.sha256
 
   smoke:
     name: Post-build Smoke
@@ -223,6 +308,17 @@ jobs:
             find /Volumes/AztecAccelerator -type f
             exit 1
           fi
+
+          # Gatekeeper / notarization verification: an unstapled or improperly
+          # signed DMG can still "launch fine" in CI yet be REJECTED on a real
+          # user's first double-click. These offline checks catch that class
+          # (which a launch-only smoke misses).
+          APP_PATH=$(find /Volumes/AztecAccelerator -maxdepth 1 -name '*.app' | head -1)
+          echo "Verifying signature + stapled notarization of $APP_PATH..."
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          echo "Signature + stapled notarization OK"
+
           echo "Launching $APP_BIN..."
           "$APP_BIN" > /tmp/smoke.log 2>&1 &
           echo "SMOKE_PID=$!" >> "$GITHUB_ENV"
@@ -265,6 +361,53 @@ jobs:
           path: /tmp/smoke.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # Release-time updater gate (macOS, first increment). ADVISORY for now —
+  # intentionally NOT in `tag.needs`, so it runs + reports on every release
+  # (incl. -rc dry-runs) without blocking, until proven on a 1.0.3-rc dry-run.
+  # Follow-up will add Linux (AppImage) + a standing negative test and promote
+  # macOS to release-blocking (add to tag.needs). See
+  # implementations-plan/updater-validation-2026-05-29/plan.md.
+  update-smoke:
+    name: Updater Smoke (${{ matrix.platform-key }} / ${{ matrix.mode }})
+    needs: [validate, build]
+    # Decoupled from a full `build` success: each arch downloads ONLY its own
+    # arch's (DMG-independent) updater artifact, so a flaky DMG on one arch
+    # (e.g. macos-15-intel) must not suppress the healthy arch's updater signal.
+    # Run whenever validate produced its outputs and the run isn't cancelled.
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            platform-key: darwin-aarch64
+            n-artifact: accelerator-macos-arm64
+            n1-dmg-glob: "*macOS-Apple-Silicon.dmg"
+            mode: positive
+          - runner: macos-15-intel
+            platform-key: darwin-x86_64
+            n-artifact: accelerator-macos-x86_64
+            n1-dmg-glob: "*macOS-Intel.dmg"
+            mode: positive
+          # Negative control (teeth): serve a TAMPERED tarball (genuine signature)
+          # and assert the updater REJECTS it (never reaches version N). Proves the
+          # gate can actually fail — without this, a green positive run is consistent
+          # with a test that always passes. arm64 only: the signature-verification
+          # path is arch-independent, no need to also burn the flakier Intel runner.
+          - runner: macos-latest
+            platform-key: darwin-aarch64
+            n-artifact: accelerator-macos-arm64
+            n1-dmg-glob: "*macOS-Apple-Silicon.dmg"
+            mode: negative
+    uses: ./.github/workflows/_e2e-updater.yml
+    with:
+      runner: ${{ matrix.runner }}
+      platform-key: ${{ matrix.platform-key }}
+      n-version: ${{ needs.validate.outputs.version }}
+      n-artifact: ${{ matrix.n-artifact }}
+      n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
+      mode: ${{ matrix.mode }}
 
   tag:
     name: Create Git Tag
@@ -553,17 +696,17 @@ jobs:
         env:
           NEXT_VERSION: ${{ steps.next.outputs.version }}
         run: |
-          cd packages/accelerator/src-tauri
-
-          # Patch tauri.conf.json
+          # Patch tauri.conf.json (desktop app version)
           bun -e "
-            const conf = JSON.parse(await Bun.file('tauri.conf.json').text());
+            const conf = JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text());
             conf.version = process.env.NEXT_VERSION;
-            await Bun.write('tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+            await Bun.write('packages/accelerator/src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
           "
 
-          # Patch Cargo.toml
-          sed -i "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" Cargo.toml
+          # Patch both crate versions: src-tauri (lib → /health) and server
+          # (→ accelerator-server --version).
+          sed -i "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" packages/accelerator/src-tauri/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" packages/accelerator/server/Cargo.toml
 
       - name: Create PR
         env:
@@ -576,7 +719,7 @@ jobs:
 
           BRANCH="chore/bump-accelerator-${NEXT_VERSION}"
           git checkout -b "$BRANCH"
-          git add packages/accelerator/src-tauri/tauri.conf.json packages/accelerator/src-tauri/Cargo.toml
+          git add packages/accelerator/src-tauri/tauri.conf.json packages/accelerator/src-tauri/Cargo.toml packages/accelerator/server/Cargo.toml
           git commit -m "chore(accelerator): bump source version to ${NEXT_VERSION}"
           git push -u origin "$BRANCH"
 

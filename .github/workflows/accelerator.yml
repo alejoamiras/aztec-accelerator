@@ -96,10 +96,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
       - name: Build headless server
-        run: cargo build --bin accelerator-server
+        # `accelerator-server` lives in a sibling crate at `../server/`
+        # — see Cargo.toml docs.
+        run: cargo build --manifest-path ../server/Cargo.toml
       - name: Launch and health check
         run: |
-          ./target/debug/accelerator-server &
+          ../server/target/debug/accelerator-server &
           SERVER_PID=$!
 
           # Poll until server is ready (max 15s)
@@ -147,10 +149,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
       - name: Build release headless server (linux-x86_64)
-        run: cargo build --release --bin accelerator-server
+        # `accelerator-server` lives in a sibling crate at `../server/`.
+        run: cargo build --release --manifest-path ../server/Cargo.toml
       - name: Package and checksum
         run: |
-          cd target/release
+          cd ../server/target/release
           tar -czf accelerator-server-pr-smoke-linux-x86_64.tar.gz accelerator-server
           shasum -a 256 accelerator-server-pr-smoke-linux-x86_64.tar.gz > accelerator-server-pr-smoke-linux-x86_64.tar.gz.sha256
           shasum -a 256 -c accelerator-server-pr-smoke-linux-x86_64.tar.gz.sha256
@@ -176,9 +179,23 @@ jobs:
         id: pw-cache
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/accelerator/package.json') }}
-      - run: bunx playwright install --with-deps chromium
+          # Key on the lockfile (resolved Playwright version) — consistent across
+          # all Playwright install sites; package.json carries only a semver range.
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
+      - name: Install Playwright browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 22
+        run: |
+          # 10 min/attempt: the chromium CDN download (~150MB) is slow-but-
+          # progressing and legitimately exceeds a few minutes; too-short a
+          # timeout kills a healthy download. 2 attempts covers a transient blip.
+          for i in 1 2; do
+            if timeout 600 bunx playwright install --with-deps --only-shell chromium; then exit 0; fi
+            echo "::warning::playwright install attempt $i failed/timed out; retrying"
+            sleep 15
+          done
+          echo "::error::playwright install failed after 2 attempts"
+          exit 1
       - run: bun run --cwd packages/accelerator test:e2e:ui
 
   e2e:

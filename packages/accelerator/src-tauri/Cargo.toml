@@ -1,14 +1,27 @@
 [package]
 name = "aztec-accelerator"
-version = "1.0.2-rc.1"
+version = "1.0.3-rc.1"
 description = "Native proving accelerator for Aztec transactions"
 edition = "2021"
 rust-version = "1.77.2"
 default-run = "aztec-accelerator"
+# Disable Cargo's `src/bin/*` auto-discovery. `tauri build` bundles every
+# `[[bin]]` defined in this crate into the desktop `.app`'s `MacOS/` folder.
+# A stray file under `src/bin/` would silently change the bundle signature
+# shape between releases — that is the root cause of the 1.0.1 macOS
+# auto-update breakage, where `accelerator-server.rs` was auto-discovered
+# and stowed alongside the main binary, breaking `amfid` revalidation on
+# in-place updates from 1.0.0. The standalone server now lives in a
+# sibling crate at `../server/` and is built separately.
+autobins = false
 
 [features]
 default = []
 webdriver = ["dep:tauri-plugin-webdriver"]
+
+[[bin]]
+name = "aztec-accelerator"
+path = "src/main.rs"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
