@@ -141,9 +141,6 @@ mod tests {
         assert!(registry.lookup("https://nulo.sh").is_some());
         assert!(registry.lookup("https://faucet.nulo.sh").is_some());
         assert!(registry
-            .lookup("chrome-extension://bafbiogfmibdojbhphgpbmbfokmhbpeh")
-            .is_some());
-        assert!(registry
             .lookup("https://playground.aztec-accelerator.dev")
             .is_some(),);
     }

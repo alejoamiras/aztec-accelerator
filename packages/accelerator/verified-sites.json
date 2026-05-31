@@ -14,15 +14,6 @@
     },
     {
       "origins": [
-        "chrome-extension://bafbiogfmibdojbhphgpbmbfokmhbpeh"
-      ],
-      "displayName": "Nulo Wallet (Chrome Extension)",
-      "description": "Chrome extension for Nulo Wallet",
-      "curatedBy": "alejoamiras",
-      "addedAt": "2026-05-28"
-    },
-    {
-      "origins": [
         "https://playground.aztec-accelerator.dev"
       ],
       "displayName": "Aztec Accelerator Playground",
