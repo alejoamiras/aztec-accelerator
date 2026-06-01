@@ -113,7 +113,11 @@ pub async fn start_https(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], HTTPS_PORT));
-    let listener = match TcpListener::bind(addr).await {
+    // Same restart race as the HTTP listener: an in-place update relaunches while
+    // the old process still holds 59834. Retry first; only fall back to HTTP-only
+    // if the port is genuinely unavailable past the budget (HTTPS must never
+    // crash the app — it's optional Safari support).
+    let listener = match bind_with_retry(addr).await {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("HTTPS port {HTTPS_PORT} unavailable: {e} — continuing HTTP-only");
