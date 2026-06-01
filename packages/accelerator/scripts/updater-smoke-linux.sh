@@ -74,8 +74,12 @@ log() { echo "── $* ──"; }
 cleanup() {
   set +e
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
-  pkill -f "aztec-accelerator.AppImage" 2>/dev/null
-  pkill -f "aztec-accelerator" 2>/dev/null
+  # Kill the (possibly relaunched) app by its AppImage path ONLY, dot escaped.
+  # A broad `pkill -f aztec-accelerator` ALSO matches THIS script's own argv —
+  # the repo checkout path contains "aztec-accelerator" — so it SIGTERMs the
+  # script itself mid-cleanup (exit 143), turning a real PASS into a spurious
+  # failure. (That false failure was observed on the 1.0.3-rc.11 dry-run.)
+  pkill -f "aztec-accelerator\.AppImage" 2>/dev/null
   [ -n "$FEED_PID" ] && sudo kill "$FEED_PID" 2>/dev/null
   # best-effort: drop ONLY the exact line we added (anchored + dots escaped, so
   # the host's literal '.' can't match an arbitrary char) — avoids clobbering an
