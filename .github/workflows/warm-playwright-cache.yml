@@ -1,0 +1,95 @@
+name: Warm Playwright Cache
+
+# Populates the shared Playwright headless-shell browser cache on `main` so PR
+# jobs can RESTORE it instead of cold-downloading from the flaky Playwright CDN.
+# This is the ONLY writer of the cache (trusted, already-merged code) — PR jobs
+# are restore-only, so a PR cannot poison it.
+#
+# Bootstrap note: the install is INLINED here (not the shared composite action)
+# so this workflow can land on `main` in a tiny PR that trips NO E2E paths-filter
+# — letting the first warm run seed the cache before the PR that swaps the E2E
+# sites to the (cache-restoring) composite. It uses a long cold-path timeout
+# because the first fill / post-eviction fill is the one slow-but-progressing CDN
+# download we must let finish.
+on:
+  push:
+    branches: [main]
+    # Bootstrap on the merge that adds this, and repopulate when Playwright is
+    # bumped (bun.lock). Routine pushes don't need it — the schedule keeps the
+    # existing cache alive (a restore resets GitHub's 7-day eviction timer).
+    paths:
+      - bun.lock
+      - .github/workflows/warm-playwright-cache.yml
+  schedule:
+    # Mon + Thu 06:00 UTC — two touches/week keeps the cache inside GitHub's
+    # 7-day eviction window even if a scheduled run is delayed.
+    - cron: "0 6 * * 1,4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-playwright-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm Playwright cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - run: bun install --frozen-lockfile
+
+      - name: Resolve Playwright version
+        id: pw
+        run: |
+          set -euo pipefail
+          v=$(bunx playwright --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          if [ -z "$v" ]; then
+            echo "::error::could not resolve Playwright version — is 'bun install' run first?"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Playwright version: $v"
+
+      - name: Restore Playwright browser cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}-shell
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright (headless shell + system deps)
+        run: |
+          # Long timeout: the cold fill on a slow-but-progressing CDN can take
+          # 20-30 min. Always run so the apt --with-deps are installed; on a
+          # cache hit `playwright install` skips the browser download.
+          for i in 1 2; do
+            if timeout 1800 bunx playwright install --with-deps --only-shell chromium; then exit 0; fi
+            echo "::warning::playwright install attempt $i failed/timed out; retrying"
+            sleep 15
+          done
+          echo "::error::playwright install failed after 2 attempts"
+          exit 1
+
+      - name: Save Playwright browser cache
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}-shell
