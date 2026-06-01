@@ -31,7 +31,6 @@ jobs:
             # affect the accelerator's Rust/app build).
             desktop:
               - 'packages/accelerator/**'
-              - '!packages/accelerator/**/*.md'
               - 'packages/sdk/package.json'
               - 'biome.json'
               - 'package.json'
@@ -45,7 +44,6 @@ jobs:
             # runs on SDK src changes (what `desktop` skips) AND everything else.
             integration:
               - 'packages/accelerator/**'
-              - '!packages/accelerator/**/*.md'
               - 'packages/sdk/src/**'
               - 'packages/sdk/package.json'
               - 'biome.json'
