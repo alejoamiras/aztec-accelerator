@@ -469,16 +469,14 @@ jobs:
       n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
       mode: ${{ matrix.mode }}
 
-  # Linux/AppImage updater smoke — ADVISORY. Deliberately ABSENT from `tag.needs`
-  # / `release.needs`, so it never blocks the ship. The advisory semantics live
-  # INSIDE the reusable workflow (the smoke step is `continue-on-error` and a
-  # failure is downgraded to a ::warning:: + step summary) because GitHub forbids
-  # `continue-on-error` on a `uses:` caller job — so this job stays green while
-  # still surfacing the signal. It answers the open `v1Compatible` question (does
-  # Tauri apply a raw .AppImage in place?) on a real runner; it flips to blocking
-  # (move into `tag.needs`, make the step hard-fail) only after a proving run.
+  # Linux/AppImage updater smoke — BLOCKING (in `tag.needs` + `release.needs`).
+  # Proves a user on the previous stable AppImage auto-updates to N AND the
+  # relaunched app rebinds :59833 — the EADDRINUSE restart race fixed by the
+  # server's bind-retry (#251). Started advisory; flipped to blocking after a
+  # green 1.0.3-rc dry-run. To revert: drop it from tag/release `needs` and
+  # restore `continue-on-error` on the smoke step in _e2e-updater-linux.yml.
   update-smoke-linux:
-    name: Updater Smoke (linux-x86_64 / positive, advisory)
+    name: Updater Smoke (linux-x86_64 / positive)
     needs: [validate, build, e2e-webdriver]
     if: ${{ !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-linux.yml
@@ -487,7 +485,7 @@ jobs:
 
   tag:
     name: Create Git Tag
-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, e2e-webdriver]
+    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -510,7 +508,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, tag, e2e-webdriver]
+    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, tag, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

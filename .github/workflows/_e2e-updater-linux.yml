@@ -112,13 +112,13 @@ jobs:
           mkdir -p n1
           gh release download "$N1_TAG" --pattern "${{ inputs.n1-appimage-glob }}" --dir n1
 
-      # ADVISORY: continue-on-error so a Linux-updater failure does NOT fail this
-      # job (and thus never reds the release run via the caller). The result is
-      # downgraded to a warning in the next step. To make this BLOCKING later,
-      # delete `continue-on-error` here and add this job to `tag.needs`.
+      # BLOCKING: this job is in release-accelerator.yml's `tag.needs` /
+      # `release.needs`, so a failure here fails the job → blocks the release.
+      # Validated green on a 1.0.3-rc dry-run before the flip. To revert to
+      # advisory: restore `continue-on-error` here + drop the job from tag/release
+      # `needs`. The script's own ::error:: (and the FUSE-vs-updater-reject log
+      # disambiguation) explain any failure.
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
-        id: smoke
-        continue-on-error: true
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
         run: |
@@ -131,15 +131,6 @@ jobs:
             "$APPIMAGE" \
             "$GITHUB_WORKSPACE"
 
-      # Surface the advisory outcome WITHOUT failing the run: a green job here
-      # means "the advisory ran", not "the update worked" — read this step.
-      - name: Advisory result (never fails the run)
-        if: always()
-        run: |
-          if [ "${{ steps.smoke.outcome }}" = "success" ]; then
-            echo "✅ Linux AppImage updater smoke PASSED — Tauri applied the raw .AppImage and relaunched on N." >> "$GITHUB_STEP_SUMMARY"
-            echo "Linux AppImage updater smoke PASSED"
-          else
-            echo "::warning::Linux AppImage updater smoke FAILED (ADVISORY — not a release blocker). Signals Tauri's v1Compatible Linux updater may not apply a raw .AppImage in place, or a FUSE/display harness issue. See the smoke step log."
-            echo "⚠️ Linux AppImage updater smoke FAILED (advisory) — see the 'Updater smoke' step log for the FUSE-vs-updater-reject signal." >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - name: Result summary
+        if: success()
+        run: echo "✅ Linux AppImage updater smoke PASSED — Tauri applied the raw .AppImage and relaunched on N." >> "$GITHUB_STEP_SUMMARY"
