@@ -16,14 +16,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
-      relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+      desktop: ${{ steps.override.outputs.relevant || steps.filter.outputs.desktop }}
+      integration: ${{ steps.override.outputs.relevant || steps.filter.outputs.integration }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
-            relevant:
+            # Heavy desktop/Rust/macOS jobs (clippy, test, smoke, release-smoke,
+            # desktop-ui, e2e-webdriver). Retains ALL shared-infra paths so a
+            # workflow / composite / lockfile / config change still reruns them —
+            # only a PURE packages/sdk/src change is narrowed out (it cannot
+            # affect the accelerator's Rust/app build).
+            desktop:
+              - 'packages/accelerator/**'
+              - '!packages/accelerator/**/*.md'
+              - 'packages/sdk/package.json'
+              - 'biome.json'
+              - 'package.json'
+              - 'bun.lock'
+              - '.github/workflows/accelerator.yml'
+              - '.github/workflows/_e2e.yml'
+              - '.github/workflows/_e2e-webdriver.yml'
+              - '.github/actions/**'
+            # SDK-against-accelerator integration (lint + the _e2e.yml SDK E2E).
+            # Identical to the previous single `relevant` filter, so it still
+            # runs on SDK src changes (what `desktop` skips) AND everything else.
+            integration:
               - 'packages/accelerator/**'
               - '!packages/accelerator/**/*.md'
               - 'packages/sdk/src/**'
@@ -43,7 +63,7 @@ jobs:
   clippy:
     name: Clippy
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -61,7 +81,7 @@ jobs:
   test:
     name: Rust Tests
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -79,7 +99,7 @@ jobs:
   lint:
     name: Lint
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -98,7 +118,7 @@ jobs:
   smoke:
     name: Smoke
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -153,7 +173,7 @@ jobs:
   release-smoke:
     name: Release Smoke
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -181,7 +201,7 @@ jobs:
   desktop-ui:
     name: Desktop UI Tests
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     # Headroom for a cold Playwright fill (~30 min) on a cache miss; ~2 min on a
     # cache hit, so this ceiling is a safety net that normal runs never approach.
@@ -203,7 +223,7 @@ jobs:
   e2e:
     name: E2E
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.integration == 'true'
     uses: ./.github/workflows/_e2e.yml
     secrets:
       SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
@@ -213,7 +233,7 @@ jobs:
   e2e-webdriver:
     name: E2E WebDriver (${{ matrix.platform }})
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     strategy:
       fail-fast: false
       matrix:
