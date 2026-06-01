@@ -67,10 +67,15 @@ runs:
         exit 1
 
     - name: Save Playwright browser cache
-      # Only the warm-on-main job saves, and only on a miss (a hit means the key
-      # already exists). Restore-only in PR jobs is also a security property:
-      # a PR cannot overwrite the shared cache.
-      if: ${{ inputs.save == 'true' && steps.cache.outputs.cache-hit != 'true' }}
+      # Save on ANY cache miss. GitHub scopes a pull_request job's cache save to
+      # that PR's own merge ref — it CANNOT poison `main` or other PRs (only the
+      # warm-on-main job writes the shared main-scope cache). Saving here is
+      # therefore safe AND self-healing: a PR's fast jobs (Mocked/Desktop, which
+      # download cleanly) seed the PR-scoped cache that its slower, setup-heavy
+      # job (Local Network E2E — ~5 min of setup-aztec before this step) then
+      # RESTORES in the same run, sidestepping the CDN-hang on bad-routing
+      # runners. The `save` input is retained for clarity but no longer gates.
+      if: ${{ steps.cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v5
       with:
         path: ~/.cache/ms-playwright
