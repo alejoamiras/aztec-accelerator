@@ -1,0 +1,82 @@
+name: Playwright cache
+description: >
+  Restore (and, in the warm-on-main job, save) the Playwright headless-shell
+  browser cache, then ensure the browser + system deps are present. Keyed on the
+  resolved Playwright version so the cache survives lockfile churn. Linux/ubuntu
+  only (uses `--with-deps`, the ~/.cache/ms-playwright path, and GNU `timeout`).
+
+inputs:
+  save:
+    description: "Save the cache after a miss. Use 'true' ONLY in the warm-on-main job; PR jobs restore-only so a PR cannot poison the shared cache."
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Playwright version
+      id: pw
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Exact installed version — every caller runs `bun install` before this
+        # composite, so `playwright --version` is more robust than parsing
+        # bun.lock's text shape. `|| true` keeps a no-match from being swallowed
+        # by `set -e` so it reaches our explicit error below.
+        v=$(bunx playwright --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        if [ -z "$v" ]; then
+          echo "::error::could not resolve Playwright version — is 'bun install' run before this action?"
+          exit 1
+        fi
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+        echo "Playwright version: $v"
+
+    - name: Restore Playwright browser cache
+      id: cache
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}-shell
+        # Fall back to the latest browser cache for this OS if the exact version
+        # key misses (e.g. right after a Playwright bump, before the warm job
+        # reruns) — still avoids a cold CDN download in most cases.
+        restore-keys: |
+          ${{ runner.os }}-playwright-
+
+    # System deps (apt) — reliable, run ONCE and separately from the browser.
+    - name: Install Playwright system deps
+      shell: bash
+      run: timeout 300 bunx playwright install-deps chromium
+
+    - name: Install Playwright browser (headless shell)
+      shell: bash
+      run: |
+        # The ~111 MB headless-shell bytes arrive in <1s, but cdn.playwright.dev
+        # intermittently HANGS at 100% (post-download) for many minutes. A long
+        # timeout just waits on the stuck connection (observed: 100% then ~10 min
+        # of silence → kill). So kill a hang FAST and RETRY with a fresh
+        # connection — other jobs in the same run download fine, so a retry
+        # usually catches a good edge. On a cache hit `playwright install` finds
+        # the browser and skips the download (this loop exits on attempt 1).
+        for i in 1 2 3 4 5 6 7 8; do
+          if timeout 150 bunx playwright install --only-shell chromium; then exit 0; fi
+          echo "::warning::playwright browser install attempt $i hung/failed; retrying with a fresh connection"
+          sleep 10
+        done
+        echo "::error::playwright browser install failed after 8 attempts"
+        exit 1
+
+    - name: Save Playwright browser cache
+      # Save on ANY cache miss. GitHub scopes a pull_request job's cache save to
+      # that PR's own merge ref — it CANNOT poison `main` or other PRs (only the
+      # warm-on-main job writes the shared main-scope cache). Saving here is
+      # therefore safe AND self-healing: a PR's fast jobs (Mocked/Desktop, which
+      # download cleanly) seed the PR-scoped cache that its slower, setup-heavy
+      # job (Local Network E2E — ~5 min of setup-aztec before this step) then
+      # RESTORES in the same run, sidestepping the CDN-hang on bad-routing
+      # runners. The `save` input is retained for clarity but no longer gates.
+      if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}-shell

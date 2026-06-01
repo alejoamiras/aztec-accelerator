@@ -1,0 +1,55 @@
+name: Warm Playwright Cache
+
+# Populates the shared Playwright headless-shell browser cache on `main` so PR
+# jobs can RESTORE it instead of cold-downloading from the flaky Playwright CDN.
+# This is the ONLY writer of the cache (trusted, already-merged code) — PR jobs
+# are restore-only, so a PR cannot poison it.
+on:
+  push:
+    branches: [main]
+    # Bootstrap on the merge that adds this, and repopulate when Playwright is
+    # bumped (bun.lock) or the cache action/workflow changes. Routine pushes
+    # don't need it — the weekly schedule keeps the existing cache alive (a
+    # restore resets GitHub's 7-day eviction timer).
+    paths:
+      - bun.lock
+      - .github/workflows/warm-playwright-cache.yml
+      - .github/actions/playwright-cache/action.yml
+  schedule:
+    # Mon + Thu 06:00 UTC — two touches/week keeps the cache inside GitHub's
+    # 7-day eviction window even if a scheduled run is delayed.
+    - cron: "0 6 * * 1,4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-playwright-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm Playwright cache
+    runs-on: ubuntu-latest
+    # Generous: the cold fill on a slow-but-progressing CDN can take ~30 min
+    # (composite uses `timeout 1800`). This job is non-blocking + rerunnable.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - run: bun install --frozen-lockfile
+
+      - uses: ./.github/actions/playwright-cache
+        with:
+          save: "true"
