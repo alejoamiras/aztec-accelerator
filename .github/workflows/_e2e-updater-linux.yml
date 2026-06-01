@@ -56,10 +56,18 @@ jobs:
       # AppImage natively (via FUSE) sets $APPIMAGE, which the Tauri Linux updater
       # replaces in place — `--appimage-extract-and-run` would NOT, breaking the
       # swap path under test. libfuse2 is `libfuse2t64` on 24.04 (ubuntu-latest).
-      - name: Install FUSE + display + tray deps
+      - name: Install FUSE + GUI runtime + display + tray deps
         run: |
           sudo apt-get update
           sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
+          # GUI runtime libs the AppImage needs at launch (libEGL/libGL come in via
+          # the gtk/webkit stack). This is the SAME set setup-accelerator installs
+          # for the Linux WebDriver job — which is why that job's app launches
+          # headlessly. Without them the AppImage dies on
+          # `libEGL.so.1: cannot open shared object file` before it can update.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libssl-dev libgtk-3-dev
           sudo apt-get install -y xvfb stalonetray dbus-x11
 
       - name: Setup display
