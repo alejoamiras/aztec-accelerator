@@ -65,10 +65,23 @@ retried step, so the chronic GH-runner DMG flake can't suppress updater signal;
 the N-1 selection aborts if it resolves to the same version under test (no
 no-op pass).
 
-**Status:** macOS (Apple Silicon + Intel) positive + an arm64 negative leg,
-**advisory** until validated on a `1.0.3-rc` dry-run, then promoted to
-release-blocking. A follow-up adds the Linux AppImage leg. Until macOS is
-blocking, run the manual steps above before promoting an rc to stable.
+**Status:** macOS (Apple Silicon + Intel) positive + an arm64 negative leg are
+**release-blocking** (in `tag.needs`) — validated on a `1.0.3-rc` dry-run, plus
+an Intel-DMG notarization check (`smoke-intel`). The macOS manual runbook above
+is therefore covered by CI; run it only as a belt-and-suspenders sanity check.
+
+**Linux (AppImage) — ADVISORY.** A Linux sibling (`update-smoke-linux` →
+`_e2e-updater-linux.yml` + `scripts/updater-smoke-linux.sh`) runs the same
+install-N-1 → auto-update → relaunch → `/health == N` check on `ubuntu-latest`
+(FUSE-native AppImage exec under Xvfb + dbus + a tray host; the local CA is
+trusted via `update-ca-certificates`, which both OpenSSL and
+`rustls-native-certs` read). It additionally asserts the on-disk AppImage's
+checksum changed (in-place swap). It is **advisory**: absent from `tag.needs`
+and `continue-on-error` inside the reusable workflow, with a failure downgraded
+to a `::warning::` + step-summary line — so it never blocks or reds a release.
+It exists to answer an open question: does Tauri's `v1Compatible` Linux updater
+actually apply a **raw `.AppImage`** in place? It flips to blocking (into
+`tag.needs`, hard-fail the step) after a proving green `-rc` dry-run.
 
 A `-rc` dry-run is safe for real users: prereleases skip the S3 `latest.json`
 upload and are marked `--prerelease --latest=false`, so the prod updater feed
