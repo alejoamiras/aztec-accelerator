@@ -55,7 +55,12 @@ HOST="aztec-accelerator.dev"
 CONFIG_DIR="$HOME/.aztec-accelerator"
 APP_DIR="$HOME/Applications"
 APP_BIN="$APP_DIR/aztec-accelerator.AppImage"
-CA_DEST="/usr/local/share/ca-certificates/updater-smoke-local-CA.crt"
+# Run-unique CA name (CN + on-disk filename) so cleanup removes only THIS run's
+# trust anchor — a fixed name could clobber a concurrent/leftover entry on a
+# non-ephemeral self-hosted runner. (Plan security item; the macOS script's
+# fixed-name retro-hardening is tracked as a separate follow-up.)
+CA_ID="updater-smoke-local-CA-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-0}"
+CA_DEST="/usr/local/share/ca-certificates/${CA_ID}.crt"
 WORK="$(mktemp -d)"
 SERVE_DIR="$WORK/serve"
 mkdir -p "$SERVE_DIR" "$APP_DIR"
@@ -90,9 +95,12 @@ N_SIG_FILE="$(find "$N_ARTIFACTS_DIR" -name '*.AppImage.sig' | head -1)"
 [ -n "$N_APPIMAGE" ] || { echo "::error::no *.AppImage in $N_ARTIFACTS_DIR"; exit 1; }
 [ -n "$N_SIG_FILE" ] || { echo "::error::no *.AppImage.sig in $N_ARTIFACTS_DIR"; exit 1; }
 N_BASENAME="$(basename "$N_APPIMAGE")"
+# Genuine N checksum, captured BEFORE the optional negative-mode tamper, so the
+# positive path can assert the on-disk swap landed exactly N's bytes.
+N_SUM="$(sha256sum "$N_APPIMAGE" | awk '{print $1}')"
 cp "$N_APPIMAGE" "$SERVE_DIR/$N_BASENAME"
 N_SIG="$(cat "$N_SIG_FILE")"
-log "N artifact: $N_BASENAME"
+log "N artifact: $N_BASENAME (sha256=$N_SUM)"
 
 # Negative control: serve the GENUINE signature but a TAMPERED AppImage (append a
 # byte). The updater downloads the artifact, then the minisign check over the
@@ -107,7 +115,7 @@ fi
 # ── Local CA + leaf cert (SAN = the prod host) ──
 log "generating local CA + leaf (SAN=$HOST)"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORK/ca.key" -out "$WORK/ca.pem" \
-  -days 2 -subj "/CN=updater-smoke-local-CA" >/dev/null 2>&1
+  -days 2 -subj "/CN=$CA_ID" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes -keyout "$WORK/leaf.key" -out "$WORK/leaf.csr" \
   -subj "/CN=$HOST" >/dev/null 2>&1
 cat > "$WORK/leaf.ext" <<EXT
@@ -157,6 +165,11 @@ log "installing N-1 → $APP_BIN"
 rm -f "$APP_BIN"
 cp "$N1_APPIMAGE" "$APP_BIN"
 chmod +x "$APP_BIN"
+# Baseline on-disk checksum — the positive path asserts this CHANGED after the
+# update (proves the in-place swap physically replaced the file, not just that
+# /health happens to report N from some other process).
+N1_SUM="$(sha256sum "$APP_BIN" | awk '{print $1}')"
+log "N-1 on-disk sha256=$N1_SUM"
 
 # ── Pre-seed auto-update so N-1 updates without UI ──
 mkdir -p "$CONFIG_DIR"
@@ -216,7 +229,21 @@ for _ in $(seq 1 150); do
       dump_logs
       exit 1
     fi
-    log "SUCCESS — updated to $GOT via the local feed (artifact downloaded)"
+    # In-place-swap proof: the on-disk AppImage must have CHANGED from N-1. A
+    # version flip with an unchanged file would mean Tauri reported N without
+    # actually replacing $APPIMAGE (a non-in-place path we'd want to know about).
+    POST_SUM="$(sha256sum "$APP_BIN" 2>/dev/null | awk '{print $1}')"
+    if [ "$POST_SUM" = "$N1_SUM" ]; then
+      echo "::error::/health reports $N_VERSION and the feed was hit, but the on-disk AppImage ($APP_BIN) is UNCHANGED (sha256 still $N1_SUM) — the in-place swap did not happen."
+      dump_logs
+      exit 1
+    fi
+    if [ "$POST_SUM" = "$N_SUM" ]; then
+      log "in-place swap confirmed — $APP_BIN now matches the served N artifact (sha256=$N_SUM)"
+    else
+      log "NOTE: post-update sha256=$POST_SUM changed from N-1 but differs from the served N ($N_SUM) — swapped via a re-pack path; /health==N + download hit still confirm the update applied"
+    fi
+    log "SUCCESS — updated to $GOT via the local feed (artifact downloaded + in-place swap)"
     exit 0
   fi
   sleep 2
