@@ -52,6 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/src-tauri -> target
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -67,6 +70,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/src-tauri -> target
+          rust-components: ""
       - run: cargo test
 
   lint:
@@ -100,6 +107,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/server -> target
+          rust-components: ""
       - name: Build headless server
         # `accelerator-server` lives in a sibling crate at `../server/`
         # — see Cargo.toml docs.
@@ -153,6 +164,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/server -> target
+          rust-components: ""
       - name: Build release headless server (linux-x86_64)
         # `accelerator-server` lives in a sibling crate at `../server/`.
         run: cargo build --release --manifest-path ../server/Cargo.toml

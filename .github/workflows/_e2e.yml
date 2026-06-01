@@ -61,14 +61,14 @@ jobs:
 
       # This job builds the server crate FROM packages/accelerator/server, so
       # Cargo writes all artifacts (incl. the src-tauri path-dep) under
-      # server/target. Cache that dir — caching src-tauri/target here is dead
-      # weight (nothing builds into it in this job). NOTE: keep in sync with the
-      # setup-accelerator composite if this is ever refactored to share setup.
+      # server/target. Cache that dir only. Use the SAME `shared-key` as the
+      # other linux server builds (smoke / release-smoke / release build-headless
+      # + setup-accelerator) so they cross-warm one shared server cache.
       - uses: Swatinem/rust-cache@v2
         if: inputs.build_accelerator
         with:
           workspaces: packages/accelerator/server -> target
-          key: e2e-accelerator
+          shared-key: accelerator-server-x86_64-unknown-linux-gnu
 
       - name: Build headless accelerator server
         if: inputs.build_accelerator

@@ -104,7 +104,8 @@ jobs:
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-target: ${{ matrix.target }}
-          rust-cache-key: release-${{ matrix.target }}
+          rust-cache-key: accelerator-desktop-${{ matrix.target }}
+          rust-workspaces: packages/accelerator/src-tauri -> target
           rust-components: ""
 
       - name: Patch version in Cargo.toml
@@ -243,7 +244,8 @@ jobs:
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-target: ${{ matrix.target }}
-          rust-cache-key: headless-${{ matrix.target }}
+          rust-cache-key: accelerator-server-${{ matrix.target }}
+          rust-workspaces: packages/accelerator/server -> target
           rust-components: ""
 
       - name: Patch version in Cargo.toml
