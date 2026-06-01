@@ -386,12 +386,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Release-time updater gate (macOS, first increment). ADVISORY for now —
-  # intentionally NOT in `tag.needs`, so it runs + reports on every release
-  # (incl. -rc dry-runs) without blocking, until proven on a 1.0.3-rc dry-run.
-  # Follow-up will add Linux (AppImage) + a standing negative test and promote
-  # macOS to release-blocking (add to tag.needs). See
-  # implementations-plan/updater-validation-2026-05-29/plan.md.
+  # Intel DMG notarization gate (verify-only). The `smoke` job above checks
+  # signature + stapled notarization only on the ARM64 DMG; this covers the
+  # Intel DMG so an unstapled / improperly-signed Intel installer (rejected on a
+  # real Intel user's first double-click) can't ship. No launch — the arm64
+  # `smoke` covers launch + /health; the Intel positive `update-smoke` leg below
+  # exercises the Intel app at runtime.
+  smoke-intel:
+    name: Post-build Smoke (Intel notarization)
+    needs: [validate, build, e2e-webdriver]
+    runs-on: macos-15-intel
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: accelerator-macos-x86_64
+          path: artifacts
+      - name: Verify Intel DMG signature + stapled notarization (offline)
+        run: |
+          DMG=$(find artifacts -name '*.dmg' | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::No Intel DMG found in artifacts"; ls -la artifacts/; exit 1
+          fi
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator-Intel
+          APP_PATH=$(find /Volumes/AztecAccelerator-Intel -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app in Intel DMG"; find /Volumes/AztecAccelerator-Intel -maxdepth 2; exit 1
+          fi
+          echo "Verifying signature + stapled notarization of $APP_PATH..."
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          echo "Intel signature + stapled notarization OK"
+      - name: Cleanup
+        if: always()
+        run: hdiutil detach /Volumes/AztecAccelerator-Intel 2>/dev/null || true
+
+  # Release-time updater gate — BLOCKING (in `tag.needs`). macOS arm64 + Intel
+  # positive legs prove install-N-1 → auto-update → relaunch → /health==N (the
+  # 1.0.1 amfid failure class); the arm64 negative leg proves a tampered artifact
+  # is REJECTED (signature enforcement). Linux (AppImage) lands separately as an
+  # ADVISORY leg first (it has an artifact-format + FUSE spike to clear).
   update-smoke:
     name: Updater Smoke (${{ matrix.platform-key }} / ${{ matrix.mode }})
     needs: [validate, build, e2e-webdriver]
@@ -435,7 +471,7 @@ jobs:
 
   tag:
     name: Create Git Tag
-    needs: [validate, build, build-headless, smoke, e2e-webdriver]
+    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -458,7 +494,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build, build-headless, smoke, tag, e2e-webdriver]
+    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, tag, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
