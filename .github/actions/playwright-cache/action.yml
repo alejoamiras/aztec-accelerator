@@ -43,23 +43,27 @@ runs:
         restore-keys: |
           ${{ runner.os }}-playwright-
 
-    - name: Install Playwright (headless shell + system deps)
+    # System deps (apt) — reliable, run ONCE and separately from the browser.
+    - name: Install Playwright system deps
+      shell: bash
+      run: timeout 300 bunx playwright install-deps chromium
+
+    - name: Install Playwright browser (headless shell)
       shell: bash
       run: |
-        # Always run: on a cache hit `playwright install` finds the cached
-        # browser and SKIPS the (flaky) CDN download, only running --with-deps
-        # (reliable apt, ~1 min); on a miss it cold-downloads. The CDN is
-        # slow-but-progressing, so a generous 30-min `timeout` lets the ~80 MB
-        # shell finish on a cold path rather than killing a healthy download
-        # (10-min attempts barely missed). (Composite run steps don't support
-        # `timeout-minutes`, hence coreutils `timeout`.) On a cache hit this
-        # whole step is ~1 min, so the big timeout is never approached.
-        for i in 1 2; do
-          if timeout 1800 bunx playwright install --with-deps --only-shell chromium; then exit 0; fi
-          echo "::warning::playwright install attempt $i failed/timed out; retrying"
-          sleep 15
+        # The ~111 MB headless-shell bytes arrive in <1s, but cdn.playwright.dev
+        # intermittently HANGS at 100% (post-download) for many minutes. A long
+        # timeout just waits on the stuck connection (observed: 100% then ~10 min
+        # of silence → kill). So kill a hang FAST and RETRY with a fresh
+        # connection — other jobs in the same run download fine, so a retry
+        # usually catches a good edge. On a cache hit `playwright install` finds
+        # the browser and skips the download (this loop exits on attempt 1).
+        for i in 1 2 3 4 5 6 7 8; do
+          if timeout 150 bunx playwright install --only-shell chromium; then exit 0; fi
+          echo "::warning::playwright browser install attempt $i hung/failed; retrying with a fresh connection"
+          sleep 10
         done
-        echo "::error::playwright install failed after 2 attempts"
+        echo "::error::playwright browser install failed after 8 attempts"
         exit 1
 
     - name: Save Playwright browser cache
