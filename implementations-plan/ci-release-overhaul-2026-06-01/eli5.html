@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CI/Release Overhaul — ELI5</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 720px; margin: 0 auto; padding: 3rem 1.5rem 6rem;
+    color: #1a1a1a; background: #fbfbf9;
+  }
+  @media (prefers-color-scheme: dark) { body { color: #e6e6e6; background: #16171a; } }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 .4rem; }
+  .sub { color: #888; margin: 0 0 2.5rem; font-size: 1rem; }
+  h2 { font-size: 1.25rem; margin: 2.6rem 0 .6rem; }
+  h2 .tag { font-size: .72rem; font-weight: 600; vertical-align: middle; padding: .12rem .5rem;
+    border-radius: 999px; margin-left: .5rem; background: #e8eef7; color: #2b5797; }
+  @media (prefers-color-scheme: dark) { h2 .tag { background: #243; color: #9cd; } }
+  .free { background: #e6f3e6 !important; color: #2c6e2c !important; }
+  @media (prefers-color-scheme: dark){ .free { background:#1e3a1e !important; color:#8fd68f !important; } }
+  p { margin: .7rem 0; }
+  .lead { font-size: 1.05rem; }
+  .box { background: #fff; border: 1px solid #eee; border-radius: 10px; padding: 1.1rem 1.3rem; margin: 1rem 0; }
+  @media (prefers-color-scheme: dark){ .box { background:#1d1f23; border-color:#2c2f35; } }
+  .why { color: #666; font-size: .95rem; }
+  @media (prefers-color-scheme: dark){ .why { color:#9a9a9a; } }
+  .why b { color: inherit; }
+  code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: #eee; padding: .1em .35em; border-radius: 4px; }
+  @media (prefers-color-scheme: dark){ code { background:#2a2d33; } }
+  hr { border: none; border-top: 1px solid #eaeaea; margin: 2.5rem 0; }
+  @media (prefers-color-scheme: dark){ hr { border-color:#2c2f35; } }
+  a { color: #2b5797; }
+  @media (prefers-color-scheme: dark){ a { color:#9cd; } }
+  .foot { color: #999; font-size: .9rem; margin-top: 3rem; }
+</style>
+</head>
+<body>
+
+<h1>Making releases faster — and the auto-update test actually count</h1>
+<p class="sub">Plain-language companion to <a href="plan.md">plan.md</a>. Two goals, one pipeline.</p>
+
+<p class="lead">A "release" is an assembly line: check the app works → build &amp; sign it for Mac/Linux → smoke-test → tag → publish. Right now it's slower than it needs to be, and the test that checks <em>"will auto-updating brick people's apps?"</em> is just a sticky note, not a stop sign. We're fixing both.</p>
+
+<hr>
+
+<h2>1. Inspect while you build, not before <span class="tag free">free · biggest win</span></h2>
+<p>Today a safety inspector (the "WebDriver gate") makes the whole factory <b>wait</b> before building starts — 5 minutes on a good day, 20 on a bad one. Only then does the slow part (building + Apple notarization) begin.</p>
+<p>Fix: run the inspection <b>at the same time</b> as the build. If the inspector fails the app, a tiny watchdog <b>pulls the alarm and stops the line</b> so we don't tag a broken release. And as a safety net, tag/publish still refuse to run unless the inspection passed — so even if the alarm misfires, nothing bad ships.</p>
+<p class="why"><b>Why:</b> the build (~8 min) is usually <em>faster</em> than the cold inspection (~20 min), so doing them together basically hides the inspection's time entirely. Plus: if you push a fix twice, the old run now auto-cancels instead of finishing pointlessly.</p>
+
+<h2>2. Turn the auto-update test into a real stop sign <span class="tag">the gating goal</span></h2>
+<p>Version 1.0.1 shipped a bug where the app <b>froze while auto-updating</b> — on real people's machines. We built a test that reproduces that exact moment (install old version → let it update → check it relaunches). But it's <b>advisory</b>: it can go red and the release ships anyway.</p>
+<p>Now it <b>blocks</b> the release, and we widen the net:</p>
+<div class="box">
+  <p style="margin-top:0"><b>Mac (Apple Silicon + Intel)</b> — blocking immediately; also verify the Intel installer is properly notarized (today we only check Apple Silicon).</p>
+  <p style="margin-bottom:0"><b>Linux (AppImage)</b> — brand-new: a Linux version of the same test. It's the riskiest piece (Linux self-updates are finicky in CI), so it rides along as advisory until <b>one real practice-release proves it works</b>, then it becomes blocking too.</p>
+</div>
+<p class="why"><b>Why this won't slow releases down:</b> the update test runs <em>in parallel</em> with the existing smoke test, finishing inside the time the build already takes. So we add a real safety gate <b>and</b> still come out faster overall (because of #1).</p>
+<p class="why"><b>One judgment call (corrected after review):</b> the "tampered file must be rejected" test (proving the signature check works) <b>blocks both practice and real releases</b>. We originally planned to skip it on real releases, but a real release is cut from whatever's in the repo <em>at that moment</em> — so a green practice-run doesn't guarantee the real one. It's safe to block because this test uses our own local test-server (no flaky internet download), so it won't get stuck.</p>
+
+<h2>3. Stop recompiling the same code from scratch <span class="tag free">free</span></h2>
+<p>Building the Rust app is the slow part. We <em>have</em> a "save your work" shelf (a cache) so we don't recompile every time — but the shelf labels don't match between jobs, so almost nothing ever gets reused. Every release and most PRs recompile from cold.</p>
+<p>Fix: give the cache <b>consistent labels</b> so the same compiled pieces are reused across releases and PRs, and keep each shelf small and tidy (don't mix unrelated builds). Optionally, a small job re-stocks the shelf on the main branch weekly so it never goes stale — exactly the trick that just killed the Playwright flake.</p>
+<p class="why"><b>Why:</b> this is where "releases take a while" actually comes from — cold compiles. Right labels = warm compiles = minutes back, for free.</p>
+
+<h2>4. Don't run heavy tests for unrelated changes <span class="tag free">free</span></h2>
+<p>Right now, changing one unrelated file can trigger the slow Mac crash-tests and full Rust builds even when they can't possibly be affected. We'll teach the pipeline to tell <b>"this touched the desktop app"</b> apart from <b>"this touched only the SDK"</b>, and skip the heavy Mac/Rust jobs when they're irrelevant.</p>
+<p class="why"><b>Why:</b> you wait on PR checks every day. This trims the everyday wait without losing any real coverage.</p>
+
+<h2>5. (Optional) Rent a faster Mac for the one slow step <span class="tag">paid · only if needed</span></h2>
+<p>The slowest single piece is the <b>Intel Mac build</b>. GitHub will rent us a beefier Mac for it — a one-line change, billed per minute (trivial for the rare release). We'll only pull this lever <b>if</b>, after the free fixes, the Intel build is still the bottleneck. Measure first, spend second.</p>
+
+<hr>
+
+<h2>What we're being careful about</h2>
+<p class="why">
+  • The "pull the alarm" watchdog has powerful permissions, so it's a bare-minimum job — no code checkout, no secrets, nothing to hijack.<br>
+  • The update test fakes being our website <em>inside a throwaway machine</em> and needs <b>no signing key</b> — it serves our already-signed release and the old app verifies it. We're hardening the fake-certificate cleanup so it can never leak.<br>
+  • Shared caches are safe because GitHub keeps each PR's cache walled off from the main one — a malicious PR can't poison what everyone builds from.<br>
+  • A flaky <em>blocking</em> gate could jam all releases, so the new Linux gate stays advisory until proven, and emergencies would use a separate, owner-only "break-glass" — never a quiet skip switch.
+</p>
+
+<h2>Open question we deferred</h2>
+<p class="why">The Linux auto-update has <b>two</b> unknowns the review surfaced. First, we may be shipping the <em>wrong file format</em> for Linux updates — if so, Linux auto-update is already quietly broken, and this test's real job is to catch that and fix it. Second, the Linux self-update may simply not run in GitHub's Linux machines (a technical thing called FUSE). So before wiring Linux as a blocker, we do a quick proof-of-concept on both. If it genuinely can't work headlessly, Linux stays advisory and we note why — we won't fake a green check.</p>
+
+<p class="foot">Three independent plans (this one + a different AI model + an architect agent) were merged and cross-checked, then reviewed once more for holes before you saw it. Details + the exact workflow changes are in <a href="plan.md">plan.md</a>.</p>
+
+</body>
+</html>

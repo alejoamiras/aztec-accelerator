@@ -44,3 +44,16 @@ macOS `update-smoke` is in `tag.needs` and proven green (rc.8). Linux is a **sep
 
 ## Open question this leg EXISTS to answer
 Does Tauri's `v1Compatible` Linux updater apply a **raw `.AppImage`** (what the shipped `latest.json` points at) in place? The artifact-format spike confirmed the shipped feed is self-consistent (raw `.AppImage` + `.AppImage.sig`), but whether the updater *applies* it is empirical. The advisory leg surfaces it on a real runner; if red, the script log distinguishes a **FUSE/harness** failure from a genuine **updater rejection**. A red here may mean Linux auto-update is broken in production — which would reframe this from a gate into a bug-fix + gate.
+
+## RESOLUTION (rc.9 → rc.13)
+
+**Answer: YES, Tauri's Linux updater applies a raw `.AppImage` in place and relaunches.** It was a bug-fix + gate after all — but the bug was NOT in the updater.
+
+The leg took three runs to get clean signal, each surfacing a real layer:
+1. **rc.9** — app died on launch: `libEGL.so.1: cannot open shared object file`. The workflow installed FUSE + display but not the gtk/webkit/GL runtime stack. Fix: install the same dep set `setup-accelerator` gives the Linux WebDriver job. (The disambiguation worked — "N-1 process exited" pointed at the harness, not the updater.)
+2. **rc.10** — app launched, **downloaded N, applied it, relaunched as N** (`Update installed, restarting` → new process is rc.10) — but then `ERROR Accelerator server error: Address already in use (os error 98)`. The old process still held :59833 during the restart overlap and the server **binds once with no retry** → server stays down on the updated app. **Real product bug**, fixed in #251 (`bind_with_retry`: 100ms × ≤5s, hard deadline, AddrInUse-only; applied to both :59833 and :59834; codex-reviewed — caught a soft-deadline bug). macOS dodged it on timing.
+3. **rc.11** — reached `SUCCESS` (update applied, :59833 rebound, /health==N, in-place swap checksum matched) — then exit **143**. The smoke script's cleanup `pkill -f "aztec-accelerator"` matched the script's OWN repo-path argv and SIGTERMed itself → false failure. Fixed in #252 (narrow the pattern to `aztec-accelerator\.AppImage`).
+4. **rc.12** — leg cleanly green (smoke step conclusion = success).
+5. **rc.13** — flipped to blocking (`tag.needs` + drop `continue-on-error`, #253); blocking leg passed and the release still tagged/released green.
+
+Net: the advisory-first rollout did exactly its job — surfaced two real bugs (one product, one harness) on a non-blocking leg, each fixed and re-validated, before the leg became release-blocking.
