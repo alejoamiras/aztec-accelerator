@@ -163,7 +163,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Headroom for a cold Playwright fill (~30 min) on a cache miss; ~2 min on a
+    # cache hit, so this ceiling is a safety net that normal runs never approach.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2

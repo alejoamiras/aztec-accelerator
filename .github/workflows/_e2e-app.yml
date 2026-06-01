@@ -26,7 +26,9 @@ jobs:
   e2e-app:
     name: App E2E (${{ inputs.test_script }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Headroom for a cold Playwright fill (~30 min) on a cache miss on top of the
+    # aztec node setup + the test; ~1-2 min install on a cache hit.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v6
         with:

@@ -48,11 +48,14 @@ runs:
       run: |
         # Always run: on a cache hit `playwright install` finds the cached
         # browser and SKIPS the (flaky) CDN download, only running --with-deps
-        # (reliable apt); on a miss it downloads. `timeout` guards a slow-CDN
-        # stall on the miss path; 2 attempts covers a transient blip. (Composite
-        # run steps don't support `timeout-minutes`, hence coreutils `timeout`.)
+        # (reliable apt, ~1 min); on a miss it cold-downloads. The CDN is
+        # slow-but-progressing, so a generous 30-min `timeout` lets the ~80 MB
+        # shell finish on a cold path rather than killing a healthy download
+        # (10-min attempts barely missed). (Composite run steps don't support
+        # `timeout-minutes`, hence coreutils `timeout`.) On a cache hit this
+        # whole step is ~1 min, so the big timeout is never approached.
         for i in 1 2; do
-          if timeout 600 bunx playwright install --with-deps --only-shell chromium; then exit 0; fi
+          if timeout 1800 bunx playwright install --with-deps --only-shell chromium; then exit 0; fi
           echo "::warning::playwright install attempt $i failed/timed out; retrying"
           sleep 15
         done

@@ -32,7 +32,9 @@ jobs:
   warm:
     name: Warm Playwright cache
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Generous: the cold fill on a slow-but-progressing CDN can take ~30 min
+    # (composite uses `timeout 1800`). This job is non-blocking + rerunnable.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
