@@ -1,0 +1,60 @@
+name: Warm Rust Cache
+
+# Warms the shared LINUX Rust caches on `main` so PR jobs RESTORE them instead of
+# cold-compiling the dependency graph. PR runs can only restore caches from
+# main/base, and nothing else runs Rust on push-to-main (PR gates are
+# `pull_request`; the release is `workflow_dispatch`) — so without this, the
+# shared-key caches are only ever written by the rare release dispatch and PRs
+# stay cold. Builds the DEBUG profile (what clippy/test/smoke/_e2e use); release
+# jobs still benefit from the shared `~/.cargo` registry under the same key.
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/accelerator/src-tauri/**
+      - packages/accelerator/server/**
+      - .github/actions/setup-accelerator/action.yml
+      - .github/workflows/warm-rust-cache.yml
+  schedule:
+    - cron: "0 6 * * 1,4" # Mon + Thu 06:00 UTC — keep the cache inside the 7-day eviction window
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-rust-cache
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Warm desktop Rust cache (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: packages/accelerator/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/src-tauri -> target
+      # Debug + all-targets to warm what `clippy --all-targets` and `cargo test` compile.
+      - run: cargo build --all-targets
+
+  server:
+    name: Warm server Rust cache (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: packages/accelerator/server
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/server -> target
+          rust-components: ""
+      - run: cargo build
