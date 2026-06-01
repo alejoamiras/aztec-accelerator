@@ -45,10 +45,56 @@ pub struct AppState {
 pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], PORT));
-    let listener = TcpListener::bind(addr).await?;
+    let listener = bind_with_retry(addr).await?;
     tracing::info!("Accelerator server listening on {addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Bind the HTTP listener, retrying briefly on `AddrInUse`.
+///
+/// During an in-place updater restart the just-exited previous instance can
+/// still hold port 59833 for a moment. Without a retry the freshly-relaunched
+/// app permanently fails to bind and the accelerator server stays down — the
+/// new process binds once, hits `EADDRINUSE`, and never recovers (observed on
+/// Linux auto-update; macOS happens to dodge it on timing). The wait is bounded
+/// so a genuine conflict — a second instance the user started — still fails
+/// fast with the port-in-use signal (surfaced by main.rs) instead of hanging.
+async fn bind_with_retry(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    bind_with_retry_inner(addr, Duration::from_millis(500), Duration::from_secs(10)).await
+}
+
+/// Inner form with injectable timings so tests can exercise both the
+/// wait-it-out and give-up paths without real-time sleeps.
+async fn bind_with_retry_inner(
+    addr: SocketAddr,
+    interval: Duration,
+    max_wait: Duration,
+) -> std::io::Result<TcpListener> {
+    let deadline = std::time::Instant::now() + max_wait;
+    let mut warned = false;
+    loop {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            // Retry only on AddrInUse, and only within the budget — any other
+            // bind error (or a timed-out conflict) propagates so the caller can
+            // surface it instead of silently looping.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AddrInUse
+                    && std::time::Instant::now() < deadline =>
+            {
+                if !warned {
+                    tracing::warn!(
+                        "port {} in use — retrying for up to {max_wait:?} (waiting out a prior instance, e.g. an in-place updater restart)",
+                        addr.port()
+                    );
+                    warned = true;
+                }
+                tokio::time::sleep(interval).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Start an HTTPS listener using the provided TLS config.
@@ -498,6 +544,42 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn bind_with_retry_waits_out_a_transient_holder() {
+        // The in-place-restart case: hold a freshly-chosen port, release it
+        // shortly, and assert the retry binds once it frees.
+        let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = probe.local_addr().unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            drop(probe);
+        });
+        let listener =
+            bind_with_retry_inner(addr, Duration::from_millis(20), Duration::from_secs(2))
+                .await
+                .expect("should bind once the transient holder releases the port");
+        assert_eq!(listener.local_addr().unwrap().port(), addr.port());
+    }
+
+    #[tokio::test]
+    async fn bind_with_retry_gives_up_on_a_persistent_conflict() {
+        // A second instance, not a restart overlap: a port held for the whole
+        // window must fail fast with AddrInUse (so main.rs surfaces "port in
+        // use") rather than hang.
+        let probe = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = probe.local_addr().unwrap();
+        let err =
+            bind_with_retry_inner(addr, Duration::from_millis(20), Duration::from_millis(150))
+                .await
+                .expect_err("should give up while the port stays held");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(probe);
+    }
 
     #[tokio::test]
     async fn health_returns_ok() {
