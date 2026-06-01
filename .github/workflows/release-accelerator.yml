@@ -56,9 +56,31 @@ jobs:
       runner: macos-latest
       mode: release
 
+  # COST-CONTROL ONLY — not the safety guarantee. The gate runs in PARALLEL with
+  # `build`/`build-headless` (which now need only `validate`); the actual
+  # ungated-ship guard is that `smoke`, `update-smoke`, `tag`, and `release` all
+  # keep `e2e-webdriver` in `needs`. If the gate fails, this cancels the whole
+  # run so in-flight builds/notarization stop early instead of finishing for a
+  # release that can never tag. `gh run cancel` is best-effort; correctness never
+  # depends on it. INVARIANT: any future side-effecting job (tag/publish/deploy)
+  # MUST transitively `needs: e2e-webdriver`.
+  gate-watchdog:
+    name: Cancel run if the pre-release gate failed
+    needs: [e2e-webdriver]
+    if: ${{ always() && needs.e2e-webdriver.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write # scoped to THIS job only; no checkout, no secrets, no third-party action
+    steps:
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}"
+
   build:
     name: Build (${{ matrix.target }})
-    needs: [validate, e2e-webdriver]
+    needs: [validate]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -194,7 +216,7 @@ jobs:
 
   build-headless:
     name: Build Headless (${{ matrix.platform }})
-    needs: [validate, e2e-webdriver]
+    needs: [validate]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -279,7 +301,7 @@ jobs:
 
   smoke:
     name: Post-build Smoke
-    needs: [validate, build]
+    needs: [validate, build, e2e-webdriver]
     runs-on: macos-latest
     timeout-minutes: 5
     permissions:
@@ -370,7 +392,7 @@ jobs:
   # implementations-plan/updater-validation-2026-05-29/plan.md.
   update-smoke:
     name: Updater Smoke (${{ matrix.platform-key }} / ${{ matrix.mode }})
-    needs: [validate, build]
+    needs: [validate, build, e2e-webdriver]
     # Decoupled from a full `build` success: each arch downloads ONLY its own
     # arch's (DMG-independent) updater artifact, so a flaky DMG on one arch
     # (e.g. macos-15-intel) must not suppress the healthy arch's updater signal.
@@ -411,7 +433,7 @@ jobs:
 
   tag:
     name: Create Git Tag
-    needs: [validate, build, build-headless, smoke]
+    needs: [validate, build, build-headless, smoke, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -434,7 +456,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build, build-headless, smoke, tag]
+    needs: [validate, build, build-headless, smoke, tag, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
