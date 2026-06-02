@@ -733,13 +733,22 @@ jobs:
     if: needs.validate.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write       # commit + push branch
-      pull-requests: write  # gh pr create
+    # No default-GITHUB_TOKEN perms: a short-lived, repo-scoped GitHub App
+    # installation token (contents + PRs write only, ~1h TTL) does the push +
+    # PR + auto-merge instead of the long-lived PAT (audit least-privilege).
+    permissions: {}
     steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: actions/checkout@v6
         with:
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -784,7 +793,7 @@ jobs:
 
       - name: Create PR
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           NEXT_VERSION: ${{ steps.next.outputs.version }}
           RELEASED: ${{ needs.validate.outputs.version }}
         run: |
