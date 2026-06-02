@@ -72,8 +72,17 @@ pub fn versions_base_dir() -> PathBuf {
 }
 
 /// Returns the path to a cached bb binary for a given version.
+/// The bb binary filename on the current platform (`bb.exe` on Windows, `bb` elsewhere).
+pub fn bb_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "bb.exe"
+    } else {
+        "bb"
+    }
+}
+
 pub fn version_bb_path(version: &str) -> PathBuf {
-    versions_base_dir().join(version).join("bb")
+    versions_base_dir().join(version).join(bb_binary_name())
 }
 
 /// Returns the current platform identifier for download URLs.
@@ -99,6 +108,10 @@ pub fn current_platform() -> &'static str {
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
         "arm64-linux"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    {
+        "amd64-windows"
     }
 }
 
@@ -328,7 +341,7 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
     }
     std::fs::rename(&tmp_dir, &version_dir)?;
 
-    let final_path = version_dir.join("bb");
+    let final_path = version_dir.join(bb_binary_name());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -396,8 +409,8 @@ fn extract_bb_from_tarball(
         let mut entry = entry?;
         let path = entry.path()?;
 
-        // Look for a file named "bb" at any level in the archive
-        if path.file_name().and_then(|n| n.to_str()) == Some("bb") {
+        // Look for the bb binary (bb, or bb.exe on Windows) at any level in the archive
+        if path.file_name().and_then(|n| n.to_str()) == Some(bb_binary_name()) {
             if entry.header().entry_type() != tar::EntryType::Regular {
                 return Err(format!(
                     "bb entry in tarball is not a regular file (type: {:?})",
@@ -405,7 +418,7 @@ fn extract_bb_from_tarball(
                 )
                 .into());
             }
-            entry.unpack(dest.join("bb"))?;
+            entry.unpack(dest.join(bb_binary_name()))?;
             return Ok(());
         }
     }
