@@ -32,6 +32,25 @@ the Tauri sidecar `binaries/bb-x86_64-pc-windows-msvc.exe`. macOS/Linux paths un
   verified against the pin → extract → `bb.exe` = 21,731,840 B (matches the spike exactly).
 - `bun run lint` + `actionlint` clean.
 
+## Codex review (`019e89a4`, verdict: ship-with-changes) — all adopted
+- **[High] The win32 fetch path had no ongoing Windows CI gate** (the spike was throwaway,
+  could silently rot). → Added a real **`windows-prebuild`** job to accelerator.yml: runs
+  the *actual* `prebuild` (copy-bb.ts) on windows-latest, asserts the sidecar exists +
+  `bb.exe --version` runs, and folds in the **dumpbin import-canary** (fails if bb.exe ever
+  gains a `VCRUNTIME140`/`MSVCP140` dep). Wired into `accelerator-status` ⇒ blocking on
+  desktop changes. Deleted the throwaway `windows-bb-spike.yml` (fully superseded).
+- **[Med] `execSync(\`tar …\`)` shell exposure** → `execFileSync("tar.exe", [...])`, no shell.
+- **[Med] no size bound before buffering** → `MAX_BB_TARBALL_BYTES` cap (Content-Length
+  pre-check + post-read assert). Build-time only, but cheap OOM defense vs a hostile CDN.
+- **[Low→useful] assert archive layout** → after extraction, throw unless the *only* entry
+  is `bb.exe`. Doubles as a canary: if a future bb bundles DLLs, we fail loudly instead of
+  shipping a broken (missing-dependency) sidecar.
+- **[Low] in-repo pin is the sole trust anchor** — acknowledged; inherent to pinning absent
+  upstream signatures. A compromised upstream is blocked by the hash; a compromised *repo*
+  is not (the attacker edits the pin). Documented, no code change.
+- **Looks-fine (codex-confirmed):** fail-closed on wrong/truncated/HTML bodies; version
+  poisoning neutralized by the unknown-version throw; `import.meta.main` reliable under bun.
+
 ## Carry-forward to P2
 - The prebuild now needs **network on the Windows build runner** (mac/linux still read the
   npm package, unchanged). The `win32` fetch only runs when `process.platform === "win32"`.

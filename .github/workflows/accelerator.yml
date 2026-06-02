@@ -247,16 +247,60 @@ jobs:
       runner: ${{ matrix.runner }}
       mode: dev
 
+  windows-prebuild:
+    name: Windows Prebuild Smoke
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - name: Fetch + verify the Windows bb.exe sidecar (real copy-bb.ts path)
+        run: bun run --cwd packages/accelerator prebuild
+      - name: Assert the sidecar exists, runs, and is self-contained
+        shell: pwsh
+        run: |
+          $bb = "packages/accelerator/src-tauri/binaries/bb-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path $bb)) { Write-Error "sidecar missing: $bb"; exit 1 }
+          & $bb --version
+          if ($LASTEXITCODE -ne 0) { Write-Error "bb.exe --version failed (exit $LASTEXITCODE)"; exit 1 }
+          # Import canary: fail the gate if bb.exe ever gains a VC++ redist dependency.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($dumpbin) {
+            $deps = & $dumpbin.FullName /DEPENDENTS $bb
+            $deps
+            if ($deps | Select-String -Pattern 'VCRUNTIME140|MSVCP140|MSVCR\d') {
+              Write-Error "bb.exe now depends on the VC++ redistributable — bundle it or revisit self-contained"
+              exit 1
+            }
+            Write-Host "Import canary OK: no VC++ redist dependency"
+          } else {
+            Write-Warning "dumpbin not found; skipped import canary"
+          }
+
   accelerator-status:
     name: Accelerator Status
     if: always()
-    needs: [changes, clippy, test, lint, smoke, release-smoke, desktop-ui, e2e, e2e-webdriver]
+    needs:
+      [changes, clippy, test, lint, smoke, release-smoke, desktop-ui, e2e, e2e-webdriver, windows-prebuild]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

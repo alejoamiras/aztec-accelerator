@@ -10,7 +10,7 @@
  *   pinned SHA-256. Upstream publishes no checksum file, so this in-repo, review-gated
  *   pin is the supply-chain integrity anchor.
  */
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -18,6 +18,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -53,7 +54,7 @@ export function getTargetTriple(): string {
 export const WINDOWS_BB_ASSET = "barretenberg-amd64-windows.tar.gz";
 
 export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
-  // @aztec/bb.js 4.2.0 — verified on windows-latest via the windows-bb-spike workflow.
+  // @aztec/bb.js 4.2.0 — verified on windows-latest (Windows Prebuild Smoke CI gate).
   "4.2.0": "55043d74d20afd55cb3d3c5fd690b79f9d964ba52bfebd13bcba71b74a3d0c8f",
 };
 
@@ -66,9 +67,8 @@ export function resolveWindowsBbChecksum(version: string): string {
   if (!sha) {
     throw new Error(
       `No pinned Windows bb.exe SHA-256 for @aztec/bb.js ${version}.\n` +
-        `Download ${WINDOWS_BB_ASSET} from the v${version} aztec-packages release ` +
-        `(or run the windows-bb-spike workflow), then add its sha256 to ` +
-        `WINDOWS_BB_CHECKSUMS in copy-bb.ts.`,
+        `Download ${WINDOWS_BB_ASSET} from the v${version} aztec-packages release, ` +
+        `sha256sum it, and add the hash to WINDOWS_BB_CHECKSUMS in copy-bb.ts.`,
     );
   }
   return sha;
@@ -81,6 +81,11 @@ export function assertSha256(data: Uint8Array, expected: string, label: string):
   }
 }
 
+// bb's tarball is ~5 MiB; cap well above that to bound build-time memory if a
+// compromised CDN serves a giant body (the SHA-256 still rejects it — this only
+// prevents an OOM before the mismatch is detected). Build-time only, never on users.
+const MAX_BB_TARBALL_BYTES = 64 * 1024 * 1024;
+
 async function fetchWindowsBb(version: string, destExe: string): Promise<void> {
   const tag = windowsBbReleaseTag(version);
   const expected = resolveWindowsBbChecksum(version);
@@ -91,7 +96,18 @@ async function fetchWindowsBb(version: string, destExe: string): Promise<void> {
   if (!res.ok) {
     throw new Error(`Failed to download ${url}: HTTP ${res.status} ${res.statusText}`);
   }
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (declared > MAX_BB_TARBALL_BYTES) {
+    throw new Error(
+      `${WINDOWS_BB_ASSET} too large: Content-Length ${declared} > ${MAX_BB_TARBALL_BYTES}`,
+    );
+  }
   const data = new Uint8Array(await res.arrayBuffer());
+  if (data.length > MAX_BB_TARBALL_BYTES) {
+    throw new Error(
+      `${WINDOWS_BB_ASSET} too large: ${data.length} bytes > ${MAX_BB_TARBALL_BYTES}`,
+    );
+  }
   assertSha256(data, expected, WINDOWS_BB_ASSET);
   console.log(`SHA-256 verified: ${expected}`);
 
@@ -99,13 +115,21 @@ async function fetchWindowsBb(version: string, destExe: string): Promise<void> {
   try {
     const tarPath = join(work, WINDOWS_BB_ASSET);
     writeFileSync(tarPath, data);
-    // bsdtar ships in System32 on Windows 10+, the only platform this branch runs on.
-    execSync(`tar -xzf "${tarPath}" -C "${work}"`, { stdio: "inherit" });
-    const extracted = join(work, "bb.exe");
-    if (!existsSync(extracted)) {
-      throw new Error(`bb.exe not found after extracting ${WINDOWS_BB_ASSET}`);
+    const extractDir = join(work, "extract");
+    mkdirSync(extractDir);
+    // bsdtar ships in System32 on Windows 10+ (the only platform this runs on);
+    // execFileSync avoids cmd.exe entirely — no shell parsing of the paths.
+    execFileSync("tar.exe", ["-xzf", tarPath, "-C", extractDir], { stdio: "inherit" });
+    // Canary: the tarball must hold ONLY bb.exe. If a future bb release bundles DLLs,
+    // throw loudly rather than silently shipping a broken (missing-dependency) sidecar.
+    const entries = readdirSync(extractDir);
+    if (entries.length !== 1 || entries[0] !== "bb.exe") {
+      throw new Error(
+        `Unexpected Windows bb archive layout: expected only bb.exe, got [${entries.join(", ")}]. ` +
+          `bb may have gained runtime dependencies — revisit the self-contained sidecar assumption.`,
+      );
     }
-    copyFileSync(extracted, destExe);
+    copyFileSync(join(extractDir, "bb.exe"), destExe);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
