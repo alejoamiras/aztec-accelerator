@@ -45,7 +45,10 @@ jobs:
           set -euo pipefail
           PR_NUM=""
 
-          # shellcheck disable=SC2329  # invoked via `trap cleanup EXIT`
+          # cleanup runs indirectly via `trap cleanup EXIT`, so shellcheck's
+          # reachability analysis flags its body — SC2329 (never invoked) and
+          # SC2317 (unreachable) are both false positives here.
+          # shellcheck disable=SC2317,SC2329
           cleanup() {
             set +e
             [ -n "$PR_NUM" ] && GH_TOKEN="$APP_TOKEN" gh pr close "$PR_NUM" --repo "$REPO" 2>/dev/null
