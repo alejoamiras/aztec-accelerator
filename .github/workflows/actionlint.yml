@@ -100,16 +100,21 @@ jobs:
     steps:
       - name: Check results
         run: |
-          if [ "${{ needs.actionlint.result }}" = "failure" ]; then
-            echo "Actionlint failed"
+          # This job is a REQUIRED check on main, so it must fail closed. If the
+          # `changes` filter itself didn't succeed we can't trust the gating, and
+          # a cancelled lint job must NOT read as pass (only `skipped` = no
+          # relevant changes is a legitimate pass).
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "changes job did not succeed (${{ needs.changes.result }}) — cannot trust lint gating"
             exit 1
           fi
-          if [ "${{ needs.shellcheck.result }}" = "failure" ]; then
-            echo "Shellcheck failed"
-            exit 1
-          fi
-          if [ "${{ needs.tofu.result }}" = "failure" ]; then
-            echo "OpenTofu lint failed"
-            exit 1
-          fi
-          echo "All checks passed (or skipped — no relevant changes)"
+          for r in "actionlint:${{ needs.actionlint.result }}" \
+                   "shellcheck:${{ needs.shellcheck.result }}" \
+                   "tofu:${{ needs.tofu.result }}"; do
+            name="${r%%:*}"; res="${r#*:}"
+            if [ "$res" = "failure" ] || [ "$res" = "cancelled" ]; then
+              echo "$name lint $res"
+              exit 1
+            fi
+          done
+          echo "All lint checks passed or skipped (no relevant changes)"
