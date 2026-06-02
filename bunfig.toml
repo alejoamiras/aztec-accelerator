@@ -1,0 +1,11 @@
+# Supply-chain hardening. Refuse installing any dependency version published
+# less than 7 days ago, so a freshly-published malicious release (e.g. a hijacked
+# popular package — the May 2026 @tanstack worm compromised 42 packages within 6
+# minutes of publish) is never pulled into a build during the window before the
+# compromise is typically caught and yanked.
+#
+# Affects dependency RESOLUTION (bun add / bun update). Already-locked installs
+# (`bun install --frozen-lockfile`, what CI runs) are unaffected — they install
+# exactly what bun.lock pins.
+[install]
+minimumReleaseAge = 604800 # 7 days, in seconds
