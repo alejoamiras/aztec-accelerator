@@ -727,9 +727,62 @@ jobs:
             --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
             --paths "/releases/latest.json"
 
+  # Enforce the live-feed check that was previously done by hand: after `release`
+  # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
+  # actually serves this version and every asset URL resolves. Separate job (own
+  # 15m timeout) so CDN lag can't trip the short `release`/`bump-source` jobs.
+  # `bump-source` gates on this — don't bump source until users would really get
+  # the release.
+  verify-live-feed:
+    name: Verify live updater feed
+    needs: [validate, release]
+    if: needs.validate.outputs.is_prerelease == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Poll the prod feed + assert it serves this release
+        env:
+          EXPECTED: ${{ needs.validate.outputs.version }}
+          FEED_URL: https://aztec-accelerator.dev/releases/latest.json
+        run: |
+          set -euo pipefail
+          # Poll the public CDN until it serves this version (covers invalidation
+          # propagation + the 300s max-age), then assert the platform map + that
+          # every asset URL is reachable. The updater gate used a synthesized
+          # feed; this is the only check on the REAL prod latest.json + assets.
+          FEED=""
+          GOT=""
+          for _ in $(seq 1 60); do
+            FEED=$(curl -fsS --max-time 15 "$FEED_URL" 2>/dev/null || true)
+            GOT=$(printf '%s' "$FEED" | jq -r '.version // empty' 2>/dev/null || true)
+            [ "$GOT" = "$EXPECTED" ] && break
+            sleep 10
+          done
+          if [ "$GOT" != "$EXPECTED" ]; then
+            echo "::error::live feed at $FEED_URL still not $EXPECTED after ~10min (got '${GOT:-<none>}')"
+            exit 1
+          fi
+          echo "✅ feed serves $EXPECTED"
+          printf '%s' "$FEED" | jq -e '.platforms | has("darwin-aarch64") and has("darwin-x86_64") and has("linux-x86_64")' >/dev/null \
+            || { echo "::error::latest.json missing a platform key"; exit 1; }
+          # `while read` over process substitution (not a pipe) so `exit 1` exits
+          # the script, not a subshell. Retry each URL (brief edge/GitHub lag).
+          while read -r u; do
+            ok=""
+            for _ in $(seq 1 5); do
+              code=$(curl -fsIL --max-time 30 -o /dev/null -w '%{http_code}' "$u" 2>/dev/null || echo ERR)
+              if [ "$code" = "200" ]; then ok=1; break; fi
+              sleep 5
+            done
+            [ -n "$ok" ] || { echo "::error::asset URL not reachable (last=$code): $u"; exit 1; }
+            echo "✅ 200 $u"
+          done < <(printf '%s' "$FEED" | jq -r '.platforms[].url')
+          echo "✅ live updater feed verified == $EXPECTED, all assets reachable"
+
   bump-source:
     name: Bump source version
-    needs: [validate, release]
+    needs: [validate, release, verify-live-feed]
     if: needs.validate.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
