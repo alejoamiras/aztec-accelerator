@@ -71,7 +71,6 @@ pub fn versions_base_dir() -> PathBuf {
         .join("versions")
 }
 
-/// Returns the path to a cached bb binary for a given version.
 /// The bb binary filename on the current platform (`bb.exe` on Windows, `bb` elsewhere).
 pub fn bb_binary_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -81,6 +80,7 @@ pub fn bb_binary_name() -> &'static str {
     }
 }
 
+/// Returns the path to a cached bb binary for a given version.
 pub fn version_bb_path(version: &str) -> PathBuf {
     versions_base_dir().join(version).join(bb_binary_name())
 }
@@ -186,7 +186,7 @@ pub fn list_cached_versions() -> Vec<String> {
     let mut versions = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&base) {
         for entry in entries.flatten() {
-            if entry.path().join("bb").exists() {
+            if entry.path().join(bb_binary_name()).exists() {
                 if let Some(name) = entry.file_name().to_str() {
                     versions.push(name.to_string());
                 }
@@ -558,7 +558,13 @@ mod tests {
     #[test]
     fn current_platform_matches_aztec_naming() {
         // Aztec releases use "darwin" (not "macos") and "linux"
-        let valid = ["arm64-darwin", "amd64-darwin", "amd64-linux", "arm64-linux"];
+        let valid = [
+            "arm64-darwin",
+            "amd64-darwin",
+            "amd64-linux",
+            "arm64-linux",
+            "amd64-windows",
+        ];
         let platform = current_platform();
         assert!(
             valid.contains(&platform),
@@ -596,10 +602,19 @@ mod tests {
     #[test]
     fn version_bb_path_format() {
         let path = version_bb_path("5.0.0-nightly.20260307");
-        assert!(path
-            .to_str()
-            .unwrap()
-            .contains(".aztec-accelerator/versions/5.0.0-nightly.20260307/bb"));
+        // Separator-agnostic: compare path components, and use the platform's bb name.
+        let tail: std::path::PathBuf = [
+            ".aztec-accelerator",
+            "versions",
+            "5.0.0-nightly.20260307",
+            bb_binary_name(),
+        ]
+        .iter()
+        .collect();
+        assert!(
+            path.ends_with(&tail),
+            "got {path:?}, expected to end with {tail:?}"
+        );
     }
 
     #[test]
@@ -617,7 +632,7 @@ mod tests {
             header.set_mode(0o755);
             header.set_cksum();
             builder
-                .append_data(&mut header, "bb", &bb_content[..])
+                .append_data(&mut header, bb_binary_name(), &bb_content[..])
                 .unwrap();
             builder.finish().unwrap();
         }
@@ -626,7 +641,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         extract_bb_from_tarball(&tarball, tmp.path()).unwrap();
 
-        let bb = tmp.path().join("bb");
+        let bb = tmp.path().join(bb_binary_name());
         assert!(bb.exists());
         let contents = std::fs::read_to_string(&bb).unwrap();
         assert!(contents.contains("echo hello"));
@@ -647,7 +662,11 @@ mod tests {
             header.set_mode(0o755);
             header.set_cksum();
             builder
-                .append_data(&mut header, "barretenberg/bb", &bb_content[..])
+                .append_data(
+                    &mut header,
+                    format!("barretenberg/{}", bb_binary_name()),
+                    &bb_content[..],
+                )
                 .unwrap();
             builder.finish().unwrap();
         }
@@ -656,7 +675,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         extract_bb_from_tarball(&tarball, tmp.path()).unwrap();
 
-        let bb = tmp.path().join("bb");
+        let bb = tmp.path().join(bb_binary_name());
         assert!(bb.exists());
         assert_eq!(std::fs::read_to_string(&bb).unwrap(), "nested-bb");
     }
@@ -703,7 +722,7 @@ mod tests {
             header.set_size(0);
             header.set_cksum();
             builder
-                .append_link(&mut header, "bb", "/etc/passwd")
+                .append_link(&mut header, bb_binary_name(), "/etc/passwd")
                 .unwrap();
             builder.finish().unwrap();
         }
