@@ -31,7 +31,9 @@ on:
         default: ""
         type: string
     secrets:
-      PAT_TOKEN:
+      RELEASE_BOT_APP_ID:
+        required: true
+      RELEASE_BOT_PRIVATE_KEY:
         required: true
 
 jobs:
@@ -146,14 +148,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
       CURRENT_VERSION: ${{ needs.check-update.outputs.current_version }}
     steps:
+      # Short-lived, repo-scoped GitHub App token instead of the long-lived PAT.
+      # Needs issues:write too — `gh pr edit --add-label` + `gh pr close --comment`
+      # below go through the issues label/comment endpoints. The token still
+      # triggers CI on the created PR (so `--auto` waits for the required checks).
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
       - uses: actions/checkout@v6
 
       - name: Close stale update PRs
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH_PREFIX: ${{ inputs.branch_prefix }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
           NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
@@ -171,6 +186,7 @@ jobs:
 
       - name: Create or update PR
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH_PREFIX: ${{ inputs.branch_prefix }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
           ADD_LABEL: ${{ inputs.add_label }}
