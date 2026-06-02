@@ -112,6 +112,8 @@ jobs:
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - run: bun run lint
+      - name: Unit-test build scripts (copy-bb supply-chain gate)
+        run: bun run --cwd packages/accelerator test:unit
 
   smoke:
     name: Smoke

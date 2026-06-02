@@ -7,7 +7,8 @@
   "scripts": {
     "prebuild": "bun scripts/copy-bb.ts",
     "test:e2e:ui": "bunx playwright test --config playwright.config.mjs",
-    "test:e2e:webdriver": "npx @wdio/cli run ./wdio.conf.ts"
+    "test:e2e:webdriver": "npx @wdio/cli run ./wdio.conf.ts",
+    "test:unit": "bun test scripts/"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
