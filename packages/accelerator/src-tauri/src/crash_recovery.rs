@@ -191,9 +191,23 @@ pub fn disable_crash_recovery() {
 #[cfg(target_os = "windows")]
 const TASK_NAME: &str = "Aztec Accelerator Crash Recovery";
 
+/// Absolute path to schtasks.exe — avoids a bare-name PATH lookup (same defense as the
+/// absolute System32 tar.exe in copy-bb.ts: a planted `schtasks` earlier on PATH can't win).
+#[cfg(target_os = "windows")]
+fn schtasks_exe() -> std::path::PathBuf {
+    let system_root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("windir"))
+        .unwrap_or_else(|_| "C:\\Windows".to_string());
+    std::path::Path::new(&system_root)
+        .join("System32")
+        .join("schtasks.exe")
+}
+
 /// Register the Task Scheduler crash-recovery task. Call after `manager.enable()`.
 #[cfg(target_os = "windows")]
 pub fn enable_crash_recovery() {
+    use std::io::Write;
+
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -202,22 +216,43 @@ pub fn enable_crash_recovery() {
         }
     };
 
-    let xml_path = std::env::temp_dir().join("aztec-accelerator-recovery.xml");
     // schtasks /XML expects UTF-16LE with a BOM.
     let mut bytes = vec![0xFFu8, 0xFE];
     for unit in task_xml(&exe.display().to_string()).encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
-    if let Err(e) = std::fs::write(&xml_path, &bytes) {
-        tracing::warn!("Failed to write Task Scheduler XML: {e}");
-        return;
-    }
 
-    let result = std::process::Command::new("schtasks")
+    // Random temp filename (not a predictable %TEMP% path a local user could pre-create or
+    // symlink), written + closed before schtasks reads it, auto-deleted when it drops.
+    let xml_path = {
+        let mut tmp = match tempfile::Builder::new()
+            .prefix("aztec-accel-recovery-")
+            .suffix(".xml")
+            .tempfile()
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to create Task Scheduler XML temp file: {e}");
+                return;
+            }
+        };
+        if let Err(e) = tmp.write_all(&bytes) {
+            tracing::warn!("Failed to write Task Scheduler XML: {e}");
+            return;
+        }
+        if let Err(e) = tmp.flush() {
+            tracing::warn!("Failed to flush Task Scheduler XML: {e}");
+            return;
+        }
+        // Close our handle so schtasks can open it; the file persists until this drops.
+        tmp.into_temp_path()
+    };
+
+    let result = std::process::Command::new(schtasks_exe())
         .args(["/Create", "/F", "/TN", TASK_NAME, "/XML"])
-        .arg(&xml_path)
+        .arg(&*xml_path)
         .output();
-    let _ = std::fs::remove_file(&xml_path);
+    // xml_path (TempPath) drops at end of scope → the temp file is removed.
 
     match result {
         Ok(output) if output.status.success() => {
@@ -234,7 +269,7 @@ pub fn enable_crash_recovery() {
 /// Remove the Task Scheduler crash-recovery task. Call after `manager.disable()`.
 #[cfg(target_os = "windows")]
 pub fn disable_crash_recovery() {
-    let result = std::process::Command::new("schtasks")
+    let result = std::process::Command::new(schtasks_exe())
         .args(["/Delete", "/F", "/TN", TASK_NAME])
         .output();
     match result {
