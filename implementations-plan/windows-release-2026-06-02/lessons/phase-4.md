@@ -50,13 +50,27 @@ so WebDriver has a browsing context. Risk: the tray/WebView2 driving headlessly 
 - **Gate B (quit→stays-down):** trigger the intentional quit (exit 0) → assert NO relaunch.
 - **Gate C (updater-handoff):** during an N-1→N update, assert Task Scheduler does NOT relaunch
   the OLD build mid-handoff (would race the installer).
-- **Dual-launch fix (the real bug codex found):** the Run key AND the Task Scheduler logon
-  trigger both launch at logon; the loser of the `:59833` bind does NOT self-terminate
-  (`main.rs:373-381` just sets a tray tooltip) → ghost tray. **Candidate fix: exit-on-bind-fail**
-  — when `bind_with_retry` exhausts (another instance owns the port), `app.exit(1)` instead of
-  staying resident. Makes double-launch benign single-instance on ALL platforms. **CONSULT CODEX**
-  on this fork (exit-on-bind-fail vs suppress-the-Run-key-when-Task-Scheduler-active vs watchdog)
-  before implementing — it touches mac/linux behavior too.
+- **Dual-launch fix (codex consult `019e…` done — DESIGN LOCKED, implement with CI):**
+  the Run key AND the Task Scheduler logon trigger both launch at logon; the loser of the
+  `:59833` bind does NOT self-terminate (`main.rs:373-381` sets a tray tooltip + stays resident)
+  → ghost tray. Fix = **exit-0-on-bind-fail, but CLASSIFY first** (codex's key correction):
+  - `bind_with_retry` only proves "port busy 5s," not "a *healthy Aztec* instance owns it."
+  - So on bind exhaustion, **probe `http://127.0.0.1:59833/health`** (new
+    `server::healthy_aztec_on_port()` — true iff `status=="ok" && api_version==1`).
+    - healthy Aztec answers → `app_handle.exit(0)` (redundant instance bows out; **exit 0**, NOT
+      non-zero, or it loops against Task Scheduler `RestartOnFailure`/systemd `on-failure`/launchd
+      `KeepAlive`). Cross-platform.
+    - foreign process / no answer → keep the current visible "port in use" tooltip + stay resident
+      (do NOT exit non-zero → avoids a restart loop on a persistent foreign conflict).
+  - Wire in `main.rs:372-385` (add `app.handle().clone()` into the spawn). Add a unit test for
+    the classifier. **Sharp edge codex flagged (→ Gate C):** updater handoff — if the NEW build
+    bows out (exit 0) while the OLD build still owns the port and then dies, nothing runs + no
+    supervisor restart. The 5s retry is the gating assumption; Gate C must exercise this.
+  - `tauri-plugin-single-instance` is NOT a fit (it'd reject the legit updater-relaunch overlap
+    that `bind_with_retry` is designed to tolerate). Confirmed by codex.
+  - **NOTE:** this changes SHIPPED macOS/Linux behavior (a redundant instance now exits instead
+    of ghosting) — must land with green mac/linux e2e/smoke, so implement it with stable CI, not
+    blind in an AFK/flaky-SSH window.
 
 ## Sequencing
 Updater-smoke first (highest risk — proves the Windows update mechanism + answers "does the
