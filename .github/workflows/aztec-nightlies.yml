@@ -20,7 +20,8 @@ jobs:
   update:
     uses: ./.github/workflows/_aztec-update.yml
     secrets:
-      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      RELEASE_BOT_APP_ID: ${{ secrets.RELEASE_BOT_APP_ID }}
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
     with:
       dist_tag: nightly
       target_branch: nightlies
