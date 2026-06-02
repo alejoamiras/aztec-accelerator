@@ -1,0 +1,8 @@
+name: Lint Block Test (throwaway)
+on: workflow_dispatch
+jobs:
+  a:
+    needs: [ghost-job-that-does-not-exist]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
