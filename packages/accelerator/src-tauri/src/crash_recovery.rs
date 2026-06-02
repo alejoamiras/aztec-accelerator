@@ -176,8 +176,177 @@ pub fn disable_crash_recovery() {
     tracing::info!("systemd user service disabled (crash recovery)");
 }
 
+// ── Windows ──────────────────────────────────────────────────────────────────
+//
+// PROVISIONAL mechanism (windows-release-2026-06-02 plan, owner decision):
+// a Task Scheduler task with `RestartOnFailure` — a non-zero exit (crash) relaunches
+// the app; a clean exit 0 (intentional quit) completes the task and is NOT restarted.
+// Mirrors the Linux systemd approach: a separate recovery mechanism alongside the
+// autostart entry created by tauri-plugin-autostart (a Run key on Windows).
+//
+// Known caveat the P4 gating tests must resolve: the Run key AND the task's logon
+// trigger both fire at logon (potential double-launch). If the crash-vs-quit or
+// updater-handoff tests fail, the sibling-crate watchdog is the documented fallback.
+
+#[cfg(target_os = "windows")]
+const TASK_NAME: &str = "Aztec Accelerator Crash Recovery";
+
+/// Absolute path to schtasks.exe — avoids a bare-name PATH lookup (same defense as the
+/// absolute System32 tar.exe in copy-bb.ts: a planted `schtasks` earlier on PATH can't win).
+#[cfg(target_os = "windows")]
+fn schtasks_exe() -> std::path::PathBuf {
+    let system_root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("windir"))
+        .unwrap_or_else(|_| "C:\\Windows".to_string());
+    std::path::Path::new(&system_root)
+        .join("System32")
+        .join("schtasks.exe")
+}
+
+/// Register the Task Scheduler crash-recovery task. Call after `manager.enable()`.
+#[cfg(target_os = "windows")]
+pub fn enable_crash_recovery() {
+    use std::io::Write;
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Cannot determine executable path for Task Scheduler: {e}");
+            return;
+        }
+    };
+
+    // schtasks /XML expects UTF-16LE with a BOM.
+    let mut bytes = vec![0xFFu8, 0xFE];
+    for unit in task_xml(&exe.display().to_string()).encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    // Random temp filename (not a predictable %TEMP% path a local user could pre-create or
+    // symlink), written + closed before schtasks reads it, auto-deleted when it drops.
+    let xml_path = {
+        let mut tmp = match tempfile::Builder::new()
+            .prefix("aztec-accel-recovery-")
+            .suffix(".xml")
+            .tempfile()
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to create Task Scheduler XML temp file: {e}");
+                return;
+            }
+        };
+        if let Err(e) = tmp.write_all(&bytes) {
+            tracing::warn!("Failed to write Task Scheduler XML: {e}");
+            return;
+        }
+        if let Err(e) = tmp.flush() {
+            tracing::warn!("Failed to flush Task Scheduler XML: {e}");
+            return;
+        }
+        // Close our handle so schtasks can open it; the file persists until this drops.
+        tmp.into_temp_path()
+    };
+
+    let result = std::process::Command::new(schtasks_exe())
+        .args(["/Create", "/F", "/TN", TASK_NAME, "/XML"])
+        .arg(&*xml_path)
+        .output();
+    // xml_path (TempPath) drops at end of scope → the temp file is removed.
+
+    match result {
+        Ok(output) if output.status.success() => {
+            tracing::info!("Task Scheduler crash-recovery task registered");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("schtasks /Create failed: {stderr}");
+        }
+        Err(e) => tracing::warn!("Failed to run schtasks: {e}"),
+    }
+}
+
+/// Remove the Task Scheduler crash-recovery task. Call after `manager.disable()`.
+#[cfg(target_os = "windows")]
+pub fn disable_crash_recovery() {
+    let result = std::process::Command::new(schtasks_exe())
+        .args(["/Delete", "/F", "/TN", TASK_NAME])
+        .output();
+    match result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("Task Scheduler crash-recovery task removed");
+        }
+        Ok(_) => tracing::debug!("Task Scheduler task not present (already removed)"),
+        Err(e) => tracing::warn!("Failed to run schtasks /Delete: {e}"),
+    }
+}
+
+/// Build the Task Scheduler task definition. The exe path is XML-escaped.
+#[cfg(target_os = "windows")]
+fn task_xml(exe_path: &str) -> String {
+    let exe = xml_escape(exe_path);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Aztec Accelerator crash recovery</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+    </Exec>
+  </Actions>
+</Task>"#
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn task_xml_has_restart_and_escapes_exe() {
+        let xml = super::task_xml(r"C:\Program Files\A & B\aztec-accelerator.exe");
+        // Crash → relaunch is the whole point.
+        assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains("<LogonTrigger>"));
+        // The raw ampersand must be escaped or the XML is invalid.
+        assert!(xml.contains("A &amp; B"));
+        assert!(!xml.contains("A & B"));
+        // Path text (sans the escaped char) survives.
+        assert!(xml.contains(r"C:\Program Files"));
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn patch_plist_inserts_before_last_dict() {

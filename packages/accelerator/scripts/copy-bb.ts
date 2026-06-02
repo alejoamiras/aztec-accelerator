@@ -117,9 +117,14 @@ async function fetchWindowsBb(version: string, destExe: string): Promise<void> {
     writeFileSync(tarPath, data);
     const extractDir = join(work, "extract");
     mkdirSync(extractDir);
-    // bsdtar ships in System32 on Windows 10+ (the only platform this runs on);
-    // execFileSync avoids cmd.exe entirely — no shell parsing of the paths.
-    execFileSync("tar.exe", ["-xzf", tarPath, "-C", extractDir], { stdio: "inherit" });
+    // Invoke System32's bsdtar by ABSOLUTE path. A bare "tar.exe" resolves via PATH,
+    // and under Git Bash (e.g. a `shell: bash` CI step) that is Git's GNU tar, which
+    // mishandles C:\ paths and dies with "gzip: stdin: unexpected end of file".
+    // bsdtar is native (Win10 1803+/Server 2019+) and handles Windows paths; the
+    // absolute path makes extraction shell-independent. execFileSync = no shell.
+    const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
+    const tarExe = join(systemRoot, "System32", "tar.exe");
+    execFileSync(tarExe, ["-xzf", tarPath, "-C", extractDir], { stdio: "inherit" });
     // Canary: the tarball must hold ONLY bb.exe. If a future bb release bundles DLLs,
     // throw loudly rather than silently shipping a broken (missing-dependency) sidecar.
     const entries = readdirSync(extractDir);

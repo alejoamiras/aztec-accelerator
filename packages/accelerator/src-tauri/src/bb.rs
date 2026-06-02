@@ -32,9 +32,12 @@ pub fn find_bb(version: Option<&str>) -> Result<PathBuf, String> {
         }
     }
 
-    // 2. Sidecar: check next to the current executable
+    // 2. Sidecar: check next to the current executable (bb.exe on Windows)
     if let Ok(exe) = std::env::current_exe() {
-        let sidecar = exe.parent().unwrap_or(&exe).join("bb");
+        let sidecar = exe
+            .parent()
+            .unwrap_or(&exe)
+            .join(versions::bb_binary_name());
         if sidecar.exists() {
             return Ok(sidecar);
         }
@@ -42,13 +45,17 @@ pub fn find_bb(version: Option<&str>) -> Result<PathBuf, String> {
 
     // 3. ~/.bb/bb (bbup install location)
     if let Some(home) = dirs_next().or_else(home_dir_fallback) {
-        let bbup_path = home.join(".bb").join("bb");
+        let bbup_path = home.join(".bb").join(versions::bb_binary_name());
         if bbup_path.exists() {
             return Ok(bbup_path);
         }
     }
 
-    // 4. bb on $PATH
+    // 4. bb on $PATH — Unix only. On Windows we deliberately skip a bare PATH lookup:
+    //    which() there resolves via PATH+PATHEXT, so a planted bb.exe/bb.bat/bb.cmd in
+    //    CWD or a writable PATH dir could hijack proving. The bundled sidecar (step 2) is
+    //    always present in shipped builds; for Windows dev, set BB_BINARY_PATH explicitly.
+    #[cfg(not(target_os = "windows"))]
     if let Ok(path) = which::which("bb") {
         return Ok(path);
     }

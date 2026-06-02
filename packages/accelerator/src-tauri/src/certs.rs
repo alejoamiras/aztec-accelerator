@@ -300,7 +300,12 @@ mod tests {
     #[test]
     fn certs_dir_is_under_home() {
         let dir = certs_dir();
-        assert!(dir.to_string_lossy().contains(".aztec-accelerator/certs"));
+        // Separator-agnostic: compare path components, not a "/"-joined string.
+        let tail: std::path::PathBuf = [".aztec-accelerator", "certs"].iter().collect();
+        assert!(
+            dir.ends_with(&tail),
+            "certs_dir {dir:?} should end with {tail:?}"
+        );
     }
 
     #[test]
