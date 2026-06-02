@@ -34,8 +34,9 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-issues: write
 
-      - name: Prove the App token can push + open a CI-triggering PR (no merge, no main impact)
+      - name: Prove the App token can push + open a CI-triggering PR + label/comment (issues:write)
         env:
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_TOKEN: ${{ github.token }} # default token: read checks/runs + cancel
@@ -51,7 +52,7 @@ jobs:
           # shellcheck disable=SC2317,SC2329
           cleanup() {
             set +e
-            [ -n "$PR_NUM" ] && GH_TOKEN="$APP_TOKEN" gh pr close "$PR_NUM" --repo "$REPO" 2>/dev/null
+            [ -n "$PR_NUM" ] && GH_TOKEN="$APP_TOKEN" gh pr close "$PR_NUM" --repo "$REPO" --comment "release-bot smoke cleanup" 2>/dev/null
             GH_TOKEN="$APP_TOKEN" gh api -X DELETE "repos/$REPO/git/refs/heads/$BR" 2>/dev/null
             # cancel the gate runs the PR triggered (default token, actions:write)
             for rid in $(gh api "repos/$REPO/actions/runs?branch=$BR&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null); do
@@ -80,6 +81,14 @@ jobs:
             --body "Throwaway PR verifying the release-bot GitHub App token. Auto-closed by the Release Bot Token Check workflow.")
           PR_NUM=$(printf '%s' "$PR_URL" | grep -oE '[0-9]+$')
           echo "✅ pull_requests:write — opened PR #$PR_NUM"
+
+          # issues:write — the @aztec update workflows add a label + comment on
+          # their PRs (and close stale ones with a --comment); those go through
+          # the issues label/comment endpoints. Exercise both on this throwaway PR.
+          GH_TOKEN="$APP_TOKEN" gh pr edit "$PR_NUM" --repo "$REPO" --add-label dependencies
+          echo "✅ issues:write — added label 'dependencies'"
+          GH_TOKEN="$APP_TOKEN" gh pr comment "$PR_NUM" --repo "$REPO" --body "release-bot issues:write smoke — auto-closing"
+          echo "✅ issues:write — posted a comment"
 
           # Assert the App-token PR triggered CI (check-runs appear on the head).
           # This is what guarantees the required *-status checks exist so the real
