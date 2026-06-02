@@ -308,6 +308,28 @@ jobs:
           rust-components: ""
       - name: Compile + unit-test the app crate on Windows
         run: cargo test
+      - name: Build the Tauri app (NSIS installer)
+        working-directory: packages/accelerator
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ephemeral updater signing key — smoke only, never shipped. createUpdaterArtifacts
+          # is on, so tauri build needs a key to emit the .nsis.zip + .sig.
+          bunx tauri signer generate --ci -p "" -w ./smoke-updater.key
+          TAURI_SIGNING_PRIVATE_KEY="$(cat ./smoke-updater.key)"
+          export TAURI_SIGNING_PRIVATE_KEY
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          bunx tauri build --bundles nsis
+          rm -f ./smoke-updater.key ./smoke-updater.key.pub
+      - name: Assert the NSIS installer was produced
+        working-directory: packages/accelerator/src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
+          nsis=$(find target/release/bundle -name '*-setup.exe' | head -1)
+          [ -n "$nsis" ] || { echo "::error::no NSIS -setup.exe produced"; exit 1; }
+          ls -la "$nsis"
+          echo "Windows installer produced: $nsis"
 
   accelerator-status:
     name: Accelerator Status
