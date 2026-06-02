@@ -1,0 +1,93 @@
+name: Release Bot Token Check
+
+# Dispatch-only diagnostic. Proves the release-bot GitHub App + its secrets mint
+# a working installation token with exactly the perms `bump-source` needs
+# (contents:write + pull_requests:write) AND that an App-token PR triggers the
+# required CI checks — WITHOUT merging anything. Run once before relying on the
+# App token at a real stable cut.
+#
+# It creates a throwaway branch off main + a trivial commit under
+# packages/accelerator/** (so the Accelerator gate actually fires), opens a PR
+# against main, asserts check-runs appear on it, then closes the PR + deletes the
+# branch + cancels the triggered runs. The App token does the writes; the default
+# GITHUB_TOKEN does only the read assertions + run cancellation.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  checks: read
+  statuses: read
+  pull-requests: read
+  actions: write # cancel the gate runs the smoke PR triggers, during cleanup
+
+jobs:
+  check:
+    name: Mint App token + prove push/PR/CI-trigger
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Prove the App token can push + open a CI-triggering PR (no merge, no main impact)
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }} # default token: read checks/runs + cancel
+          REPO: ${{ github.repository }}
+          BR: release-bot-smoke-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          PR_NUM=""
+
+          # shellcheck disable=SC2329  # invoked via `trap cleanup EXIT`
+          cleanup() {
+            set +e
+            [ -n "$PR_NUM" ] && GH_TOKEN="$APP_TOKEN" gh pr close "$PR_NUM" --repo "$REPO" 2>/dev/null
+            GH_TOKEN="$APP_TOKEN" gh api -X DELETE "repos/$REPO/git/refs/heads/$BR" 2>/dev/null
+            # cancel the gate runs the PR triggered (default token, actions:write)
+            for rid in $(gh api "repos/$REPO/actions/runs?branch=$BR&per_page=100" --jq '.workflow_runs[].id' 2>/dev/null); do
+              gh api -X POST "repos/$REPO/actions/runs/$rid/cancel" >/dev/null 2>&1
+            done
+            echo "── cleanup done (branch + PR removed, triggered runs cancelled) ──"
+          }
+          trap cleanup EXIT
+
+          BASE_SHA=$(gh api "repos/$REPO/git/refs/heads/main" --jq '.object.sha')
+
+          # contents:write — create the branch, then a trivial commit under
+          # packages/accelerator/** so the Accelerator PR gate actually fires.
+          GH_TOKEN="$APP_TOKEN" gh api -X POST "repos/$REPO/git/refs" \
+            -f ref="refs/heads/$BR" -f sha="$BASE_SHA" >/dev/null
+          echo "✅ contents:write — branch $BR created"
+          GH_TOKEN="$APP_TOKEN" gh api -X PUT "repos/$REPO/contents/packages/accelerator/.release-bot-smoke" \
+            -f message="chore: release-bot token smoke (throwaway)" \
+            -f content="$(printf 'release-bot token smoke %s\n' "$BR" | base64 | tr -d '\n')" \
+            -f branch="$BR" >/dev/null
+          echo "✅ contents:write — commit pushed on $BR"
+
+          # pull_requests:write — open the PR against main (this is what triggers CI).
+          PR_URL=$(GH_TOKEN="$APP_TOKEN" gh pr create --repo "$REPO" --base main --head "$BR" \
+            --title "chore: release-bot token smoke (auto-closing, do not merge)" \
+            --body "Throwaway PR verifying the release-bot GitHub App token. Auto-closed by the Release Bot Token Check workflow.")
+          PR_NUM=$(printf '%s' "$PR_URL" | grep -oE '[0-9]+$')
+          echo "✅ pull_requests:write — opened PR #$PR_NUM"
+
+          # Assert the App-token PR triggered CI (check-runs appear on the head).
+          # This is what guarantees the required *-status checks exist so the real
+          # bump PR's `--auto` waits for them instead of merging ungated.
+          for _ in $(seq 1 18); do
+            n=$(gh api "repos/$REPO/commits/$BR/check-runs" --jq '.total_count' 2>/dev/null || echo 0)
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "✅ App-token PR triggered CI ($n check-run(s)) — required checks will gate the real bump PR"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::No check-runs appeared on the App-token PR within ~3min — the bump PR may not trigger the required checks. Investigate before relying on the App token at a stable cut."
+          exit 1
