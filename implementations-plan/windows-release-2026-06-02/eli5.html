@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows release — ELI5</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6; max-width: 47rem; margin: 3rem auto; padding: 0 1.25rem; color: #1a1a1a; background: #fdfdfd; }
+  @media (prefers-color-scheme: dark){ body{color:#e6e6e6;background:#161616;} }
+  h1{font-size:1.75rem;line-height:1.25;margin-bottom:.2rem;}
+  .sub{color:#777;margin-top:0;font-size:.95rem;}
+  h2{font-size:1.25rem;margin-top:2.4rem;border-bottom:1px solid #8884;padding-bottom:.3rem;}
+  .analogy{background:#8881;border-left:3px solid #888;padding:.6rem .9rem;border-radius:4px;margin:1rem 0;}
+  .good{border-left-color:#1f9d55;} .watch{border-left-color:#e06700;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em;background:#8882;padding:.1em .35em;border-radius:3px;}
+  .step{margin:.7rem 0;padding-left:.2rem;}
+  .step b{display:inline-block;min-width:2.4rem;color:#888;}
+  .why{color:#555;} @media (prefers-color-scheme: dark){ .why{color:#aaa;} .sub{color:#999;} }
+  a{color:#2b6cb0;} @media (prefers-color-scheme: dark){ a{color:#7ab3ee;} }
+  footer{margin-top:3rem;font-size:.85rem;color:#888;border-top:1px solid #8884;padding-top:1rem;}
+</style>
+</head>
+<body>
+
+<h1>Bringing the Accelerator to Windows</h1>
+<p class="sub">Plain-English companion to <a href="plan.md">plan.md</a>. Why it's finally possible, what's genuinely hard, and the one open question.</p>
+
+<p>The app does its heavy lifting by shipping a little engine called <code>bb</code> (Barretenberg) — the thing that actually crunches the zero-knowledge proofs. Until now, <code>bb</code> didn't come in a Windows flavour, so the app couldn't either. Aztec just started publishing a Windows <code>bb</code>, so the door is open.</p>
+
+<h2>The lucky break 🍀</h2>
+<p>We downloaded and X-rayed the actual Windows <code>bb.exe</code>. The big fear with Windows is "DLL hell" — programs that need a pile of extra system libraries that may or may not be on the user's PC. Turns out <code>bb.exe</code> is a <b>single, self-contained file</b> that only needs libraries already built into every modern Windows. <b>No extra installs, no redistributables.</b> That kills the scariest risk before we start.</p>
+
+<h2>The plan, in eight steps</h2>
+<div class="step"><b>P0</b> Teach the build to grab the Windows <code>bb.exe</code> (it lives in a different place than the Mac/Linux one) and verify its checksum so nobody can swap in a tampered one.</div>
+<div class="step"><b>P1</b> Make Tauri actually produce a Windows installer (a <code>-setup.exe</code>) + the auto-update package.</div>
+<div class="step"><b>P2</b> Fill the Windows-shaped holes in the code. One is urgent: a piece of "restart-if-I-crash" code only exists for Mac/Linux, and the app literally <i>won't compile</i> for Windows until we add a Windows version.</div>
+<div class="step"><b>P3</b> Wire up auto-update so Windows users get a "windows" entry in the update file.</div>
+<div class="step"><b>P4</b> The hard part — robot tests that install the app, auto-update it, and a fake-website test that proves a tampered update is rejected. (More below.)</div>
+<div class="step"><b>P5</b> Plug Windows into the release pipeline so a release builds + ships the Windows files.</div>
+<div class="step"><b>P6</b> A dry-run "release-candidate" to shake out surprises, with the Windows tests running as <i>advisory</i> first (they report but don't block) — the same careful rollout we used for Linux.</div>
+<div class="step"><b>P7</b> Ship it for real, with all the Windows tests now <i>required</i>.</div>
+
+<h2>The make-or-break: testing auto-update on a robot 🤖</h2>
+<p>The riskiest piece is proving the app can <b>quietly update itself</b> on a Windows machine with nobody clicking anything. The test installs an <i>old</i> version, stands up a fake copy of our website on the test machine, and watches the old app download + install + relaunch as the <i>new</i> version — then checks it's alive and reports the new version.</p>
+<div class="analogy good"><b>Why it can work with no clicks:</b> we install "just for this user" (into the user's own folder, no admin password), which lets the update happen silently. Two things only this test can settle: does Windows <i>really</i> do it click-free, and does the app grab its network port back fast enough after the restart (the exact bug that bit us on Linux — and Windows is a bit worse at it). The test is the experiment that answers both.</div>
+
+<h2>The honest trade-off: unsigned for now</h2>
+<p>Properly "signing" a Windows app (so it doesn't show a scary "unknown publisher" warning) needs a certificate that costs money + takes time to obtain. We're shipping <b>unsigned first</b>. What that means:</p>
+<ul>
+<li><b>First install:</b> users see a SmartScreen "unknown publisher" warning and click "More info → Run anyway." Mild friction.</li>
+<li><b>Updates are still cryptographically safe.</b> This is the important bit: the app verifies every update with a separate cryptographic signature (minisign) <i>before</i> running it. So even unsigned, nobody can sneak a malicious update past it — and a test proves exactly that by trying (and failing) to push a tampered one.</li>
+</ul>
+<p class="why">Signing is a clearly-scoped follow-up, not a blocker.</p>
+
+<h2>The one open question 🤔</h2>
+<div class="analogy watch"><b>How should the app restart itself if it crashes on Windows?</b> Mac and Linux have a built-in "babysitter" for this. Windows doesn't have a clean per-user equivalent. Two options: use Windows' Task Scheduler (built-in, no extra files — my pick), or ship a tiny separate "watchdog" program (more reliable at telling a crash from "the user quit on purpose," but it adds a second file to the bundle — the exact kind of thing that caused a past breakage). The plan picks Task Scheduler and proves it with a "kill the app, did it come back?" test — but this is the call I'd most like your gut-check on.</div>
+
+<h2>How sure are we?</h2>
+<p>This plan was written three ways in parallel — me, a second AI (codex), and a third (opus) that went and inspected the real Windows files — then merged, with a final critical review before you see it. The boring parts (the engine, the installer) turned out easy; the real work is the robot tests and that one crash-recovery question.</p>
+
+<footer>Generated alongside <a href="plan.md">plan.md</a>. 🤖 typed it; you decide what ships.</footer>
+</body>
+</html>
