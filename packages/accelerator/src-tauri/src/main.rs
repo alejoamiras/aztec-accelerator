@@ -372,8 +372,14 @@ fn main() {
             let server_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = aztec_accelerator::server::start(http_state).await {
-                    let addr_in_use = e.to_string().contains("Address already in use")
-                        || e.to_string().contains("address already in use");
+                    // Classify AddrInUse STRUCTURALLY (by ErrorKind), not by display text —
+                    // the OS string differs per platform (Windows WSAEADDRINUSE reads
+                    // "Only one usage of each socket address…"), so a string match would miss
+                    // it on Windows and skip the whole dual-launch fix on its target platform.
+                    // bind_with_retry returns the io::Error, boxed by `?` in server::start.
+                    let addr_in_use = e
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
                     // A redundant instance loses the :59833 bind — the autostart entry AND the
                     // crash-recovery launcher (Task Scheduler / launchd / systemd) can both start
                     // us at logon. If a HEALTHY Aztec instance already owns the port, bow out with

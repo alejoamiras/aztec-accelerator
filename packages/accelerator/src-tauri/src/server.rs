@@ -76,6 +76,11 @@ pub async fn healthy_aztec_on_port() -> bool {
     let Ok(resp) = client.get(&url).send().await else {
         return false;
     };
+    // Require a 2xx so a non-success responder that happens to echo the right JSON
+    // shape isn't mistaken for a healthy Aztec instance.
+    if !resp.status().is_success() {
+        return false;
+    }
     let Ok(body) = resp.json::<serde_json::Value>().await else {
         return false;
     };
