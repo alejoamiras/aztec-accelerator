@@ -1,0 +1,111 @@
+name: _Updater Smoke Windows (reusable)
+
+# ADVISORY Windows/NSIS sibling of _e2e-updater-linux.yml. There is NO prior Windows
+# release to update FROM, so this BOOTSTRAPS with a synthetic N-1: it builds two app
+# versions in-job with ONE ephemeral minisign key (N-1 embeds the pubkey; N's updater
+# artifact is signed with the matching private key), installs N-1, lets it auto-update
+# to N via a local feed impersonating the prod host, and asserts it relaunches on N.
+# No prod signing key is involved. Once a real Windows stable exists, switch to the
+# Linux pattern (download N-1, serve the prod-signed N). See updater-smoke-windows.ps1.
+
+on:
+  workflow_call:
+    inputs:
+      n-version:
+        description: The version under test (N)
+        required: false
+        default: "9.9.9"
+        type: string
+      n1-version:
+        description: The synthetic previous version (N-1)
+        required: false
+        default: "0.0.1"
+        type: string
+      mode:
+        description: "positive (expect the update) | negative (tamper the artifact, expect rejection)"
+        required: false
+        default: positive
+        type: string
+  workflow_dispatch:
+
+jobs:
+  updater-smoke-windows:
+    name: Updater Smoke Windows (${{ inputs.mode || 'positive' }})
+    runs-on: windows-latest
+    timeout-minutes: 60 # two release builds + the smoke
+    permissions:
+      contents: read
+    env:
+      N_VERSION: ${{ inputs.n-version || '9.9.9' }}
+      N1_VERSION: ${{ inputs.n1-version || '0.0.1' }}
+      SMOKE_MODE: ${{ inputs.mode || 'positive' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+          rust-workspaces: packages/accelerator/src-tauri -> target
+          rust-components: ""
+
+      - name: Generate one ephemeral updater key (N-1 trusts it; N is signed with it)
+        shell: bash
+        working-directory: packages/accelerator
+        run: |
+          set -euo pipefail
+          bunx tauri signer generate --ci -p "" -w ./smoke.key
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY=$(cat ./smoke.key)"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD="
+            echo "SMOKE_PUBKEY=$(cat ./smoke.key.pub)"
+          } >> "$GITHUB_ENV"
+          rm -f ./smoke.key ./smoke.key.pub
+
+      # Build a version at the given version with the ephemeral pubkey embedded.
+      # Outputs land in target/release/bundle/nsis; we copy them out per version.
+      - name: Build N-1 (${{ inputs.n1-version || '0.0.1' }})
+        shell: bash
+        working-directory: packages/accelerator/src-tauri
+        run: |
+          set -euo pipefail
+          # Patch version (Cargo.toml + tauri.conf) + the updater pubkey to the ephemeral one.
+          sed -i "s/^version = \".*\"/version = \"$N1_VERSION\"/" Cargo.toml
+          bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N1_VERSION;c.plugins.updater.pubkey=process.env.SMOKE_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"
+          ( cd .. && bunx tauri build --bundles nsis )
+          mkdir -p "$RUNNER_TEMP/n1"
+          cp target/release/bundle/nsis/*-setup.exe "$RUNNER_TEMP/n1/"
+          # Wipe the bundle dir so N-1's *.nsis.zip can't linger into the N build and get
+          # copied as "N" (it would serve N-1's own 0.0.1 artifact = a no-op update).
+          rm -rf target/release/bundle/nsis
+          # Restore the working tree so the N build patches cleanly.
+          git checkout -- Cargo.toml tauri.conf.json
+
+      - name: Build N (${{ inputs.n-version || '9.9.9' }})
+        shell: bash
+        working-directory: packages/accelerator/src-tauri
+        run: |
+          set -euo pipefail
+          sed -i "s/^version = \".*\"/version = \"$N_VERSION\"/" Cargo.toml
+          bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N_VERSION;c.plugins.updater.pubkey=process.env.SMOKE_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"
+          ( cd .. && bunx tauri build --bundles nsis )
+          mkdir -p "$RUNNER_TEMP/n"
+          cp target/release/bundle/nsis/*-setup.nsis.zip "$RUNNER_TEMP/n/"
+          cp target/release/bundle/nsis/*-setup.nsis.zip.sig "$RUNNER_TEMP/n/"
+          git checkout -- Cargo.toml tauri.conf.json
+
+      # BLOCKING once proven (mirrors the Linux flip). Advisory until a green dry-run.
+      - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
+        shell: pwsh
+        env:
+          UPDATER_SMOKE_MODE: ${{ inputs.mode || 'positive' }}
+        run: |
+          $n1 = Get-ChildItem -Path "$env:RUNNER_TEMP\n1" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $n1) { Write-Error "N-1 installer not found"; exit 1 }
+          & packages/accelerator/scripts/updater-smoke-windows.ps1 `
+            -NVersion $env:N_VERSION `
+            -NArtifactsDir "$env:RUNNER_TEMP\n" `
+            -N1Installer $n1.FullName `
+            -RepoRoot $env:GITHUB_WORKSPACE
+
+      - name: Result summary
+        if: success()
+        run: echo "✅ Windows updater smoke PASSED ($env:SMOKE_MODE) — N-1 auto-updated to N via the local feed." >> $env:GITHUB_STEP_SUMMARY

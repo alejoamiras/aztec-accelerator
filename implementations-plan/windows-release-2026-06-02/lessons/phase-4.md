@@ -81,3 +81,33 @@ Each is its own PR, windows-latest-validated, codex-reviewed. Expect P2-style mu
 Designed during the AFK window while the 1Password/SSH agent was flaking (blocked reliable CI
 iteration). Execute when SSH is stable. P0–P3 are banked (P3 committed locally `c161015`,
 auto-pushes on SSH recovery via watcher b7y1txmfx).
+
+## P4 updater-smoke — PROVEN + merged (#273)
+Both legs GREEN on windows-latest, reproducibly:
+- **positive**: install synthetic N-1 (0.0.1) → click-free auto-update to N (9.9.9) via local
+  minisign-signed feed → quiet-install → relaunch → /health == 9.9.9.
+- **negative**: tampered `.nsis.zip` (genuine sig) REJECTED — never reaches 9.9.9.
+Harness: `scripts/updater-smoke-windows.ps1` + reusable `_e2e-updater-windows.yml`
+(ephemeral minisign keypair, builds N-1 + N in-job, synthetic-N-1 bootstrap).
+Key fixes that got it green (from app-log evidence over 4 rounds):
+- CA must go to `LocalMachine\Root` (CurrentUser\Root pops a Trusted-Root GUI dialog → freezes
+  the headless runner — regardless of certutil/Import-Certificate/X509Store).
+- `rm -rf target/release/bundle/nsis` after copying N-1's artifact, else N reuses N-1's stale zip.
+- `plugins.updater.windows.installMode: "quiet"` — the only fully click-free mode (default
+  `passive` shows a progress window that freezes the runner). Also = parity with silent mac/linux.
+
+### Codex review (session 019e8e71, ship-with-changes)
+- **FIXED now**: Defender exclusion was added but never removed — added `Remove-MpPreference`
+  for the same scoped paths ($InstallRoot, $ServeDir) to the `finally` Cleanup. No impact on
+  ephemeral GH runners but never leave an AV hole in a committed harness.
+- **Deferred to P5 blocking-flip (#93)**: (1) HIGH — single-slot release concurrency means a
+  hung advisory Windows leg holds the run `in_progress`, delaying a later dispatch; (2) MED — a
+  failed advisory leg makes the overall run conclude `failure` (harmless in-repo; resolved by
+  the blocking flip). Did NOT touch the proven-green timeout to chase a low-probability hang.
+- **Accepted**: `quiet` UX (no native progress/error UI) is a deliberate tray-app choice +
+  parity with mac/linux silent auto-update.
+
+### P5 partial (in #273)
+Per-PR smoke scaffolding removed from accelerator.yml; the proven jobs now live in
+release-accelerator.yml as ADVISORY (needs:[validate], absent from tag/release needs).
+Flip to blocking after a green Windows rc dry-run (#93/P6).

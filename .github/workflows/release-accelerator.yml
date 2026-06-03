@@ -496,6 +496,27 @@ jobs:
     with:
       n-version: ${{ needs.validate.outputs.version }}
 
+  # Windows/NSIS updater smoke — ADVISORY (synthetic-N-1 bootstrap: no prior Windows release
+  # to update from, so it builds its OWN N-1 + N with an ephemeral key). Proves the click-free
+  # N-1→N update (positive) + tampered-artifact rejection (negative). Self-contained — needs
+  # only `validate`. NOT in tag/release `needs` yet; flip to blocking after a green Windows rc
+  # dry-run, then switch to download-real-N-1 once a Windows stable exists.
+  update-smoke-windows:
+    name: Updater Smoke (windows-x86_64 / positive)
+    needs: [validate]
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    uses: ./.github/workflows/_e2e-updater-windows.yml
+    with:
+      mode: positive
+
+  update-smoke-windows-negative:
+    name: Updater Smoke (windows-x86_64 / negative)
+    needs: [validate]
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    uses: ./.github/workflows/_e2e-updater-windows.yml
+    with:
+      mode: negative
+
   tag:
     name: Create Git Tag
     needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, e2e-webdriver]

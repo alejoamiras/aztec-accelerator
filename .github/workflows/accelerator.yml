@@ -369,6 +369,11 @@ jobs:
           }
           Write-Host "OK: the Windows app installs, launches, and serves /health on the runner"
 
+  # NOTE: the Windows updater-smoke (positive + negative) is PROVEN green and now lives in
+  # the release pipeline (release-accelerator.yml), not per-PR — it builds 4 app versions,
+  # far too heavy for every PR. The reusable _e2e-updater-windows.yml can still be run
+  # manually via workflow_dispatch.
+
   accelerator-status:
     name: Accelerator Status
     if: always()
