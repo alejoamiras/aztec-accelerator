@@ -274,9 +274,11 @@ pub fn enable_crash_recovery() {
     }
 }
 
-/// Remove the Task Scheduler crash-recovery task. Call after `manager.disable()`.
+/// Remove the Task Scheduler crash-recovery task. Returns `true` if the task is confirmed gone
+/// (removed or already absent), `false` if removal could not be verified — callers that rely on
+/// the task being gone (the updater, before NSIS mutates files) MUST check this and not proceed.
 #[cfg(target_os = "windows")]
-pub fn disable_crash_recovery() {
+pub fn disable_crash_recovery() -> bool {
     // Deletion is correctness-critical now: the repeating-trigger task relaunches the app a
     // minute after an intentional quit if it survives. So retry, and verify via /Query
     // (locale-independent — it exits non-zero when the task is absent) rather than trusting
@@ -290,11 +292,11 @@ pub fn disable_crash_recovery() {
             .output()
             .map(|o| o.status.success())
             // If /Query itself can't run, don't claim the task is gone — assume it may persist
-            // so we keep retrying and ultimately log the error rather than a false success.
+            // so we keep retrying and ultimately report failure rather than a false success.
             .unwrap_or(true);
         if !still_present {
             tracing::info!("Task Scheduler crash-recovery task removed (or absent)");
-            return;
+            return true;
         }
         tracing::warn!("crash-recovery task still present after /Delete (attempt {attempt})");
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -302,6 +304,7 @@ pub fn disable_crash_recovery() {
     tracing::error!(
         "crash-recovery task could NOT be removed after retries — the app may relaunch after an intentional quit"
     );
+    false
 }
 
 /// Build the Task Scheduler task definition. The exe path is XML-escaped.
