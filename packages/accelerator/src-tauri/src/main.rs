@@ -381,13 +381,21 @@ fn main() {
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
                     // A redundant instance loses the :59833 bind — the autostart entry AND the
-                    // crash-recovery launcher (Task Scheduler / launchd / systemd) can both start
-                    // us at logon. If a HEALTHY Aztec instance already owns the port, bow out with
-                    // exit(0) rather than ghosting a tray with no server. exit 0 (not non-zero) so
-                    // the supervisor's restart-on-failure does NOT loop us. A foreign process / no
-                    // answer is a real error: surface it and stay resident (exiting non-zero there
-                    // could loop the supervisor against a persistent conflict).
-                    if addr_in_use && aztec_accelerator::server::healthy_aztec_on_port().await {
+                    // crash-recovery launcher can both start us at logon. If a HEALTHY Aztec
+                    // instance already owns the port, bow out with exit(0) rather than ghosting a
+                    // tray with no server. exit 0 (not non-zero) so the supervisor's
+                    // restart-on-failure does NOT loop us. A foreign process / no answer is a real
+                    // error: surface it and stay resident.
+                    //
+                    // WINDOWS-ONLY for now: the dual-launch is a NEW Windows issue (Task Scheduler
+                    // logon trigger + the autostart Run key both fire). macOS/Linux have shipped
+                    // the stay-resident behavior for ages; we don't change them until P4's
+                    // updater-handoff gate proves the bow-out is safe there too (then drop the
+                    // `cfg!`). The `&&` short-circuits, so /health is only probed on Windows.
+                    if addr_in_use
+                        && cfg!(target_os = "windows")
+                        && aztec_accelerator::server::healthy_aztec_on_port().await
+                    {
                         tracing::warn!(
                             "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
                         );
