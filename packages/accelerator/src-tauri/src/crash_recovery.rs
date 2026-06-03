@@ -277,16 +277,29 @@ pub fn enable_crash_recovery() {
 /// Remove the Task Scheduler crash-recovery task. Call after `manager.disable()`.
 #[cfg(target_os = "windows")]
 pub fn disable_crash_recovery() {
-    let result = std::process::Command::new(schtasks_exe())
-        .args(["/Delete", "/F", "/TN", TASK_NAME])
-        .output();
-    match result {
-        Ok(o) if o.status.success() => {
-            tracing::info!("Task Scheduler crash-recovery task removed");
+    // Deletion is correctness-critical now: the repeating-trigger task relaunches the app a
+    // minute after an intentional quit if it survives. So retry, and verify via /Query
+    // (locale-independent — it exits non-zero when the task is absent) rather than trusting
+    // a single best-effort /Delete whose stderr wording varies by Windows language.
+    for attempt in 1..=3 {
+        let _ = std::process::Command::new(schtasks_exe())
+            .args(["/Delete", "/F", "/TN", TASK_NAME])
+            .output();
+        let still_present = std::process::Command::new(schtasks_exe())
+            .args(["/Query", "/TN", TASK_NAME])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !still_present {
+            tracing::info!("Task Scheduler crash-recovery task removed (or absent)");
+            return;
         }
-        Ok(_) => tracing::debug!("Task Scheduler task not present (already removed)"),
-        Err(e) => tracing::warn!("Failed to run schtasks /Delete: {e}"),
+        tracing::warn!("crash-recovery task still present after /Delete (attempt {attempt})");
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    tracing::error!(
+        "crash-recovery task could NOT be removed after retries — the app may relaunch after an intentional quit"
+    );
 }
 
 /// Build the Task Scheduler task definition. The exe path is XML-escaped.
