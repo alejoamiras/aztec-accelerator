@@ -67,6 +67,10 @@ function Cleanup {
   if (Test-Path $HostsFile) {
     (Get-Content $HostsFile) | Where-Object { $_ -notmatch "^127\.0\.0\.1\s+$([regex]::Escape($FeedHost))$" } | Set-Content $HostsFile -ErrorAction SilentlyContinue
   }
+  # (#96) Disarm: drop the autostart Run key + the crash-recovery task we may have armed, and
+  # verify the task is gone — an armed task must not leak even on an ephemeral runner.
+  Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
+  & schtasks /Delete /F /TN "Aztec Accelerator Crash Recovery" *> $null
 }
 
 function Dump-Logs {
@@ -158,6 +162,16 @@ try {
   New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
   '{"config_version":1,"safari_support":false,"approved_origins":[],"speed":"full","auto_update":true}' | Set-Content (Join-Path $ConfigDir "config.json")
 
+  # ── (#96) Arm crash-recovery the way the app does, so the update runs THROUGH the
+  #    disarm-before-install guard (updater.rs). The app registers the Task Scheduler task on
+  #    startup iff autostart is_enabled(); is_enabled() needs only the Run key under the
+  #    productName "Aztec Accelerator" — a missing StartupApproved entry counts as enabled
+  #    (auto-launch `unwrap_or(true)`). Positive leg only (the negative leg rejects before install).
+  if ($Mode -eq "positive") {
+    Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value "`"$($Exe.FullName)`""
+    Log "armed crash-recovery (autostart Run key set for 'Aztec Accelerator')"
+  }
+
   # ── Launch N-1; it should auto-update to N and relaunch ──
   Log "launching N-1 (expecting auto-update → $NVersion)"
   $AppProc = Start-Process -FilePath $Exe.FullName -PassThru
@@ -185,6 +199,22 @@ try {
         Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; Dump-Logs; exit 1
       }
       Log "SUCCESS — updated to $got via the local feed (artifact downloaded + relaunched)"
+      # ── (#96) The update ran with crash-recovery ARMED. The updater disarms the repeating task
+      #    right before NSIS mutates files, then re-arms (before restart + on N's startup). Assert
+      #    the task is PRESENT again — proves the guard disarmed-then-rearmed rather than leaking
+      #    the task or leaving recovery off. (The in-install-window absence is too brief to observe
+      #    reliably; the re-armed end-state is the durable signal.)
+      $taskName = "Aztec Accelerator Crash Recovery"
+      $rearmed = $false
+      for ($r = 0; $r -lt 10; $r++) {
+        & schtasks /Query /TN $taskName *> $null
+        if ($LASTEXITCODE -eq 0) { $rearmed = $true; break }
+        Start-Sleep -Seconds 2
+      }
+      if (-not $rearmed) {
+        Write-Error "update succeeded but the crash-recovery task is ABSENT — the disarm-before-install guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; Dump-Logs; exit 1
+      }
+      Log "crash-recovery re-armed after the update (disarm-before-install guard verified)"
       exit 0
     }
     Start-Sleep -Seconds 2
