@@ -340,6 +340,14 @@ mod tests {
         // Crash → relaunch is the whole point.
         assert!(xml.contains("<RestartOnFailure>"));
         assert!(xml.contains("<LogonTrigger>"));
+        // The restart must be BOUNDED — a finite count + a real interval — else a
+        // crash-looping app would be relaunched forever. PT1M is the documented minimum.
+        assert!(xml.contains("<Interval>PT1M</Interval>"));
+        assert!(xml.contains("<Count>3</Count>"));
+        // The Run key (autostart) AND this task's LogonTrigger both fire at logon;
+        // IgnoreNew tells Task Scheduler not to spawn a second instance if one is up
+        // (the exit-0-if-healthy guard in main.rs handles the Run-key-vs-task race).
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         // The raw ampersand must be escaped or the XML is invalid.
         assert!(xml.contains("A &amp; B"));
         assert!(!xml.contains("A & B"));

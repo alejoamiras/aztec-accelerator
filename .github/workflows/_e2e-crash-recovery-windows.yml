@@ -1,0 +1,26 @@
+name: _E2E Crash Recovery (Windows)
+
+# Diagnostic spike (codex session 019e8e9e): does Task Scheduler <RestartOnFailure>
+# actually relaunch the app on a crash? Pinned to windows-2025 (not windows-latest —
+# that label drifts). Path-scoped push trigger so it runs when the spike files change;
+# workflow_dispatch for re-runs once this is on the default branch.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "packages/accelerator/scripts/crash-recovery-smoke-windows.ps1"
+      - ".github/workflows/_e2e-crash-recovery-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  crash-recovery-smoke:
+    name: Crash-recovery crux (Task Scheduler)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run crash-recovery crux spike
+        shell: pwsh
+        run: ./packages/accelerator/scripts/crash-recovery-smoke-windows.ps1
