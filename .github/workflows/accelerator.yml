@@ -330,6 +330,44 @@ jobs:
           [ -n "$nsis" ] || { echo "::error::no NSIS -setup.exe produced"; exit 1; }
           ls -la "$nsis"
           echo "Windows installer produced: $nsis"
+      - name: Install + launch + probe /health (does the tray app run on the runner?)
+        working-directory: packages/accelerator/src-tauri
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nsis = Get-ChildItem -Recurse -Filter "*-setup.exe" target/release/bundle/nsis | Select-Object -First 1
+          if (-not $nsis) { Write-Error "no installer"; exit 1 }
+          # Scoped Defender exclusion so the UNSIGNED installer/exe isn't quarantined mid-test
+          # (ephemeral runner only; %LOCALAPPDATA% is the per-user install target).
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA" -ErrorAction SilentlyContinue
+          # Silent per-user NSIS install (/S, installMode currentUser -> %LOCALAPPDATA%, no UAC).
+          Write-Host "installing $($nsis.FullName) /S"
+          Start-Process -FilePath $nsis.FullName -ArgumentList "/S" -Wait
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "aztec-accelerator.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "installed aztec-accelerator.exe not found under %LOCALAPPDATA%"
+            Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Out-String | Write-Host
+            exit 1
+          }
+          Write-Host "launching $($exe.FullName)"
+          # Kill switch so the launched app doesn't poll the PROD updater feed / pop a prompt.
+          $env:AZTEC_ACCEL_NO_UPDATE = "1"
+          $proc = Start-Process -FilePath $exe.FullName -PassThru
+          # Poll /health (the server binds even without a visible tray) — proves the app starts.
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $h = Invoke-RestMethod -Uri "http://127.0.0.1:59833/health" -TimeoutSec 3
+              if ($h.status -eq "ok") { Write-Host "/health: $($h | ConvertTo-Json -Compress)"; $ok = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 2
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) {
+            Write-Error "app did not serve /health within 60s — the tray/WebView2 app may not run on a windows-latest runner (risk #1)"
+            exit 1
+          }
+          Write-Host "OK: the Windows app installs, launches, and serves /health on the runner"
 
   accelerator-status:
     name: Accelerator Status
