@@ -61,15 +61,6 @@ pub async fn check_for_update(
 pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
     tracing::info!(version = %update.version, "Downloading update");
 
-    // Windows guard: the crash-recovery task is an always-armed repeating launcher (every
-    // PT1M). If a tick fires while NSIS is mutating the install tree, it could spawn the exe
-    // mid-update — locking the file being replaced or launching a half-written binary.
-    // Disarm it for the install window. On success the relaunched build re-arms on startup
-    // (per autostart); on failure the app keeps running, so we re-arm below. No-op if the
-    // task was never armed (autostart off).
-    #[cfg(target_os = "windows")]
-    crate::crash_recovery::disable_crash_recovery();
-
     match update
         .download_and_install(
             |chunk_length, content_length| {
@@ -81,25 +72,42 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
             },
             || {
                 tracing::info!("Download complete, installing");
+                // Windows: disarm the always-armed repeating crash-recovery task ONLY now —
+                // right before NSIS mutates the install tree. A tick during that window could
+                // spawn the exe mid-update (lock the file being replaced / launch a half-written
+                // binary). Disarming here (not before the download) keeps a mid-download crash
+                // recoverable. No-op if the task was never armed (autostart off).
+                #[cfg(target_os = "windows")]
+                crate::crash_recovery::disable_crash_recovery();
             },
         )
         .await
     {
         Ok(()) => {
+            // Re-arm BEFORE restarting: a failed relaunch must not leave recovery off while
+            // autostart is on. IgnoreNew + the exit-0-if-healthy guard absorb any brief
+            // double-launch with the restarted build.
+            #[cfg(target_os = "windows")]
+            rearm_crash_recovery_if_enabled(app);
             tracing::info!("Update installed, restarting");
             app.restart();
         }
         Err(e) => {
             tracing::error!("Update failed: {e}");
-            // The app keeps running, so crash-recovery must resume — but only if it should
-            // be armed (autostart on), mirroring the enable condition at startup.
+            // The app keeps running, so crash-recovery must resume (only if it should be
+            // armed — autostart on). Idempotent if it was never disarmed (crash mid-download).
             #[cfg(target_os = "windows")]
-            {
-                use tauri_plugin_autostart::ManagerExt;
-                if app.autolaunch().is_enabled().unwrap_or(false) {
-                    crate::crash_recovery::enable_crash_recovery();
-                }
-            }
+            rearm_crash_recovery_if_enabled(app);
         }
+    }
+}
+
+/// Re-arm the Windows crash-recovery task iff it should be armed (autostart on). Idempotent —
+/// `enable_crash_recovery` overwrites any existing task.
+#[cfg(target_os = "windows")]
+fn rearm_crash_recovery_if_enabled(app: &AppHandle) {
+    use tauri_plugin_autostart::ManagerExt;
+    if app.autolaunch().is_enabled().unwrap_or(false) {
+        crate::crash_recovery::enable_crash_recovery();
     }
 }

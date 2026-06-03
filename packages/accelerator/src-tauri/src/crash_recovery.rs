@@ -289,7 +289,9 @@ pub fn disable_crash_recovery() {
             .args(["/Query", "/TN", TASK_NAME])
             .output()
             .map(|o| o.status.success())
-            .unwrap_or(false);
+            // If /Query itself can't run, don't claim the task is gone — assume it may persist
+            // so we keep retrying and ultimately log the error rather than a false success.
+            .unwrap_or(true);
         if !still_present {
             tracing::info!("Task Scheduler crash-recovery task removed (or absent)");
             return;
