@@ -58,6 +58,9 @@ function Cleanup {
   if ($AppProc) { Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue }
   Get-Process -Name "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   if ($FeedProc) { Stop-Process -Id $FeedProc.Id -Force -ErrorAction SilentlyContinue }
+  # Drop the scoped Defender exclusions we added (self-hosted-runner hygiene; no-op on
+  # ephemeral GH-hosted runners, which are torn down — but never leave an AV hole behind).
+  Remove-MpPreference -ExclusionPath $InstallRoot, $ServeDir -ErrorAction SilentlyContinue
   # Drop the test CA from LocalMachine\Root (ephemeral runner is torn down anyway).
   if ($CaThumb) { Get-ChildItem "Cert:\LocalMachine\Root\$CaThumb" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }
   # Drop the hosts line we added (anchored, exact).
