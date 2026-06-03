@@ -242,6 +242,8 @@ jobs:
             runner: macos-latest
           - platform: linux
             runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
     uses: ./.github/workflows/_e2e-webdriver.yml
     with:
       runner: ${{ matrix.runner }}
