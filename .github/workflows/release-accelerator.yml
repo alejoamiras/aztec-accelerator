@@ -98,6 +98,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             platform: linux-x86_64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            platform: windows-x86_64
     steps:
       - uses: actions/checkout@v6
 
@@ -154,8 +157,15 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
         run: |
           set -euo pipefail
+          # Windows: NSIS only — matches the proven windows-build gate; skips flaky wix/msi.
+          # createUpdaterArtifacts emits *-setup.nsis.zip + .sig, signed with the real key.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bunx tauri build --target "$TARGET" --bundles nsis
+            exit 0
+          fi
           if [ "$RUNNER_OS" != "macOS" ]; then
             bunx tauri build --target "$TARGET"
             exit 0
@@ -214,6 +224,9 @@ jobs:
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.tar.gz
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.sig
             packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.sig
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.nsis.zip
+            packages/accelerator/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.sig
 
   build-headless:
     name: Build Headless (${{ matrix.platform }})
@@ -543,6 +556,10 @@ jobs:
           find artifacts -name '*_amd64.deb'      -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \;
           find artifacts -name '*_amd64.AppImage'  -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \;
 
+          # Windows — the -setup.exe (first install) + the .nsis.zip (the updater artifact)
+          find artifacts -name '*-setup.exe'       -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.exe" \;
+          find artifacts -name '*-setup.nsis.zip'  -exec mv {} "release-files/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" \;
+
           # Headless server tarballs + checksums (named accelerator-server-${VERSION}-<platform>.tar.gz)
           find artifacts -name 'accelerator-server-*.tar.gz' -exec mv {} release-files/ \;
           find artifacts -name 'accelerator-server-*.tar.gz.sha256' -exec mv {} release-files/ \;
@@ -558,6 +575,8 @@ jobs:
             "Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz"
             "Aztec-Accelerator-${VERSION}-Linux-x86_64.deb"
             "Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage"
+            "Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.exe"
+            "Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip"
             "accelerator-server-${VERSION}-macos-arm64.tar.gz"
             "accelerator-server-${VERSION}-macos-arm64.tar.gz.sha256"
             "accelerator-server-${VERSION}-macos-x86_64.tar.gz"
@@ -588,9 +607,10 @@ jobs:
           DARWIN_AARCH64_SIG=$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
           DARWIN_X86_64_SIG=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
           LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
+          WINDOWS_X86_64_SIG=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip.sig' -exec cat {} \; 2>/dev/null || echo "")
 
           # Assert all signatures are present — empty sigs produce broken auto-updates
-          for sig_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG; do
+          for sig_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG; do
             if [ -z "${!sig_name}" ]; then
               echo "::error::Missing signature: $sig_name — cannot generate latest.json"
               exit 1
@@ -606,6 +626,8 @@ jobs:
             --arg darwin_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \
             --arg linux_x86_64_sig "$LINUX_APPIMAGE_SIG" \
             --arg linux_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \
+            --arg windows_x86_64_sig "$WINDOWS_X86_64_SIG" \
+            --arg windows_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" \
             '{
               version: $version,
               notes: ("Aztec Accelerator " + $version),
@@ -613,7 +635,8 @@ jobs:
               platforms: {
                 "darwin-aarch64": { signature: $darwin_aarch64_sig, url: $darwin_aarch64_url },
                 "darwin-x86_64": { signature: $darwin_x86_64_sig, url: $darwin_x86_64_url },
-                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url }
+                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url },
+                "windows-x86_64": { signature: $windows_x86_64_sig, url: $windows_x86_64_url }
               }
             }' > release-files/latest.json
 
@@ -629,7 +652,7 @@ jobs:
           IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
         run: |
           # Collect all bundle files into a null-delimited list
-          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name 'accelerator-server-*.tar.gz' -o -name 'accelerator-server-*.tar.gz.sha256' -o -name 'latest.json' \) -print0)
+          mapfile -d '' FILES < <(find release-files -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name '*-setup.exe' -o -name '*-setup.nsis.zip' -o -name 'accelerator-server-*.tar.gz' -o -name 'accelerator-server-*.tar.gz.sha256' -o -name 'latest.json' \) -print0)
 
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts found!"
@@ -665,10 +688,18 @@ jobs:
           | **macOS (Intel)** | \`Aztec-Accelerator-${VERSION}-macOS-Intel.dmg\` |
           | **Linux (Debian/Ubuntu)** | \`Aztec-Accelerator-${VERSION}-Linux-x86_64.deb\` |
           | **Linux (Other distros)** | \`Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage\` |
+          | **Windows (x64)** | \`Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.exe\` |
 
           ### macOS: First Launch
 
           The app is **code-signed and notarized** by Apple. Double-click the DMG, drag to Applications, and launch.
+
+          ### Windows: First Launch
+
+          The installer is **not yet code-signed**, so Windows SmartScreen shows an
+          "unknown publisher" warning on first install — click **More info → Run anyway**.
+          It installs per-user (no admin prompt). Every **update** is still cryptographically
+          verified (minisign) before it runs, so auto-updates remain safe.
 
           ### Headless server for CI test acceleration
 
@@ -764,7 +795,7 @@ jobs:
             exit 1
           fi
           echo "✅ feed serves $EXPECTED"
-          printf '%s' "$FEED" | jq -e '.platforms | has("darwin-aarch64") and has("darwin-x86_64") and has("linux-x86_64")' >/dev/null \
+          printf '%s' "$FEED" | jq -e '.platforms | has("darwin-aarch64") and has("darwin-x86_64") and has("linux-x86_64") and has("windows-x86_64")' >/dev/null \
             || { echo "::error::latest.json missing a platform key"; exit 1; }
           # `while read` over process substitution (not a pipe) so `exit 1` exits
           # the script, not a subshell. Retry each URL (brief edge/GitHub lag).
