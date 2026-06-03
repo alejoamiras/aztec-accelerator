@@ -22,6 +22,9 @@ jobs:
       contents: read
     defaults:
       run:
+        # bash on every platform — Git Bash on windows-latest runs the same scripts
+        # (the alternative, pwsh, would need every step rewritten).
+        shell: bash
         working-directory: packages/accelerator
     steps:
       - uses: actions/checkout@v6
@@ -59,8 +62,10 @@ jobs:
       # ── Launch app (single step, no platform conditionals) ──
       - name: Launch app
         run: |
+          EXE=""
+          [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
           if [ "${{ inputs.mode }}" = "release" ]; then
-            APP_CMD="./src-tauri/target/release/aztec-accelerator"
+            APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE"
           else
             APP_CMD="bunx tauri dev --no-watch --features webdriver"
           fi
@@ -71,8 +76,9 @@ jobs:
       - name: Wait for app
         run: |
           echo "Waiting for WebDriver (:4445) and HTTP (:59833)..."
-          # 300 iterations x 2s = 600s (10 min) — cold Rust cache can take 5+ min
-          for i in $(seq 1 300); do
+          # 450 iterations x 2s = 900s (15 min) — cold Rust cache, esp. a Windows
+          # debug compile of the webdriver feature, can be slow on first run.
+          for i in $(seq 1 450); do
             if ! kill -0 "$TAURI_PID" 2>/dev/null; then
               echo "::error::App process crashed during startup"
               cat /tmp/tauri.log 2>/dev/null || true
@@ -85,7 +91,7 @@ jobs:
             fi
             sleep 2
           done
-          echo "::error::Servers not ready after 600s"
+          echo "::error::Servers not ready after 900s"
           cat /tmp/tauri.log 2>/dev/null || true
           exit 1
 
@@ -122,9 +128,16 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          kill "$TAURI_PID" 2>/dev/null || true
-          pkill -P "$TAURI_PID" 2>/dev/null || true
-          pkill -f "aztec-accelerator" 2>/dev/null || true
-          pkill -f stalonetray 2>/dev/null || true
-          pkill -f Xvfb 2>/dev/null || true
-          kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Git Bash has no pkill; use taskkill on the native processes (// escapes
+            # the flags so MSYS doesn't path-mangle them).
+            taskkill //F //IM aztec-accelerator.exe 2>/dev/null || true
+            taskkill //F //IM msedgewebview2.exe 2>/dev/null || true
+          else
+            kill "$TAURI_PID" 2>/dev/null || true
+            pkill -P "$TAURI_PID" 2>/dev/null || true
+            pkill -f "aztec-accelerator" 2>/dev/null || true
+            pkill -f stalonetray 2>/dev/null || true
+            pkill -f Xvfb 2>/dev/null || true
+            kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true
+          fi
