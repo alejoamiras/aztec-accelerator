@@ -9,12 +9,14 @@
 
   Trust model (no signing key needed): we serve an ALREADY-signed N .nsis.zip; N-1
   (unmodified) verifies the .sig against its embedded pubkey. reqwest on Windows uses
-  schannel, which reads the Windows cert store — so a local CA trusted in CurrentUser\Root
+  schannel, which reads the Windows cert store — so a local CA trusted in LocalMachine\Root
   is honored.
 
   Windows vs Linux swaps:
-    CA trust : Import-Certificate -> CurrentUser\Root (vs update-ca-certificates; NOT certutil
-               -addstore Root, which pops a GUI confirmation that hangs a non-interactive runner)
+    CA trust : Import-Certificate -> LocalMachine\Root (vs update-ca-certificates). MUST be the
+               MACHINE store, not per-user: adding a CA to the per-user Trusted Root pops a GUI
+               confirmation that hangs a headless runner; the machine store is admin-authorized
+               (runner is admin) so it adds silently. schannel validates against both.
     hosts    : %SystemRoot%\System32\drivers\etc\hosts
     install  : <setup>.exe /S  (silent NSIS, %LOCALAPPDATA%)   (vs cp + chmod AppImage)
     AV       : scoped Add-MpPreference exclusion (unsigned exe) (no Linux analogue)
@@ -56,8 +58,8 @@ function Cleanup {
   if ($AppProc) { Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue }
   Get-Process -Name "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   if ($FeedProc) { Stop-Process -Id $FeedProc.Id -Force -ErrorAction SilentlyContinue }
-  # Drop the test CA from CurrentUser\Root (ephemeral runner is torn down anyway).
-  if ($CaThumb) { Get-ChildItem "Cert:\CurrentUser\Root\$CaThumb" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }
+  # Drop the test CA from LocalMachine\Root (ephemeral runner is torn down anyway).
+  if ($CaThumb) { Get-ChildItem "Cert:\LocalMachine\Root\$CaThumb" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }
   # Drop the hosts line we added (anchored, exact).
   if (Test-Path $HostsFile) {
     (Get-Content $HostsFile) | Where-Object { $_ -notmatch "^127\.0\.0\.1\s+$([regex]::Escape($FeedHost))$" } | Set-Content $HostsFile -ErrorAction SilentlyContinue
@@ -99,12 +101,14 @@ try {
   "subjectAltName=DNS:$FeedHost`nextendedKeyUsage=serverAuth" | Set-Content "$Work\leaf.ext"
   & openssl x509 -req -in "$Work\leaf.csr" -CA "$Work\ca.pem" -CAkey "$Work\ca.key" -CAcreateserial -out "$Work\leaf.pem" -days 2 -extfile "$Work\leaf.ext" 2>$null
 
-  # ── Trust the CA (CurrentUser\Root — schannel reads it for reqwest) + impersonate host ──
-  # Import-Certificate adds to the store PROGRAMMATICALLY. Do NOT use `certutil -addstore Root`:
-  # adding to the Root store that way pops a GUI "install this certificate?" confirmation that
-  # HANGS a non-interactive CI runner (observed: the smoke stalled here on iteration 1).
-  Log "trusting CA (Import-Certificate -> CurrentUser\Root) + hosts entry"
-  $CaThumb = (Import-Certificate -FilePath "$Work\ca.pem" -CertStoreLocation Cert:\CurrentUser\Root).Thumbprint
+  # ── Trust the CA (LocalMachine\Root — schannel validates against it for reqwest) + host ──
+  # MUST be LocalMachine\Root, NOT CurrentUser\Root: adding a CA to the PER-USER Trusted Root
+  # store pops a GUI security-confirmation dialog ("install this certificate?") that hangs a
+  # headless runner — regardless of certutil vs Import-Certificate vs X509Store.Add. The MACHINE
+  # store is admin-authorized (the GH runner is admin) so it adds with NO prompt; schannel
+  # validates against both stores. (Observed freeze on iterations 1-3.)
+  Log "trusting CA (Import-Certificate -> LocalMachine\Root) + hosts entry"
+  $CaThumb = (Import-Certificate -FilePath "$Work\ca.pem" -CertStoreLocation Cert:\LocalMachine\Root).Thumbprint
   Write-Host "CA trusted (thumbprint $CaThumb)"
   Add-Content -Path $HostsFile -Value "127.0.0.1 $FeedHost"
   Write-Host "hosts entry added"

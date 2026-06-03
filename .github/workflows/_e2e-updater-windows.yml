@@ -73,6 +73,9 @@ jobs:
           ( cd .. && bunx tauri build --bundles nsis )
           mkdir -p "$RUNNER_TEMP/n1"
           cp target/release/bundle/nsis/*-setup.exe "$RUNNER_TEMP/n1/"
+          # Wipe the bundle dir so N-1's *.nsis.zip can't linger into the N build and get
+          # copied as "N" (it would serve N-1's own 0.0.1 artifact = a no-op update).
+          rm -rf target/release/bundle/nsis
           # Restore the working tree so the N build patches cleanly.
           git checkout -- Cargo.toml tauri.conf.json
 
