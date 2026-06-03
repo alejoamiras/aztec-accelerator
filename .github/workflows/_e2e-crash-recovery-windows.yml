@@ -1,9 +1,10 @@
 name: _E2E Crash Recovery (Windows)
 
-# Diagnostic spike (codex session 019e8e9e): does Task Scheduler <RestartOnFailure>
-# actually relaunch the app on a crash? Pinned to windows-2025 (not windows-latest —
-# that label drifts). Path-scoped push trigger so it runs when the spike files change;
-# workflow_dispatch for re-runs once this is on the default branch.
+# Gates the Windows crash-recovery MECHANISM: a repeating Task Scheduler TimeTrigger
+# (PT1M) + IgnoreNew must relaunch a dead app and never duplicate a live one. (The
+# original RestartOnFailure was proven BROKEN here — see lessons/phase-4.md.) Pinned to
+# windows-2025 (windows-latest drifts — codex 019e8e9e). Runs when the test/workflow
+# changes; workflow_dispatch for re-runs.
 on:
   workflow_dispatch:
   push:

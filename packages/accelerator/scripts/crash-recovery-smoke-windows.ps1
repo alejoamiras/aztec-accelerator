@@ -87,3 +87,11 @@ $dupOk = if ($rNodup -eq 1) { 'OK' } else { 'DUPLICATED' }
 Write-Host "VERDICT relaunch-on-death: $relOk"
 Write-Host "VERDICT no-dup-when-alive: $dupOk"
 Write-Host "::notice::relaunch=$relOk nodup=$dupOk (relaunch_runs=$rRelaunch nodup_runs=$rNodup)"
+
+# Standing gate: fail if the mechanism the Windows crash-recovery relies on regresses.
+if ($rRelaunch -ge 2 -and $rNodup -eq 1) {
+  Write-Host "PASS — repeating-trigger crash-recovery mechanism verified"
+} else {
+  Write-Error "FAIL — crash-recovery mechanism regressed (relaunch=$rRelaunch want>=2; nodup=$rNodup want=1)"
+  exit 1
+}
