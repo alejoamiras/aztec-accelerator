@@ -93,6 +93,10 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
         tracing::error!(
             "Aborting update install: could not disarm crash-recovery task (race risk)"
         );
+        // The app keeps running on the current version, and disarm may have PARTIALLY succeeded
+        // (/Delete worked but /Query couldn't confirm), so recovery could now be off. Restore it
+        // before bailing out — every path that leaves the app running must end armed.
+        rearm_crash_recovery_if_enabled(app);
         return;
     }
 
