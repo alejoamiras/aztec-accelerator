@@ -369,25 +369,10 @@ jobs:
           }
           Write-Host "OK: the Windows app installs, launches, and serves /health on the runner"
 
-  # ADVISORY while iterating (NOT in accelerator-status). Builds a synthetic N-1 + N and
-  # proves N-1 auto-updates to N via a local feed. Permanent home is the release pipeline
-  # (P5); this per-PR wiring is to get it green. Flip to blocking once proven.
-  updater-smoke-windows:
-    name: Updater Smoke Windows (advisory)
-    needs: changes
-    if: needs.changes.outputs.desktop == 'true'
-    uses: ./.github/workflows/_e2e-updater-windows.yml
-    with:
-      mode: positive
-
-  # Teeth check: a TAMPERED .nsis.zip (genuine sig) must be REJECTED (no update).
-  updater-smoke-windows-negative:
-    name: Updater Smoke Windows (negative, advisory)
-    needs: changes
-    if: needs.changes.outputs.desktop == 'true'
-    uses: ./.github/workflows/_e2e-updater-windows.yml
-    with:
-      mode: negative
+  # NOTE: the Windows updater-smoke (positive + negative) is PROVEN green and now lives in
+  # the release pipeline (release-accelerator.yml), not per-PR — it builds 4 app versions,
+  # far too heavy for every PR. The reusable _e2e-updater-windows.yml can still be run
+  # manually via workflow_dispatch.
 
   accelerator-status:
     name: Accelerator Status
