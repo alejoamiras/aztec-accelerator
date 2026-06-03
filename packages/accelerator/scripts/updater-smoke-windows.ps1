@@ -13,7 +13,8 @@
   is honored.
 
   Windows vs Linux swaps:
-    CA trust : certutil -addstore -user Root        (vs update-ca-certificates)
+    CA trust : Import-Certificate -> CurrentUser\Root (vs update-ca-certificates; NOT certutil
+               -addstore Root, which pops a GUI confirmation that hangs a non-interactive runner)
     hosts    : %SystemRoot%\System32\drivers\etc\hosts
     install  : <setup>.exe /S  (silent NSIS, %LOCALAPPDATA%)   (vs cp + chmod AppImage)
     AV       : scoped Add-MpPreference exclusion (unsigned exe) (no Linux analogue)
@@ -96,10 +97,14 @@ try {
   & openssl x509 -req -in "$Work\leaf.csr" -CA "$Work\ca.pem" -CAkey "$Work\ca.key" -CAcreateserial -out "$Work\leaf.pem" -days 2 -extfile "$Work\leaf.ext" 2>$null
 
   # ── Trust the CA (CurrentUser\Root — schannel reads it for reqwest) + impersonate host ──
-  Log "trusting CA (certutil -addstore -user Root) + hosts entry"
-  & certutil -addstore -f -user Root "$Work\ca.pem" | Out-Null
+  # Import-Certificate adds to the store PROGRAMMATICALLY. Do NOT use `certutil -addstore Root`:
+  # adding to the Root store that way pops a GUI "install this certificate?" confirmation that
+  # HANGS a non-interactive CI runner (observed: the smoke stalled here on iteration 1).
+  Log "trusting CA (Import-Certificate -> CurrentUser\Root) + hosts entry"
   $CaThumb = (Import-Certificate -FilePath "$Work\ca.pem" -CertStoreLocation Cert:\CurrentUser\Root).Thumbprint
+  Write-Host "CA trusted (thumbprint $CaThumb)"
   Add-Content -Path $HostsFile -Value "127.0.0.1 $FeedHost"
+  Write-Host "hosts entry added"
 
   # ── Scoped Defender exclusion (the UNSIGNED installer/exe) ──
   Add-MpPreference -ExclusionPath $InstallRoot, $ServeDir -ErrorAction SilentlyContinue
