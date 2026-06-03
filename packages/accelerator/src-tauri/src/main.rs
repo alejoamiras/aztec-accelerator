@@ -369,12 +369,27 @@ fn main() {
             let mut http_state = state;
             http_state.https_port = https_port;
             let status_for_server = status_for_diagnostics;
+            let server_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = aztec_accelerator::server::start(http_state).await {
+                    let addr_in_use = e.to_string().contains("Address already in use")
+                        || e.to_string().contains("address already in use");
+                    // A redundant instance loses the :59833 bind — the autostart entry AND the
+                    // crash-recovery launcher (Task Scheduler / launchd / systemd) can both start
+                    // us at logon. If a HEALTHY Aztec instance already owns the port, bow out with
+                    // exit(0) rather than ghosting a tray with no server. exit 0 (not non-zero) so
+                    // the supervisor's restart-on-failure does NOT loop us. A foreign process / no
+                    // answer is a real error: surface it and stay resident (exiting non-zero there
+                    // could loop the supervisor against a persistent conflict).
+                    if addr_in_use && aztec_accelerator::server::healthy_aztec_on_port().await {
+                        tracing::warn!(
+                            "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
+                        );
+                        server_app_handle.exit(0);
+                        return;
+                    }
                     tracing::error!("Accelerator server error: {e}");
-                    let msg = if e.to_string().contains("Address already in use")
-                        || e.to_string().contains("address already in use")
-                    {
+                    let msg = if addr_in_use {
                         "Error: port 59833 in use"
                     } else {
                         "Error: server failed"
