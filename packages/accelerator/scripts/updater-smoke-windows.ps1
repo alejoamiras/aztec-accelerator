@@ -67,6 +67,9 @@ function Cleanup {
 function Dump-Logs {
   Write-Host "── feed log ──"; Get-Content (Join-Path $Work "feed.log") -ErrorAction SilentlyContinue
   Write-Host "── feed err ──"; Get-Content (Join-Path $Work "feed.err") -ErrorAction SilentlyContinue
+  Write-Host "── app log (what the updater actually did) ──"
+  Get-ChildItem "$env:LOCALAPPDATA\aztec-accelerator\logs" -ErrorAction SilentlyContinue |
+    ForEach-Object { Write-Host "-- $($_.Name) --"; Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue }
   Write-Host "── last /health ──"; try { Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3 | ConvertTo-Json -Compress } catch { "unreachable" }
 }
 
@@ -132,8 +135,15 @@ try {
   if (-not $feedUp) { Write-Error "feed server not reachable"; Dump-Logs; exit 1 }
 
   # ── Install N-1 silently (currentUser → %LOCALAPPDATA%, no UAC) ──
+  # Timed (not -Wait): a non-silent NSIS prompt would hang the runner forever, so fail fast.
   Log "installing N-1 silently: $N1Installer /S"
-  Start-Process -FilePath $N1Installer -ArgumentList "/S" -Wait
+  $inst = Start-Process -FilePath $N1Installer -ArgumentList "/S" -PassThru
+  if (-not $inst.WaitForExit(120000)) {
+    try { $inst.Kill() } catch { }
+    Write-Error "N-1 silent install did NOT finish in 120s — a non-silent NSIS prompt? (runner can't click)"
+    exit 1
+  }
+  Write-Host "N-1 installed (exit $($inst.ExitCode))"
   $Exe = Get-ChildItem -Path $InstallRoot -Recurse -Filter "aztec-accelerator.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $Exe) { Write-Error "installed exe not found under $InstallRoot"; exit 1 }
 
