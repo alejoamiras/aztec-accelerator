@@ -380,6 +380,15 @@ jobs:
     with:
       mode: positive
 
+  # Teeth check: a TAMPERED .nsis.zip (genuine sig) must be REJECTED (no update).
+  updater-smoke-windows-negative:
+    name: Updater Smoke Windows (negative, advisory)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    uses: ./.github/workflows/_e2e-updater-windows.yml
+    with:
+      mode: negative
+
   accelerator-status:
     name: Accelerator Status
     if: always()
