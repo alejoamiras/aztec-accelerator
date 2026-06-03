@@ -52,6 +52,7 @@ runs:
           Linux-ARM64) HOST="aarch64-unknown-linux-gnu" ;;
           macOS-ARM64) HOST="aarch64-apple-darwin" ;;
           macOS-X64)   HOST="x86_64-apple-darwin" ;;
+          Windows-X64) HOST="x86_64-pc-windows-msvc" ;;
           *) echo "::error::Unsupported runner os/arch: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
         esac
         if [ "$HOST" != "$REQUESTED_TARGET" ]; then
