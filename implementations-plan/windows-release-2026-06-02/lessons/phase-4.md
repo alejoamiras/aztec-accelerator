@@ -111,3 +111,32 @@ Key fixes that got it green (from app-log evidence over 4 rounds):
 Per-PR smoke scaffolding removed from accelerator.yml; the proven jobs now live in
 release-accelerator.yml as ADVISORY (needs:[validate], absent from tag/release needs).
 Flip to blocking after a green Windows rc dry-run (#93/P6).
+
+## P4c crash-recovery — RestartOnFailure is BROKEN (codex 019e8e9e + empirical proof)
+Codex flagged that Task Scheduler `<RestartOnFailure>` may not relaunch on a non-zero/crash
+exit. Spiked it on a real windows-2025 runner (SYSTEM principal to isolate the mechanism):
+```
+exit0 runs=1  (stays down — fine)
+exit1 runs=1  (graceful non-zero does NOT relaunch)
+kill  runs=1  (abnormal kill = real crash does NOT relaunch)  -> crash->relaunch BROKEN
+```
+RestartOnFailure is for "the engine couldn't start the action", NOT "the action ran then died".
+mac (launchd KeepAlive{SuccessfulExit:false}) + linux (systemd Restart=on-failure) genuinely
+work and key on the exit code; Windows had no working equivalent. Merged-but-never-released, so
+zero users affected — exactly what this test push exists to catch pre-release.
+
+### Fix (user chose: repeating-trigger task)
+Two parts:
+1. **task_xml**: replace `LogonTrigger + RestartOnFailure` with a REPEATING `TimeTrigger` (PT1M,
+   no Duration) + keep `MultipleInstancesPolicy=IgnoreNew`. Every minute TS tries to start the
+   action; IgnoreNew = no-op if alive, RELAUNCH if dead. ~<=1min recovery latency.
+2. **disable-on-quit** (app code): a repeating trigger relaunches ANYTHING not running, incl.
+   after an intentional quit — which would break quit->stays-down. So the Quit path
+   (main.rs `"quit" => app.exit(0)`) must call `disable_crash_recovery()` (delete the task)
+   BEFORE exit. A crash skips that path -> task remains -> relaunched. Clean quit deletes it
+   first -> stays down. (Updater handoff: restart() launches the NEW build at the same exe path;
+   task either way points there.)
+
+Round-2 spike (crash-recovery-smoke-windows.ps1) confirms the two OS behaviors the fix needs:
+relaunch-on-death (runs grows) + no-dup-when-alive (IgnoreNew, runs stays 1). Spike FIRST,
+then implement — same discipline that caught the round-1 bug.
