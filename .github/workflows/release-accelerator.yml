@@ -114,6 +114,9 @@ jobs:
       - name: Patch version in Cargo.toml
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        # bash on every platform — the windows-x86_64 matrix leg would otherwise run this in
+        # pwsh, where `sed` + `$RELEASE_VERSION` (a bash var) don't resolve (rc dry-run caught it).
+        shell: bash
         run: |
           cd packages/accelerator/src-tauri
           sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml
@@ -122,6 +125,9 @@ jobs:
       - name: Patch version in tauri.conf.json
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        # bash on every platform — the multi-line `bun -e` quoting would otherwise be at the
+        # mercy of pwsh on the windows-x86_64 leg.
+        shell: bash
         run: |
           cd packages/accelerator/src-tauri
           bun -e "
