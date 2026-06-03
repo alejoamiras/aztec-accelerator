@@ -369,12 +369,41 @@ fn main() {
             let mut http_state = state;
             http_state.https_port = https_port;
             let status_for_server = status_for_diagnostics;
+            let server_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = aztec_accelerator::server::start(http_state).await {
-                    tracing::error!("Accelerator server error: {e}");
-                    let msg = if e.to_string().contains("Address already in use")
-                        || e.to_string().contains("address already in use")
+                    // Classify AddrInUse STRUCTURALLY (by ErrorKind), not by display text —
+                    // the OS string differs per platform (Windows WSAEADDRINUSE reads
+                    // "Only one usage of each socket address…"), so a string match would miss
+                    // it on Windows and skip the whole dual-launch fix on its target platform.
+                    // bind_with_retry returns the io::Error, boxed by `?` in server::start.
+                    let addr_in_use = e
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
+                    // A redundant instance loses the :59833 bind — the autostart entry AND the
+                    // crash-recovery launcher can both start us at logon. If a HEALTHY Aztec
+                    // instance already owns the port, bow out with exit(0) rather than ghosting a
+                    // tray with no server. exit 0 (not non-zero) so the supervisor's
+                    // restart-on-failure does NOT loop us. A foreign process / no answer is a real
+                    // error: surface it and stay resident.
+                    //
+                    // WINDOWS-ONLY for now: the dual-launch is a NEW Windows issue (Task Scheduler
+                    // logon trigger + the autostart Run key both fire). macOS/Linux have shipped
+                    // the stay-resident behavior for ages; we don't change them until P4's
+                    // updater-handoff gate proves the bow-out is safe there too (then drop the
+                    // `cfg!`). The `&&` short-circuits, so /health is only probed on Windows.
+                    if addr_in_use
+                        && cfg!(target_os = "windows")
+                        && aztec_accelerator::server::healthy_aztec_on_port().await
                     {
+                        tracing::warn!(
+                            "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
+                        );
+                        server_app_handle.exit(0);
+                        return;
+                    }
+                    tracing::error!("Accelerator server error: {e}");
+                    let msg = if addr_in_use {
                         "Error: port 59833 in use"
                     } else {
                         "Error: server failed"
