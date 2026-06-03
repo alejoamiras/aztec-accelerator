@@ -270,7 +270,17 @@ fn main() {
 
             let tray =
                 tray::build_tray_icon(app, &menu, move |app, event| match event.id().as_ref() {
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // The repeating-trigger crash-recovery task relaunches anything not
+                        // running, so an intentional quit must delete it first or the app
+                        // returns within ~1 min. A crash skips this path → the task survives
+                        // → relaunch. Windows-only: mac/linux key on exit code (launchd
+                        // SuccessfulExit:false / systemd on-failure), so a clean quit is a
+                        // no-op there and the recovery entry must persist across quit.
+                        #[cfg(target_os = "windows")]
+                        aztec_accelerator::crash_recovery::disable_crash_recovery();
+                        app.exit(0);
+                    }
                     "show_logs" => open_in_browser(&log_dir()),
                     "open_github" => {
                         open_in_browser(&"https://github.com/alejoamiras/aztec-accelerator");

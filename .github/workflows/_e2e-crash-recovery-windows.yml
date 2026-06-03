@@ -1,0 +1,27 @@
+name: _E2E Crash Recovery (Windows)
+
+# Gates the Windows crash-recovery MECHANISM: a repeating Task Scheduler TimeTrigger
+# (PT1M) + IgnoreNew must relaunch a dead app and never duplicate a live one. (The
+# original RestartOnFailure was proven BROKEN here — see lessons/phase-4.md.) Pinned to
+# windows-2025 (windows-latest drifts — codex 019e8e9e). Runs when the test/workflow
+# changes; workflow_dispatch for re-runs.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "packages/accelerator/scripts/crash-recovery-smoke-windows.ps1"
+      - ".github/workflows/_e2e-crash-recovery-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  crash-recovery-smoke:
+    name: Crash-recovery crux (Task Scheduler)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run crash-recovery crux spike
+        shell: pwsh
+        run: ./packages/accelerator/scripts/crash-recovery-smoke-windows.ps1

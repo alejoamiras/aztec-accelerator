@@ -178,15 +178,23 @@ pub fn disable_crash_recovery() {
 
 // ── Windows ──────────────────────────────────────────────────────────────────
 //
-// PROVISIONAL mechanism (windows-release-2026-06-02 plan, owner decision):
-// a Task Scheduler task with `RestartOnFailure` — a non-zero exit (crash) relaunches
-// the app; a clean exit 0 (intentional quit) completes the task and is NOT restarted.
-// Mirrors the Linux systemd approach: a separate recovery mechanism alongside the
-// autostart entry created by tauri-plugin-autostart (a Run key on Windows).
+// A Task Scheduler task with a REPEATING TimeTrigger (every PT1M) + IgnoreNew. Every
+// minute Task Scheduler tries to start the app; IgnoreNew makes that a no-op if it's
+// already running and a RELAUNCH if it died — so a crash recovers within <=1 min.
 //
-// Known caveat the P4 gating tests must resolve: the Run key AND the task's logon
-// trigger both fire at logon (potential double-launch). If the crash-vs-quit or
-// updater-handoff tests fail, the sibling-crate watchdog is the documented fallback.
+// Why not `RestartOnFailure`: it was the original design, but it's BROKEN for this —
+// it does NOT relaunch on a non-zero/abnormal process exit (proven empirically on a
+// windows-2025 runner; see lessons/phase-4.md). It only restarts when the task ENGINE
+// fails to start the action, not when the action runs then dies. mac launchd
+// (KeepAlive{SuccessfulExit:false}) and linux systemd (Restart=on-failure) genuinely
+// key on the exit code; the repeating trigger is the working Windows equivalent.
+//
+// The repeating trigger relaunches ANYTHING not running, so it can't distinguish an
+// intentional quit from a crash. The Quit menu therefore calls disable_crash_recovery()
+// (delete this task) BEFORE exiting — see the `"quit"` handler in main.rs. A crash skips
+// that path → the task survives → relaunch; a clean quit deletes it first → stays down.
+// Logon start is handled by the autostart Run key (tauri-plugin-autostart), not this
+// task; the Run-key-vs-tick race is absorbed by the exit-0-if-healthy guard in main.rs.
 
 #[cfg(target_os = "windows")]
 const TASK_NAME: &str = "Aztec Accelerator Crash Recovery";
@@ -266,19 +274,37 @@ pub fn enable_crash_recovery() {
     }
 }
 
-/// Remove the Task Scheduler crash-recovery task. Call after `manager.disable()`.
+/// Remove the Task Scheduler crash-recovery task. Returns `true` if the task is confirmed gone
+/// (removed or already absent), `false` if removal could not be verified — callers that rely on
+/// the task being gone (the updater, before NSIS mutates files) MUST check this and not proceed.
 #[cfg(target_os = "windows")]
-pub fn disable_crash_recovery() {
-    let result = std::process::Command::new(schtasks_exe())
-        .args(["/Delete", "/F", "/TN", TASK_NAME])
-        .output();
-    match result {
-        Ok(o) if o.status.success() => {
-            tracing::info!("Task Scheduler crash-recovery task removed");
+pub fn disable_crash_recovery() -> bool {
+    // Deletion is correctness-critical now: the repeating-trigger task relaunches the app a
+    // minute after an intentional quit if it survives. So retry, and verify via /Query
+    // (locale-independent — it exits non-zero when the task is absent) rather than trusting
+    // a single best-effort /Delete whose stderr wording varies by Windows language.
+    for attempt in 1..=3 {
+        let _ = std::process::Command::new(schtasks_exe())
+            .args(["/Delete", "/F", "/TN", TASK_NAME])
+            .output();
+        let still_present = std::process::Command::new(schtasks_exe())
+            .args(["/Query", "/TN", TASK_NAME])
+            .output()
+            .map(|o| o.status.success())
+            // If /Query itself can't run, don't claim the task is gone — assume it may persist
+            // so we keep retrying and ultimately report failure rather than a false success.
+            .unwrap_or(true);
+        if !still_present {
+            tracing::info!("Task Scheduler crash-recovery task removed (or absent)");
+            return true;
         }
-        Ok(_) => tracing::debug!("Task Scheduler task not present (already removed)"),
-        Err(e) => tracing::warn!("Failed to run schtasks /Delete: {e}"),
+        tracing::warn!("crash-recovery task still present after /Delete (attempt {attempt})");
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
+    tracing::error!(
+        "crash-recovery task could NOT be removed after retries — the app may relaunch after an intentional quit"
+    );
+    false
 }
 
 /// Build the Task Scheduler task definition. The exe path is XML-escaped.
@@ -292,9 +318,14 @@ fn task_xml(exe_path: &str) -> String {
     <Description>Aztec Accelerator crash recovery</Description>
   </RegistrationInfo>
   <Triggers>
-    <LogonTrigger>
+    <TimeTrigger>
+      <StartBoundary>2024-01-01T00:00:00</StartBoundary>
       <Enabled>true</Enabled>
-    </LogonTrigger>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -308,10 +339,6 @@ fn task_xml(exe_path: &str) -> String {
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>3</Count>
-    </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -335,11 +362,27 @@ fn xml_escape(s: &str) -> String {
 mod tests {
     #[test]
     #[cfg(target_os = "windows")]
-    fn task_xml_has_restart_and_escapes_exe() {
+    fn task_xml_uses_repeating_trigger_and_escapes_exe() {
         let xml = super::task_xml(r"C:\Program Files\A & B\aztec-accelerator.exe");
-        // Crash → relaunch is the whole point.
-        assert!(xml.contains("<RestartOnFailure>"));
-        assert!(xml.contains("<LogonTrigger>"));
+        // Crash → relaunch is a REPEATING TimeTrigger (every PT1M) + IgnoreNew, proven
+        // on a real runner. NOT RestartOnFailure, which does NOT relaunch a dead/crashed
+        // process (see the module comment + lessons/phase-4.md).
+        assert!(xml.contains("<TimeTrigger>"));
+        assert!(xml.contains("<Repetition>"));
+        assert!(xml.contains("<Interval>PT1M</Interval>"));
+        // Regression guards: the broken mechanism must not come back, and logon-start is
+        // the autostart Run key's job (not a LogonTrigger here).
+        assert!(
+            !xml.contains("<RestartOnFailure>"),
+            "RestartOnFailure does not relaunch a crash — regression"
+        );
+        assert!(
+            !xml.contains("<LogonTrigger>"),
+            "logon start is the autostart Run key's job, not this task"
+        );
+        // IgnoreNew = the every-minute tick is a no-op if the app is alive, a relaunch if
+        // it died (the exit-0-if-healthy guard in main.rs absorbs the Run-key-vs-tick race).
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         // The raw ampersand must be escaped or the XML is invalid.
         assert!(xml.contains("A &amp; B"));
         assert!(!xml.contains("A & B"));
