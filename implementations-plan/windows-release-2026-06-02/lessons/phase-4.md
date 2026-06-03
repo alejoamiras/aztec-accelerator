@@ -140,3 +140,31 @@ Two parts:
 Round-2 spike (crash-recovery-smoke-windows.ps1) confirms the two OS behaviors the fix needs:
 relaunch-on-death (runs grows) + no-dup-when-alive (IgnoreNew, runs stays 1). Spike FIRST,
 then implement — same discipline that caught the round-1 bug.
+
+## P4 COMPLETE (merged to main 12bc09b)
+- updater-smoke (pos+neg) — #273
+- WebDriver-win E2E — #274 (first-try green: tauri-plugin-webdriver drives WebView2)
+- crash-recovery fix — #275: repeating TimeTrigger + IgnoreNew + disable-on-quit + the
+  update-install guard (split download/install, abort if the task can't be disarmed, re-arm on
+  every app-still-running path). Codex BLOCKED 4x then lifted on round 5 — each round a real
+  correctness bug in the auto-update path. Standing integration gate + RestartOnFailure
+  regression guard.
+
+### Coverage state vs the 3 crash-recovery gates
+- crash->relaunch: GATED (integration test, windows-2025, relaunch=2/nodup=1).
+- intentional-quit->stays-down: IMPLEMENTED (disable-on-quit) + IgnoreNew nodup gated; no direct
+  app-level "quit deletes the task" test yet.
+- updater-handoff->no-old-relaunch: IMPLEMENTED + codex-5-round-reviewed (disarm-before-install
+  guard); app-level test of the update-while-armed path deferred to #96 (InteractiveToken-on-CI
+  caveat — the app's task may not fire on a GH runner, so a faithful test needs design).
+
+Remaining: P5 (flip updater-smoke to blocking, post-rc) + P6 (Windows rc dry-run — needs owner go).
+
+## P6 rc dry-run — GREEN (1.0.4-rc.1, 2026-06-03)
+Second dispatch succeeded end-to-end. First dispatch caught a real release-pipeline bug: the
+"Patch version in Cargo.toml" step had no `shell:` override → ran in pwsh on the windows-x86_64
+leg where `sed`/`$RELEASE_VERSION` fail (PR gates never patch the version, so only the release
+path surfaced it). Fixed with `shell: bash` on both version-patch steps (#276). Re-dispatch:
+all 7 platform builds green INCLUDING Build (x86_64-pc-windows-msvc), Windows updater-smoke
+positive+negative green, mac/linux blocking gates green, tag + GitHub prerelease created.
+Release assets include the Windows -setup.exe + -setup.nsis.zip. Goal stop-condition met.
