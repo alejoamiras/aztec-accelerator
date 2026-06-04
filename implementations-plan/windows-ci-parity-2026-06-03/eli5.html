@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Plan ELI5 — Windows CI Parity</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .fork { border-left-color: #d97706; background: #fffbeb; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Windows CI Parity — the last three follow-ups</h1>
+  <p>The Windows version of the app now works and proved itself end-to-end (a green dry-run release
+  built the installer and did a real silent, signature-checked auto-update). This plan is the
+  <em>finish-the-job</em> list: three small-but-careful tasks so Windows is held to the exact same
+  standard as Mac and Linux in our automated checks. Two of these were re-aimed after an audit
+  caught the original plan pointing at the wrong files.</p>
+
+  <h2>Phases</h2>
+
+  <div class="phase">
+    <h3>Phase 1 — #95: fix a stale bookkeeping file</h3>
+    <p>Every crate has a <code>Cargo.lock</code> that should record the current version number. The
+    <em>server</em> one still says an old version (1.0.2-rc.1) while everything else says 1.0.4-rc.1.
+    It's harmless today (nothing enforces it), but untidy. We sync it, and — more importantly — fix
+    the release robot so it updates the lock whenever it bumps the version, so this can't drift again.
+    Plain find-and-replace; no heavy tooling.</p>
+  </div>
+
+  <div class="phase">
+    <h3>Phase 2 — #96: test updating while "auto-restart-on-crash" is ON</h3>
+    <p>Windows recovers from crashes with a timer that relaunches the app if it dies. That timer has
+    a tripwire: if it fires <em>during</em> an update (while files are being swapped), it could
+    corrupt the update. We already built a guard that switches the timer off just before the update
+    and back on after — and hardened it heavily. This phase finally <em>tests</em> that guard by
+    running an update with the timer armed. Mac/Linux don't need this (their crash-recovery can't
+    fire during a clean update), so this is exactly the kind of Windows-specific risk that "same
+    assurance as Linux" actually requires us to cover.</p>
+  </div>
+
+  <div class="phase fork">
+    <h3>Phase 3 — P5: make the Windows update-check REQUIRED (and the big decision)</h3>
+    <p>Right now the Windows update-test is "advisory" — it runs but can't block a bad release.
+    Mac/Linux update-tests <em>are</em> required gates. To match them, we make Windows' required too.
+    <strong>But the audit caught something:</strong> the Windows test currently updates a
+    <em>stand-in</em> app signed with a throwaway key — it never touches the <em>real</em> signed
+    installer we actually ship. Mac/Linux test the real thing. So making the stand-in test "required"
+    would be a gate that doesn't check what we release.</p>
+    <p>The decision (yours): <strong>Option A</strong> — make the stand-in test required now (quick,
+    but it's a weaker gate), with the real-installer upgrade as a fast-follow. Or <strong>Option B
+    (recommended)</strong> — first upgrade the test to use the <em>real</em> signed installer
+    (checked against the real signing key), then make it required. More work, but it's the honest
+    version of "same as Mac/Linux." Either way we also add a one-click "undo" runbook so a flaky
+    Windows test can't jam the release line.</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p><strong>Why so careful about a "required check"?</strong> Our release pipeline runs one release
+  at a time. If a required Windows check hangs or flakes, it can stall <em>all</em> releases until it
+  clears. So "make it required" comes with "and make sure it can't wedge us" — a tight timeout plus a
+  documented way to instantly demote it back to advisory.</p>
+  <p><strong>Why not just reuse the Mac/Linux approach wholesale?</strong> Their test downloads the
+  <em>previous real release</em> as the "before" version. Windows has no previous real release yet
+  (this dry-run was the first, and it's marked pre-release, which their logic deliberately skips). So
+  the full copy would actually break the very first real Windows release. Option B sidesteps that by
+  keeping a synthetic "before" version while still testing the real "after" installer.</p>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li><strong>P5: Option A (lean) or Option B (real-installer parity)?</strong> The recommendation
+    is B — it's the only version that makes the required gate actually check the shipped artifact, the
+    way Mac/Linux do. A is faster but ships a weaker gate.</li>
+    <li><strong>Keep or delete the <code>1.0.4-rc.1</code> pre-release?</strong> Keeping it gives a
+    future "before" baseline once a real Windows release exists.</li>
+    <li><strong>Re-enable commit signing</strong> going forward (the long autonomous run committed
+    unsigned; it's harmless because merges re-sign, but worth turning back on).</li>
+  </ul>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>Two seeds for the autonomous implementation session. Pick one. They don't compose within a
+    single Claude Code session.</p>
+
+    <h3>/goal (primary)</h3>
+    <pre><code>/goal All 3 phases (#95, #96, P5) ✓ in the plan checklist, each a merged PR with green CI; per phase the agent printed `LESSONS_FILE=implementations-plan/windows-ci-parity-2026-06-03/lessons/phase-N.md`; #96 Level-1 assertions green AND (P5) the chosen Option's Windows update-smoke is in tag/release needs and proven by a GREEN owner-dispatched rc dry-run that isn't wedged; `/code-review max --fix` applied + committed; codex post-impl audit clean (or high/critical addressed); `bun run test` + `bun run lint:actions` exit 0 in transcript. No STABLE release — rc dry-runs only, owner-gated.</code></pre>
+
+    <h3>/loop (fallback)</h3>
+    <pre><code>/loop Each turn, priority order: (1) read implementations-plan/windows-ci-parity-2026-06-03/plan.md + lessons/ as source of truth; `git status`; open PR? `gh pr view --json statusCheckRollup` (no --watch). (2) CI on HEAD? `gh run watch <id>` ≤10min. (3) Failed? triage+fix, `/codex xhigh` if non-trivial, commit (small, conventional)+push; stop+reassess after 5 fails on one step. (4) Phase green? mark ✓ in plan.md, file lessons/phase-N.md, print LESSONS_FILE=..., advance (sequence #95 → #96 → P5). (5) Nothing in flight? next pending step (edit → `bun run lint:actions`/`bun run test` → commit → push). (6) All ✓? `/code-review max --fix` → commit → codex post-impl audit (`/codex xhigh`, adversarial+security) → address high/critical → stop. Repo artifacts authoritative; codex on any scope/risk fork; NEVER merge to main or cut a stable release autonomously; rc dry-runs owner-gated — surface+stop when a release dispatch is next.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a> · <a href="audit-codex.md">Codex audit</a> · <a href="audit-opus.md">Opus audit</a></p>
+</body>
+</html>

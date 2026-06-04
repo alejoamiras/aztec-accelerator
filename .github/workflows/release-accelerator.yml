@@ -902,6 +902,17 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" packages/accelerator/src-tauri/Cargo.toml
           sed -i "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" packages/accelerator/server/Cargo.toml
 
+          # Keep both Cargo.locks' local-package stanzas in lockstep with the manifests.
+          # Cargo.lock records each local crate's own version; bump-source previously left them
+          # to drift (windows-ci-parity audit caught server/Cargo.lock stuck two versions back).
+          # Pure sed (the version line is the line right after `name = "<crate>"`) — no Rust
+          # toolchain in this job. A crate absent from a given lock simply doesn't match.
+          for lock in packages/accelerator/src-tauri/Cargo.lock packages/accelerator/server/Cargo.lock; do
+            for crate in aztec-accelerator accelerator-server; do
+              sed -i "/^name = \"$crate\"\$/{n;s/^version = \".*\"/version = \"$NEXT_VERSION\"/}" "$lock"
+            done
+          done
+
       - name: Create PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -913,7 +924,7 @@ jobs:
 
           BRANCH="chore/bump-accelerator-${NEXT_VERSION}"
           git checkout -b "$BRANCH"
-          git add packages/accelerator/src-tauri/tauri.conf.json packages/accelerator/src-tauri/Cargo.toml packages/accelerator/server/Cargo.toml
+          git add packages/accelerator/src-tauri/tauri.conf.json packages/accelerator/src-tauri/Cargo.toml packages/accelerator/server/Cargo.toml packages/accelerator/src-tauri/Cargo.lock packages/accelerator/server/Cargo.lock
           git commit -m "chore(accelerator): bump source version to ${NEXT_VERSION}"
           git push -u origin "$BRANCH"
 
