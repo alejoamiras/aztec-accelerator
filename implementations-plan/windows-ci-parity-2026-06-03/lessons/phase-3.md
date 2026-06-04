@@ -21,3 +21,12 @@ the old smoke flipped to blocking would gate releases on a synthetic test, not t
 This can ONLY run in the RELEASE pipeline — the `build` artifact exists only there, so it is NOT
 workflow_dispatch-testable (unlike #96). So codex-review is the main pre-rc check; then an
 OWNER-DISPATCHED rc dry-run is the validation. Iterations are expensive (rc-gated) — get it right.
+
+## Codex P5 review (ship-with-changes)
+- HIGH (throwaway key echo'd to GITHUB_ENV) = FALSE POSITIVE: the old smoke used the byte-identical
+  pattern and #96's armed-smoke ran green hours ago using it (its key-dependent builds succeeded), so
+  `tauri signer generate`'s key is single-line. Kept as-is (don't change a proven path before an rc).
+- MEDIUM (build-gate divergence) = FIXED: dropped `&& needs.build.result=='success'` to match
+  update-smoke-linux (gate on validate only) so an unrelated mac/linux leg failure doesn't skip the
+  Windows validation; the download-artifact step fails cleanly if the windows artifact is missing.
+- Trust chain, artifact flow, version/feed (no live 9.9.9), negative leg: all confirmed fine.

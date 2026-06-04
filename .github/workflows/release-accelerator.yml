@@ -512,7 +512,10 @@ jobs:
   update-smoke-windows:
     name: Updater Smoke (windows-x86_64 / positive)
     needs: [validate, build]
-    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.build.result == 'success' }}
+    # Gate on validate only (mirrors update-smoke-linux): an unrelated mac/linux build-leg failure
+    # must NOT skip the Windows validation. If the windows-x86_64 leg itself failed, the
+    # download-artifact step below fails cleanly (advisory).
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
@@ -521,7 +524,10 @@ jobs:
   update-smoke-windows-negative:
     name: Updater Smoke (windows-x86_64 / negative)
     needs: [validate, build]
-    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.build.result == 'success' }}
+    # Gate on validate only (mirrors update-smoke-linux): an unrelated mac/linux build-leg failure
+    # must NOT skip the Windows validation. If the windows-x86_64 leg itself failed, the
+    # download-artifact step below fails cleanly (advisory).
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
