@@ -190,21 +190,51 @@ try {
     Dump-Logs; exit 0
   }
 
-  # ── Positive: poll /health until version == N ──
-  Log "polling $HealthUrl for version == $NVersion (up to 300s)"
-  for ($i = 0; $i -lt 150; $i++) {
-    try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3).version } catch { $got = $null }
+  # ── Positive: prove the full armed → disarm(absent during install) → re-arm cycle ──
+  $taskName = "Aztec Accelerator Crash Recovery"
+
+  # (#97) ARMED: N-1 must register the crash-recovery task on startup (autostart Run key set above).
+  #   Confirm it is PRESENT *before* the disarm can fire — safe because the first update check is 5s
+  #   after launch (main.rs:436) and task registration happens during early startup. This makes the
+  #   absence we watch for below a real disarm, not a pre-registration gap.
+  $armed = $false
+  for ($a = 0; $a -lt 40; $a++) {        # up to ~20s
+    & schtasks /Query /TN $taskName *> $null
+    if ($LASTEXITCODE -eq 0) { $armed = $true; break }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $armed) {
+    Write-Error "(#97) ARMING proof FAILED — N-1 never registered the '$taskName' task (autostart Run key or startup enable_crash_recovery regressed); the update-while-armed scenario was never set up."; Dump-Logs; exit 1
+  }
+  Log "(#97) armed — crash-recovery task present before the update"
+
+  # ── Poll /health until == N, sampling the task each tick to catch the disarm DURING the install ──
+  Log "polling $HealthUrl for version == $NVersion (up to 300s), watching '$taskName'"
+  $sawAbsent = $false
+  for ($i = 0; $i -lt 600; $i++) {       # 600 * 500ms = 300s
+    # (#97) DISARM proof (state, not log): sample the task FIRST (cheap, never blocks). The updater
+    #   removes it for the ENTIRE NSIS install window (disable_crash_recovery → install → re-arm,
+    #   updater.rs:86-110) while N-1's /health stays up, so 500ms sampling reliably observes the gap.
+    & schtasks /Query /TN $taskName *> $null
+    if ($LASTEXITCODE -ne 0) { $sawAbsent = $true }
+
+    try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2).version } catch { $got = $null }
     if ($got -eq $NVersion) {
       if (-not (Select-String -Path (Join-Path $Work "feed.log") -Pattern "/releases/download/" -Quiet)) {
         Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; Dump-Logs; exit 1
       }
       Log "SUCCESS — updated to $got via the local feed (artifact downloaded + relaunched)"
-      # ── (#96) The update ran with crash-recovery ARMED. The updater disarms the repeating task
-      #    right before NSIS mutates files, then re-arms (before restart + on N's startup). Assert
-      #    the task is PRESENT again — proves the guard disarmed-then-rearmed rather than leaking
-      #    the task or leaving recovery off. (The in-install-window absence is too brief to observe
-      #    reliably; the re-armed end-state is the durable signal.)
-      $taskName = "Aztec Accelerator Crash Recovery"
+
+      # (#97) DISARM: the task must have been observed ABSENT at least once during the update. If it
+      #   stayed armed throughout, disable_crash_recovery() never ran before install — the
+      #   half-written-binary race is LIVE. The end-state re-arm check below would still pass and hide
+      #   this; observing the real absence is the teeth #96 lacked.
+      if (-not $sawAbsent) {
+        Write-Error "(#97) DISARM proof FAILED — '$taskName' was NEVER observed absent during the update; the disarm-before-install guard (disable_crash_recovery) did not run. The crash-recovery race is live."; Dump-Logs; exit 1
+      }
+      Log "(#97) disarmed — task observed absent during the install window"
+
+      # (#96) RE-ARM (durable end-state): the task must be present again after the update.
       $rearmed = $false
       for ($r = 0; $r -lt 10; $r++) {
         & schtasks /Query /TN $taskName *> $null
@@ -212,12 +242,12 @@ try {
         Start-Sleep -Seconds 2
       }
       if (-not $rearmed) {
-        Write-Error "update succeeded but the crash-recovery task is ABSENT — the disarm-before-install guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; Dump-Logs; exit 1
+        Write-Error "update succeeded but '$taskName' is ABSENT — the guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; Dump-Logs; exit 1
       }
-      Log "crash-recovery re-armed after the update (disarm-before-install guard verified)"
+      Log "(#97) re-armed — full armed→disarm→re-arm cycle proven"
       exit 0
     }
-    Start-Sleep -Seconds 2
+    Start-Sleep -Milliseconds 500
   }
   Write-Error "updater smoke failed — /health never reported $NVersion (does Tauri's Windows updater apply the .nsis.zip? see feed/app logs)"
   Dump-Logs
