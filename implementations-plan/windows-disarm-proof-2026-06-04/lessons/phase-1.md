@@ -58,3 +58,18 @@ Mechanics: poller writes "`<sawPresent> <maxStreak>`" to `$Work/task-state.txt` 
 parent Stop-Job → reads it → asserts sawPresent==1 AND maxStreak>=3, then the durable re-arm /Query.
 Job is stopped in the success path and in Cleanup (`finally`) so it can't leak. The `>=3` threshold is
 the one rc-tunable knob if a future install is unusually fast (the window is install-bound, seconds).
+
+## Codex re-review (still-High) → 3 more fixes
+1. **Poller started AFTER launch** → Start-Job latency could miss first-present + the absent window
+   (false-RED). FIX: start the poller BEFORE Start-Process (in the positive arming block). The
+   pre-registration absence isn't miscounted — the `sawPresent` gate only counts the streak after the
+   task was first seen present.
+2. **Stop-Job→Get-Content torn read** (fail-closed "0 0" flake). FIX: dropped file IPC; the job emits
+   "<sawPresent> <maxStreak>" to its output stream; parent reads the LAST line via Receive-Job.
+3. **Pre-clean delete unverified** (a surviving stale task could satisfy arming). FIX: /Query after
+   /Delete; fail closed if the task survived. Combined with the verified-gone state + poller-before-
+   launch, `sawPresent==1` now provably means THIS run's N-1 registered the task.
+Conscious residual (NOT a defect): the `maxAbsentStreak >= 3` threshold isn't airtight against a 3+
+consecutive transient schtasks failure, but raising it risks false-RED on a fast install. For a
+BLOCKING gate, not-wedging is the priority + a 3-failure burst (while the app's own schtasks calls
+succeed) is implausible. The rc reveals the real streak (expected 10-40) → tune the floor up then.

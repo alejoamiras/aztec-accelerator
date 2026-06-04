@@ -172,11 +172,32 @@ try {
   #    productName "Aztec Accelerator" — a missing StartupApproved entry counts as enabled
   #    (auto-launch `unwrap_or(true)`). Positive leg only (the negative leg rejects before install).
   if ($Mode -eq "positive") {
-    # (#97) Clear any stale crash-recovery task FIRST, so the poller's "seen present" below provably
-    #   reflects THIS run's registration by N-1 (Cleanup's delete only runs in `finally`, after).
+    # (#97) Clear any stale crash-recovery task FIRST and VERIFY it's gone, so the poller's "seen
+    #   present" below provably reflects THIS run's registration by N-1 (not a leftover). Cleanup's
+    #   delete only runs in `finally`, after.
     & schtasks /Delete /F /TN $TaskName *> $null
+    & schtasks /Query /TN $TaskName *> $null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Error "(#97) pre-run cleanup FAILED — a stale '$TaskName' task survived /Delete; cannot prove this run armed it."; Dump-Logs; exit 1
+    }
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value "`"$($Exe.FullName)`""
-    Log "armed crash-recovery (stale task cleared; autostart Run key set for 'Aztec Accelerator')"
+    Log "armed crash-recovery (stale task cleared + verified gone; autostart Run key set)"
+
+    # (#97) Start the task-state poller BEFORE launching N-1, so Start-Job's startup latency can't miss
+    #   the first-present observation or the disarm window (first update check is 5s post-launch,
+    #   main.rs:436). It emits "<sawPresent> <maxConsecutiveAbsentAfterPresent>" each ~200ms; the parent
+    #   reads the last value via Receive-Job (no file/torn-read race).
+    $PollJob = Start-Job -ScriptBlock {
+      param($tn)
+      $sawPresent = 0; $streak = 0; $maxStreak = 0
+      while ($true) {
+        & schtasks /Query /TN $tn *> $null
+        if ($LASTEXITCODE -eq 0) { $sawPresent = 1; $streak = 0 }
+        elseif ($sawPresent -eq 1) { $streak++; if ($streak -gt $maxStreak) { $maxStreak = $streak } }
+        "$sawPresent $maxStreak"
+        Start-Sleep -Milliseconds 200
+      }
+    } -ArgumentList $TaskName
   }
 
   # ── Launch N-1; it should auto-update to N and relaunch ──
@@ -197,28 +218,8 @@ try {
     Dump-Logs; exit 0
   }
 
-  # ── Positive: prove the full armed → disarm(sustained-absent during install) → re-arm cycle, via a
-  #    DECOUPLED background poller. (codex post-impl: don't couple /Query sampling to /health latency,
-  #    and require SUSTAINED absence so a one-off schtasks error can't read as a disarm.)
-  $PollState = Join-Path $Work "task-state.txt"
-  Set-Content -Path $PollState -Value "0 0"
-  $PollJob = Start-Job -ScriptBlock {
-    param($tn, $outFile)
-    # Sample the task ~every 200ms, independent of /health. Track whether it was ever PRESENT (armed)
-    # and the longest run of consecutive ABSENT samples AFTER that (the disarm). A seconds-long
-    # install-window absence → a long streak; a single transient schtasks blip → streak 1 (filtered).
-    $sawPresent = 0; $streak = 0; $maxStreak = 0
-    while ($true) {
-      & schtasks /Query /TN $tn *> $null
-      if ($LASTEXITCODE -eq 0) { $sawPresent = 1; $streak = 0 }
-      elseif ($sawPresent -eq 1) { $streak++; if ($streak -gt $maxStreak) { $maxStreak = $streak } }
-      Set-Content -Path $outFile -Value "$sawPresent $maxStreak"
-      Start-Sleep -Milliseconds 200
-    }
-  } -ArgumentList $TaskName, $PollState
-
-  # ── Wait for the update (/health == N). The poller runs independently, so a slow /health never
-  #    starves task sampling. 150 * 2s = 300s budget.
+  # ── Positive: the task-state poller is already running (started BEFORE launch, above). Wait for the
+  #    update, then read what the poller observed. ──
   Log "polling $HealthUrl for version == $NVersion (up to 300s); background poller watching '$TaskName'"
   $updated = $false
   for ($i = 0; $i -lt 150; $i++) {
@@ -234,12 +235,14 @@ try {
   }
   Log "SUCCESS — updated to $NVersion via the local feed (artifact downloaded + relaunched)"
 
-  # ── Read what the poller observed, then stop it. ──
+  # ── Read what the poller observed: Receive-Job returns every emitted "<sawPresent> <maxStreak>" line;
+  #    the LAST is the final state (no file/torn-read race). Default closed to "0 0" → ARMING fails. ──
   Stop-Job $PollJob -ErrorAction SilentlyContinue
-  $raw = (Get-Content $PollState -Raw -ErrorAction SilentlyContinue); if (-not $raw) { $raw = "0 0" }
-  $parts = $raw.Trim() -split '\s+'
-  $sawPresent = [int]$parts[0]; $maxAbsentStreak = [int]$parts[1]
+  $samples = @(Receive-Job $PollJob -ErrorAction SilentlyContinue)
   Remove-Job $PollJob -Force -ErrorAction SilentlyContinue; $PollJob = $null
+  $last = if ($samples.Count -gt 0) { [string]$samples[-1] } else { "0 0" }
+  $parts = $last.Trim() -split '\s+'
+  $sawPresent = [int]$parts[0]; $maxAbsentStreak = [int]$parts[1]
 
   # (#97) ARMED: the poller must have seen the task PRESENT (N-1 registered it; the stale task was
   #   cleared pre-run, so this is genuinely this run's registration — not a leftover).
