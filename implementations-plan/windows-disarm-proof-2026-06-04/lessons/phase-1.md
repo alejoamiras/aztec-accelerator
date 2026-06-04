@@ -37,3 +37,24 @@ NON-disarming guard) and wouldn't prevent the race anyway. Out of scope.
   review + the rc are the gates.
 - Phase 2 = owner-dispatched rc dry-run (the smoke runs only in the release pipeline since P5 dropped
   workflow_dispatch). SURFACE + STOP for that.
+
+## Codex post-impl (High) → reworked to a decoupled poller
+The first cut coupled /Query sampling into the /health loop. Codex post-impl (verdict High, would not
+trust as a blocking gate) flagged three real issues; all fixed:
+1. **Cadence not really 500ms** — Invoke-RestMethod (≤2-3s) blocked each tick, so a /health stall
+   spread samples and a fast install could be missed (false-RED/wedge); the "300s" comment was wrong
+   (worst case ~25min). → FIX: a **decoupled `Start-Job` background poller** samples /Query every
+   ~200ms independently; the /health wait loop (150×2s=300s) no longer gates sampling.
+2. **False-GREEN on a transient schtasks error** — `$sawAbsent` flipped on ANY non-zero exit. → FIX:
+   the poller tracks the longest run of CONSECUTIVE absent samples after first-present; assert
+   `maxAbsentStreak >= 3` (~≥600ms) — a one-off blip is streak 1 (filtered); the real install-window
+   absence is seconds (streak 10-40+).
+3. **Hollow arming proof** — no pre-run cleanup, so a stale task could satisfy it. → FIX: delete any
+   stale task before launch (the arming block); the poller's `sawPresent` only counts a real
+   registration by THIS run's N-1, and the absent-streak is only counted AFTER first-present (so the
+   post-cleanup pre-registration gap isn't miscounted as the disarm).
+
+Mechanics: poller writes "`<sawPresent> <maxStreak>`" to `$Work/task-state.txt` each tick (file IPC);
+parent Stop-Job → reads it → asserts sawPresent==1 AND maxStreak>=3, then the durable re-arm /Query.
+Job is stopped in the success path and in Cleanup (`finally`) so it can't leak. The `>=3` threshold is
+the one rc-tunable knob if a future install is unusually fast (the window is install-bound, seconds).

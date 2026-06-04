@@ -35,20 +35,19 @@ in favour of **state-proof**, and the owner chose it ("A — the watcher"):
 ## Phase 1 — PowerShell: state-proof full-cycle assertion (positive leg)
 **File:** `packages/accelerator/scripts/updater-smoke-windows.ps1` (positive leg, L193-221). No Rust.
 
-Replace the end-state-only check with a three-part observed-state proof:
-1. **Armed (pre-update):** after launching N-1, poll `schtasks /Query /TN "Aztec Accelerator Crash
-   Recovery"` until PRESENT (bounded ~20s). Fail if never present → N-1's autostart Run key / startup
-   `enable_crash_recovery()` regressed. (Run before the disarm can fire — safe because the first update
-   check is 5s post-launch, main.rs:436.)
-2. **Disarmed-during-install (the new teeth):** tighten the `/health` poll loop to ~500ms and, each
-   tick, sample `schtasks /Query` *first* (cheap, never blocks); set `$sawAbsent` if it reports absent.
-   On `/health == N`, assert `$sawAbsent` — the task was physically removed during the update. If it
-   was armed the whole time, `disable_crash_recovery()` never ran → fail loudly. (~500ms sampling
-   reliably catches a seconds-long, install-bound absence; N-1's `/health` server stays up *during* the
-   install, so the cadence is tight when it matters; the slow `/health` timeout only bites later, during
-   the restart, after absence is already recorded.)
-3. **Re-armed (post-update, durable):** keep the existing #96 check — task PRESENT again after the
-   update (the re-arm end-state).
+Replace the end-state-only check with an observed-state proof via a **decoupled background poller**
+(reworked per codex post-impl — see lessons/phase-1.md):
+0. **Pre-run cleanup:** before launching N-1 (positive leg), delete any stale crash-recovery task, so
+   the "armed" observation below provably reflects THIS run's registration (not a leftover).
+1. **Decoupled poller:** after launch, a `Start-Job` poller samples `schtasks /Query` every ~200ms —
+   *independent of `/health` latency* — recording whether the task was ever PRESENT (armed) and the
+   longest run of **consecutive** ABSENT samples after first-present (the disarm). Writes
+   `<sawPresent> <maxStreak>` to a state file each tick.
+2. **Assert the cycle** once `/health == N` (a separate 150×2s=300s wait loop): stop the job, read the
+   state, require **armed** (`sawPresent==1`) + **disarmed** (`maxStreak >= 3` ≈ ≥600ms sustained —
+   filters a one-off `schtasks` error; the real install-window absence is seconds) + **re-armed** (the
+   durable #96 `/Query` PRESENT check). The job is stopped in the success path and in `Cleanup`
+   (`finally`) so it can't leak.
 
 Each failure `Write-Error`s a specific cause + `Dump-Logs` + `exit 1`. **Negative leg unchanged** (the
 tampered artifact is rejected *before* install → no disarm → must NOT assert absence). The
@@ -84,12 +83,12 @@ No STABLE release. rc dry-run only, owner-dispatched.
   surfaces the app log dir for debugging (`:80`).
 
 ### Inferences (attack these)
-- The absence window (disarm → re-arm) spans the entire NSIS install (seconds) → ~500ms sampling
-  reliably observes it. *If wrong* (sub-500ms install): tighten the interval; the window is install-
-  bound so this is conservative.
-- N-1's `/health` server stays responsive during `update.install()` (separate axum task), so the
-  combined loop keeps a tight `/Query` cadence during the absence. *If wrong:* sampling `/Query` first
-  each tick still records absence before any `/health` stall.
+- The absence window (disarm → re-arm) spans the entire NSIS install (seconds) → ~200ms decoupled
+  sampling yields a consecutive-absent streak ≫3. *If wrong* (sub-600ms install): lower the `maxStreak`
+  threshold; the window is install-bound so 3 is conservative. (The one rc-tunable knob.)
+- `Start-Job` runs reliably on windows-latest and the file-IPC state is readable after `Stop-Job` (the
+  job's last `Set-Content` completed before the parent reads). *If wrong:* the parent defaults to
+  "0 0" → ARMING proof fails closed (a broken poller fails the gate, not a false-green).
 - No prod-code change ⇒ zero risk to the disarm guard itself (only the test gets stricter).
 
 ### Asks (resolved)

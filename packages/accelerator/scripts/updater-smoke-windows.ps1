@@ -51,6 +51,8 @@ New-Item -ItemType Directory -Force -Path $ServeDir | Out-Null
 $AppProc = $null
 $FeedProc = $null
 $CaThumb = $null
+$PollJob = $null
+$TaskName = "Aztec Accelerator Crash Recovery"
 
 function Log($m) { Write-Host "── $m ──" }
 
@@ -70,7 +72,9 @@ function Cleanup {
   # (#96) Disarm: drop the autostart Run key + the crash-recovery task we may have armed, and
   # verify the task is gone — an armed task must not leak even on an ephemeral runner.
   Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
-  & schtasks /Delete /F /TN "Aztec Accelerator Crash Recovery" *> $null
+  & schtasks /Delete /F /TN $TaskName *> $null
+  # (#97) Stop the background task-state poller if it's still running (don't leak a job).
+  if ($PollJob) { Stop-Job $PollJob -ErrorAction SilentlyContinue; Remove-Job $PollJob -Force -ErrorAction SilentlyContinue }
 }
 
 function Dump-Logs {
@@ -168,8 +172,11 @@ try {
   #    productName "Aztec Accelerator" — a missing StartupApproved entry counts as enabled
   #    (auto-launch `unwrap_or(true)`). Positive leg only (the negative leg rejects before install).
   if ($Mode -eq "positive") {
+    # (#97) Clear any stale crash-recovery task FIRST, so the poller's "seen present" below provably
+    #   reflects THIS run's registration by N-1 (Cleanup's delete only runs in `finally`, after).
+    & schtasks /Delete /F /TN $TaskName *> $null
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value "`"$($Exe.FullName)`""
-    Log "armed crash-recovery (autostart Run key set for 'Aztec Accelerator')"
+    Log "armed crash-recovery (stale task cleared; autostart Run key set for 'Aztec Accelerator')"
   }
 
   # ── Launch N-1; it should auto-update to N and relaunch ──
@@ -190,68 +197,77 @@ try {
     Dump-Logs; exit 0
   }
 
-  # ── Positive: prove the full armed → disarm(absent during install) → re-arm cycle ──
-  $taskName = "Aztec Accelerator Crash Recovery"
-
-  # (#97) ARMED: N-1 must register the crash-recovery task on startup (autostart Run key set above).
-  #   Confirm it is PRESENT *before* the disarm can fire — safe because the first update check is 5s
-  #   after launch (main.rs:436) and task registration happens during early startup. This makes the
-  #   absence we watch for below a real disarm, not a pre-registration gap.
-  $armed = $false
-  for ($a = 0; $a -lt 40; $a++) {        # up to ~20s
-    & schtasks /Query /TN $taskName *> $null
-    if ($LASTEXITCODE -eq 0) { $armed = $true; break }
-    Start-Sleep -Milliseconds 500
-  }
-  if (-not $armed) {
-    Write-Error "(#97) ARMING proof FAILED — N-1 never registered the '$taskName' task (autostart Run key or startup enable_crash_recovery regressed); the update-while-armed scenario was never set up."; Dump-Logs; exit 1
-  }
-  Log "(#97) armed — crash-recovery task present before the update"
-
-  # ── Poll /health until == N, sampling the task each tick to catch the disarm DURING the install ──
-  Log "polling $HealthUrl for version == $NVersion (up to 300s), watching '$taskName'"
-  $sawAbsent = $false
-  for ($i = 0; $i -lt 600; $i++) {       # 600 * 500ms = 300s
-    # (#97) DISARM proof (state, not log): sample the task FIRST (cheap, never blocks). The updater
-    #   removes it for the ENTIRE NSIS install window (disable_crash_recovery → install → re-arm,
-    #   updater.rs:86-110) while N-1's /health stays up, so 500ms sampling reliably observes the gap.
-    & schtasks /Query /TN $taskName *> $null
-    if ($LASTEXITCODE -ne 0) { $sawAbsent = $true }
-
-    try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2).version } catch { $got = $null }
-    if ($got -eq $NVersion) {
-      if (-not (Select-String -Path (Join-Path $Work "feed.log") -Pattern "/releases/download/" -Quiet)) {
-        Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; Dump-Logs; exit 1
-      }
-      Log "SUCCESS — updated to $got via the local feed (artifact downloaded + relaunched)"
-
-      # (#97) DISARM: the task must have been observed ABSENT at least once during the update. If it
-      #   stayed armed throughout, disable_crash_recovery() never ran before install — the
-      #   half-written-binary race is LIVE. The end-state re-arm check below would still pass and hide
-      #   this; observing the real absence is the teeth #96 lacked.
-      if (-not $sawAbsent) {
-        Write-Error "(#97) DISARM proof FAILED — '$taskName' was NEVER observed absent during the update; the disarm-before-install guard (disable_crash_recovery) did not run. The crash-recovery race is live."; Dump-Logs; exit 1
-      }
-      Log "(#97) disarmed — task observed absent during the install window"
-
-      # (#96) RE-ARM (durable end-state): the task must be present again after the update.
-      $rearmed = $false
-      for ($r = 0; $r -lt 10; $r++) {
-        & schtasks /Query /TN $taskName *> $null
-        if ($LASTEXITCODE -eq 0) { $rearmed = $true; break }
-        Start-Sleep -Seconds 2
-      }
-      if (-not $rearmed) {
-        Write-Error "update succeeded but '$taskName' is ABSENT — the guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; Dump-Logs; exit 1
-      }
-      Log "(#97) re-armed — full armed→disarm→re-arm cycle proven"
-      exit 0
+  # ── Positive: prove the full armed → disarm(sustained-absent during install) → re-arm cycle, via a
+  #    DECOUPLED background poller. (codex post-impl: don't couple /Query sampling to /health latency,
+  #    and require SUSTAINED absence so a one-off schtasks error can't read as a disarm.)
+  $PollState = Join-Path $Work "task-state.txt"
+  Set-Content -Path $PollState -Value "0 0"
+  $PollJob = Start-Job -ScriptBlock {
+    param($tn, $outFile)
+    # Sample the task ~every 200ms, independent of /health. Track whether it was ever PRESENT (armed)
+    # and the longest run of consecutive ABSENT samples AFTER that (the disarm). A seconds-long
+    # install-window absence → a long streak; a single transient schtasks blip → streak 1 (filtered).
+    $sawPresent = 0; $streak = 0; $maxStreak = 0
+    while ($true) {
+      & schtasks /Query /TN $tn *> $null
+      if ($LASTEXITCODE -eq 0) { $sawPresent = 1; $streak = 0 }
+      elseif ($sawPresent -eq 1) { $streak++; if ($streak -gt $maxStreak) { $maxStreak = $streak } }
+      Set-Content -Path $outFile -Value "$sawPresent $maxStreak"
+      Start-Sleep -Milliseconds 200
     }
-    Start-Sleep -Milliseconds 500
+  } -ArgumentList $TaskName, $PollState
+
+  # ── Wait for the update (/health == N). The poller runs independently, so a slow /health never
+  #    starves task sampling. 150 * 2s = 300s budget.
+  Log "polling $HealthUrl for version == $NVersion (up to 300s); background poller watching '$TaskName'"
+  $updated = $false
+  for ($i = 0; $i -lt 150; $i++) {
+    try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3).version } catch { $got = $null }
+    if ($got -eq $NVersion) { $updated = $true; break }
+    Start-Sleep -Seconds 2
   }
-  Write-Error "updater smoke failed — /health never reported $NVersion (does Tauri's Windows updater apply the .nsis.zip? see feed/app logs)"
-  Dump-Logs
-  exit 1
+  if (-not $updated) {
+    Write-Error "updater smoke failed — /health never reported $NVersion (does Tauri's Windows updater apply the .nsis.zip? see feed/app logs)"; Dump-Logs; exit 1
+  }
+  if (-not (Select-String -Path (Join-Path $Work "feed.log") -Pattern "/releases/download/" -Quiet)) {
+    Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; Dump-Logs; exit 1
+  }
+  Log "SUCCESS — updated to $NVersion via the local feed (artifact downloaded + relaunched)"
+
+  # ── Read what the poller observed, then stop it. ──
+  Stop-Job $PollJob -ErrorAction SilentlyContinue
+  $raw = (Get-Content $PollState -Raw -ErrorAction SilentlyContinue); if (-not $raw) { $raw = "0 0" }
+  $parts = $raw.Trim() -split '\s+'
+  $sawPresent = [int]$parts[0]; $maxAbsentStreak = [int]$parts[1]
+  Remove-Job $PollJob -Force -ErrorAction SilentlyContinue; $PollJob = $null
+
+  # (#97) ARMED: the poller must have seen the task PRESENT (N-1 registered it; the stale task was
+  #   cleared pre-run, so this is genuinely this run's registration — not a leftover).
+  if ($sawPresent -ne 1) {
+    Write-Error "(#97) ARMING proof FAILED — '$TaskName' was never observed present; N-1 did not register the crash-recovery task (autostart Run key or startup enable_crash_recovery regressed). The update-while-armed scenario was never set up."; Dump-Logs; exit 1
+  }
+  # (#97) DISARM: after being present, the task must have been SUSTAINED-absent (>=3 consecutive ~200ms
+  #   samples ≈ >=600ms) during the update. The real disarm-before-install window is the whole NSIS
+  #   install (seconds); requiring a streak rejects a one-off schtasks error AND proves the guard ran.
+  #   If it stayed armed throughout, disable_crash_recovery() never disarmed — the race is live (and the
+  #   end-state re-arm check below would still pass, hiding it: the exact #96 gap).
+  if ($maxAbsentStreak -lt 3) {
+    Write-Error "(#97) DISARM proof FAILED — '$TaskName' was never observed sustained-absent during the update (longest consecutive-absent run: $maxAbsentStreak samples). disable_crash_recovery() did not disarm before install; the half-written-binary race is live."; Dump-Logs; exit 1
+  }
+  Log "(#97) armed + disarmed — task seen present, then sustained-absent ($maxAbsentStreak samples) across the install"
+
+  # (#96) RE-ARM (durable end-state): the task must be present again after the update.
+  $rearmed = $false
+  for ($r = 0; $r -lt 10; $r++) {
+    & schtasks /Query /TN $TaskName *> $null
+    if ($LASTEXITCODE -eq 0) { $rearmed = $true; break }
+    Start-Sleep -Seconds 2
+  }
+  if (-not $rearmed) {
+    Write-Error "update succeeded but '$TaskName' is ABSENT — the guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; Dump-Logs; exit 1
+  }
+  Log "(#97) re-armed — full armed→disarm→re-arm cycle proven"
+  exit 0
 }
 finally {
   Cleanup
