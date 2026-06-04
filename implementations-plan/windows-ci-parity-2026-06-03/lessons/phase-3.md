@@ -37,3 +37,32 @@ file. upload-artifact NESTS the nsis files in `n-dl/nsis/` (the build's path glo
 appimage/macos/nsis → common ancestor is `bundle/`, so the subdir is preserved). Fixed with a
 recursive `find` (mirrors the linux smoke's `find n1 -name '*.AppImage'`) + a clear error that lists
 the artifact tree. The trust chain / update logic wasn't reached — re-validate on the next rc.
+
+## rc.3 GREEN — real-artifact smoke validated (the staged advisory proof)
+1.0.4-rc.3 dry-run: the recursive-find fix (#280) unblocked the staging step that failed on rc.2,
+and the smoke then exercised the full REAL trust chain end-to-end:
+- **Updater Smoke (windows-x86_64 / positive): success** — the real prod-signed `-setup.nsis.zip`
+  installed as a click-free minisign-verified auto-update FROM the synthetic N-1 (which embeds the
+  committed prod pubkey, so N's prod signature verifies). Asserted /health == N.
+- **Updater Smoke (windows-x86_64 / negative): success** — tampered artifact rejected vs the prod pubkey.
+- Create Git Tag + Create GitHub Release: success — the run TAGGED + RELEASED (not wedged).
+This proves Option B's central claim (a synthetic N-1 embedding the prod pubkey verifies the real
+prod-signed N) on a real release run. The advisory stage did its job.
+
+## Flip to blocking (#281, merged)
+With rc.3 green, executed the staged flip: added `update-smoke-windows` + `update-smoke-windows-negative`
+to `tag.needs` + `release.needs` in release-accelerator.yml. `tag` is pure needs-gated (no `if:`), so a
+failed Windows smoke now skips `tag` → blocks `release` — identical blocking semantics to the already-
+working mac/Linux gates. The Windows smoke's own `if: !cancelled() && needs.validate.result=='success'`
+introduces no new wedge path (validate is already a shared need). actionlint clean; PR #281 squash-merged.
+
+**Owner decision (logged):** skip a confirming blocking-rc (rc.4). rc.3 already proved the smoke green
+(pos+neg) against the real artifact; the flip only wires it into needs (mechanically identical to the
+proven mac/Linux gates). A green rc.4 would merely re-confirm green-passes — it can't prove block-on-
+failure without a deliberate red smoke (undesirable in a release dispatch). The goal's P5 condition
+("in tag/release needs AND proven by a green rc that isn't wedged") is satisfied: in needs via #281,
+green proof via rc.3.
+
+## Outcome
+P5 COMPLETE. Windows updater-smoke is a BLOCKING release gate testing the REAL prod-signed artifact —
+full parity with mac/Linux. North star met: Windows reaches the same release-pipeline assurance.
