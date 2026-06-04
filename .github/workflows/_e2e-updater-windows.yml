@@ -66,9 +66,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/n"
-          # Only the updater artifacts (.nsis.zip + .sig) are needed to serve the update.
-          cp "$RUNNER_TEMP"/n-dl/*-setup.nsis.zip "$RUNNER_TEMP/n/"
-          cp "$RUNNER_TEMP"/n-dl/*-setup.nsis.zip.sig "$RUNNER_TEMP/n/"
+          # upload-artifact preserves the bundle/ subdir (the build's path globs span dmg/deb/
+          # appimage/macos/nsis, so the common ancestor is bundle/) — the nsis files land under
+          # n-dl/nsis/, not flat. Find recursively (mirrors the linux smoke's `find`), not a glob.
+          nzip=$(find "$RUNNER_TEMP/n-dl" -name '*-setup.nsis.zip' | head -1)
+          nsig=$(find "$RUNNER_TEMP/n-dl" -name '*-setup.nsis.zip.sig' | head -1)
+          if [ -z "$nzip" ] || [ -z "$nsig" ]; then
+            echo "::error::N updater artifacts (-setup.nsis.zip/.sig) not found in the build artifact"
+            find "$RUNNER_TEMP/n-dl" -type f
+            exit 1
+          fi
+          cp "$nzip" "$nsig" "$RUNNER_TEMP/n/"
           ls -la "$RUNNER_TEMP/n"
 
       # Throwaway key ONLY so tauri will emit N-1's updater artifacts; N-1's .sig is never used.

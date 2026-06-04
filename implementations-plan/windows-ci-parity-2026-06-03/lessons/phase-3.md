@@ -30,3 +30,10 @@ OWNER-DISPATCHED rc dry-run is the validation. Iterations are expensive (rc-gate
   update-smoke-linux (gate on validate only) so an unrelated mac/linux leg failure doesn't skip the
   Windows validation; the download-artifact step fails cleanly if the windows artifact is missing.
 - Trust chain, artifact flow, version/feed (no live 9.9.9), negative leg: all confirmed fine.
+
+## rc.2 caught a flat-glob bug (fixed)
+rc.2's Windows smoke failed at "Stage N updater artifacts": `cp n-dl/*-setup.nsis.zip` → No such
+file. upload-artifact NESTS the nsis files in `n-dl/nsis/` (the build's path globs span dmg/deb/
+appimage/macos/nsis → common ancestor is `bundle/`, so the subdir is preserved). Fixed with a
+recursive `find` (mirrors the linux smoke's `find n1 -name '*.AppImage'`) + a clear error that lists
+the artifact tree. The trust chain / update logic wasn't reached — re-validate on the next rc.
