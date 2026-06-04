@@ -155,6 +155,38 @@ describe("AcceleratorProver", () => {
       serializeSpy.mockRestore();
     });
 
+    test("emits 'proved' phase even when the server omits x-prove-duration-ms", async () => {
+      // Regression: the native success path previously emitted "proved" only when the
+      // x-prove-duration-ms header was present, leaving the UI stuck on "proving" for a
+      // header-less response. It must always emit "proved" (client-measured fallback).
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+        "/prove": () => Response.json({ proof: "" }), // no x-prove-duration-ms header
+      });
+      const serializeSpy = mockSerializer();
+      const phases: string[] = [];
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        onPhase: (p) => phases.push(p),
+      });
+
+      try {
+        await prover.createChonkProof([fakeStep]);
+      } catch {
+        // proof deserialization may fail in-test; we only assert the phase sequence
+      }
+
+      expect(phases).toContain("proving");
+      expect(phases).toContain("proved");
+      expect(phases.indexOf("proved")).toBeGreaterThan(phases.indexOf("proving"));
+      serializeSpy.mockRestore();
+    });
+
     test("falls back to WASM with denied phase on 403 (origin not authorized)", async () => {
       mockFetch({
         "/health": () =>
@@ -470,6 +502,31 @@ describe("AcceleratorProver", () => {
       // Next check re-probes both protocols
       const status2 = await prover.checkAcceleratorStatus();
       expect(status2.protocol).toBeDefined();
+    });
+
+    test("setAcceleratorConfig() invalidates the status cache (no stale endpoint)", async () => {
+      // Regression: setAcceleratorConfig reset the protocol but NOT #statusCache, so for up
+      // to the TTL a re-check returned the OLD endpoint's cached result after reconfig.
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+      });
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+
+      const first = await prover.checkAcceleratorStatus();
+      expect(first.available).toBe(true);
+
+      // Reconfigure, then make the new endpoint unreachable.
+      prover.setAcceleratorConfig({ port: 12345 });
+      mockFetchOffline();
+
+      // Must re-probe (cache cleared) and see the new endpoint offline — not the stale true.
+      const second = await prover.checkAcceleratorStatus();
+      expect(second.available).toBe(false);
     });
   });
 

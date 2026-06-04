@@ -89,7 +89,12 @@ function createLazySimulator(): CircuitSimulator {
   // Return a proxy that forwards all property access to the lazy-loaded instance.
   return new Proxy({} as CircuitSimulator, {
     get(_target, prop) {
-      // Return an async function that loads the simulator then delegates.
+      // Do NOT make the proxy thenable or hijack symbol-keyed protocols: if `then`
+      // (or any symbol like Symbol.iterator/toPrimitive) resolved to a forwarding
+      // function, `await proxy` or a promise-probe would treat the proxy as a broken
+      // thenable and could hang. Methods are string-keyed, so this is safe.
+      if (prop === "then" || typeof prop === "symbol") return undefined;
+      // Otherwise return an async function that loads the simulator then delegates.
       return async (...args: unknown[]) => {
         const sim = await getInstance();
         return (sim as any)[prop](...args);
@@ -167,7 +172,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     if (config.port !== undefined) this.#acceleratorPort = config.port;
     if (config.httpsPort !== undefined) this.#acceleratorHttpsPort = config.httpsPort;
     if (config.host !== undefined) this.#acceleratorHost = config.host;
+    // Reset BOTH the cached protocol and the status cache — both are keyed to the old
+    // endpoint, so a stale cache hit would report the wrong host/port for up to the TTL.
     this.#acceleratorProtocol = null;
+    this.#statusCache = null;
   }
 
   /** Register a callback for proof generation sub-phase transitions (for UI animation). */
@@ -315,13 +323,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   ): Promise<ChonkProofWithPublicInputs> {
     if (this.#forceLocal) {
       logger.info("Force-local mode, using WASM prover");
-      this.#onPhase?.("proving");
-      const start = performance.now();
-      const proof = await super.createChonkProof(executionSteps);
-      const durationMs = Math.round(performance.now() - start);
-      logger.info("Local proof completed", { durationMs });
-      this.#onPhase?.("proved", { durationMs });
-      return proof;
+      return this.#proveLocally(executionSteps, "Local proof completed");
     }
 
     logger.info("Using accelerated prover");
@@ -332,12 +334,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     if (!available) {
       logger.info("Accelerator not available, falling back to WASM");
       this.#onPhase?.("fallback");
-      this.#onPhase?.("proving");
-      const start = performance.now();
-      const proof = await super.createChonkProof(executionSteps);
-      const durationMs = Math.round(performance.now() - start);
-      logger.info("Local proof completed", { durationMs });
-      this.#onPhase?.("proved", { durationMs });
+      const proof = await this.#proveLocally(executionSteps, "Local proof completed");
       this.#onPhase?.("receive");
       return proof;
     }
@@ -360,6 +357,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#onPhase?.("proving");
 
     let res: Awaited<ReturnType<typeof ky.post>>;
+    const start = performance.now();
     try {
       res = await ky.post(`${this.#acceleratorBaseUrl}/prove`, {
         body: new Uint8Array(msgpack),
@@ -384,28 +382,45 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         });
         this.#onPhase?.("denied");
         this.#onPhase?.("fallback");
-        this.#onPhase?.("proving");
-        const start = performance.now();
-        const proof = await super.createChonkProof(executionSteps);
-        const durationMs = Math.round(performance.now() - start);
-        logger.info("Local proof completed after denial", { durationMs });
-        this.#onPhase?.("proved", { durationMs });
+        const proof = await this.#proveLocally(
+          executionSteps,
+          "Local proof completed after denial",
+        );
         this.#onPhase?.("receive");
         return proof;
       }
       throw err;
     }
 
-    const proveDurationMs = res.headers.get("x-prove-duration-ms");
-    if (proveDurationMs) {
-      logger.info("Accelerator server-side timing", { proveDurationMs: Number(proveDurationMs) });
-      this.#onPhase?.("proved", { durationMs: Number(proveDurationMs) });
-    }
-    const response = await res.json<{ proof: string }>();
+    // Always emit "proved" so the UI never hangs on "proving": prefer the server's
+    // authoritative duration (x-prove-duration-ms), else the client-measured round-trip.
+    const serverMs = Number(res.headers.get("x-prove-duration-ms"));
+    const durationMs =
+      Number.isFinite(serverMs) && serverMs > 0 ? serverMs : Math.round(performance.now() - start);
+    logger.info("Accelerator proof completed", { durationMs });
+    this.#onPhase?.("proved", { durationMs });
 
+    const response = await res.json<{ proof: string }>();
     this.#onPhase?.("receive");
     const proofBuffer = Buffer.from(response.proof, "base64");
     return ChonkProofWithPublicInputs.fromBuffer(proofBuffer);
+  }
+
+  /**
+   * Run the WASM (super) prover with phase + timing instrumentation. Emits "proving"
+   * then "proved"; callers add any surrounding phases (e.g. "fallback" / "receive").
+   */
+  async #proveLocally(
+    executionSteps: PrivateExecutionStep[],
+    logLabel: string,
+  ): Promise<ChonkProofWithPublicInputs> {
+    this.#onPhase?.("proving");
+    const start = performance.now();
+    const proof = await super.createChonkProof(executionSteps);
+    const durationMs = Math.round(performance.now() - start);
+    logger.info(logLabel, { durationMs });
+    this.#onPhase?.("proved", { durationMs });
+    return proof;
   }
 
   #getAztecVersion(): string | undefined {
