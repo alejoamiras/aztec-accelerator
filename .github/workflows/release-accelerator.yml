@@ -502,25 +502,29 @@ jobs:
     with:
       n-version: ${{ needs.validate.outputs.version }}
 
-  # Windows/NSIS updater smoke — ADVISORY (synthetic-N-1 bootstrap: no prior Windows release
-  # to update from, so it builds its OWN N-1 + N with an ephemeral key). Proves the click-free
-  # N-1→N update (positive) + tampered-artifact rejection (negative). Self-contained — needs
-  # only `validate`. NOT in tag/release `needs` yet; flip to blocking after a green Windows rc
-  # dry-run, then switch to download-real-N-1 once a Windows stable exists.
+  # Windows/NSIS updater smoke — ADVISORY. Tests the REAL prod-signed Windows artifact (this run's
+  # `build` output) installing as an auto-update FROM a synthetic N-1 that embeds the prod pubkey —
+  # parity with the mac/linux smokes (they download a real N-1 stable; Windows has no stable yet, so
+  # it bootstraps N-1 in-job). Proves the click-free update (positive) + tampered-artifact rejection
+  # (negative). NOT in tag/release `needs` yet — STAGED: prove this real-artifact path on a green
+  # Windows rc dry-run, THEN flip to blocking (add both to tag.needs + release.needs).
+  # REVERT: to demote back to advisory, drop both from tag.needs/release.needs (this is the state).
   update-smoke-windows:
     name: Updater Smoke (windows-x86_64 / positive)
-    needs: [validate]
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    needs: [validate, build]
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.build.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
+      n-version: ${{ needs.validate.outputs.version }}
       mode: positive
 
   update-smoke-windows-negative:
     name: Updater Smoke (windows-x86_64 / negative)
-    needs: [validate]
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    needs: [validate, build]
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.build.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
+      n-version: ${{ needs.validate.outputs.version }}
       mode: negative
 
   tag:
