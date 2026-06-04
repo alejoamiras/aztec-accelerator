@@ -1,8 +1,11 @@
 # Windows updater-smoke: prove the disarm-before-install actually ran (#97)
 
 **Tier:** `/plan mid` (codex + opus dual audit — both done; verdicts + the design pivot below).
-**Status:** **Phase 1 ✅ merged (#284)** — codex post-impl hardened over 3 rounds → final *minor / no
-new defects*. **Phase 2 = owner-dispatched rc dry-run (PENDING — surfaced; no autonomous release).**
+**Status:** ✅ **COMPLETE.** Phase 1 merged (#284; codex post-impl hardened over 3 rounds → *minor / no
+new defects*). Phase 2 **rc.4 GREEN** (run 26976538825): positive + negative Windows smoke both
+SUCCESS, the disarm physically observed as a **9-sample (~1.8s) sustained absence**, tag + GitHub
+release produced — the blocking gate proved the cycle *and* didn't wedge. `≥3` floor kept (9 gives 3×
+headroom; raising it risks false-RED on install-time variance).
 
 ## North star
 The Windows updater-smoke is a BLOCKING release gate. Today its crash-recovery check is
