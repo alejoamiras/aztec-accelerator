@@ -502,13 +502,12 @@ jobs:
     with:
       n-version: ${{ needs.validate.outputs.version }}
 
-  # Windows/NSIS updater smoke — ADVISORY. Tests the REAL prod-signed Windows artifact (this run's
+  # Windows/NSIS updater smoke — BLOCKING (in tag.needs + release.needs), proven green on the
+  # 1.0.4-rc.3 dry-run (positive + negative). Tests the REAL prod-signed Windows artifact (this run's
   # `build` output) installing as an auto-update FROM a synthetic N-1 that embeds the prod pubkey —
   # parity with the mac/linux smokes (they download a real N-1 stable; Windows has no stable yet, so
-  # it bootstraps N-1 in-job). Proves the click-free update (positive) + tampered-artifact rejection
-  # (negative). NOT in tag/release `needs` yet — STAGED: prove this real-artifact path on a green
-  # Windows rc dry-run, THEN flip to blocking (add both to tag.needs + release.needs).
-  # REVERT: to demote back to advisory, drop both from tag.needs/release.needs (this is the state).
+  # it bootstraps N-1 in-job). Once a Windows STABLE exists, switch N-1 to the linux download-real-N-1.
+  # REVERT (if it flakes): drop both jobs from tag.needs/release.needs to demote back to advisory.
   update-smoke-windows:
     name: Updater Smoke (windows-x86_64 / positive)
     needs: [validate, build]
@@ -535,7 +534,7 @@ jobs:
 
   tag:
     name: Create Git Tag
-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, e2e-webdriver]
+    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -558,7 +557,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, tag, e2e-webdriver]
+    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, tag, e2e-webdriver]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
