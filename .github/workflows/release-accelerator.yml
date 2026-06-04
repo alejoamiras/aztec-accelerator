@@ -511,9 +511,11 @@ jobs:
   update-smoke-windows:
     name: Updater Smoke (windows-x86_64 / positive)
     needs: [validate, build]
-    # Gate on validate only (mirrors update-smoke-linux): an unrelated mac/linux build-leg failure
-    # must NOT skip the Windows validation. If the windows-x86_64 leg itself failed, the
-    # download-artifact step below fails cleanly (advisory).
+    # `!cancelled()` overrides the implicit needs-success gate, so this runs even if `build` fails
+    # (gate on validate only, mirroring update-smoke-linux): an unrelated mac/linux build-leg failure
+    # must NOT skip Windows validation. If the windows build leg itself failed, its artifact is
+    # absent → the download-artifact step fails → correctly BLOCKS tag/release (this job is now in
+    # tag.needs + release.needs).
     if: ${{ !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
@@ -523,9 +525,11 @@ jobs:
   update-smoke-windows-negative:
     name: Updater Smoke (windows-x86_64 / negative)
     needs: [validate, build]
-    # Gate on validate only (mirrors update-smoke-linux): an unrelated mac/linux build-leg failure
-    # must NOT skip the Windows validation. If the windows-x86_64 leg itself failed, the
-    # download-artifact step below fails cleanly (advisory).
+    # `!cancelled()` overrides the implicit needs-success gate, so this runs even if `build` fails
+    # (gate on validate only, mirroring update-smoke-linux): an unrelated mac/linux build-leg failure
+    # must NOT skip Windows validation. If the windows build leg itself failed, its artifact is
+    # absent → the download-artifact step fails → correctly BLOCKS tag/release (this job is now in
+    # tag.needs + release.needs).
     if: ${{ !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:

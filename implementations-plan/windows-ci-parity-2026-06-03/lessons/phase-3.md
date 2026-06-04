@@ -66,3 +66,33 @@ green proof via rc.3.
 ## Outcome
 P5 COMPLETE. Windows updater-smoke is a BLOCKING release gate testing the REAL prod-signed artifact —
 full parity with mac/Linux. North star met: Windows reaches the same release-pipeline assurance.
+
+## Post-impl reviews (loop step 6)
+**`/code-review max --fix` → clean (no fixes).** Inline expert pass on the b166504..53d40e0 diff
+(CI YAML + ps1 + 2 lockfile lines). Verified directly: #95 lock completeness (accelerator-server is
+genuinely ABSENT from src-tauri/Cargo.lock — tauri links only the lib; both locks have zero
+version-qualified local-crate refs → the bump-source sed is drift-safe), the blocking-flip wiring,
+the trust chain, `$Exe` null-guard (ps1 L159) before the #96 arm step, the re-arm assertion's teeth.
+
+**Codex post-impl audit (session 019e9378…, xhigh adversarial) → verdict: minor-only.** No
+release-bypass, no trust-chain break. Confirmed fine: real-artifact trust chain (synthetic N-1 keeps
+the committed updater pubkey → Tauri verifies N's bytes against it), #95 in-tree fix + sed safety,
+#96 arming realism (the HKCU Run-key write hits the SAME `is_enabled()` predicate the app uses at
+startup, main.rs:259).
+- **LOW (fixed):** the two windows-smoke job comments were stale — said "(advisory)" post-flip and
+  under-specified the gate. Rewrote to state `!cancelled()` overrides the implicit needs-success gate
+  (so a build failure does NOT skip the job; a missing windows artifact fails the download → blocks
+  tag/release). NOTE: codex misread this as "build-failure → skip"; the `!cancelled()` idiom is the
+  canonical override, so the job RUNS even when build fails — the new comment makes that explicit so
+  the next reader doesn't repeat the misread. Either way codex agreed it CANNOT wrongly-pass a release.
+- **MEDIUM (deferred → task #97):** the #96 crash-recovery check is END-STATE-ONLY (asserts the task
+  is present after the update); it does NOT prove the disarm-before-install actually ran. A no-op
+  regression of `disable_crash_recovery()` (crash_recovery.rs:281, an schtasks /Delete OS-call NOT
+  directly unit-tested) would pass green. Real residual gap in a now-BLOCKING gate. Fix needs a
+  disarm-success log in updater.rs + app-log capture in the smoke + grep — out-of-scope for the docs
+  wrap-up (touches the update hot path + logging infra). Filed as task #97; surfaced to owner.
+
+## Gates (transcript evidence)
+- `bun run lint:actions` → exit 0 (actionlint).
+- `bun run test` → all stages green: biome (51 files, 1 pre-existing non-failing warning unrelated to
+  this diff), sort-package-json ✓, cargo fmt --check ✓, sdk lint ✓, tsc ✓, units 23+73+5 = 101 pass / 0 fail.
