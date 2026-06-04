@@ -37,3 +37,6 @@ infra/tofu/.snapshot/
 .pnp.*
 .yarn/
 yarn.lock
+
+# Claude Code local runtime state (settings.local.json is already ignored globally)
+.claude/scheduled_tasks.lock
