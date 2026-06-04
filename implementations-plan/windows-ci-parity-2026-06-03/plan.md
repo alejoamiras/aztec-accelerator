@@ -1,7 +1,12 @@
 # Windows CI Parity — post-rc follow-ups (#95, #96, P5)
 
 **Tier:** `/plan mid` (codex + opus dual audit — both completed, consolidated below).
-**Status:** revised post-audit → final fresh-codex pass pending → approval gate.
+**Status:** ✅ **ALL 3 PHASES COMPLETE.** Approved (Option B, staged) → implemented → merged.
+
+### Phase checklist
+- [✓] **Phase 1 — #95** server-lock parity + bump-source fix — merged (`LESSONS_FILE=.../lessons/phase-1.md`)
+- [✓] **Phase 2 — #96** crash-recovery-armed updater-smoke (Level 1 + spike Level 2) — merged (`.../lessons/phase-2.md`)
+- [✓] **Phase 3 — P5** real-artifact parity + flip-to-blocking — reworked to Option B (#279), recursive-find fix (#280), **proven green on `1.0.4-rc.3`** (positive + negative, real prod-signed artifact, tagged+released = not wedged), **flipped to blocking (#281)** — `.../lessons/phase-3.md`
 
 ## North star
 Windows must reach the **same assurance** and **behave the same** as Linux/Mac in CI and the
