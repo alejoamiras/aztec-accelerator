@@ -198,6 +198,15 @@ try {
         Start-Sleep -Milliseconds 200
       }
     } -ArgumentList $TaskName
+
+    # Barrier: Start-Job is async — wait until the poller has actually emitted a sample (i.e. is
+    #   sampling) before launching, so it can't miss the early task lifecycle. `-Keep` peeks without
+    #   consuming (the final Receive-Job still sees every sample). Best-effort + bounded (~5s); the
+    #   disarm is 5s out, so even a slow start has margin.
+    for ($w = 0; $w -lt 50; $w++) {
+      if (@(Receive-Job $PollJob -Keep -ErrorAction SilentlyContinue).Count -gt 0) { break }
+      Start-Sleep -Milliseconds 100
+    }
   }
 
   # ── Launch N-1; it should auto-update to N and relaunch ──

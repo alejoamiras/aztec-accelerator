@@ -73,3 +73,14 @@ Conscious residual (NOT a defect): the `maxAbsentStreak >= 3` threshold isn't ai
 consecutive transient schtasks failure, but raising it risks false-RED on a fast install. For a
 BLOCKING gate, not-wedging is the priority + a 3-failure burst (while the app's own schtasks calls
 succeed) is implausible. The rc reveals the real streak (expected 10-40) → tune the floor up then.
+
+## Codex final confirm (minor — no new defects) + last touch
+Fix 2 (Receive-Job) confirmed clean. Fixes 1+3 "improve but not fully airtight":
+- #1 (poller-before-launch): added a best-effort BARRIER — after Start-Job, peek `Receive-Job -Keep`
+  until the poller has emitted ≥1 sample (i.e. is actually sampling) before launching. -Keep is
+  non-destructive so the final read still sees every sample. (The 5s disarm margin already covered it;
+  this makes "before launch" meaningful rather than racy.)
+- #3 (pre-clean verify treats any non-zero /Query as gone): ACCEPTED as-is — ephemeral CI runners have
+  no stale task, and a false-green needs BOTH a silently-failed /Delete AND a /Query error at once;
+  the exit-0-only-fails-closed pattern matches the Rust convention (crash_recovery.rs). Documented, not
+  closed. Verdict was minor → shipping; the rc is the real integration proof.
