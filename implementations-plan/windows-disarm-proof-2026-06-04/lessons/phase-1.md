@@ -84,3 +84,18 @@ Fix 2 (Receive-Job) confirmed clean. Fixes 1+3 "improve but not fully airtight":
   no stale task, and a false-green needs BOTH a silently-failed /Delete AND a /Query error at once;
   the exit-0-only-fails-closed pattern matches the Rust convention (crash_recovery.rs). Documented, not
   closed. Verdict was minor → shipping; the rc is the real integration proof.
+
+## Phase 2 — rc.4 dry-run: GREEN (validated)
+Owner-dispatched 1.0.4-rc.4 (run 26976538825). Positive smoke step log:
+- "armed crash-recovery (stale task cleared + verified gone; autostart Run key set)"
+- "(#97) armed + disarmed — task seen present, then sustained-absent (9 samples) across the install"
+- "(#97) re-armed — full armed→disarm→re-arm cycle proven"
+Both legs SUCCESS (positive + negative); Create Git Tag + Create GitHub Release SUCCESS; run
+conclusion success. The state-proof works end-to-end: the disarm was PHYSICALLY observed (not inferred
+from a log), and the blocking gate did not wedge.
+
+**The real streak = 9 samples (~1.8s).** Decision: KEEP the `>=3` floor. 9 is only 3× the floor and the
+install window varies by runner/bundle, so a faster install could approach a higher floor → false-RED
+(wedge) risk. The transient-burst false-green that a higher floor would prevent (3+ consecutive schtasks
+failures while the app's own schtasks calls succeed) is implausible. Not-wedge-first wins for a blocking
+gate. #97 COMPLETE.
