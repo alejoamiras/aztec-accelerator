@@ -1,7 +1,8 @@
 # Windows updater-smoke: prove the disarm-before-install actually ran (#97)
 
 **Tier:** `/plan mid` (codex + opus dual audit — both done; verdicts + the design pivot below).
-**Status:** ✅ approach locked (**state-proof**, owner chose "A") → implement → owner rc dry-run.
+**Status:** **Phase 1 ✅ merged (#284)** — codex post-impl hardened over 3 rounds → final *minor / no
+new defects*. **Phase 2 = owner-dispatched rc dry-run (PENDING — surfaced; no autonomous release).**
 
 ## North star
 The Windows updater-smoke is a BLOCKING release gate. Today its crash-recovery check is
