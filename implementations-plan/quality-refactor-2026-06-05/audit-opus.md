@@ -1,0 +1,16 @@
+# Opus fresh-hostile final audit (a0054ed2)
+
+**Verdict: conditional approve** — conditions: (1) add trailing-dot + IDNA cases to the Q14 negative-test set and gate Q14 on them; (2) reframe the Q4/Q6 "rc dry-run" proof — it is Windows-only, the macOS rc proves nothing for the disarm path; (3) make Q8/Q10/Q3 ≺ Q2 HARD prerequisites (seam-stabilizers), not soft "cheap wins."
+
+## Ranked attacks
+1. **[HIGH — unflagged silent behavior change] Q14 trailing-dot widening.** `canonicalize_origin` does `host.trim_end_matches('.')` (authorization.rs:37); `is_auto_approved` does not. Today `http://localhost.:5173` → host `localhost.` → DENY (popup); after Q14 → canonical host `localhost` → AUTO-APPROVE, no popup. The plan's negative-test list (path/query/userinfo/IPv6/extension/localhost-alias) does NOT include trailing-dot, and no existing test covers it — the guard goes green while a real origin flips deny→auto-approve. Security widening. Fix: add `http://localhost.`, `http://LOCALHOST`, IDNA/punycode to Q14 negatives, red-or-defer.
+2. **[HIGH — hollow characterization] Q4/Q6 un-pinnable on macOS.** disarm→abort-if-unconfirmed→install→rearm is entirely `#[cfg(windows)]` (updater.rs:86-119). The macOS dev box (cargo test + rc builds) exercises a no-op `disable()`. So the Phase-0 sequence test asserts only the Windows arm, and the "rc dry-run proof" is real ONLY if the rc IS the Windows `_e2e-updater-windows.yml` run. Also un-pinnable: the macOS `codesign --force --sign -` cleanup-on-failure arm (versions.rs:398-416) — fake-bb produces no signable Mach-O, so Q11's "fold the two cleanup arms" touches uncharacterized code. The harness pins the axum wire contract well; it does NOT pin the OS-privilege/codesign/race paths — the dangerous ones.
+3. **[MED — sequencing] Q8/Q10/Q3 ≺ Q2 must be HARD.** Threading typed ProveErrorBody/ServerStatus/AztecVersion through server.rs before splitting shrinks the split's merge surface. Q3-vs-Q8 dispute is noise (pick Q8-first).
+4. **[MED — blast radius] Auto-publish race.** `_aztec-update.yml` auto-bumps + `get-sdk-publish-version.ts` auto-derives → auto-publishes the SDK on upstream Aztec releases, no human in loop. If upstream Aztec ships between the Q12 merge and the playground/skill migration completing, the broken-typed SDK auto-ships. Condition: Q12 PR also lands the skill-doc migration + a publish-guard, OR freeze `_aztec-update.yml` for the Q12 window. Ask D misses this (it's about the Tauri app, not the SDK).
+5. **[LOW — scope] Cut Q6.** Only moderate-confidence single-model (codex) architectural finding, safety-critical, least-testable, speculative payoff (skip-version/progress). Highest risk-to-proven-value ratio. Push back on Q13 (cosmetic build-script churn) too.
+
+## The ONE thing to change
+Make the Q4/Q6/Q7 "rc dry-run" gate concretely = the green Windows `_e2e-updater-windows.yml` run on the rc; add trailing-dot/IDNA to Q14 negatives; state plainly that the macOS rc proves the wire contract but NOT the disarm-before-install race or the codesign-cleanup arm.
+
+## What's solid
+Three-way convergence; honest Ask A + Ask B; Q1≺Q2, Q3≺Q11 correct; Q7/Q9/Q14 correctly surfaced as behavior-change traps; characterization-first instinct right — the hole is that the target missed the highest-risk orderings + a couple of observable deltas.

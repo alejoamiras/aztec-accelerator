@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Quality-debt refactor (accelerator + SDK)</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Filing down the quality debt — without changing what users see</h1>
+  <p>The <code>/harden quality</code> audit found 15 maintainability problems (plus a bag of small ones) in the
+  accelerator app and its SDK. None are bugs — the app works and just shipped 1.0.4. This plan turns those
+  findings into a careful, step-by-step refactor that makes the code easier to change <em>while keeping every
+  observable behavior identical</em>: same HTTP responses, same tray, same auto-update flow, same proof output.
+  Because the app auto-updates real users, "don't break anything" is the prime directive.</p>
+
+  <h2>Why this tier (mega-deep)</h2>
+  <p>By the rubric this was borderline <code>deep</code> (we know this code well — low novelty), but you asked for
+  the deepest pass and the scope justifies it: <em>everything</em> including the two riskiest changes (splitting the
+  giant <code>server.rs</code> and its central <code>AppState</code>), a public SDK type-break, and a shipping app
+  that auto-updates. Three independent planners (me + codex + opus) drafted in parallel after four research agents
+  mapped each module. That fan-out already paid off — it caught a wrong assumption in the brief (see Open Questions).</p>
+
+  <h2>How it's sequenced</h2>
+  <div class="phase"><h3>0. Safety net first (characterization tests)</h3>
+  <p>Before touching anything risky, write "golden" tests that lock down <em>current</em> behavior — exact error
+  messages, the proving flow, the version logic. Trick: a fake <code>bb</code> binary lets us test the success path
+  without a real prover. If a later refactor changes behavior, these tests go red.</p></div>
+  <div class="phase"><h3>1. Cheap, safe wins</h3><p>Share the duplicated 60-second timeout; replace 19 hand-built
+  error blobs with one typed object (same wire output); sweep tiny duplications. Low risk, quick.</p></div>
+  <div class="phase"><h3>2–6. The "value objects" + mid refactors</h3><p>Give versions a real type
+  (<code>AztecVersion</code>) instead of raw strings; make the tray status a typed enum instead of matching on the
+  word "Proving"; split the 149-line downloader into named steps; unify the per-platform crash-recovery code behind
+  one interface. Each is one small PR with its tests.</p></div>
+  <div class="phase"><h3>7. The risky splits (last)</h3><p>Split <code>AppState</code> into "server core" vs
+  "desktop UI bits", then carve the <code>/prove</code> + authorization workflow out of the 1,335-line
+  <code>server.rs</code>. Done last, behind a release-candidate dry-run, because this is the hot path.</p></div>
+  <div class="phase"><h3>8. The SDK type-break</h3><p>Make the SDK's status/phase types precise (discriminated
+  unions). This is the one intentionally-breaking change; the in-repo playground updates in the same PR. (See the
+  Open Question about how "breaking" actually works here.)</p></div>
+
+  <h2>Human context</h2>
+  <p>The safest way to refactor a live app is many tiny, independently-revertible PRs, each proven behavior-identical
+  by tests written <em>before</em> the change. Three findings look like "cleanups" but are actually behavior changes
+  in disguise (a swallowed error, an origin-matching tweak, a missing recovery path) — the plan keeps today's
+  behavior and splits the real fixes into separate, clearly-labeled PRs you opt into.</p>
+
+  <h2>Open questions (need your call)</h2>
+  <ul>
+    <li><strong>A — the big one.</strong> Your "SDK major bump" decision can't happen literally: the SDK has no
+    version number of its own — it inherits the Aztec version at publish time. So Q12 ships as a clean type-break on
+    the dev line, published at the next Aztec bump with a migration guide. Confirm that, or treat standalone SDK
+    versioning as a separate project.</li>
+    <li><strong>B — behavior fixes?</strong> Do you want the 3 disguised fixes (swallowed save error, origin-parser
+    tweak, Safari recovery gap) actually <em>fixed</em> (shipped to users), or kept as-is (pure refactor)?</li>
+    <li><strong>C — small stuff:</strong> fold the minor cleanups into their related PRs (recommended), or one
+    separate sweep?</li>
+    <li><strong>D — cadence:</strong> one release-candidate dry-run covering all the risky changes, or one per risky PR?</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Answer Open Questions A–D (A is blocking — it reshapes the SDK phase).</li>
+      <li>Confirm scope (everything incl. the risky splits) and tier (mega-deep).</li>
+      <li>Decide the post-implementation <code>/harden quality</code> re-run (recommended, to confirm the debt actually dropped).</li>
+      <li>Approve / conditionally approve (with conditions) / reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>One drives the autonomous build. <code>/goal</code> survives <code>claude --resume</code> (good for a
+    multi-day program); <code>/loop</code> is per-session.</p>
+    <p class="warning">Use exactly ONE per session — they don't compose.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /goal (it's a long, multi-PR program — durable outer stop condition)</h3>
+      <pre><code>/goal All phases ✓ in implementations-plan/quality-refactor-2026-06-05/plan.md (each phase: characterization tests landed FIRST, then the named refactor, shipped as a small behavior-preserving PR that merged green; the disguised-behavior fixes Q9/Q14/Q7 only if owner approved Ask B; SDK Q5+Q12 paired with playground migrated + MIGRATION.md per Ask A); cargo test --lib + bun run test + bun run lint + bun run lint:actions exit 0 throughout; the risky splits (Q1/Q2) + safety-critical refactors (Q4/Q6/Q7) validated by a 1.0.x-rc dry-run (blocking updater-smoke green); per phase LESSONS_FILE printed; /code-review max --fix applied + committed; codex post-impl audit clean (or high/critical addressed). NEVER merge to main without green CI; NEVER cut a stable release autonomously.</code></pre>
+    </div>
+
+    <h3>Alternative: /loop (per-session cadence)</h3>
+    <pre><code>/loop Each turn: read implementations-plan/quality-refactor-2026-06-05/plan.md + lessons/ as source of truth; git status; open PR? gh pr view --json statusCheckRollup. CI on HEAD? gh run watch ≤10min. Failed? triage+fix, /codex xhigh if non-trivial, commit+push; stop after 5 fails. Phase green (PR merged + tests)? mark ✓, file lessons/phase-N.md, print LESSONS_FILE, advance per the dependency graph (char-harness → cheap wins → value objects → structural → coordinators → splits → SDK break). Next pending? characterization tests FIRST → refactor → cargo test + bun run test → lint → small PR → auto-merge. Risky/safety-critical phase? surface for an rc dry-run before the next stable cut. All ✓? /code-review max --fix → commit → codex post-impl audit → address high/critical → stop. NEVER merge to main without green CI; NEVER cut a stable release autonomously — surface + stop.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./research/">Research</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>
