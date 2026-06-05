@@ -3540,6 +3540,7 @@ dependencies = [
  "time",
  "x509-parser 0.16.0",
  "yasna",
+ "zeroize",
 ]
 
 [[package]]
