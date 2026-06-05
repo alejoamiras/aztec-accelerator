@@ -6,7 +6,7 @@ mod windows;
 
 use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
-use aztec_accelerator::server::{AppState, HTTPS_PORT};
+use aztec_accelerator::server::{AppState, ServerStatus, HTTPS_PORT};
 use aztec_accelerator::{certs, commands, config, log_dir, verified_sites};
 use parking_lot::RwLock;
 use std::path::Path;
@@ -345,7 +345,8 @@ fn main() {
 
             let is_animating_for_status = is_animating.clone();
             let state = AppState {
-                on_status: Some(Arc::new(move |text: &str| {
+                on_status: Some(Arc::new(move |status: ServerStatus| {
+                    let text = status.display_text();
                     tracing::info!(text, "on_status callback fired");
                     if let Err(e) = status_clone.set_text(text) {
                         tracing::error!("set_text failed: {e}");
@@ -353,8 +354,7 @@ fn main() {
                     if let Err(e) = tray_clone.set_tooltip(Some(text)) {
                         tracing::error!("set_tooltip failed: {e}");
                     }
-                    let active = text.contains("Proving") || text.contains("Downloading");
-                    is_animating_for_status.store(active, Ordering::Release);
+                    is_animating_for_status.store(status.is_busy(), Ordering::Release);
                 })),
                 bundled_version: Some(bundled_version),
                 on_versions_changed: Some(on_versions_changed),
