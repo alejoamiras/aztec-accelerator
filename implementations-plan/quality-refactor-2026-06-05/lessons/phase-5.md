@@ -41,9 +41,22 @@ fresh extract, stale-entry wholesale replace, temp-dir cleanup — using the exi
 fixture pattern + a `tempfile::tempdir()` so it never touches the real `~/.aztec-accelerator`. 127 lib
 tests + clippy -D warnings green.
 
-## Remaining Q11 extracts (part 2, this branch or follow-up)
-`download_tarball` (bounded streaming GET, versions.rs ~350-391) · `verify_digest` (GitHub asset digest
-fetch + sha256 compare, ~394-417) · `postprocess_unix`/`postprocess_macos` (chmod / xattr+codesign +
-cleanup-on-failure, ~438-486). Orchestrator `download_bb` keeps the guard+cache fast-path + the
-digest→extract ordering. Then the Q3-followup (`versions_to_evict` → `&[AztecVersion]`).
+## Q11 part 2 — extract `download_tarball` + `verify_digest` (#TBD)
+Extracted the two cfg-free async units: `download_tarball(&str) -> Vec<u8>` (bounded-streaming GET with
+the 64 MB cap) and `verify_digest(&str, &[u8])` (GitHub asset SHA-256 fetch + fail-closed compare).
+`download_bb`'s orchestrator is now a clean sequence: `download_tarball → verify_digest →
+install_version_dir → postprocess`, preserving the **verify-BEFORE-install ordering**. Pure byte-identical
+extractions — covered by the gated real-download integration test. 127 lib tests + clippy -D warnings green.
+
+**Deliberately left `postprocess` inline** (NOT extracted to `postprocess_unix`/`postprocess_macos` as the
+plan sketched): the chmod is `#[cfg(unix)]` and the xattr+codesign is `#[cfg(target_os = "macos")]`, so
+extracted fns would have **unused params on non-macOS** (`version_dir`/`version` only used by the macOS
+cleanup-on-failure) → `clippy -D warnings` failures across the platform matrix, the exact cfg trap the
+Q15 bin-crate lesson warned about. The inline `#[cfg]` blocks are already clearly delimited; extracting
+them trades real cross-platform risk for cosmetic gain. Logged as a conscious scope cut.
+
+## Next
+Q11 done (modulo the noted postprocess decision) → `/code-review max --fix` on the complete `download_bb`
+split → then the Q3-followup (`versions_to_evict` → `&[AztecVersion]`, using the precomputed
+`tier()`/`sort_key()`) → Phase 6 (Q4 crash-recovery trait, SAFETY-CRITICAL, needs the rc dry-run).
 LESSONS_FILE=implementations-plan/quality-refactor-2026-06-05/lessons/phase-5.md
