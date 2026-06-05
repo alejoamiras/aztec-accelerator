@@ -1,6 +1,6 @@
 [package]
 name = "accelerator-server"
-version = "1.0.4-rc.1"
+version = "1.0.5-rc.1"
 description = "Headless Aztec Accelerator HTTP server (no GUI, no Tauri runtime)"
 edition = "2021"
 rust-version = "1.77.2"
