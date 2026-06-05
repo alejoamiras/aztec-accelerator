@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Plan ELI5 — Removing the risky "master key" from Safari HTTPS</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+    .flag { border-left: 3px solid #d97706; background: #fffbeb; }
+  </style>
+</head>
+<body>
+  <h1>Removing the risky "master key" from Safari HTTPS</h1>
+  <p>The accelerator runs a tiny web server on your own machine. Safari refuses plain
+  <code>http://localhost</code> for some features, so the app serves <strong>https</strong> instead — and
+  for Safari to trust that, the app currently makes its own little <em>certificate authority</em> (think:
+  a <strong>master key</strong> that can vouch for certificates) and tells your Mac to trust it. The
+  problem: that master key is saved as a plain file on disk. Anything running as you that reads it could
+  forge a "trusted" certificate for <em>any</em> website — your bank, your email — not just localhost.
+  This plan <strong>throws the master key away the instant it's been used once.</strong> We still make the
+  master key, use it to stamp one "localhost" certificate, and then <em>destroy the key immediately</em> —
+  it's never saved to disk. Your Mac still trusts the setup exactly like before (so Safari is happy), but
+  there's no longer any key lying around for someone to forge with. (We first tried removing the master key
+  concept entirely, but Apple's own guidance says Safari needs that "authority" structure to trust a local
+  site — so we keep the structure and kill the key instead. Safer and simpler.)</p>
+
+  <h2>Human context</h2>
+  <p>A normal HTTPS certificate proves "I am localhost." A <em>certificate authority (CA)</em> is one
+  level up: it's a key that signs <em>other</em> certificates, so trusting it means trusting everything it
+  signs. The app used a CA because it let the app quietly refresh its localhost certificate every couple
+  of years without bugging you. But a trusted CA key on disk is a loaded gun: whoever holds it can mint
+  trusted certificates for anything. We don't need that power — we only ever need one certificate, for
+  localhost. So we drop the CA and trust the localhost certificate directly.</p>
+  <p>One Apple rule shapes the design: macOS won't accept a TLS certificate that's valid for more than
+  <strong>~2 years (825 days)</strong> — even one you trusted by hand. So the localhost certificate has to
+  be replaced every couple of years, which means a quick "trust this?" prompt then. You decided that small
+  occasional prompt is an acceptable price for removing the master key.</p>
+
+  <h2>Phases</h2>
+  <div class="phase"><h3>Phase 1 — Make the cert, then destroy the master key</h3>
+  <p>Make the master key in memory, use it to stamp one "localhost" certificate (valid 824 days), write
+  the certificate to disk — and <strong>never write the master key</strong>. It's discarded the moment
+  it's done its one job. Share one helper for the cert settings so "make it" and "renew it" can't drift.</p></div>
+  <div class="phase"><h3>Phase 2 — Trust + renew safely</h3>
+  <p>Trust the (now keyless) authority exactly like before — Safari already accepts this, no gamble.
+  Renewal makes a brand-new authority + cert (since the old key is gone), so it needs a fresh "trust
+  this?" prompt — we ask <strong>~30 days before the old one expires</strong> (while it still works), add
+  the new one before removing the old, and if you cancel, keep serving the old one. No silent renewals, no
+  sudden "HTTPS broke" surprise, and old trust entries get cleaned up so they don't pile up.</p></div>
+  <div class="phase"><h3>Phase 3 — Clean up the old master key (upgrades)</h3>
+  <p>For people upgrading: <strong>delete the old master-key file from disk.</strong> That alone defuses
+  the danger — a trusted-but-keyless certificate can't forge anything. (We leave the old trust entry in
+  your keychain so there's no scary prompt; there's an optional "remove it" button for a full cleanup.)</p></div>
+  <div class="phase"><h3>Phase 4 — Tidy up the file handling</h3>
+  <p>Write cert files safely (all-or-nothing, owner-only permissions), and actually check a cert is valid
+  (not just "a file exists") so a half-written file can't wedge HTTPS forever.</p></div>
+  <div class="phase"><h3>Phase 5 — Prove it (automatically)</h3>
+  <p>Tests that generation writes the cert but <em>never</em> the master key, that renewal works and
+  cleans up, and that upgrades delete the old key — no manual Safari testing needed.</p></div>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li>None blocking. The earlier worry — "will Safari trust this?" — is <strong>resolved</strong>: by
+    keeping the authority structure (just without its key), we stay on Apple's recommended path, so trust
+    works exactly as it does today.</li>
+    <li>Residual we're accepting: someone who copied the old master key <em>before</em> you upgraded keeps
+    a copy until the old trust entry is removed (the optional cleanup button). And every ~2 years a renewal
+    asks you to approve once.</li>
+  </ul>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>Two seeds for the autonomous implementation session. Pick one. They don't compose within a single
+    Claude Code session.</p>
+    <h3>/goal (primary)</h3>
+    <pre><code>/goal All phases ✓ in implementations-plan/safari-tls-ca-removal-2026-06-04/plan.md (generate_and_save writes ca.pem+leaf but NEVER ca.key — CA key discarded in-memory after signing; trustRoot unchanged; rotation regenerates a fresh keyless CA, pre-expiry ≤30d, add-new-before-remove-old-anchor, fail-closed; migrate deletes legacy on-disk ca.key; certs_exist validity-checks + atomic 0o600 write + ca_params/leaf_params dedup; cert-flow unit incl. "no ca.key on disk" + macOS integration verify-cert/rotation green); per phase LESSONS_FILE printed; /code-review max --fix applied + committed; codex post-impl audit clean (or high/critical addressed); bun run test + bun run lint:actions exit 0. No stable release.</code></pre>
+    <h3>/loop (fallback)</h3>
+    <pre><code>/loop Each turn: read implementations-plan/safari-tls-ca-removal-2026-06-04/plan.md + lessons/; git status; PR? gh pr view --json statusCheckRollup. CI? gh run watch ≤10min. Failed? fix, /codex xhigh if non-trivial, commit+push; stop after 5 fails. Phase green? mark ✓, file lessons/phase-N.md, print LESSONS_FILE, advance. Next pending? edit → cargo test + bun run test → bun run lint:actions → commit → push. All ✓? /code-review max --fix → commit → codex post-impl audit → address high/critical → stop. NEVER merge to main or release. Security invariant: ca.key is NEVER written to disk; rotation removes the old CA anchor.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>
