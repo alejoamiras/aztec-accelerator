@@ -353,6 +353,10 @@ fn main() {
             };
 
             // ── HTTPS startup ──
+            // One-time migration: delete any legacy on-disk CA private key (older installs) — it was
+            // a readable mint-any-cert primitive. Runs regardless of Safari Support; the keyless CA
+            // anchor that remains can't sign anything. Idempotent.
+            certs::migrate_legacy_ca_key();
             let https_port = try_start_https(&state);
 
             // Manage the shared state for Tauri commands (e.g. enable_safari_support)
