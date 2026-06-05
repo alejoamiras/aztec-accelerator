@@ -912,6 +912,96 @@ mod tests {
         );
     }
 
+    /// CHARACTERIZATION (quality-refactor Phase 0 — Q8 wire-contract guard).
+    /// `/prove` error responses are a `{error,message}` JSON-shaped body served as **`text/plain`**
+    /// (they go out via `(StatusCode, String)`, not `axum::Json`). The SDK's `ky` client keys
+    /// `HTTPError.data` parsing on Content-Type, so a Q8 refactor that switches to `axum::Json` would
+    /// flip this to `application/json` and silently change SDK runtime behavior. Pin status + error-id
+    /// + `text/plain` for the reachable (no-bb) error paths so that regression fails loudly.
+    #[tokio::test]
+    async fn prove_error_responses_stay_text_plain_json_string() {
+        async fn assert_error(
+            app: Router,
+            req: Request<Body>,
+            want_status: StatusCode,
+            want_error: &str,
+        ) {
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), want_status, "status for {want_error}");
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            assert!(
+                ct.starts_with("text/plain"),
+                "{want_error} must stay text/plain (Q8 wire contract — SDK ky keys on it), got {ct:?}"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("error body is JSON-shaped");
+            assert_eq!(json["error"], want_error, "error id for {want_error}");
+            assert!(json["message"].is_string(), "{want_error} needs a message");
+        }
+
+        // invalid_version (400) — default state, traversal-y x-aztec-version
+        assert_error(
+            router(AppState::default()),
+            Request::builder()
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("x-aztec-version", "../../../etc/passwd")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+            "invalid_version",
+        )
+        .await;
+
+        // invalid_origin (400) — auth present, malformed Origin (rejected before popup)
+        let (_origin_tx, _origin_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(_origin_tx);
+        assert_error(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("origin", "not-a-valid-origin")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+            "invalid_origin",
+        )
+        .await;
+
+        // origin_denied (403) — auth + deny
+        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (state, auth) = auth_state_with_popup(popup_tx);
+        let auth_clone = auth.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            auth_clone.resolve("https://evil.com", crate::authorization::AuthDecision::Deny);
+        });
+        assert_error(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("origin", "https://evil.com")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+            StatusCode::FORBIDDEN,
+            "origin_denied",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn health_includes_available_versions() {
         let state = AppState {
