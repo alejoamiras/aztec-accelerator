@@ -2,7 +2,20 @@
 
 **Tier:** `/plan deep` — 3 parallel drafts → consolidated → final codex audit (needs-rework) → **reworked
 to the discarded-CA-key approach** (owner-chosen). Verdicts inline.
-**Status:** reworked; ready for approval (optional confirming codex pass offered).
+**Status:** ✅ **IMPLEMENTED** (branch `feat/tls-discard-ca-key`). All phases done; codex post-impl
+(high-critical) all addressed; `cargo test --lib certs` 6 passed, `bun run test` + `lint:actions` exit 0.
+
+### Phase checklist
+- [✓] **Phase 1** — `certs.rs` generates CA+leaf, **discards the CA key** (never written); `ca_params`/
+  `leaf_params` dedup; `certs_exist` validity-checked; atomic `0o600` `write_pem_file`.
+- [✓] **Phase 2** — staging-swap `rotate()` (fresh keyless CA, pre-expiry ≤30d, add-new-anchor → verify →
+  atomic swap → remove-old-anchor by SHA-1; fail-closed); renewal runs off the startup path (non-blocking);
+  rcgen `zeroize`.
+- [✓] **Phase 3** — `migrate_legacy_ca_key()` wired into startup (deletes legacy `ca.key`); `try_start_https`
+  recovers (reset Safari) on a broken/mismatched cert set instead of silently wedging HTTPS.
+- [✓] **Phase 4** — unit tests: `generation_writes_no_ca_key` (the security invariant) +
+  `migrate_deletes_legacy_ca_key_but_keeps_certs`. macOS keychain integration validated by the **owner's
+  Mac recipe** (touches the real keychain + prompts → can't be safely automated in CI).
 
 ## Problem
 For Safari localhost HTTPS, `certs.rs` makes a root **CA** + a leaf signed under it, and trusts the CA in
