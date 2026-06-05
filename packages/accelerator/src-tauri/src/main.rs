@@ -57,43 +57,56 @@ fn try_start_https(state: &AppState) -> Option<u16> {
         return None;
     }
     if !certs::certs_exist() {
-        tracing::warn!("Safari Support enabled but certs missing — resetting config");
-        if let Some(ref cfg_lock) = state.config {
-            let mut cfg = cfg_lock.write();
-            cfg.safari_support = false;
-            let _ = config::save(&cfg);
-        }
+        tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
+        reset_safari_support(state);
         return None;
     }
 
-    // Auto-renew leaf cert if expiring
-    if let Err(e) = certs::regenerate_leaf_if_expiring() {
-        tracing::warn!("Failed to check/renew leaf cert: {e}");
-    }
-
-    // Verify CA is still trusted (macOS only)
+    // Verify the live CA is still trusted (macOS only).
     if !certs::is_ca_trusted() {
         tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
         return None;
     }
 
-    match certs::load_rustls_config() {
-        Ok(tls_config) => {
-            let mut state_for_https = state.clone();
-            state_for_https.https_port = Some(HTTPS_PORT);
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) =
-                    aztec_accelerator::server::start_https(state_for_https, tls_config).await
-                {
-                    tracing::error!("HTTPS server error: {e}");
-                }
-            });
-            Some(HTTPS_PORT)
-        }
+    let tls_config = match certs::load_rustls_config() {
+        Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Failed to load TLS config: {e} — skipping HTTPS");
-            None
+            // A broken/mismatched cert set (e.g. a crash mid-rotation leaving a new leaf with the old
+            // key) must NOT silently wedge HTTPS. Reset Safari Support so the user re-enables and a
+            // fresh, matched, trusted set is generated, instead of HTTPS being dead every launch.
+            tracing::warn!("Failed to load TLS config ({e}) — resetting Safari Support to recover");
+            reset_safari_support(state);
+            return None;
         }
+    };
+
+    let mut state_for_https = state.clone();
+    state_for_https.https_port = Some(HTTPS_PORT);
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = aztec_accelerator::server::start_https(state_for_https, tls_config).await {
+            tracing::error!("HTTPS server error: {e}");
+        }
+    });
+
+    // Pre-expiry auto-renewal runs OFF the startup path (a background thread) so the macOS trust
+    // prompt can never block/hang launch. The running server keeps its already-loaded config; a
+    // rotated set takes effect on the next launch.
+    std::thread::spawn(|| {
+        if let Err(e) = certs::regenerate_leaf_if_expiring() {
+            tracing::warn!("Background leaf renewal: {e}");
+        }
+    });
+
+    Some(HTTPS_PORT)
+}
+
+/// Disable Safari Support in config (certs missing/invalid/untrusted) so the user can re-enable to
+/// regenerate a fresh, trusted cert set.
+fn reset_safari_support(state: &AppState) {
+    if let Some(ref cfg_lock) = state.config {
+        let mut cfg = cfg_lock.write();
+        cfg.safari_support = false;
+        let _ = config::save(&cfg);
     }
 }
 

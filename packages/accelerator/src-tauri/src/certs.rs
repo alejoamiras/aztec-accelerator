@@ -148,9 +148,8 @@ pub fn migrate_legacy_ca_key() {
 
 /// Inner, path-parameterized for testability.
 fn migrate_legacy_ca_key_at(ca_key: &std::path::Path) {
-    let p = ca_key;
-    if p.exists() {
-        match std::fs::remove_file(p) {
+    if ca_key.exists() {
+        match std::fs::remove_file(ca_key) {
             Ok(_) => tracing::warn!(
                 "Removed legacy on-disk CA key (ca.key) — the mint-any-cert primitive is gone. The \
                  legacy keychain CA anchor (now keyless) remains; use Settings to fully remove it."

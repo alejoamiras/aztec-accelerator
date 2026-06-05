@@ -45,3 +45,19 @@ The trust install/verify/rotation touches the REAL login keychain + ~/.aztec-acc
 prompts for a password — automating it in `cargo test` would clobber the user's real install + hang on
 the prompt. So the macOS path is validated via a documented manual recipe on the owner's Mac, not an
 automated test. The unit tests cover all the non-keychain logic.
+
+## Post-impl codex audit (high-critical) → all addressed
+Codex post-impl flagged high-critical; fixed:
+- **[HIGH] non-atomic 3-file rotation swap → silent HTTPS wedge.** A crash mid-swap could leave a new
+  leaf with the old key; certs_exist (presence+expiry) missed it. FIX: `try_start_https` now resets
+  Safari Support when `load_rustls_config()` fails (broken/mismatched set) → recover (user re-enables →
+  fresh trusted set) instead of HTTPS dead every launch. Extracted `reset_safari_support()`.
+- **[MED] "discarded" ≠ scrubbed (rcgen no zeroize).** FIX: enabled rcgen `zeroize` feature → the
+  in-memory CA key is zeroized on drop (hardens against a heap/core-dump attacker).
+- **[MED] rotation ran synchronously at startup → keychain prompt could block/hang autostart.** FIX:
+  pre-expiry renewal now runs on a background `std::thread` AFTER the server starts (off the launch
+  path; the running server keeps its loaded config, a rotated set applies next launch).
+- **[MINOR] duplicate legacy anchors** — accepted (best-effort cleanup).
+Confirmed solid by codex: no runtime path writes ca.key; keyless-anchor model prevents disk-only
+minting; migrate is safe (HTTPS loads only the leaf); *.new vs *.tmp don't collide.
+cargo check 0; cargo test --lib certs 6 passed.
