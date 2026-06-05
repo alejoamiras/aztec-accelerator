@@ -29,7 +29,37 @@ pub const HTTPS_PORT: u16 = 59834;
 /// imports this).
 pub const AUTH_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub type StatusCallback = Arc<dyn Fn(&str) + Send + Sync>;
+/// Status surfaced to the tray via the `on_status` callback during a `/prove` request.
+/// `display_text()` MUST stay byte-identical to the legacy `"Status: …"` string literals — the
+/// tray label and the `prove_success_path_and_status_sequence` characterization test both pin
+/// them. `is_busy()` drives the tray spinner (true ⟺ work in flight: Downloading or Proving).
+/// Replaces the prior stringly-typed `Fn(&str)` callback so the tray consumer matches on variants
+/// instead of substring-sniffing the label text (Q10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerStatus {
+    Idle,
+    Downloading,
+    Proving,
+}
+
+impl ServerStatus {
+    /// Tray label text. Byte-identical to the pre-Q10 string literals (behavior-preserving).
+    pub fn display_text(self) -> &'static str {
+        match self {
+            ServerStatus::Idle => "Status: Idle",
+            ServerStatus::Downloading => "Status: Downloading bb...",
+            ServerStatus::Proving => "Status: Proving...",
+        }
+    }
+
+    /// Whether work is in flight (drives the tray spinner). True for exactly Downloading + Proving
+    /// — matching the prior `text.contains("Proving") || text.contains("Downloading")` consumer.
+    pub fn is_busy(self) -> bool {
+        matches!(self, ServerStatus::Downloading | ServerStatus::Proving)
+    }
+}
+
+pub type StatusCallback = Arc<dyn Fn(ServerStatus) + Send + Sync>;
 pub type VersionsChangedCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Callback to show the authorization popup window. Takes the origin string.
@@ -278,7 +308,7 @@ struct StatusGuard {
 impl Drop for StatusGuard {
     fn drop(&mut self) {
         if let Some(ref cb) = self.cb {
-            cb("Status: Idle");
+            cb(ServerStatus::Idle);
         }
     }
 }
@@ -454,7 +484,7 @@ async fn resolve_version<'a>(
     if v != bundled && !versions::version_bb_path(v).exists() {
         tracing::info!(version = %v, "Version not cached, downloading");
         if let Some(ref cb) = state.on_status {
-            cb("Status: Downloading bb...");
+            cb(ServerStatus::Downloading);
         }
 
         match versions::download_bb(v).await {
@@ -482,7 +512,7 @@ async fn resolve_version<'a>(
         }
 
         if let Some(ref cb) = state.on_status {
-            cb("Status: Proving...");
+            cb(ServerStatus::Proving);
         }
     }
 
@@ -548,7 +578,7 @@ async fn prove(
         .map(|v| v.to_string());
 
     if let Some(ref cb) = state.on_status {
-        cb("Status: Proving...");
+        cb(ServerStatus::Proving);
     }
     let _guard = StatusGuard {
         cb: state.on_status.clone(),
@@ -1048,8 +1078,8 @@ mod tests {
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let rec = recorded.clone();
         let state = AppState {
-            on_status: Some(std::sync::Arc::new(move |s: &str| {
-                rec.lock().unwrap().push(s.to_string())
+            on_status: Some(std::sync::Arc::new(move |s: ServerStatus| {
+                rec.lock().unwrap().push(s.display_text().to_string())
             })),
             prove_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
             ..Default::default()

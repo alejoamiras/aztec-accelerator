@@ -32,8 +32,35 @@ warn!}`). Per Ask B (refactor + ship the fixes, communicate each), Q9 will make 
 too — a real, user-visible change (a failed auto-update-pref save now surfaces instead of being lost).
 This will be surfaced to the owner explicitly in the Q9 PR, as a separately-labeled commit.
 
+## Q10 — typed ServerStatus enum (#299, auto-merging)
+Replaced `StatusCallback = Arc<dyn Fn(&str)>` with `Arc<dyn Fn(ServerStatus)>`.
+`enum ServerStatus { Idle, Downloading, Proving }` + `display_text()` (byte-identical to the prior
+`"Status: …"` literals) + `is_busy()` (true iff `Downloading|Proving`). The 4 emit sites
+(`StatusGuard` drop, download transition, two proving transitions) pass variants; the main.rs tray
+consumer matches on `is_busy()` instead of `text.contains("Proving") || text.contains("Downloading")`.
+Behavior-preserving: the Phase-0 `prove_success_path_and_status_sequence` test's assertion is
+**unchanged** (`["Status: Proving...", "Status: Idle"]`) — now produced via `display_text()`.
+
+**Gotcha 1 (compiler-caught):** the two `cb("Status: Proving...")` sites had **different indentation**
+(12 vs 8 spaces), so an `Edit replace_all` on the 12-space literal silently missed the 8-space one.
+`cargo test --lib` caught it (`E0308 expected ServerStatus, found &str` at the survivor). Lesson:
+after a `replace_all` on a string that recurs at varying indent, grep the literal again to confirm zero
+survivors before trusting it.
+
+**Gotcha 2 (process, not code):** `git checkout -b refactor/phase1-q10-server-status` **failed**
+("already exists" — a stale branch from a prior abandoned attempt at the pre-Q8/Q9 base), which left
+HEAD on `main`. The subsequent commit landed on **local main**, and the explicit-refspec push then
+shipped the *stale* branch tip, not the new commit (`gh pr create` → "No commits between"). Fix:
+`branch -f <q10> <commit>`, `reset --hard <real-main>`, re-push (fast-forward, since the stale tip was
+an ancestor). Lesson: when `checkout -b` can fail on a pre-existing name, verify `git branch
+--show-current` before committing — don't assume the branch switched.
+
+**Infra note:** SSH transport to github.com (port 22) was down this session while keys were loaded and
+`gh` (HTTPS) worked — so pull/push were routed through `gh`'s credential helper over HTTPS via
+`git -c credential.helper='!gh auth git-credential'` (no token-in-URL, no persistent config change).
+Diagnosis matters: it was the transport, NOT 1Password/the agent.
+
 ## Next
-Q8 merges → Q9 (mutate_config + the swallow fix) → Q10 (ServerStatus enum, coordinated server emit +
-main.rs tray consumer; the Phase-0 `prove_success_path_and_status_sequence` test pins the exact
-`["Status: Proving...", "Status: Idle"]` strings the enum must reproduce). Then Phase 2+ (value objects,
-splits). LESSONS_FILE=implementations-plan/quality-refactor-2026-06-05/lessons/phase-1.md
+Phase 1 cheap-wins COMPLETE (Q15 #295, Q8 #296, Q9 #298, Q10 #299). Next: **Phase 2 value objects** —
+Q3 `AztecVersion` (versions.rs/bb.rs), Q11 `download_bb` split, Q5 SDK extraction. Characterization
+tests FIRST per phase. LESSONS_FILE=implementations-plan/quality-refactor-2026-06-05/lessons/phase-1.md
