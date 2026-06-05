@@ -6,8 +6,8 @@
 + codex post-impl audit + JS-side gates.
 
 ### Phase checklist
-- [✓] **Phase 1** — `download_bb` streams via `response.chunk()` into a bounded `Vec<u8>` (32 MB cap,
-  per-chunk counter); no `response.bytes()` full-body buffer. `&bytes` (`Vec<u8>`) coerces to `&[u8]`
+- [✓] **Phase 1** — `download_bb` streams via `response.chunk()` into a bounded `Vec<u8>` (**64 MB** cap
+  — revised from 32 post-impl, see code-review note; per-chunk counter); no `response.bytes()` full-body buffer. `&bytes` (`Vec<u8>`) coerces to `&[u8]`
   for the unchanged digest + extract.
 - [✓] **Phase 2** — `is_valid_version` **centralized into `versions.rs`** (full invariant: non-empty,
   `<=128`, charset, **no leading dot, no `..`**); `server.rs` ingress + a new **`download_bb` sink guard**
@@ -20,7 +20,8 @@
 
 ## Scope (owner-confirmed)
 The net-new findings from the full-depth audit (#98), **fixes + the safe simplifications**, one contained
-Rust PR. All in `packages/accelerator/src-tauri/src/`. Cap = **32 MB**; testing = **unit tests +
+Rust PR. All in `packages/accelerator/src-tauri/src/`. Cap = **64 MB** (revised from 32 post-impl — the
+"~5 MB" premise was empirically false, real tarball is ~17 MB; see code-review note); testing = **unit tests +
 streaming code-review**.
 
 ---
@@ -144,6 +145,12 @@ Unit-test with a >500-char multibyte string (repeated `é`/emoji) — asserts no
   invariant** (charset + length + dots), not just dots, and run as `download_bb`'s first line — so a *direct*
   caller can't pass slash/backslash traversal either. Implemented by centralizing `is_valid_version` into
   `versions.rs` (single source of truth for ingress + sink) + the direct sink test. Transcript: `audit-codex.md`.
+- **Post-impl `/code-review max --fix` (3 parallel agents):** hardening confirmed **sound** (path-traversal
+  airtight, OOM cap checked before `extend`, digest fail-closed). One real finding: the **32 MB cap +
+  "~5 MB" comment were wrong** — `download_bb` fetches the platform tarball (`barretenberg-amd64-linux`
+  = **17 MB** live, avm-class ~30 MB), so 32 MB was only ~1.9× the largest current asset → silent WASM
+  fallback on a future bloat. **Owner bumped to 64 MB** (matches `copy-bb.ts`; comment corrected). Deferred
+  LOW: `.tmp` staging-dir litter on mid-extract failure (pre-existing, self-healing, out of scope).
 
 ---
 

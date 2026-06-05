@@ -29,7 +29,8 @@
   <p>The downloader trusted the server's <em>claimed</em> size, then loaded the whole file into memory at
   once. A malicious/broken server that <em>doesn't</em> state a size could stream gigabytes and crash the
   app (out of memory). Fix: read the download in small chunks, counting as we go, and stop the moment it
-  passes a sane ceiling (32 MB — `bb` is ~5 MB).</p></div>
+  passes a sane ceiling (64 MB — the downloaded platform tarball is ~17 MB; the cap was bumped from 32 MB
+  post-implementation when code-review measured the real size).</p></div>
   <div class="phase"><h3>Phase 2 — Block the "<code>..</code>" path trick</h3>
   <p>A version name is used to build a folder path. The check that validates version names accidentally
   allowed <code>..</code> ("go up a folder"), which in the worst case could point a "delete this folder"
@@ -50,7 +51,11 @@
   compiled / would have broken a test — those are now corrected.</p>
 
   <h2>Open questions</h2>
-  <ul><li>None blocking. The one judgement call — a 32 MB vs 64 MB download ceiling — you chose 32 MB (tighter); if <code>bb</code> ever grows past it, the download fails loudly and it's a one-line bump.</li></ul>
+  <ul><li><strong>Resolved post-impl.</strong> The one judgement call — a 32 MB vs 64 MB download ceiling.
+  You originally chose 32 MB (tighter), but that rested on a wrong "<code>bb</code> is ~5 MB" assumption;
+  code-review measured the real downloaded tarball at ~17 MB (avm-class ~30 MB), so 32 MB had too little
+  headroom (a future bump would silently fall back to slow WASM). Bumped to 64 MB — matching the sibling
+  <code>copy-bb.ts</code> limit for the same artifact.</li></ul>
 
   <section class="seeds">
     <h2>Implementation seeds</h2>

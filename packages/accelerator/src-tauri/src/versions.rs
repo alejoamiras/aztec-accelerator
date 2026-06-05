@@ -294,8 +294,11 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
 
     // Bounded streaming download: read the body in chunks with a running counter so a server that
     // omits Content-Length (chunked encoding) cannot OOM us by streaming gigabytes. The advertised
-    // length is an early fail-fast; the per-chunk counter is the real ceiling. 32 MB cap (bb is ~5 MB).
-    const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
+    // length is an early fail-fast; the per-chunk counter is the real ceiling. 64 MB cap: download_bb
+    // fetches the platform tarball (barretenberg-amd64-linux is ~17 MB today, avm-class builds ~30 MB),
+    // so this is ~2x the largest current asset with room to grow. Mirrors copy-bb.ts
+    // MAX_BB_TARBALL_BYTES (64 MB) — the sibling build-time fetch of the same artifact.
+    const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
     if let Some(len) = response.content_length() {
         if len > MAX_DOWNLOAD_BYTES as u64 {
             return Err(format!(

@@ -6,7 +6,8 @@ implemented + validated together rather than as four separate commits.
 ## Phase 1 — `download_bb` OOM → bounded streaming
 - Swapped `response.bytes().await?` (whole-body buffer) for `response.chunk()` in a
   `while let Some(chunk) = response.chunk().await?` loop with a running `bytes.len() + chunk.len()`
-  counter against a 32 MB cap. Bound `let mut response = response;` first (`chunk()` takes `&mut self`).
+  counter against a **64 MB** cap (raised from 32 — see Post-impl below). Bound `let mut response = response;`
+  first (`chunk()` takes `&mut self`).
 - **No new crate.** `Response::chunk()` is in reqwest's base async API (codex confirmed it on the pinned
   `reqwest 0.12.28`, not gated by the `stream` feature). Avoided the `futures-util::StreamExt` +
   `bytes::Bytes` route an earlier plan draft used (those aren't deps → wouldn't have compiled).
@@ -53,3 +54,18 @@ implemented + validated together rather than as four separate commits.
   `rc_versions_sort_numerically` — still green, confirming the `drain` refactor is behaviorally identical).
 - `bun run test` exit 0 (TS unchanged). `bun run lint` exit 0 (biome's 1 warning is a pre-existing unused
   var in an SDK test, not this diff). `bun run lint:actions` clean (no workflow changes).
+
+## Post-impl code-review (`/code-review max --fix`)
+Three parallel review agents (correctness / cleanup / adversarial-security). Security agent: hardening
+**sound** — path-traversal airtight, OOM cap checked before `extend`, digest fail-closed & buffer-then-
+verify-then-extract ordering intact. **One real finding (correctness + cleanup agents agreed):** the
+32 MB cap + its "bb is ~5 MB" comment were wrong — `download_bb` fetches the platform **tarball**, not the
+bundled binary. **Verified empirically** (live GitHub API): `barretenberg-amd64-linux.tar.gz` = **17 MB**,
+darwin ~7.5–7.9 MB, windows 4.6 MB, avm-class ~30 MB. 32 MB was only ~1.9× the largest current asset — a
+future bloat would fail the download and **silently fall back to WASM** (a perf cliff, not a loud error).
+→ **Owner chose to bump to 64 MB** (reverses the earlier "32 MB tighter" pick, which rested on the
+falsified ~5 MB premise): matches `copy-bb.ts` `MAX_BB_TARBALL_BYTES` (the sibling build-time fetch of the
+same artifact), ~3.8× headroom, still fully bounds the OOM threat. Comment corrected with real sizes.
+**Deferred (LOW, pre-existing, out of this diff's scope):** the `.{version}.tmp` staging dir isn't cleaned
+up if `extract`/`rename` fails mid-way (self-heals on the next same-version retry; version component is
+validated so not traversal-steerable). Candidate for a follow-up RAII cleanup guard.
