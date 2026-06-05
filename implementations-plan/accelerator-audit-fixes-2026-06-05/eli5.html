@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Plan ELI5 — Hardening the bb downloader + version checks (#99)</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Hardening the bb downloader + version checks</h1>
+  <p>When you ask the accelerator to prove for an Aztec version it doesn't have, it downloads the matching
+  <code>bb</code> prover binary at runtime. Our full-codebase audit found three small-but-real bugs in that
+  path, plus two tidy-ups. None are exploitable by a random website (they're gated behind your "allow this
+  site" approval), but they're the kind of sharp edge worth filing down. This fixes them.</p>
+
+  <h2>Phases</h2>
+  <div class="phase"><h3>Phase 1 — Don't let a lying server blow up memory</h3>
+  <p>The downloader trusted the server's <em>claimed</em> size, then loaded the whole file into memory at
+  once. A malicious/broken server that <em>doesn't</em> state a size could stream gigabytes and crash the
+  app (out of memory). Fix: read the download in small chunks, counting as we go, and stop the moment it
+  passes a sane ceiling (32 MB — `bb` is ~5 MB).</p></div>
+  <div class="phase"><h3>Phase 2 — Block the "<code>..</code>" path trick</h3>
+  <p>A version name is used to build a folder path. The check that validates version names accidentally
+  allowed <code>..</code> ("go up a folder"), which in the worst case could point a "delete this folder"
+  step at the wrong directory. It's currently unreachable (another check blocks it first), but we close it
+  properly — reject <code>..</code> at the front door <em>and</em> right before the risky delete.</p></div>
+  <div class="phase"><h3>Phase 3 — Don't crash on weird error text</h3>
+  <p>When <code>bb</code> fails, we log the first 500 <em>bytes</em> of its error. If a character (like an
+  emoji) straddles byte 500, that crashes. Fix: cut at 500 <em>characters</em> instead — never mid-character.</p></div>
+  <div class="phase"><h3>Phase 4 — Two small cleanups</h3>
+  <p>Replace two hand-written "bytes → hex" loops with the standard one-liner, and simplify the
+  cache-eviction code's loop (keeping its tricky-but-correct "never evict the bundled version" rule intact —
+  the audit caught that this part is load-bearing, not redundant).</p></div>
+
+  <h2>Human context</h2>
+  <p>This came out of a whole-codebase audit (two reviewers) after the bigger security work. The accelerator
+  is otherwise high-quality; these are the genuinely <em>new</em> findings. The plan itself was then
+  reviewed by two more reviewers (codex + opus), who caught that an earlier draft of two fixes wouldn't have
+  compiled / would have broken a test — those are now corrected.</p>
+
+  <h2>Open questions</h2>
+  <ul><li>None blocking. The one judgement call — a 32 MB vs 64 MB download ceiling — you chose 32 MB (tighter); if <code>bb</code> ever grows past it, the download fails loudly and it's a one-line bump.</li></ul>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>Two seeds for the autonomous implementation session. Pick one.</p>
+    <h3>/goal (primary)</h3>
+    <pre><code>/goal All 4 phases ✓ in implementations-plan/accelerator-audit-fixes-2026-06-05/plan.md (download_bb streams via response.chunk() with a 32MB bounded counter — no full-body buffer; is_valid_version + download_bb reject bare `..`/`.`/leading-dot with extended tests; bb.rs stderr truncates char-safely incl. the condition; hex::encode dedup + versions_to_evict keeps effective_limit, only remove(0)→drain, eviction tests green); per phase LESSONS_FILE printed; /code-review max --fix applied + committed; codex post-impl audit clean (or high/critical addressed); cargo test + bun run test + bun run lint:actions exit 0.</code></pre>
+    <h3>/loop (fallback)</h3>
+    <pre><code>/loop Each turn: read implementations-plan/accelerator-audit-fixes-2026-06-05/plan.md + lessons/; git status; PR? gh pr view --json statusCheckRollup. CI? gh run watch ≤10min. Failed? fix, /codex xhigh if non-trivial, commit+push; stop after 5 fails. Phase green? mark ✓, file lessons/phase-N.md, print LESSONS_FILE, advance (OOM → `..` → stderr → simplify). Next pending? edit → cargo test + bun run test → bun run lint:actions → commit → push. All ✓? /code-review max --fix → commit → codex post-impl audit → address high/critical → stop. NEVER merge to main — surface the PR.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>
