@@ -175,6 +175,7 @@ fn truncate_stderr(stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn truncate_stderr_cuts_at_char_boundary_without_panic() {
@@ -229,6 +230,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_find_bb_respects_bb_binary_path_env() {
         // Set BB_BINARY_PATH to the current executable (guaranteed to exist)
         let exe = std::env::current_exe().unwrap();
@@ -243,6 +245,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_find_bb_ignores_nonexistent_bb_binary_path() {
         std::env::set_var("BB_BINARY_PATH", "/nonexistent/path/to/bb");
         // Should not return the nonexistent path — falls through to other checks

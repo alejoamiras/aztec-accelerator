@@ -630,6 +630,25 @@ mod tests {
         assert!(evicted.contains(&"5.0.0-nightly.20260301".to_string()));
     }
 
+    /// CHARACTERIZATION (quality-refactor Phase 0 — Q3 guard). Edge cases the AztecVersion refactor
+    /// (Q3 changes `versions_to_evict`'s signature `&[String]` → `&[AztecVersion]`) must preserve.
+    #[test]
+    fn versions_to_evict_edge_cases() {
+        // Empty cache → nothing to evict.
+        assert!(versions_to_evict(&[], "5.0.0-nightly.20260301").is_empty());
+
+        // The only cached version IS the bundled one → never evicted (even alone, even over a limit).
+        let only_bundled = vec!["5.0.0-nightly.20260301".to_string()];
+        assert!(versions_to_evict(&only_bundled, "5.0.0-nightly.20260301").is_empty());
+
+        // Non-bundled nightlies at/under the tier limit (2) all stay.
+        let under_limit = vec![
+            "5.0.0-nightly.20260301".to_string(),
+            "5.0.0-nightly.20260302".to_string(),
+        ];
+        assert!(versions_to_evict(&under_limit, "5.0.0").is_empty());
+    }
+
     #[test]
     fn download_url_format() {
         let url = download_url("5.0.0-nightly.20260307");

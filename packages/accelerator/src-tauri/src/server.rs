@@ -581,6 +581,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use serial_test::serial;
     use tower::util::ServiceExt;
 
     #[test]
@@ -909,6 +910,163 @@ mod tests {
         assert!(
             json["message"].is_string(),
             "error message should be a string"
+        );
+    }
+
+    /// CHARACTERIZATION (quality-refactor Phase 0 — Q8 wire-contract guard).
+    /// `/prove` error responses are a `{error,message}` JSON-shaped body served as **`text/plain`**
+    /// (they go out via `(StatusCode, String)`, not `axum::Json`). The SDK's `ky` client keys
+    /// `HTTPError.data` parsing on Content-Type, so a Q8 refactor that switches to `axum::Json` would
+    /// flip this to `application/json` and silently change SDK runtime behavior. Pin status + error-id
+    /// + `text/plain` for the reachable (no-bb) error paths so that regression fails loudly.
+    #[tokio::test]
+    async fn prove_error_responses_stay_text_plain_json_string() {
+        async fn assert_error(
+            app: Router,
+            req: Request<Body>,
+            want_status: StatusCode,
+            want_error: &str,
+        ) {
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), want_status, "status for {want_error}");
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            assert!(
+                ct.starts_with("text/plain"),
+                "{want_error} must stay text/plain (Q8 wire contract — SDK ky keys on it), got {ct:?}"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("error body is JSON-shaped");
+            assert_eq!(json["error"], want_error, "error id for {want_error}");
+            assert!(json["message"].is_string(), "{want_error} needs a message");
+        }
+
+        // invalid_version (400) — default state, traversal-y x-aztec-version
+        assert_error(
+            router(AppState::default()),
+            Request::builder()
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("x-aztec-version", "../../../etc/passwd")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+            "invalid_version",
+        )
+        .await;
+
+        // invalid_origin (400) — auth present, malformed Origin (rejected before popup)
+        let (_origin_tx, _origin_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(_origin_tx);
+        assert_error(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("origin", "not-a-valid-origin")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+            "invalid_origin",
+        )
+        .await;
+
+        // origin_denied (403) — auth + deny
+        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (state, auth) = auth_state_with_popup(popup_tx);
+        let auth_clone = auth.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            auth_clone.resolve("https://evil.com", crate::authorization::AuthDecision::Deny);
+        });
+        assert_error(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("origin", "https://evil.com")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+            StatusCode::FORBIDDEN,
+            "origin_denied",
+        )
+        .await;
+    }
+
+    /// CHARACTERIZATION (quality-refactor Phase 0 — Q2 ordering + Q10 status guards).
+    /// Pins the `/prove` SUCCESS path via a fake `bb` (`BB_BINARY_PATH`): 200 + `{proof}` base64 body
+    /// + `x-prove-duration-ms` header, and the on_status sequence `["Status: Proving...",
+    /// "Status: Idle"]` (the bundled path sets Proving, `StatusGuard` resets to Idle on exit).
+    /// `#[serial]` because `find_bb` reads the process-global `BB_BINARY_PATH`. Q2 (server split)
+    /// must preserve this ordering; Q10 (ServerStatus enum) must reproduce these exact strings.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn prove_success_path_and_status_sequence() {
+        use std::os::unix::fs::PermissionsExt;
+        // Fake bb: parse `-o <dir>`, write a 32-byte `proof` file there, exit 0.
+        let dir = tempfile::tempdir().unwrap();
+        let fake_bb = dir.path().join("fake-bb");
+        std::fs::write(
+            &fake_bb,
+            "#!/bin/sh\nprev=\"\"\nfor a in \"$@\"; do [ \"$prev\" = \"-o\" ] && out=\"$a\"; prev=\"$a\"; done\nprintf '%032d' 0 > \"$out/proof\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_bb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("BB_BINARY_PATH", &fake_bb);
+
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let rec = recorded.clone();
+        let state = AppState {
+            on_status: Some(std::sync::Arc::new(move |s: &str| {
+                rec.lock().unwrap().push(s.to_string())
+            })),
+            prove_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
+            ..Default::default()
+        };
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .body(Body::from(vec![0u8; 16]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("BB_BINARY_PATH");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().contains_key("x-prove-duration-ms"),
+            "success must carry x-prove-duration-ms"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["proof"].as_str().is_some_and(|s| !s.is_empty()),
+            "proof base64 present"
+        );
+
+        let seq = recorded.lock().unwrap().clone();
+        assert_eq!(
+            seq,
+            vec!["Status: Proving...".to_string(), "Status: Idle".to_string()],
+            "bundled success path status sequence (Q10 pin)"
         );
     }
 
