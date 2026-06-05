@@ -279,9 +279,20 @@ impl Drop for StatusGuard {
 
 type ProveError = (StatusCode, String);
 
+/// Typed `/prove` error body. Serialized to a JSON string and returned via `(StatusCode, String)`
+/// so the Content-Type stays `text/plain` — NOT `axum::Json` (which would flip it to
+/// `application/json` and change the SDK's `ky` error parsing). Field order (`error`, `message`)
+/// matches the prior `json!` macro, so output is byte-identical. Pinned by
+/// `prove_error_responses_stay_text_plain`.
+#[derive(serde::Serialize)]
+struct ProveErrorBody<'a> {
+    error: &'a str,
+    message: &'a str,
+}
+
 /// Build a consistent JSON error response body for the /prove endpoint.
 fn json_error(error: &str, message: &str) -> String {
-    serde_json::to_string(&json!({"error": error, "message": message})).unwrap()
+    serde_json::to_string(&ProveErrorBody { error, message }).unwrap()
 }
 
 /// Check if the request origin is authorized. Returns Ok(()) if approved.
@@ -312,11 +323,10 @@ async fn authorize_origin(
             tracing::warn!(raw_origin = %raw_origin, "Invalid Origin header (path/query/userinfo/unknown scheme); rejecting");
             return Err((
                 StatusCode::BAD_REQUEST,
-                serde_json::to_string(&json!({
-                    "error": "invalid_origin",
-                    "message": "Origin header is not a valid RFC 6454 origin",
-                }))
-                .unwrap(),
+                json_error(
+                    "invalid_origin",
+                    "Origin header is not a valid RFC 6454 origin",
+                ),
             ));
         }
     };
@@ -335,11 +345,10 @@ async fn authorize_origin(
         tracing::info!(origin = %origin, "Origin not approved (no popup available), denying");
         return Err((
             StatusCode::FORBIDDEN,
-            serde_json::to_string(&json!({
-                "error": "origin_denied",
-                "message": format!("Access denied for origin: {origin}")
-            }))
-            .unwrap(),
+            json_error(
+                "origin_denied",
+                &format!("Access denied for origin: {origin}"),
+            ),
         ));
     }
 
@@ -348,7 +357,10 @@ async fn authorize_origin(
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
         (
             StatusCode::TOO_MANY_REQUESTS,
-            serde_json::to_string(&json!({"error": "too_many_requests", "message": "Too many pending authorization requests"})).unwrap(),
+            json_error(
+                "too_many_requests",
+                "Too many pending authorization requests",
+            ),
         )
     })?;
 
@@ -365,13 +377,16 @@ async fn authorize_origin(
             auth_manager.resolve(&origin, AuthDecision::Deny);
             (
                 StatusCode::FORBIDDEN,
-                serde_json::to_string(&json!({"error": "authorization_timeout", "message": "Authorization request timed out"})).unwrap(),
+                json_error("authorization_timeout", "Authorization request timed out"),
             )
         })?
         .map_err(|_| {
             (
                 StatusCode::FORBIDDEN,
-                serde_json::to_string(&json!({"error": "authorization_cancelled", "message": "Authorization request was cancelled"})).unwrap(),
+                json_error(
+                    "authorization_cancelled",
+                    "Authorization request was cancelled",
+                ),
             )
         })?;
 
@@ -395,11 +410,10 @@ async fn authorize_origin(
             tracing::info!(origin = %origin, "Origin denied");
             Err((
                 StatusCode::FORBIDDEN,
-                serde_json::to_string(&json!({
-                    "error": "origin_denied",
-                    "message": format!("Access denied for origin: {origin}")
-                }))
-                .unwrap(),
+                json_error(
+                    "origin_denied",
+                    &format!("Access denied for origin: {origin}"),
+                ),
             ))
         }
     }
