@@ -262,6 +262,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "flate2",
+ "hex",
  "http",
  "hyper",
  "hyper-util",

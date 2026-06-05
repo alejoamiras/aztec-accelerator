@@ -130,16 +130,7 @@ pub async fn prove(
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.is_empty() {
-        let truncated = if stderr.len() > 500 {
-            format!(
-                "{}... [truncated, {} bytes total]",
-                &stderr[..500],
-                stderr.len()
-            )
-        } else {
-            stderr.to_string()
-        };
-        tracing::warn!("bb stderr:\n{truncated}");
+        tracing::warn!("bb stderr:\n{}", truncate_stderr(&stderr));
     }
 
     if !output.status.success() {
@@ -167,9 +158,46 @@ fn prepend_field_count_header(raw_proof: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Truncate `bb` stderr for logging, cutting at 500 CHARACTERS (not bytes). `from_utf8_lossy` yields
+/// valid UTF-8, but a multibyte codepoint straddling byte 500 would panic a byte slice (`&s[..500]`);
+/// char-truncation is panic-safe. Only labels `[truncated]` when it actually cut (a sub-500-char but
+/// >500-byte string is left whole, not mislabeled).
+fn truncate_stderr(stderr: &str) -> String {
+    let char_count = stderr.chars().count();
+    if char_count > 500 {
+        let head: String = stderr.chars().take(500).collect();
+        format!("{head}... [truncated, {char_count} chars total]")
+    } else {
+        stderr.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_stderr_cuts_at_char_boundary_without_panic() {
+        // 600 'é' = 1200 bytes / 600 chars → must truncate (char_count > 500); a byte slice at 500
+        // would split the 2-byte codepoint and panic.
+        let multibyte = "é".repeat(600);
+        let out = truncate_stderr(&multibyte);
+        assert!(out.contains("[truncated, 600 chars total]"), "got: {out}");
+        assert!(out.starts_with(&"é".repeat(500)));
+
+        // 300 emoji = 1200 bytes but only 300 chars → must NOT be labeled truncated.
+        let emoji = "😀".repeat(300);
+        let out = truncate_stderr(&emoji);
+        assert!(
+            !out.contains("[truncated"),
+            "short-char/long-byte must not truncate: {out}"
+        );
+        assert_eq!(out, emoji);
+
+        // Exactly 500 chars → boundary, not truncated.
+        let exact = "x".repeat(500);
+        assert_eq!(truncate_stderr(&exact), exact);
+    }
 
     #[test]
     fn test_prepend_field_count_header() {
