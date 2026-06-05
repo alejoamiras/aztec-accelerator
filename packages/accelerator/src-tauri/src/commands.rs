@@ -6,6 +6,17 @@ use std::sync::Arc;
 use tauri::Manager;
 
 pub type ConfigState = Arc<RwLock<AcceleratorConfig>>;
+
+/// Lock the config, apply `f`, then persist — the single source of truth for the lock-mutate-save
+/// pattern (replaces copy-pasted `config.write()` + `config::save` blocks). Propagates the save error.
+fn mutate_config(
+    config: &ConfigState,
+    f: impl FnOnce(&mut AcceleratorConfig),
+) -> Result<(), String> {
+    let mut cfg = config.write();
+    f(&mut cfg);
+    config::save(&cfg).map_err(|e| e.to_string())
+}
 pub type AuthState = Arc<AuthorizationManager>;
 pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
 /// Shared AppState so HTTPS servers spawned later (e.g. enabling Safari) get the full
@@ -46,10 +57,7 @@ pub fn set_speed(
     config: tauri::State<'_, ConfigState>,
     speed: config::Speed,
 ) -> Result<(), String> {
-    let mut cfg = config.write();
-    cfg.speed = speed;
-    config::save(&cfg).map_err(|e| e.to_string())?;
-    Ok(())
+    mutate_config(&config, |cfg| cfg.speed = speed)
 }
 
 #[tauri::command]
@@ -57,10 +65,7 @@ pub fn remove_approved_origin(
     config: tauri::State<'_, ConfigState>,
     origin: String,
 ) -> Result<(), String> {
-    let mut cfg = config.write();
-    cfg.approved_origins.retain(|o| o != &origin);
-    config::save(&cfg).map_err(|e| e.to_string())?;
-    Ok(())
+    mutate_config(&config, |cfg| cfg.approved_origins.retain(|o| o != &origin))
 }
 
 #[derive(serde::Serialize)]
@@ -144,9 +149,7 @@ pub async fn enable_safari_support(
 
     // Save config
     {
-        let mut cfg = config.write();
-        cfg.safari_support = true;
-        config::save(&cfg).map_err(|e| e.to_string())?;
+        mutate_config(&config, |cfg| cfg.safari_support = true)?;
     }
 
     // Start HTTPS server with the full shared state (includes auth, config, popup callback)
@@ -168,9 +171,7 @@ pub async fn enable_safari_support(
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
-    let mut cfg = config.write();
-    cfg.safari_support = false;
-    config::save(&cfg).map_err(|e| e.to_string())?;
+    mutate_config(&config, |cfg| cfg.safari_support = false)?;
     tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
     Ok(())
 }
@@ -192,9 +193,7 @@ pub fn disable_safari_support() -> Result<(), String> {
 /// Toggle auto-update preference from Settings.
 #[tauri::command]
 pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> Result<(), String> {
-    let mut cfg = config.write();
-    cfg.auto_update = Some(enabled);
-    config::save(&cfg).map_err(|e| e.to_string())?;
+    mutate_config(&config, |cfg| cfg.auto_update = Some(enabled))?;
     tracing::info!(enabled, "Auto-update preference changed via Settings");
     Ok(())
 }
@@ -214,9 +213,10 @@ pub fn respond_update_prompt(
         "update" => {
             // Save auto-update preference from the checkbox
             {
-                let mut cfg = config.write();
-                cfg.auto_update = Some(auto_update);
-                if let Err(e) = config::save(&cfg) {
+                // NOTE (Q9 / Ask B): this site intentionally SWALLOWS the save error (logs + continues)
+                // — preserved here for behavior parity. Making it propagate is a deliberate behavior
+                // change shipped as a separate, owner-surfaced PR.
+                if let Err(e) = mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update)) {
                     tracing::warn!("Failed to save auto-update preference: {e}");
                 }
             }
