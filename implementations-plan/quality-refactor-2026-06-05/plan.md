@@ -43,7 +43,7 @@ minor sweep ── last
 
 ## Phases
 
-### Phase 0 — Characterization-test harness (FOUNDATION, no production change)
+### Phase 0 — Characterization-test harness ✓ MERGED (#292–294) (FOUNDATION, no production change)
 Pin current behavior where research found gaps, so later refactors are provably behavior-preserving. PRs add tests only.
 - **Rust (server):** full `/prove` happy-path with the **REAL ordering (codex critical correction):** auth → **body-buffer → semaphore → initial `Proving` → resolve_version/download → bb::prove** → `{proof}`+`x-prove-duration-ms` (server.rs:493-537). Pin **all three orderings** — auth-before-body (DoS), body-before-semaphore, and **semaphore-before-resolve** (without it, two concurrent requests for the same uncached version race into `download_bb`'s fixed `.{version}.tmp` + `remove_dir_all`/rename — a real corruption risk Q2 must NOT reorder). Assert **exact error JSON bodies + Content-Type** for all 11 error sites (the SDK-facing wire contract — see Q8 note); `on_status` call **sequence** (`Proving`→`Downloading bb...`→`Proving...`→`Idle` on the uncached path) + `StatusGuard` reset on every exit (this is the Q10 timing pin).
 - **Rust (versions/bb):** `download_bb` atomic-rename-cleanup (tmp not stranded on extract failure); `find_bb` search-chain order; `versions_to_evict` empty/all-bundled edges.
@@ -52,22 +52,22 @@ Pin current behavior where research found gaps, so later refactors are provably 
 - **Harness (codex's concrete answer):** no live `bb`/network. Rust = in-process axum `router(AppState)` via `oneshot`, `tokio::time::pause` for the 60s timeout path, and a **fake `bb` executable via `BB_BINARY_PATH`** to characterize the `/prove` *success* path (today every shell-out is gated behind `find_bb`, so the happy path is unpinned — the fake bb closes that gap). SDK = existing mocked `fetch`/`ky` promoted to golden fixtures. The download paths stay gated behind `ACCELERATOR_DOWNLOAD_TEST`.
 - **Validation:** all new tests green on unmodified code. **Rollback:** trivial (test-only). Ship as 2 PRs (`rust-hot-path-characterization`, `sdk-contract-characterization`).
 
-### Phase 1 — Cheap safe wins (low risk, no behavior change)
+### Phase 1 — Cheap safe wins ✓ MERGED (Q15 #295, Q8 #296) (low risk, no behavior change)
 - **Q15**: `pub const AUTH_DECISION_TIMEOUT: Duration = Duration::from_secs(60)` in the lib crate; import in server.rs:361 + windows.rs:72. *(Extract Constant.)*
 - **Q8 [corrected — Content-Type matters]**: build the body via an internal `ProveErrorBody{error,message}: Serialize` but **keep returning `(StatusCode, String)` so the response stays `text/plain`** (struct → `serde_json::to_string` → existing String body). Codex caught that `axum::Json` would flip Content-Type → `application/json`, changing `ky`'s `HTTPError.data` undefined→parsed-object — an **observable SDK runtime change** even with identical bytes. So the DTO is internal only; status + body bytes + `text/plain` stay byte+header-identical. Collapse the 11 inline `json!`/`json_error`+`.unwrap()` sites onto the builder. **Char test asserts byte-identical body + status + Content-Type** (Phase 0). *(Replace Data Value with Object — internal.)* — now genuinely SAFE.
 - **Pure minors:** `MAX_BODY_SIZE` const dedup (server.rs:213/485); `bb_asset_name()` helper (versions.rs:121/331); shared `home_dir()` fixing `"."`/`"~"` divergence; drop redundant `write_pem` 2nd `0o600`; `default_config_version` → assoc const; copy-bb twin size-guard helper; collapse `VerifiedSite`/`VerifiedSitesEntry` + drop 3 dead fields.
 - **PR boundary:** 2-3 tiny PRs. **Validation:** `cargo test`/`bun run test`/lint green. **Rollback:** revert PR.
 
-### Phase 2 — Config mutation helper (Q9) [ASK: swallow]
+### Phase 2 — Config mutation helper (Q9) ✓ MERGED (#298) [ASK: swallow]
 `mutate_config(&ConfigState, impl FnOnce(&mut AcceleratorConfig)) -> Result<(),String>` for the 6 commands.rs sites + server.rs:382. **The respond_update_prompt:219 swallow is a real behavior decision** — see Ask A. *(Extract Function.)* Char test: a config mutator persists + an injected save-error path. **Rollback:** revert.
 
-### Phase 3 — ServerStatus enum (Q10, coordinated server↔tray)
+### Phase 3 — ServerStatus enum (Q10, coordinated server↔tray) ✓ MERGED (#299)
 Char test (Phase 0) pins the animation-active condition. Replace `StatusCallback=Arc<dyn Fn(&str)>` → `Arc<dyn Fn(ServerStatus)>`; emit `ServerStatus::{Idle,Downloading,Proving,Error}` (server.rs:437/465/531); main.rs:356 matches variants (+ `display_text()`/`is_busy()`). One PR (both sides). *(Replace Primitive with Object.)* Risk: animation timing — the char test + a manual tray smoke guard it. **Rollback:** revert (single PR).
 
-### Phase 4 — Value object `AztecVersion` (Q3 + 2 minors)
+### Phase 4 — Value object `AztecVersion` (Q3 + 2 minors) ✓ MERGED (#300) [followup: versions_to_evict threading + bb_asset_name]
 `AztecVersion{raw,tier,sort_key}` with validation-as-constructor; `Deref<str>`+`AsRef<str>`. Thread `&AztecVersion` through internal APIs; `&str` boundary stays at server ingress (resolve_version constructs once). Subsumes `versions_to_evict` re-parse + `bb_asset_name`. *(Introduce Value Object.)* Char tests already strong (eviction/tier/sort); add ctor-rejects-==-is_valid_version. **Rollback:** revert (touches ~5 call sites + versions.rs/bb.rs).
 
-### Phase 5 — `download_bb` split (Q11)
+### Phase 5 — `download_bb` split (Q11) ▶ IN PROGRESS (part 1 install_version_dir #301; part 2 = download_tarball/verify_digest/postprocess_*)
 After Q3. Char test (atomic-rename-cleanup) first. Extract `download_tarball` / `verify_digest` / `install_version_dir` (folds the 2 `remove_dir_all` arms) / `postprocess_unix`+`postprocess_macos`; orchestrator keeps guard+cache fast-path + the digest→extract ordering. *(Extract Method.)* **Rollback:** revert.
 
 ### Phase 6 — Crash-recovery trait (Q4) [SAFETY-CRITICAL]
