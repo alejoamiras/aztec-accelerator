@@ -65,3 +65,27 @@ All 4 SDK items above applied + 2 regression tests (25 pass, tsc+biome clean).
 
 ## Remaining (not yet audited): config.rs, bb.rs, crash_recovery.rs, versions.rs, main.rs, commands.rs,
 ## verified_sites.rs, tray.rs, windows.rs, + accelerator TS (settings UI).
+
+## Accelerator Rust — subagent sweep (config/commands/verified-sites/bb + versions/main/tray/windows)
+### NET-NEW (worth fixing)
+- **[HIGH] versions.rs:262-342 download_bb OOM** — buffers the full response via `response.bytes()`
+  BEFORE the digest check; the 500MB guard checks only advertised Content-Length (skipped when absent).
+  A malicious/compromised CDN omits Content-Length → streams GBs → OOM. Triggerable by an approved
+  origin's `x-aztec-version` → download. Fix: stream + running byte counter, abort past MAX.
+- **[MED] is_valid_version permits `..`** (server.rs:282; versions.rs) — `version_bb_path("..")` →
+  `versions/..`; download_bb's `remove_dir_all(version_dir)` could target `~/.aztec-accelerator/`
+  itself (nuke certs/config/cache). Currently UNREACHABLE (fail-closed digest rejects `..` before the
+  destructive block) but one refactor from data-loss. Fix: reject `.`/`..`/empty components at ingress.
+- **[LOW] bb.rs:133 `&stderr[..500]`** can panic on a non-UTF-8 char boundary → use char-safe truncation.
+### LOW/INFO + clean
+- versions.rs supply chain: GitHub `digest` over TLS is the only anchor (honest TODO; fail-closed
+  correct; macOS ad-hoc codesign adds no authenticity) — acceptable until upstream signs.
+- version_sort_key/eviction edge cases (LOW); tmp_dir TOCTOU (harmless via prove_semaphore).
+- CLEAN: verified_sites (no ✓ spoofing — canonicalize + reject non-ASCII pre-punycode), bb spawn (not
+  injectable, no shell), config migration, main.rs (_guard + AddrInUse classification), tray.rs, windows.rs.
+### SIMPLIFY
+- versions.rs:201 + commands.rs:124 hand-rolled hex → `hex::encode`. versions_to_evict effective_limit
+  over-complex + Vec::remove(0) O(n²). bb.rs dirs_next dead indirection. config_version dead state.
+  main.rs open_in_browser → tauri-plugin-opener.
+
+## CA redesign (certs.rs HIGH) → deep plan in progress: implementations-plan/safari-tls-ca-removal-2026-06-04
