@@ -293,6 +293,48 @@ describe("AcceleratorProver", () => {
       expect(status.protocol).toBeUndefined();
     });
 
+    // CHARACTERIZATION (quality-refactor Phase 0 — Q12 guard). Pins the reachable AcceleratorStatus
+    // discriminant invariants the discriminated-union refactor (Q12) must mirror exactly:
+    // available:true ⟹ protocol defined + version present; available:false ⟹ protocol undefined.
+    test("status discriminant invariants the Q12 union must preserve", async () => {
+      const mk = () => new AcceleratorProver({ simulator: new WASMSimulator() });
+
+      // available + compatible → protocol set, needsDownload false, version present
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+      });
+      let s = await mk().checkAcceleratorStatus();
+      expect(s.available).toBe(true);
+      expect(s.needsDownload).toBe(false);
+      expect(s.protocol).toBeDefined();
+      expect(typeof s.sdkAztecVersion).toBe("string");
+
+      // available + incompatible (SDK version absent) → needsDownload true, protocol still set
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            aztec_version: "0.0.0-other",
+            available_versions: ["0.0.0-other"],
+          }),
+      });
+      s = await mk().checkAcceleratorStatus();
+      expect(s.available).toBe(true);
+      expect(s.needsDownload).toBe(true);
+      expect(s.protocol).toBeDefined();
+
+      // unavailable (offline) → protocol undefined (the key discriminant)
+      mockFetchOffline();
+      s = await mk().checkAcceleratorStatus();
+      expect(s.available).toBe(false);
+      expect(s.protocol).toBeUndefined();
+    });
+
     test("returns available: false on non-ok health response", async () => {
       mockFetch({
         "/health": () => new Response("Internal Server Error", { status: 500 }),
