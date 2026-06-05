@@ -334,12 +334,13 @@ pub fn is_valid_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
-pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
-    // Defense-in-depth: reject an unsafe version BEFORE deriving any path or touching the network/fs
-    // (this fn + version_bb_path are public; `remove_dir_all(version_dir)` below is the dangerous sink).
-    if !is_valid_version(version) {
-        return Err(format!("Refusing to download bb for invalid version {version:?}").into());
-    }
+pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
+    // been built by `AztecVersion::parse`, which ran `is_valid_version`. An unsafe version therefore
+    // cannot reach this sink (`remove_dir_all` below) — the bypass the old sink-side recheck defended
+    // against is now structurally impossible. Deref to `&str` once so the existing path/URL/log sites
+    // stay byte-identical to the pre-Q3 callee.
+    let version: &str = version;
     let bb_path = version_bb_path(version);
     if bb_path.exists() {
         tracing::info!(version, "bb already cached");
@@ -635,17 +636,17 @@ mod tests {
         assert!(rc10.sort_key() > rc2.sort_key(), "rc.10 sorts after rc.2");
     }
 
-    /// The sink-side guard must fire BEFORE any path derivation or network/fs access, so a direct
-    /// caller (bypassing the server.rs ingress) can't steer `remove_dir_all` toward a traversal path.
-    #[tokio::test]
-    async fn download_bb_rejects_unsafe_version_at_sink() {
+    /// #99 traversal guard, post-Q3. The guard is now the `AztecVersion` constructor: `download_bb`
+    /// takes `&AztecVersion`, so an unsafe version can't be built into the type the `remove_dir_all`
+    /// sink requires — a direct caller bypassing the server.rs ingress is *structurally* unable to
+    /// steer the sink toward a traversal path (stronger than the prior runtime recheck). This pins
+    /// that the ctor rejects the exact corpus the sink-side check used to.
+    #[test]
+    fn unsafe_version_cannot_be_constructed_for_download_sink() {
         for v in ["..", ".", "../etc", ".5.0.0", "a/b"] {
-            let err = download_bb(v)
-                .await
-                .expect_err("download_bb must reject an unsafe version");
             assert!(
-                err.to_string().contains("invalid version"),
-                "expected guard rejection for {v:?}, got: {err}"
+                AztecVersion::parse(v).is_none(),
+                "ctor must reject unsafe {v:?} so it cannot reach download_bb(&AztecVersion)"
             );
         }
     }
@@ -1071,7 +1072,8 @@ mod tests {
         );
 
         // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
-        let bb_path = download_bb(&version)
+        let av = AztecVersion::parse(&version).expect("bundled version is valid");
+        let bb_path = download_bb(&av)
             .await
             .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
 
