@@ -23,6 +23,12 @@ use tokio::sync::Semaphore;
 const PORT: u16 = 59833;
 pub const HTTPS_PORT: u16 = 59834;
 
+/// How long the server waits for the user's origin-authorization decision before timing out the
+/// `/prove` request, AND how long the popup window waits before auto-denying. Two halves of one UX
+/// contract — shared so the server-side timeout and the popup auto-deny can't drift (windows.rs
+/// imports this).
+pub const AUTH_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub type StatusCallback = Arc<dyn Fn(&str) + Send + Sync>;
 pub type VersionsChangedCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -358,7 +364,7 @@ async fn authorize_origin(
         }
     }
 
-    let decision = tokio::time::timeout(Duration::from_secs(60), rx)
+    let decision = tokio::time::timeout(AUTH_DECISION_TIMEOUT, rx)
         .await
         .map_err(|_| {
             tracing::warn!(origin = %origin, "Authorization timed out");

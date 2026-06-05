@@ -3,7 +3,6 @@
 use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
 use aztec_accelerator::commands;
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// Focus a newly created window. We stay as Accessory (tray-only) rather than
@@ -69,7 +68,7 @@ pub fn show_auth_popup_window(
     let origin_owned = origin.to_string();
     let auth_manager = auth_manager.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(aztec_accelerator::server::AUTH_DECISION_TIMEOUT).await;
         // Close window if still open
         if let Some(window) = app_handle.get_webview_window(&label) {
             let _ = window.close();
