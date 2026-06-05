@@ -417,23 +417,10 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
         }
     }
 
-    // Extract to a temporary directory, then atomically rename
+    // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
+    // `install_version_dir` so the cleanup/rename is unit-testable without the network).
     let version_dir = versions_base_dir().join(version);
-    let tmp_dir = version_dir.with_file_name(format!(".{version}.tmp"));
-
-    // Clean up any leftover partial download
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
-    }
-    std::fs::create_dir_all(&tmp_dir)?;
-
-    extract_bb_from_tarball(&bytes, &tmp_dir)?;
-
-    // Atomic rename
-    if version_dir.exists() {
-        std::fs::remove_dir_all(&version_dir)?;
-    }
-    std::fs::rename(&tmp_dir, &version_dir)?;
+    install_version_dir(&version_dir, &bytes)?;
 
     let final_path = version_dir.join(bb_binary_name());
     #[cfg(unix)]
@@ -484,6 +471,43 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
 
     tracing::info!(version, "bb cached successfully");
     Ok(final_path)
+}
+
+/// Install an extracted bb tarball into `version_dir` via a temp dir + atomic rename.
+///
+/// Cleans up any stale partial-download temp dir, extracts into it, then removes any pre-existing
+/// `version_dir` and renames the temp dir into place — so the cache swap is atomic and a previously
+/// corrupt entry is replaced wholesale. The temp dir is a sibling named `.{name}.tmp` (derived from
+/// `version_dir`'s file name), matching the pre-Q11 inline behavior byte-for-byte.
+///
+/// Private + single-caller by design: `download_bb` passes `versions_base_dir().join(version)` where
+/// `version` came from a validated `AztecVersion`, so the `remove_dir_all` here never sees an
+/// attacker-derived path. Pinned by `install_version_dir_replaces_stale_and_extracts_atomically`.
+fn install_version_dir(
+    version_dir: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let name = version_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("invalid version dir (no file name)")?;
+    let tmp_dir = version_dir.with_file_name(format!(".{name}.tmp"));
+
+    // Clean up any leftover partial download
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)?;
+    }
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    extract_bb_from_tarball(bytes, &tmp_dir)?;
+
+    // Atomic rename — replace any pre-existing cache entry wholesale
+    if version_dir.exists() {
+        std::fs::remove_dir_all(version_dir)?;
+    }
+    std::fs::rename(&tmp_dir, version_dir)?;
+
+    Ok(())
 }
 
 /// Extract the `bb` binary from a gzipped tarball.
@@ -871,6 +895,59 @@ mod tests {
         assert!(bb.exists());
         let contents = std::fs::read_to_string(&bb).unwrap();
         assert!(contents.contains("echo hello"));
+    }
+
+    /// Q11 atomic-rename-cleanup: `install_version_dir` extracts into a sibling temp dir then renames
+    /// it into place, replacing any stale cache entry wholesale and leaving no temp dir behind. Pins
+    /// the behavior the pre-Q11 inline block in `download_bb` had, now that it's a testable unit.
+    #[test]
+    fn install_version_dir_replaces_stale_and_extracts_atomically() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Minimal valid tarball containing the platform bb binary name.
+        let bb_content = b"#!/bin/sh\necho fake-bb\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bb_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, bb_binary_name(), &bb_content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-test");
+
+        // Fresh install → bb present.
+        install_version_dir(&version_dir, &tarball).unwrap();
+        assert!(
+            version_dir.join(bb_binary_name()).exists(),
+            "bb extracted on fresh install"
+        );
+
+        // A stale cache entry (junk file) is replaced wholesale by the atomic rename.
+        std::fs::write(version_dir.join("STALE_JUNK"), b"old").unwrap();
+        install_version_dir(&version_dir, &tarball).unwrap();
+        assert!(
+            version_dir.join(bb_binary_name()).exists(),
+            "bb re-extracted after replace"
+        );
+        assert!(
+            !version_dir.join("STALE_JUNK").exists(),
+            "stale entry removed by atomic replace"
+        );
+
+        // No leftover temp dir after the rename.
+        assert!(
+            !version_dir.with_file_name(".5.0.0-test.tmp").exists(),
+            "temp dir cleaned up after rename"
+        );
     }
 
     #[test]
