@@ -1,7 +1,22 @@
 # Accelerator audit fixes (#99) — download OOM, `..` guard, stderr panic + simplifications
 
 **Tier:** `/plan mid` (codex + opus dual audit → final codex). Verdicts inline.
-**Status:** drafting → dual audit → approval gate.
+**Status:** ✅ **IMPLEMENTED** (branch `fix/accelerator-audit-99`). All 4 phases done; `cargo test --lib`
+122 passed / 0 failed (incl. 4 new tests + all eviction tests green). Pending: `/code-review max --fix`
++ codex post-impl audit + JS-side gates.
+
+### Phase checklist
+- [✓] **Phase 1** — `download_bb` streams via `response.chunk()` into a bounded `Vec<u8>` (32 MB cap,
+  per-chunk counter); no `response.bytes()` full-body buffer. `&bytes` (`Vec<u8>`) coerces to `&[u8]`
+  for the unchanged digest + extract.
+- [✓] **Phase 2** — `is_valid_version` **centralized into `versions.rs`** (full invariant: non-empty,
+  `<=128`, charset, **no leading dot, no `..`**); `server.rs` ingress + a new **`download_bb` sink guard**
+  (first line, before any path/network/fs) both call it. Canonical unit tests live next to the fn; added a
+  direct `download_bb_rejects_unsafe_version_at_sink` async test (codex final-pass ask).
+- [✓] **Phase 3** — `bb.rs` extracted `truncate_stderr` (char-based condition **and** slice via
+  `chars().take(500)`); unit-tested with 600×`é` (truncates) + 300×emoji (NOT mislabeled) + 500-char boundary.
+- [✓] **Phase 4** — `hex` crate (`hex::encode`) dedups `sha256_hex` + `sanitize_window_label`;
+  `versions_to_evict` O(n²) `remove(0)` loop → single `drain` (kept `effective_limit`; all eviction tests green).
 
 ## Scope (owner-confirmed)
 The net-new findings from the full-depth audit (#98), **fixes + the safe simplifications**, one contained
@@ -123,7 +138,12 @@ Unit-test with a >500-char multibyte string (repeated `é`/emoji) — asserts no
   ours-not-copy-bb.ts's. Transcript: `audit-codex.md`.
 - **Opus subagent (Plan):** needs-rework → **all adopted** (same core findings: `effective_limit`
   load-bearing, deps wouldn't compile, `bb.rs:136` cite). Transcript: `audit-opus.md`.
-- **Final fresh-context codex pass:** _pending (on the revised plan)._
+- **Final fresh-context codex pass (b91m4vjez):** **approve-with-changes** — confirmed `response.chunk()`
+  exists on pinned `reqwest 0.12.28` (no `stream` gating), the `drain` swap is exactly equivalent, and the
+  char-based stderr fix is correct. One refinement **adopted**: the sink validator must encode the **full
+  invariant** (charset + length + dots), not just dots, and run as `download_bb`'s first line — so a *direct*
+  caller can't pass slash/backslash traversal either. Implemented by centralizing `is_valid_version` into
+  `versions.rs` (single source of truth for ingress + sink) + the direct sink test. Transcript: `audit-codex.md`.
 
 ---
 
