@@ -63,6 +63,7 @@ url = "2"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
+serial_test = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
