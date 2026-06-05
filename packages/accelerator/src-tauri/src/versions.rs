@@ -63,6 +63,71 @@ impl NetworkTier {
     }
 }
 
+/// A validated Aztec version string — the Q3 value object.
+///
+/// Construction (`parse`) is the single validation gate: it runs the exact `is_valid_version`
+/// predicate, so any `&AztecVersion` that reaches a cache-path or download-URL sink is traversal-safe
+/// *by construction* — the #99 guard can no longer be bypassed by forgetting to call it. Carries the
+/// precomputed network `tier` and `sort_key` so eviction no longer re-parses each element.
+/// `Deref<Target = str>` + `AsRef<str>` expose the raw string at the `&str` boundaries that build
+/// paths/URLs, keeping those sinks byte-identical to the pre-Q3 `&str` callees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AztecVersion {
+    raw: String,
+    tier: NetworkTier,
+    sort_key: (String, u64),
+}
+
+impl AztecVersion {
+    /// Parse an untrusted version string, running the full `is_valid_version` gate. Returns `None`
+    /// for exactly the inputs `is_valid_version` rejects (pinned by
+    /// `aztec_version_parse_matches_is_valid_version`).
+    pub fn parse(version: &str) -> Option<Self> {
+        if !is_valid_version(version) {
+            return None;
+        }
+        Some(Self {
+            tier: NetworkTier::from_version(version),
+            sort_key: version_sort_key(version),
+            raw: version.to_string(),
+        })
+    }
+
+    /// The raw version string (e.g. `"5.0.0-rc.1"`).
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// The precomputed network tier (drives cache retention).
+    pub fn tier(&self) -> NetworkTier {
+        self.tier
+    }
+
+    /// The precomputed `(base, numeric-suffix)` sort key for retention ordering.
+    pub fn sort_key(&self) -> &(String, u64) {
+        &self.sort_key
+    }
+}
+
+impl std::ops::Deref for AztecVersion {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl AsRef<str> for AztecVersion {
+    fn as_ref(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl std::fmt::Display for AztecVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
 /// Returns the base directory for cached bb versions: `~/.aztec-accelerator/versions/`.
 pub fn versions_base_dir() -> PathBuf {
     dirs::home_dir()
@@ -269,12 +334,13 @@ pub fn is_valid_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
-pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
-    // Defense-in-depth: reject an unsafe version BEFORE deriving any path or touching the network/fs
-    // (this fn + version_bb_path are public; `remove_dir_all(version_dir)` below is the dangerous sink).
-    if !is_valid_version(version) {
-        return Err(format!("Refusing to download bb for invalid version {version:?}").into());
-    }
+pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
+    // been built by `AztecVersion::parse`, which ran `is_valid_version`. An unsafe version therefore
+    // cannot reach this sink (`remove_dir_all` below) — the bypass the old sink-side recheck defended
+    // against is now structurally impossible. Deref to `&str` once so the existing path/URL/log sites
+    // stay byte-identical to the pre-Q3 callee.
+    let version: &str = version;
     let bb_path = version_bb_path(version);
     if bb_path.exists() {
         tracing::info!(version, "bb already cached");
@@ -511,17 +577,76 @@ mod tests {
         );
     }
 
-    /// The sink-side guard must fire BEFORE any path derivation or network/fs access, so a direct
-    /// caller (bypassing the server.rs ingress) can't steer `remove_dir_all` toward a traversal path.
-    #[tokio::test]
-    async fn download_bb_rejects_unsafe_version_at_sink() {
+    /// Q3 value object: `AztecVersion::parse` MUST accept exactly the set `is_valid_version` accepts
+    /// (validation-as-constructor — the ctor is now the single traversal gate, so it can't drift from
+    /// the predicate it replaces). Also pins that a parsed version round-trips byte-identically
+    /// (`as_str`/`Deref`) and precomputes the same `tier`/`sort_key` the eviction + path/URL sinks
+    /// rely on — the properties that keep threading `&AztecVersion` behavior-preserving.
+    #[test]
+    fn aztec_version_parse_matches_is_valid_version() {
+        let corpus = [
+            "5.0.0",
+            "5.0.0-rc.1",
+            "5.0.0-nightly.20260307",
+            "5.0.0-devnet.20260307",
+            "4.2.0-aztecnr-rc.2",
+            "1.2.3-alpha_beta",
+            "",
+            "..",
+            ".",
+            ".foo",
+            "1..2",
+            "5.0.0.",
+            "../../../etc/passwd",
+            "5.0.0; rm -rf /",
+            "5.0.0\n",
+            "a\\b",
+        ];
+        for v in corpus {
+            assert_eq!(
+                AztecVersion::parse(v).is_some(),
+                is_valid_version(v),
+                "parse/is_valid_version disagree on {v:?}"
+            );
+        }
+        assert!(
+            AztecVersion::parse(&"a".repeat(129)).is_none(),
+            "over-long rejected identically"
+        );
+
+        // Valid versions round-trip byte-identically and precompute the same tier.
+        for v in [
+            "5.0.0",
+            "5.0.0-rc.1",
+            "5.0.0-nightly.20260307",
+            "5.0.0-devnet.20260307",
+        ] {
+            let av = AztecVersion::parse(v).expect("valid");
+            assert_eq!(av.as_str(), v, "as_str round-trip");
+            assert_eq!(&*av, v, "Deref round-trip");
+            assert_eq!(
+                av.tier(),
+                NetworkTier::from_version(v),
+                "tier matches from_version"
+            );
+        }
+        // sort_key precomputed (read so the field is exercised); rc.10 sorts after rc.2 numerically.
+        let rc10 = AztecVersion::parse("5.0.0-rc.10").unwrap();
+        let rc2 = AztecVersion::parse("5.0.0-rc.2").unwrap();
+        assert!(rc10.sort_key() > rc2.sort_key(), "rc.10 sorts after rc.2");
+    }
+
+    /// #99 traversal guard, post-Q3. The guard is now the `AztecVersion` constructor: `download_bb`
+    /// takes `&AztecVersion`, so an unsafe version can't be built into the type the `remove_dir_all`
+    /// sink requires — a direct caller bypassing the server.rs ingress is *structurally* unable to
+    /// steer the sink toward a traversal path (stronger than the prior runtime recheck). This pins
+    /// that the ctor rejects the exact corpus the sink-side check used to.
+    #[test]
+    fn unsafe_version_cannot_be_constructed_for_download_sink() {
         for v in ["..", ".", "../etc", ".5.0.0", "a/b"] {
-            let err = download_bb(v)
-                .await
-                .expect_err("download_bb must reject an unsafe version");
             assert!(
-                err.to_string().contains("invalid version"),
-                "expected guard rejection for {v:?}, got: {err}"
+                AztecVersion::parse(v).is_none(),
+                "ctor must reject unsafe {v:?} so it cannot reach download_bb(&AztecVersion)"
             );
         }
     }
@@ -947,7 +1072,8 @@ mod tests {
         );
 
         // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
-        let bb_path = download_bb(&version)
+        let av = AztecVersion::parse(&version).expect("bundled version is valid");
+        let bb_path = download_bb(&av)
             .await
             .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
 

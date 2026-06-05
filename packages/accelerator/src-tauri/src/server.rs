@@ -465,29 +465,35 @@ async fn resolve_version<'a>(
         None => return Ok(None),
     };
 
-    if !versions::is_valid_version(v) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            json_error(
-                "invalid_version",
-                &format!("Invalid x-aztec-version header (got '{v}')"),
-            ),
-        ));
-    }
-    tracing::info!(version = %v, "Requested Aztec version");
+    // Construct the validated value object ONCE at the ingress boundary (Q3). Parse failure returns
+    // the same 400 the bare `is_valid_version` check did; every downstream sink takes `&AztecVersion`,
+    // so the #99 traversal guard is enforced by construction rather than re-checked per sink.
+    let version = match versions::AztecVersion::parse(v) {
+        Some(av) => av,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                json_error(
+                    "invalid_version",
+                    &format!("Invalid x-aztec-version header (got '{v}')"),
+                ),
+            ));
+        }
+    };
+    tracing::info!(version = %version, "Requested Aztec version");
 
     let bundled = state
         .bundled_version
         .as_deref()
         .unwrap_or(env!("AZTEC_BB_VERSION"));
 
-    if v != bundled && !versions::version_bb_path(v).exists() {
-        tracing::info!(version = %v, "Version not cached, downloading");
+    if v != bundled && !versions::version_bb_path(&version).exists() {
+        tracing::info!(version = %version, "Version not cached, downloading");
         if let Some(ref cb) = state.on_status {
             cb(ServerStatus::Downloading);
         }
 
-        match versions::download_bb(v).await {
+        match versions::download_bb(&version).await {
             Ok(_) => {
                 tracing::info!(version = %v, "Download complete");
                 let bundled_owned = bundled.to_string();
