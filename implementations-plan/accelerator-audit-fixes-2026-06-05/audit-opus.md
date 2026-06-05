@@ -1,0 +1,1 @@
+opus: needs-rework — versions_to_evict effective_limit is load-bearing (keep it, only remove(0)→drain); streaming won't compile (add futures-util, drop bytes::Bytes use &buf); 32MB is OUR choice not copy-bb.ts's 64MB (fix framing); bb.rs panic at :136 guarded; ..guard + hex + single-path ingress fine.

@@ -46,6 +46,7 @@ tauri-plugin-process = "2"
 reqwest = { version = "0.12", features = ["stream", "json"] }
 flate2 = "1"
 tar = "0.4"
+hex = "0.4"
 # `zeroize`: scrub the in-memory CA private key on drop (it is never written to disk; hardens against
 # a heap/core-dump attacker recovering it from process memory). See safari-tls-ca-removal plan.
 rcgen = { version = "0.13", features = ["pem", "x509-parser", "zeroize"] }

@@ -277,16 +277,6 @@ impl Drop for StatusGuard {
     }
 }
 
-/// Validate that a version string contains only safe characters for URL interpolation.
-/// Allows digits, ASCII letters, dots, hyphens, and underscores.
-fn is_valid_version(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 128
-        && version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-}
-
 type ProveError = (StatusCode, String);
 
 /// Build a consistent JSON error response body for the /prove endpoint.
@@ -425,7 +415,7 @@ async fn resolve_version<'a>(
         None => return Ok(None),
     };
 
-    if !is_valid_version(v) {
+    if !versions::is_valid_version(v) {
         return Err((
             StatusCode::BAD_REQUEST,
             json_error(
@@ -894,26 +884,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn valid_version_strings_accepted() {
-        assert!(is_valid_version("5.0.0"));
-        assert!(is_valid_version("5.0.0-nightly.20260307"));
-        assert!(is_valid_version("5.0.0-rc.1"));
-        assert!(is_valid_version("5.0.0-devnet.20260307"));
-        assert!(is_valid_version("1.2.3-alpha_beta"));
-    }
-
-    #[test]
-    fn invalid_version_strings_rejected() {
-        assert!(!is_valid_version(""));
-        assert!(!is_valid_version("5.0.0; rm -rf /"));
-        assert!(!is_valid_version("../../../etc/passwd"));
-        assert!(!is_valid_version("5.0.0\n"));
-        assert!(!is_valid_version("5.0.0 "));
-        assert!(!is_valid_version("v5.0.0/../../malicious"));
-        assert!(!is_valid_version(&"a".repeat(129)));
-    }
-
     #[tokio::test]
     async fn prove_rejects_invalid_version_header() {
         let app = router(AppState::default());
@@ -1361,21 +1331,5 @@ mod tests {
             "Expected error status for empty body, got {}",
             response.status()
         );
-    }
-
-    #[test]
-    fn is_valid_version_rejects_path_traversal() {
-        assert!(!is_valid_version("../../../etc/passwd"));
-        assert!(!is_valid_version(""));
-        assert!(!is_valid_version(&"a".repeat(200)));
-        assert!(!is_valid_version("v1.0; rm -rf /"));
-    }
-
-    #[test]
-    fn is_valid_version_accepts_valid_formats() {
-        assert!(is_valid_version("5.0.0"));
-        assert!(is_valid_version("5.0.0-rc.1"));
-        assert!(is_valid_version("5.0.0-nightly.20260301"));
-        assert!(is_valid_version("5.0.0-devnet.1"));
     }
 }

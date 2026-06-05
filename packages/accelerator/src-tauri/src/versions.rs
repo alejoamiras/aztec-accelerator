@@ -172,9 +172,10 @@ pub fn versions_to_evict(cached: &[String], bundled_version: &str) -> Vec<String
             } else {
                 limit
             };
-            while versions.len() > effective_limit {
-                to_evict.push(versions.remove(0).clone());
-            }
+            // Drain the oldest non-bundled versions beyond the limit in one pass
+            // (replaces an O(n²) `Vec::remove(0)` loop; `effective_limit` semantics unchanged).
+            let excess = versions.len().saturating_sub(effective_limit);
+            to_evict.extend(versions.drain(0..excess).cloned());
         }
     }
     to_evict
@@ -200,13 +201,7 @@ pub fn list_cached_versions() -> Vec<String> {
 /// Compute SHA-256 hex digest of the given bytes.
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    use std::fmt::Write;
-    let hash = Sha256::digest(data);
-    let mut hex = String::with_capacity(64);
-    for b in hash {
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex
+    hex::encode(Sha256::digest(data))
 }
 
 /// Fetch the expected SHA-256 digest for a release asset from the GitHub API.
@@ -259,7 +254,27 @@ async fn fetch_github_asset_digest(
 ///
 /// Flow: check cache → GET tarball → verify digest → extract to temp dir → atomic rename → chmod.
 /// Returns the path to the cached `bb` binary.
+/// Validate a version string before it is used to build cache paths or download URLs. THE single
+/// source of truth for both the HTTP ingress (`server.rs::resolve_version`) and the `download_bb`
+/// sink. Rejects path-traversal + injection: non-empty, `<= 128` chars, ASCII alnum/`.`/`-`/`_`,
+/// no leading dot, no `..` sequence.
+pub fn is_valid_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 128
+        && !version.starts_with('.')
+        && !version.ends_with('.')
+        && !version.contains("..")
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
 pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    // Defense-in-depth: reject an unsafe version BEFORE deriving any path or touching the network/fs
+    // (this fn + version_bb_path are public; `remove_dir_all(version_dir)` below is the dangerous sink).
+    if !is_valid_version(version) {
+        return Err(format!("Refusing to download bb for invalid version {version:?}").into());
+    }
     let bb_path = version_bb_path(version);
     if bb_path.exists() {
         tracing::info!(version, "bb already cached");
@@ -278,19 +293,32 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
         .into());
     }
 
-    // Soft Content-Length guard — reject obviously oversized responses.
-    // Some CDNs use chunked encoding with no Content-Length, so skip if absent.
-    const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024; // 500MB
+    // Bounded streaming download: read the body in chunks with a running counter so a server that
+    // omits Content-Length (chunked encoding) cannot OOM us by streaming gigabytes. The advertised
+    // length is an early fail-fast; the per-chunk counter is the real ceiling. 64 MB cap: download_bb
+    // fetches the platform tarball (barretenberg-amd64-linux is ~17 MB today, avm-class builds ~30 MB),
+    // so this is ~2x the largest current asset with room to grow. Mirrors copy-bb.ts
+    // MAX_BB_TARBALL_BYTES (64 MB) — the sibling build-time fetch of the same artifact.
+    const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
     if let Some(len) = response.content_length() {
-        if len > MAX_DOWNLOAD_BYTES {
+        if len > MAX_DOWNLOAD_BYTES as u64 {
             return Err(format!(
-                "Download too large ({len} bytes, max {MAX_DOWNLOAD_BYTES}) for bb v{version}"
+                "bb v{version} download too large (advertised {len} bytes, max {MAX_DOWNLOAD_BYTES})"
             )
             .into());
         }
     }
-
-    let bytes = response.bytes().await?;
+    let mut response = response; // chunk() takes &mut self
+    let mut bytes: Vec<u8> = Vec::with_capacity(8 * 1024 * 1024);
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bb v{version} download exceeded {MAX_DOWNLOAD_BYTES} bytes — aborting"
+            )
+            .into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     tracing::info!(
         version,
         bytes = bytes.len(),
@@ -443,6 +471,60 @@ pub async fn cleanup_old_versions(bundled_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_valid_version_accepts_real_aztec_versions() {
+        for v in [
+            "5.0.0",
+            "5.0.0-rc.1",
+            "5.0.0-nightly.20260307",
+            "5.0.0-devnet.20260307",
+            "4.2.0-aztecnr-rc.2",
+            "1.2.3-alpha_beta",
+        ] {
+            assert!(is_valid_version(v), "should accept {v:?}");
+        }
+    }
+
+    #[test]
+    fn is_valid_version_rejects_traversal_injection_and_dots() {
+        for v in [
+            "",
+            "..",
+            ".",
+            ".foo",
+            "1..2",
+            "5.0.0.",
+            ".5.0.0",
+            "../../../etc/passwd",
+            "v5.0.0/../../malicious",
+            "5.0.0; rm -rf /",
+            "5.0.0\n",
+            "5.0.0 ",
+            "a\\b",
+        ] {
+            assert!(!is_valid_version(v), "should reject {v:?}");
+        }
+        assert!(
+            !is_valid_version(&"a".repeat(129)),
+            "should reject an over-long version"
+        );
+    }
+
+    /// The sink-side guard must fire BEFORE any path derivation or network/fs access, so a direct
+    /// caller (bypassing the server.rs ingress) can't steer `remove_dir_all` toward a traversal path.
+    #[tokio::test]
+    async fn download_bb_rejects_unsafe_version_at_sink() {
+        for v in ["..", ".", "../etc", ".5.0.0", "a/b"] {
+            let err = download_bb(v)
+                .await
+                .expect_err("download_bb must reject an unsafe version");
+            assert!(
+                err.to_string().contains("invalid version"),
+                "expected guard rejection for {v:?}, got: {err}"
+            );
+        }
+    }
 
     #[test]
     fn tier_classification() {
