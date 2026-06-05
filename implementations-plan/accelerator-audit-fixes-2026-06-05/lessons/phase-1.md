@@ -69,3 +69,19 @@ same artifact), ~3.8× headroom, still fully bounds the OOM threat. Comment corr
 **Deferred (LOW, pre-existing, out of this diff's scope):** the `.{version}.tmp` staging dir isn't cleaned
 up if `extract`/`rename` fails mid-way (self-heals on the next same-version retry; version component is
 validated so not traversal-steerable). Candidate for a follow-up RAII cleanup guard.
+
+## Codex post-impl audit (`/codex xhigh`, b8cefu0ex)
+**approve-with-changes**, no high/critical. Confirmed the load-bearing properties: verify-then-extract
+ordering (no bytes on disk before SHA-256 passes), cap enforced before `extend`, no temp-dir leak on
+mid-stream abort, no other `response.bytes()` in src-tauri, download serialized via the one-slot
+`/prove` semaphore, `truncate_stderr` panic-safe, `versions_to_evict` equivalent, `hex::encode` byte-
+identical lowercase. Three findings:
+- **[MED] "scope mismatch" — DISMISSED (false alarm):** codex ran `git diff main...HEAD` against a
+  **stale local `main`** (2 commits behind origin/main, missing the merged #288 CA work), so its diff swept
+  in `certs.rs`/`main.rs`. The real PR diff (`origin/main...HEAD`, what GitHub shows) is clean: only the 4
+  src files + Cargo + plan docs. Verified via `gh pr view 289 --json files`. Lesson: codex diffs against
+  LOCAL refs — keep local `main` fetched, or it sees phantom scope.
+- **[LOW] trailing `.` — FIXED:** `is_valid_version` permitted `5.0.0.` (Windows trailing-dot aliasing).
+  Added `!version.ends_with('.')` + a reject test. No real aztec version ends with `.`, so no false-reject.
+- **[LOW] `bytes.len() + chunk.len()` overflow — FIXED:** not a realistic exploit (64 MB invariant,
+  reqwest-bounded chunks) but switched to `saturating_add` to make the bound provably overflow-free.

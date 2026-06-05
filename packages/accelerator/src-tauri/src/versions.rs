@@ -262,6 +262,7 @@ pub fn is_valid_version(version: &str) -> bool {
     !version.is_empty()
         && version.len() <= 128
         && !version.starts_with('.')
+        && !version.ends_with('.')
         && !version.contains("..")
         && version
             .chars()
@@ -310,7 +311,7 @@ pub async fn download_bb(version: &str) -> Result<PathBuf, Box<dyn Error + Send 
     let mut response = response; // chunk() takes &mut self
     let mut bytes: Vec<u8> = Vec::with_capacity(8 * 1024 * 1024);
     while let Some(chunk) = response.chunk().await? {
-        if bytes.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
+        if bytes.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
             return Err(format!(
                 "bb v{version} download exceeded {MAX_DOWNLOAD_BYTES} bytes — aborting"
             )
@@ -493,6 +494,7 @@ mod tests {
             ".",
             ".foo",
             "1..2",
+            "5.0.0.",
             ".5.0.0",
             "../../../etc/passwd",
             "v5.0.0/../../malicious",
