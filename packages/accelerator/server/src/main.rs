@@ -8,7 +8,7 @@
 
 use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::config::AcceleratorConfig;
-use aztec_accelerator::server::{start, AppState};
+use aztec_accelerator::server::{start, AppState, HeadlessState};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing_subscriber::fmt;
@@ -60,9 +60,12 @@ async fn main() {
     };
 
     let state = AppState {
-        auth_manager,
-        config,
-        prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
+        core: Arc::new(HeadlessState {
+            auth_manager,
+            config,
+            prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 

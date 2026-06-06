@@ -156,7 +156,8 @@ pub async fn enable_safari_support(
     let tls_config =
         certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
     let mut state = (**shared_state).clone();
-    state.https_port = Some(HTTPS_PORT);
+    // https_port lives in the Arc'd core now (Q1); make_mut copies-on-write since the Arc is shared.
+    Arc::make_mut(&mut state.core).https_port = Some(HTTPS_PORT);
     tauri::async_runtime::spawn(async move {
         if let Err(e) = crate::server::start_https(state, tls_config).await {
             tracing::error!("HTTPS server error: {e}");

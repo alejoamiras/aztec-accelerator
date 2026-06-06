@@ -65,17 +65,35 @@ pub type VersionsChangedCallback = Arc<dyn Fn() + Send + Sync>;
 /// Callback to show the authorization popup window. Takes the origin string.
 pub type ShowAuthPopupCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The server-side core state — everything the headless `accelerator-server` needs, with no GUI
+/// coupling. Lives behind an `Arc` in [`AppState`] so cloning the state is cheap (fixes the main.rs
+/// clone-stutter) (Q1).
 #[derive(Clone, Default)]
-pub struct AppState {
-    pub on_status: Option<StatusCallback>,
+pub struct HeadlessState {
     pub bundled_version: Option<String>,
-    pub on_versions_changed: Option<VersionsChangedCallback>,
     pub https_port: Option<u16>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
-    pub show_auth_popup: Option<ShowAuthPopupCallback>,
     /// Limits concurrent proving to 1 — bb already uses all cores.
     pub prove_semaphore: Option<Arc<Semaphore>>,
+}
+
+/// Full app state: the headless `core` plus the optional GUI callbacks. `Deref`s to `core`, so the
+/// existing `state.<core_field>` reads are unchanged; the 3 GUI callbacks stay flat (each individually
+/// optional — a headless build or a focused test sets only a subset) (Q1).
+#[derive(Clone, Default)]
+pub struct AppState {
+    pub core: Arc<HeadlessState>,
+    pub on_status: Option<StatusCallback>,
+    pub on_versions_changed: Option<VersionsChangedCallback>,
+    pub show_auth_popup: Option<ShowAuthPopupCallback>,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = HeadlessState;
+    fn deref(&self) -> &HeadlessState {
+        &self.core
+    }
 }
 
 pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -774,8 +792,11 @@ mod tests {
             ..Default::default()
         };
         let state = AppState {
-            config: Some(Arc::new(RwLock::new(cfg))),
-            https_port: Some(59834),
+            core: Arc::new(HeadlessState {
+                config: Some(Arc::new(RwLock::new(cfg))),
+                https_port: Some(59834),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let app = router(state);
@@ -1084,10 +1105,13 @@ mod tests {
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let rec = recorded.clone();
         let state = AppState {
+            core: std::sync::Arc::new(HeadlessState {
+                prove_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
+                ..Default::default()
+            }),
             on_status: Some(std::sync::Arc::new(move |s: ServerStatus| {
                 rec.lock().unwrap().push(s.display_text().to_string())
             })),
-            prove_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
             ..Default::default()
         };
 
@@ -1129,7 +1153,10 @@ mod tests {
     #[tokio::test]
     async fn health_includes_available_versions() {
         let state = AppState {
-            bundled_version: Some("5.0.0-nightly.20260307".into()),
+            core: Arc::new(HeadlessState {
+                bundled_version: Some("5.0.0-nightly.20260307".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let app = router(state);
@@ -1163,12 +1190,15 @@ mod tests {
         let auth_for_state = auth.clone();
         let cfg = crate::config::AcceleratorConfig::default();
         let state = AppState {
-            auth_manager: Some(auth_for_state),
-            config: Some(Arc::new(RwLock::new(cfg))),
+            core: Arc::new(HeadlessState {
+                auth_manager: Some(auth_for_state),
+                config: Some(Arc::new(RwLock::new(cfg))),
+                prove_semaphore: Some(Arc::new(Semaphore::new(1))),
+                ..Default::default()
+            }),
             show_auth_popup: Some(Arc::new(move |origin: &str| {
                 let _ = popup_tx.send(origin.to_string());
             })),
-            prove_semaphore: Some(Arc::new(Semaphore::new(1))),
             ..Default::default()
         };
         (state, auth)
@@ -1345,8 +1375,11 @@ mod tests {
         let auth = Arc::new(crate::authorization::AuthorizationManager::new());
         let cfg = crate::config::AcceleratorConfig::default();
         let state = AppState {
-            auth_manager: Some(auth),
-            config: Some(Arc::new(RwLock::new(cfg))),
+            core: Arc::new(HeadlessState {
+                auth_manager: Some(auth),
+                config: Some(Arc::new(RwLock::new(cfg))),
+                ..Default::default()
+            }),
             show_auth_popup: None, // headless
             ..Default::default()
         };
@@ -1444,7 +1477,10 @@ mod tests {
             ..Default::default()
         };
         let state = AppState {
-            config: Some(Arc::new(RwLock::new(cfg))),
+            core: Arc::new(HeadlessState {
+                config: Some(Arc::new(RwLock::new(cfg))),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert_eq!(compute_threads(&state), None);
@@ -1457,7 +1493,10 @@ mod tests {
             ..Default::default()
         };
         let state = AppState {
-            config: Some(Arc::new(RwLock::new(cfg))),
+            core: Arc::new(HeadlessState {
+                config: Some(Arc::new(RwLock::new(cfg))),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert!(compute_threads(&state).is_some());
