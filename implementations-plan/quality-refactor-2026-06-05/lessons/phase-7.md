@@ -55,9 +55,48 @@ pub struct AppState { pub core: Arc<HeadlessState>, pub gui: Option<Arc<GuiCallb
 behavior guard) + `cargo check --bin` + `cargo check -p accelerator-server` (the headless crate consumes
 AppState — MUST stay green) + clippy. Then Q2 (server.rs module split) builds on this.
 
-**Why a focused pass, not deep-tail:** ~19 access rewrites across server.rs handlers + main.rs + the
-headless crate + Default + the gui-Option-of-struct intricacy. A compaction mid-rewrite leaves a broken
-hot path across 3 files. Implement in one focused pass with full budget; the char tests are the net.
+### RESOLVED design fork (the hard part — found while implementing)
+**The plan's `gui: Option<Arc<GuiCallbacks>>` (all-or-nothing) does NOT fit:** the gui callbacks are
+*individually* `Option` today — the Phase-0 char test `prove_success_path_and_status_sequence` sets
+`on_status` ALONE (no `show_auth_popup`/`on_versions_changed`). An all-or-nothing `GuiCallbacks` struct
+can't represent "only on_status set," so it would break that test.
+
+**Resolution — option (b), behavior-preserving + minimal-churn:**
+```rust
+#[derive(Clone, Default)]
+pub struct HeadlessState { bundled_version, https_port, config, auth_manager, prove_semaphore }  // 5 core, each Option
+#[derive(Clone, Default)]
+pub struct AppState {
+    pub core: Arc<HeadlessState>,
+    pub on_status: Option<StatusCallback>,            // gui callbacks stay FLAT on AppState (individually Option)
+    pub on_versions_changed: Option<VersionsChangedCallback>,
+    pub show_auth_popup: Option<ShowAuthPopupCallback>,
+}
+impl Deref for AppState { type Target = HeadlessState; fn deref(&self)->&HeadlessState { &self.core } }
+```
+- **`Deref<Target=HeadlessState>` ⇒ the ~12 core reads (`state.config`, `state.bundled_version`, …) are
+  UNCHANGED** (auto-deref through AppState→core for field reads). The ~7 gui reads (`state.on_status`)
+  are ALSO unchanged (flat fields). **Net: ZERO access-site rewrites.** Churn = struct def + Deref +
+  construction sites only.
+- This deviates from the plan's `gui: Option<Arc<GuiCallbacks>>` (which doesn't fit the per-field-Option
+  reality) but delivers the plan's actual VALUE: the headless crate uses `HeadlessState`; cloning AppState
+  Arc-clones the 5 core fields (the clone-stutter fix). Grouping the 3 gui callbacks into a struct adds the
+  per-field-Option complexity for ~no benefit — rejected.
+- **Construction edits (the only churn):** GUI (main.rs:347): core fields → `Arc::new(HeadlessState{…})`,
+  3 callbacks stay flat. Headless (server/src/main.rs:62): `core: Arc::new(HeadlessState{auth_manager,
+  config, prove_semaphore, ..Default})`, `..Default`. **main.rs:377 `state_with_https.https_port = x`** →
+  `Arc::make_mut(&mut state_with_https.core).https_port = x` (the ONLY post-construction core mutation;
+  impl `Deref` but NOT `DerefMut`, so this one site is explicit). ~8 test sites that set a core field
+  (e.g. `prove_semaphore`) move it into a `HeadlessState{…}`; sites using only `AppState::default()` or
+  gui fields are unchanged.
+
+**Validation:** `cargo test --lib` (Phase-0 char tests = the behavior net) + `cargo check --bin` +
+`cargo check -p accelerator-server` (headless MUST stay green) + clippy.
+
+**Why a focused pass, not deep-tail:** even bounded to construction sites, it's ~12 coordinated edits
+across server.rs + main.rs + the headless crate + ~8 tests; a compaction mid-rewrite leaves a broken hot
+path across 3 files. The DESIGN (above) is now complete + the access-churn eliminated via Deref — the
+implementation is mechanical, so the next focused pass executes it fast with the char tests as the net.
 
 ## Remaining P7
 Q1 (designed↑) → Q2 (server.rs → bind.rs/tls.rs/handlers/, depends on Q1) → Q6 (UpdateCoordinator,

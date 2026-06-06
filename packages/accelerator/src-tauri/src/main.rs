@@ -6,7 +6,7 @@ mod windows;
 
 use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
-use aztec_accelerator::server::{AppState, ServerStatus, HTTPS_PORT};
+use aztec_accelerator::server::{AppState, HeadlessState, ServerStatus, HTTPS_PORT};
 use aztec_accelerator::{certs, commands, config, log_dir, verified_sites};
 use parking_lot::RwLock;
 use std::path::Path;
@@ -81,7 +81,7 @@ fn try_start_https(state: &AppState) -> Option<u16> {
     };
 
     let mut state_for_https = state.clone();
-    state_for_https.https_port = Some(HTTPS_PORT);
+    Arc::make_mut(&mut state_for_https.core).https_port = Some(HTTPS_PORT);
     tauri::async_runtime::spawn(async move {
         if let Err(e) = aztec_accelerator::server::start_https(state_for_https, tls_config).await {
             tracing::error!("HTTPS server error: {e}");
@@ -345,6 +345,13 @@ fn main() {
 
             let is_animating_for_status = is_animating.clone();
             let state = AppState {
+                core: Arc::new(HeadlessState {
+                    bundled_version: Some(bundled_version),
+                    https_port: None,
+                    config: Some(config_state.clone()),
+                    auth_manager: Some(auth_manager.clone()),
+                    prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
+                }),
                 on_status: Some(Arc::new(move |status: ServerStatus| {
                     let text = status.display_text();
                     tracing::info!(text, "on_status callback fired");
@@ -356,13 +363,8 @@ fn main() {
                     }
                     is_animating_for_status.store(status.is_busy(), Ordering::Release);
                 })),
-                bundled_version: Some(bundled_version),
                 on_versions_changed: Some(on_versions_changed),
-                https_port: None,
-                config: Some(config_state.clone()),
-                auth_manager: Some(auth_manager.clone()),
                 show_auth_popup: Some(show_auth_popup),
-                prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
             };
 
             // ── HTTPS startup ──
@@ -374,7 +376,7 @@ fn main() {
 
             // Manage the shared state for Tauri commands (e.g. enable_safari_support)
             let mut state_with_https = state.clone();
-            state_with_https.https_port = https_port;
+            Arc::make_mut(&mut state_with_https.core).https_port = https_port;
             app.manage::<SharedAppState>(Arc::new(state_with_https));
 
             // ── Startup diagnostics ──
@@ -394,7 +396,7 @@ fn main() {
 
             // ── HTTP server ──
             let mut http_state = state;
-            http_state.https_port = https_port;
+            Arc::make_mut(&mut http_state.core).https_port = https_port;
             let status_for_server = status_for_diagnostics;
             let server_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
