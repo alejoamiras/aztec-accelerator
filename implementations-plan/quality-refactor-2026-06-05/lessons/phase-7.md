@@ -139,3 +139,27 @@ each slice. Result: server.rs is now thin **router + start + health + shared err
 **Cross-cut gotcha (unchanged from prior phases):** SSH transport (port 22) keeps dropping mid-run → push via
 `git -c credential.helper="!gh auth git-credential" push https://github.com/<owner>/<repo>.git <br>:<br>`
 (the SSH remote URL fails; HTTPS + gh helper works). 1Password commit-signing also flakes → `-c commit.gpgsign=false`.
+
+---
+
+## Q7 (Safari recovery consolidation) — SCOPED, execution plan (branch refactor/q7-safari)
+
+**Code traced:**
+- `commands.rs:139` `enable_safari_support` (macOS): generate_and_save → install_ca_trust (Keychain prompt) → save cfg → load_rustls_config → spawn start_https. The *create* path.
+- `main.rs:54` `try_start_https`: the *startup verify-or-recover* path. cfg.safari_support gate → certs_exist? (miss→reset) → is_ca_trusted? (**untrusted→return None, NO reset = the gap**) → load_rustls_config (broken→reset). Spawns start_https + a background regenerate_leaf_if_expiring thread (OFF startup so the Keychain prompt can't block launch — main.rs:91-93).
+- `main.rs:105` `reset_safari_support`: sets cfg.safari_support=false + save (so the user re-enables → fresh trusted set).
+- `server.rs` health advertises `https_port` when `state.https_port.is_some() || cfg.safari_support` — i.e. on the CONFIG flag, so an untrusted-skip still advertises a dead port to the SDK.
+
+**The bug (Ask-B fix to ship):** the untrusted-CA branch is the only failure mode that doesn't recover → HTTPS silently dead every launch while health still claims a port.
+
+**Engineering call (mirrors the Q6 cut rationale):** certs.rs already cohesively owns the cert lifecycle ("one-sentence responsibility → don't split"). So Q7 = focused **Extract-Method + the fix**, NOT a heavyweight `SafariSupportManager` Extract-Class. Concretely: pull the verify-or-recover decision out of main.rs into a testable helper (e.g. `certs::validate_for_https() -> ValidateOutcome { Ok(TlsConfig) | Recover | Skip }`) so the decision matrix becomes unit-testable, then `try_start_https` maps Recover→reset_safari_support uniformly across all three failure modes.
+
+**Execution order (next fresh-context turn):**
+1. Char tests FIRST: pin the current decision matrix at the helper level (miss→reset, broken→reset, untrusted→**currently** no-reset) so the diff shows the untrusted row flipping to reset deliberately.
+2. Extract `certs::validate_for_https` (or equiv) + unit tests for all rows.
+3. `try_start_https` calls it; untrusted now recovers (reset) like the others.
+4. Decide health-signal honesty (advertise `https_port` only when HTTPS actually bound) — likely fold in OR note as a separate minor.
+5. cargo test --lib + clippy -D warnings + headless check.
+6. PR: flag the **behavior change to the owner** (Ask B) — reset-on-untrusted means cfg flips off when Keychain trust is lost (re-enable re-prompts); proof is manual/integration (Keychain-dependent), note the gap.
+
+**Test-surface caveat (like Q6):** the orchestration is Keychain/filesystem-dependent; the helper extraction is what MAKES the decision unit-testable. The end-to-end proof is the rc/manual macOS check, not a unit test.
