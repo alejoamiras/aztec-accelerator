@@ -13,7 +13,7 @@ use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::authorization::{AuthDecision, AuthorizationManager};
+use crate::authorization::AuthorizationManager;
 use crate::{bb, config, versions};
 use parking_lot::RwLock;
 use tokio::sync::Semaphore;
@@ -24,6 +24,8 @@ mod tls;
 pub use tls::start_https;
 mod probe;
 pub use probe::healthy_aztec_on_port;
+mod auth;
+use auth::authorize_origin;
 
 const PORT: u16 = 59833;
 pub const HTTPS_PORT: u16 = 59834;
@@ -206,130 +208,6 @@ struct ProveErrorBody<'a> {
 /// Build a consistent JSON error response body for the /prove endpoint.
 fn json_error(error: &str, message: &str) -> String {
     serde_json::to_string(&ProveErrorBody { error, message }).unwrap()
-}
-
-/// Check if the request origin is authorized. Returns Ok(()) if approved.
-async fn authorize_origin(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), ProveError> {
-    let auth_manager = match state.auth_manager {
-        Some(ref am) => am,
-        None => return Ok(()), // No auth_manager → auto-approve all (headless mode)
-    };
-
-    let raw_origin = match headers
-        .get(http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(o) => o,
-        // No Origin header → auto-approve. Browsers always send Origin on cross-origin
-        // requests, so this only applies to curl/scripts/same-origin. Non-browser clients
-        // can bypass auth by omitting Origin, but this is inherent to localhost services —
-        // CORS/Origin is a browser-only mechanism, not a general access control boundary.
-        None => return Ok(()),
-    };
-
-    let origin = match crate::authorization::canonicalize_origin(raw_origin) {
-        Some(canon) => canon,
-        None => {
-            tracing::warn!(raw_origin = %raw_origin, "Invalid Origin header (path/query/userinfo/unknown scheme); rejecting");
-            return Err((
-                StatusCode::BAD_REQUEST,
-                json_error(
-                    "invalid_origin",
-                    "Origin header is not a valid RFC 6454 origin",
-                ),
-            ));
-        }
-    };
-
-    let approved = state.config.as_ref().is_some_and(|cfg| {
-        let cfg = cfg.read();
-        AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
-    });
-
-    if approved {
-        return Ok(());
-    }
-
-    // No popup callback = headless mode → deny immediately
-    if state.show_auth_popup.is_none() {
-        tracing::info!(origin = %origin, "Origin not approved (no popup available), denying");
-        return Err((
-            StatusCode::FORBIDDEN,
-            json_error(
-                "origin_denied",
-                &format!("Access denied for origin: {origin}"),
-            ),
-        ));
-    }
-
-    tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-    let (rx, is_first) = auth_manager.request(&origin).map_err(|_| {
-        tracing::warn!(origin = %origin, "Too many pending authorization requests");
-        (
-            StatusCode::TOO_MANY_REQUESTS,
-            json_error(
-                "too_many_requests",
-                "Too many pending authorization requests",
-            ),
-        )
-    })?;
-
-    if is_first {
-        if let Some(ref show_popup) = state.show_auth_popup {
-            show_popup(&origin);
-        }
-    }
-
-    let decision = tokio::time::timeout(AUTH_DECISION_TIMEOUT, rx)
-        .await
-        .map_err(|_| {
-            tracing::warn!(origin = %origin, "Authorization timed out");
-            auth_manager.resolve(&origin, AuthDecision::Deny);
-            (
-                StatusCode::FORBIDDEN,
-                json_error("authorization_timeout", "Authorization request timed out"),
-            )
-        })?
-        .map_err(|_| {
-            (
-                StatusCode::FORBIDDEN,
-                json_error(
-                    "authorization_cancelled",
-                    "Authorization request was cancelled",
-                ),
-            )
-        })?;
-
-    match decision {
-        AuthDecision::Allow { remember } => {
-            tracing::info!(origin = %origin, remember, "Origin authorized");
-            if remember {
-                if let Some(ref cfg_lock) = state.config {
-                    let mut cfg = cfg_lock.write();
-                    if !cfg.approved_origins.contains(&origin) {
-                        cfg.approved_origins.push(origin);
-                        if let Err(e) = config::save(&cfg) {
-                            tracing::warn!(error = %e, "Failed to persist approved origin");
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        AuthDecision::Deny => {
-            tracing::info!(origin = %origin, "Origin denied");
-            Err((
-                StatusCode::FORBIDDEN,
-                json_error(
-                    "origin_denied",
-                    &format!("Access denied for origin: {origin}"),
-                ),
-            ))
-        }
-    }
 }
 
 /// Validate and resolve the requested Aztec version. Downloads the bb binary if needed.
