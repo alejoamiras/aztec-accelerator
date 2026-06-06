@@ -44,7 +44,7 @@ pub fn find_bb(version: Option<&str>) -> Result<PathBuf, String> {
     }
 
     // 3. ~/.bb/bb (bbup install location)
-    if let Some(home) = dirs_next().or_else(home_dir_fallback) {
+    if let Some(home) = dirs::home_dir().or_else(home_dir_fallback) {
         let bbup_path = home.join(".bb").join(versions::bb_binary_name());
         if bbup_path.exists() {
             return Ok(bbup_path);
@@ -61,10 +61,6 @@ pub fn find_bb(version: Option<&str>) -> Result<PathBuf, String> {
     }
 
     Err("bb binary not found. Install via bbup or bundle as sidecar.".to_string())
-}
-
-fn dirs_next() -> Option<PathBuf> {
-    dirs::home_dir()
 }
 
 fn home_dir_fallback() -> Option<PathBuf> {

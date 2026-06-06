@@ -15,22 +15,59 @@ fn focus_window(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// Open or focus the Settings window.
-pub fn open_settings_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.set_focus();
-        return;
+/// Parameters for [`open_or_focus_window`]. `url`, `label` are owned/borrowed as the call site needs
+/// (the auth/update labels + URLs are built per-call; settings' are static).
+struct WindowConfig<'a> {
+    label: &'a str,
+    url: String,
+    title: &'a str,
+    width: f64,
+    height: f64,
+    always_on_top: bool,
+    /// Focus an ALREADY-open window with this label? Settings does (user re-clicked "Settings");
+    /// the auth/update popups don't (they just stay put). Preserves prior per-window behavior.
+    focus_if_open: bool,
+}
+
+/// Open a window with the given config, or handle an already-open one. Returns `true` iff a window
+/// with `config.label` was ALREADY open (focused first iff `focus_if_open`); `false` if none existed,
+/// in which case a new one is built + focused. The bool lets callers (auth) do post-build work only
+/// for a freshly-handled window. Dedups the get-or-build pattern across the 3 windows.
+fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> bool {
+    if let Some(window) = app.get_webview_window(config.label) {
+        if config.focus_if_open {
+            let _ = window.set_focus();
+        }
+        return true;
     }
     if let Ok(window) =
-        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-            .title("Aztec Accelerator Settings")
-            .inner_size(500.0, 520.0)
+        WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url.into()))
+            .title(config.title)
+            .inner_size(config.width, config.height)
             .resizable(false)
             .center()
+            .always_on_top(config.always_on_top)
             .build()
     {
         focus_window(&window);
     }
+    false
+}
+
+/// Open or focus the Settings window.
+pub fn open_settings_window(app: &AppHandle) {
+    open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "settings",
+            url: "settings.html".to_string(),
+            title: "Aztec Accelerator Settings",
+            width: 500.0,
+            height: 520.0,
+            always_on_top: false,
+            focus_if_open: true,
+        },
+    );
 }
 
 /// Show the authorization popup for an unknown origin.
@@ -43,20 +80,20 @@ pub fn show_auth_popup_window(
     auth_manager: &Arc<AuthorizationManager>,
 ) {
     let label = format!("auth-{}", commands::sanitize_window_label(origin));
-    if app.get_webview_window(&label).is_some() {
-        return; // popup already open for this origin
-    }
-
     let url = format!("authorize.html?origin={}", urlencoding::encode(origin));
-    if let Ok(window) = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Authorize Site")
-        .inner_size(400.0, 300.0)
-        .resizable(false)
-        .center()
-        .always_on_top(true)
-        .build()
-    {
-        focus_window(&window);
+    if open_or_focus_window(
+        app,
+        WindowConfig {
+            label: &label,
+            url,
+            title: "Authorize Site",
+            width: 400.0,
+            height: 300.0,
+            always_on_top: true,
+            focus_if_open: false,
+        },
+    ) {
+        return; // popup already open for this origin — don't spawn a duplicate timeout
     }
 
     // Spawn 60s timeout — always resolve with Deny if still pending.
@@ -85,22 +122,21 @@ pub fn show_auth_popup_window(
 /// `webdriver` builds — so this is too, to keep those builds warning-clean.
 #[cfg(not(feature = "webdriver"))]
 pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_version: &str) {
-    if app.get_webview_window("update-prompt").is_some() {
-        return;
-    }
-
     let url = format!(
         "update-prompt.html?current={}&version={}",
         urlencoding::encode(current_version),
         urlencoding::encode(new_version)
     );
-    if let Ok(window) = WebviewWindowBuilder::new(app, "update-prompt", WebviewUrl::App(url.into()))
-        .title("Aztec Accelerator Update")
-        .inner_size(420.0, 280.0)
-        .resizable(false)
-        .center()
-        .build()
-    {
-        focus_window(&window);
-    }
+    open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "update-prompt",
+            url,
+            title: "Aztec Accelerator Update",
+            width: 420.0,
+            height: 280.0,
+            always_on_top: false,
+            focus_if_open: false,
+        },
+    );
 }

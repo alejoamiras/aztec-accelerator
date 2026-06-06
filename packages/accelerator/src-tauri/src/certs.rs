@@ -399,6 +399,37 @@ pub fn is_ca_trusted() -> bool {
 mod tests {
     use super::*;
 
+    /// CA / leaf validity used by the test fixtures, mirroring production (`generate_certs`).
+    const TEST_CA_VALIDITY_DAYS: i64 = 3650;
+    const TEST_LEAF_VALIDITY_DAYS: i64 = 825;
+
+    /// Build a self-signed test CA + a `localhost` leaf signed by it. Dedups the cert-building
+    /// boilerplate shared by `generate_ca_and_leaf_certs` and `leaf_cert_loads_into_rustls`.
+    fn build_test_ca_and_leaf() -> (rcgen::Certificate, KeyPair, rcgen::Certificate, KeyPair) {
+        let now = OffsetDateTime::now_utc();
+        let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "Test CA");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.not_before = now;
+        ca_params.not_after = now + time::Duration::days(TEST_CA_VALIDITY_DAYS);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut leaf_params = CertificateParams::default();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
+        leaf_params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        leaf_params.not_before = now;
+        leaf_params.not_after = now + time::Duration::days(TEST_LEAF_VALIDITY_DAYS);
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+
+        (ca_cert, ca_key, leaf_cert, leaf_key)
+    }
+
     #[test]
     fn certs_dir_is_under_home() {
         let dir = certs_dir();
@@ -412,27 +443,7 @@ mod tests {
 
     #[test]
     fn generate_ca_and_leaf_certs() {
-        let now = OffsetDateTime::now_utc();
-        let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut ca_params = CertificateParams::default();
-        ca_params
-            .distinguished_name
-            .push(DnType::CommonName, "Test CA");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.not_before = now;
-        ca_params.not_after = now + time::Duration::days(3650);
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut leaf_params = CertificateParams::default();
-        leaf_params
-            .distinguished_name
-            .push(DnType::CommonName, "localhost");
-        leaf_params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
-        leaf_params.not_before = now;
-        leaf_params.not_after = now + time::Duration::days(825);
-
-        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+        let (ca_cert, ca_key, leaf_cert, leaf_key) = build_test_ca_and_leaf();
 
         // Verify PEM output is valid
         assert!(ca_cert.pem().starts_with("-----BEGIN CERTIFICATE-----"));
@@ -449,27 +460,7 @@ mod tests {
     fn leaf_cert_loads_into_rustls() {
         // Install a default crypto provider — needed when both aws-lc-rs and ring are available
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let now = OffsetDateTime::now_utc();
-        let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut ca_params = CertificateParams::default();
-        ca_params
-            .distinguished_name
-            .push(DnType::CommonName, "Test CA");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.not_before = now;
-        ca_params.not_after = now + time::Duration::days(3650);
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut leaf_params = CertificateParams::default();
-        leaf_params
-            .distinguished_name
-            .push(DnType::CommonName, "localhost");
-        leaf_params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
-        leaf_params.not_before = now;
-        leaf_params.not_after = now + time::Duration::days(825);
-
-        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+        let (_ca_cert, _ca_key, leaf_cert, leaf_key) = build_test_ca_and_leaf();
 
         let cert_pem = leaf_cert.pem();
         let key_pem = leaf_key.serialize_pem();
