@@ -293,6 +293,25 @@ describe("AcceleratorProver", () => {
       expect(status.protocol).toBeUndefined();
     });
 
+    test("reachable host with malformed JSON → unavailable reason 'error', not 'offline'", async () => {
+      // Post-impl audit guard (codex): a 200 with an unparseable body means the host ANSWERED
+      // (reachable) — so reason must be "error" (carrying the protocol), not "offline" (which is
+      // documented as both probes failing). The available:false → WASM-fallback outcome is unchanged.
+      mockFetch({
+        "/health": () => new Response("not valid json {{{", { status: 200 }),
+      });
+
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const status = await prover.checkAcceleratorStatus();
+
+      expect(status.available).toBe(false);
+      if (status.available) throw new Error("expected unavailable");
+      expect(status.reason).toBe("error");
+      if (status.reason === "error") {
+        expect(status.protocol).toBeDefined();
+      }
+    });
+
     // CHARACTERIZATION (quality-refactor Phase 0 — Q12 guard). Pins the reachable AcceleratorStatus
     // discriminant invariants the discriminated-union refactor (Q12) must mirror exactly:
     // available:true ⟹ protocol defined + version present; available:false ⟹ protocol undefined.
