@@ -40,3 +40,24 @@ only the STABLE SDK publish is joint.
 4. Migrate playground (aztec.ts + ascii-animation.ts) + skill doc — `bun run --cwd packages/playground build` + monorepo typecheck is the net.
 5. Add MIGRATION.md + the publish-guard.
 6. `bun run test` + `bun run lint` + (SDK build) green. PR. Then Claude cuts the SDK **rc** (autonomous-allowed).
+
+---
+
+## Q12 progress — AcceleratorStatus union DONE (commit 53ddd3a); phase-event = owner call
+
+### DONE: AcceleratorStatus discriminated union (high value — fixed real illegal states)
+Enumerated the 5 reachable states from `#probeAndParseHealth` → modelled as 4 variants:
+- `{ available:true, needsDownload, acceleratorVersion?, availableVersions?, sdkAztecVersion?, protocol }` (legacy + multi-version collapse here)
+- `{ available:false, reason:"offline", sdkAztecVersion? }`
+- `{ available:false, reason:"error", protocol, sdkAztecVersion? }`
+- `{ available:false, reason:"version-mismatch", acceleratorVersion, protocol, sdkAztecVersion? }`
+The 3 `available:false` producers swapped `needsDownload:false`→`reason`; the 2 `available:true` producers already matched. Internal `createChonkProof` consumer narrows (`if(!status.available)`) instead of destructuring. **HTTP wire UNCHANGED.** SDK build + `test:lint` typecheck + 26 unit tests + **playground build** all green (playground does NOT consume AcceleratorStatus — zero migration needed). committed `53ddd3a` on `refactor/q12-sdk-break`.
+
+### phase-event union — RECOMMEND CUT/DEFER (marginal value, mechanical churn) — SURFACE to owner
+`onPhase(phase: AcceleratorPhase, data?)` — 17 SDK call sites, only **1** carries data (`("proved",{durationMs})` L442). Converting `AcceleratorPhase` (string) → object union FIGHTS the playground: `ascii-animation.ts` does `type AnimationPhase = AcceleratorPhase | "app:simulate"|...` + `switch(phase){case "detect":...}` — a string model. Viable design = KEEP `AcceleratorPhase` string, ADD `AcceleratorPhaseEvent = {phase:Exclude<...,"proved">} | {phase:"proved";durationMs}` for the callback (~25 mechanical edits: 17 SDK + signature + ~5 aztec.ts wiring that extract `event.phase`). **Value = tie durationMs to "proved" only; cost = ~25 edits + a 2nd phase type (arguably MORE complex).** Like Q6: recommend the owner decide cut-vs-do at the Q12 PR.
+
+### Remaining Q12 finalization (next turn)
+1. MIGRATION.md (packages/sdk): AcceleratorStatus before→after + narrow-on-`available` codemod note (+ phase-event if owner keeps it).
+2. Skill doc: grep `aztec-accelerator` skill for AcceleratorStatus mentions; update.
+3. **publish-guard (Ask E):** freeze `_aztec-update.yml` (or a guard) so the SDK can't auto-publish the break mid-window. REQUIRED before pushing the Q12 PR.
+4. Push `refactor/q12-sdk-break` + PR (flag BREAKING + the phase-event cut question). Then Claude cuts the SDK **rc**.
