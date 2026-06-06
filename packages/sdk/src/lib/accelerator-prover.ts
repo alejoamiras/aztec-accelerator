@@ -42,21 +42,54 @@ export interface AcceleratorProverOptions {
   onPhase?: (phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void;
 }
 
-/** Status of the local native accelerator, returned by {@link AcceleratorProver.checkAcceleratorStatus}. */
-export interface AcceleratorStatus {
-  /** Whether the accelerator is reachable and compatible. */
-  available: boolean;
-  /** Whether the accelerator needs to download `bb` for the SDK's Aztec version. */
-  needsDownload: boolean;
-  /** Accelerator version string from the `/health` endpoint (legacy `aztec_version` field). */
-  acceleratorVersion?: string;
-  /** Aztec versions the accelerator already has cached. */
-  availableVersions?: string[];
-  /** The Aztec version this SDK expects (from its `@aztec/stdlib` dependency). */
-  sdkAztecVersion?: string;
-  /** Which protocol was used to reach the accelerator (`"http"` or `"https"`). */
-  protocol?: "http" | "https";
-}
+/** Protocol used to reach the accelerator's `/health` + `/prove` endpoints. */
+export type AcceleratorProtocol = "http" | "https";
+
+/**
+ * Status of the local native accelerator, returned by {@link AcceleratorProver.checkAcceleratorStatus}.
+ *
+ * A discriminated union on `available` (Q12). The prior flat interface let illegal field combinations
+ * typecheck (e.g. `available: false` carrying `availableVersions`, or `needsDownload` on an offline
+ * result). Narrow on `available` first — and on `reason` for the unavailable cases — to access only the
+ * fields valid for that state.
+ */
+export type AcceleratorStatus =
+  | {
+      /** The accelerator is reachable and version-compatible. */
+      available: true;
+      /** Whether it must download `bb` for the SDK's Aztec version before it can prove. */
+      needsDownload: boolean;
+      /** Accelerator version from `/health` (`aztec_version`); absent on the multi-version protocol. */
+      acceleratorVersion?: string;
+      /** Aztec versions the accelerator already has cached (multi-version protocol). */
+      availableVersions?: string[];
+      /** The Aztec version this SDK expects (from its `@aztec/stdlib` dependency). */
+      sdkAztecVersion?: string;
+      /** Which protocol reached the accelerator. */
+      protocol: AcceleratorProtocol;
+    }
+  | {
+      available: false;
+      /** Both the HTTP and HTTPS probes failed — the accelerator isn't running. */
+      reason: "offline";
+      sdkAztecVersion?: string;
+    }
+  | {
+      available: false;
+      /** Reachable, but `/health` returned a non-OK HTTP status. */
+      reason: "error";
+      sdkAztecVersion?: string;
+      protocol: AcceleratorProtocol;
+    }
+  | {
+      available: false;
+      /** Reachable, but its Aztec version doesn't match the SDK's (legacy single-version protocol). */
+      reason: "version-mismatch";
+      /** The mismatched accelerator version. */
+      acceleratorVersion: string;
+      sdkAztecVersion?: string;
+      protocol: AcceleratorProtocol;
+    };
 
 /**
  * Create a lazy-loading proxy for CircuitSimulator that dynamically imports
@@ -260,7 +293,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         // would permanently set the wrong protocol for subsequent /prove calls.
         return cacheAndReturn({
           available: false,
-          needsDownload: false,
+          reason: "error",
           sdkAztecVersion,
           protocol,
         });
@@ -306,7 +339,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           });
           return cacheAndReturn({
             available: false,
-            needsDownload: false,
+            reason: "version-mismatch",
             acceleratorVersion,
             sdkAztecVersion,
             protocol,
@@ -322,7 +355,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       });
     } catch {
       this.#acceleratorProtocol = null;
-      return cacheAndReturn({ available: false, needsDownload: false, sdkAztecVersion });
+      return cacheAndReturn({ available: false, reason: "offline", sdkAztecVersion });
     }
   }
 
@@ -337,9 +370,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     logger.info("Using accelerated prover");
 
     this.#onPhase?.("detect");
-    const { available, needsDownload } = await this.checkAcceleratorStatus();
+    const status = await this.checkAcceleratorStatus();
 
-    if (!available) {
+    if (!status.available) {
       logger.info("Accelerator not available, falling back to WASM");
       this.#onPhase?.("fallback");
       const proof = await this.#proveLocally(executionSteps, "Local proof completed");
@@ -347,7 +380,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       return proof;
     }
 
-    if (needsDownload) {
+    if (status.needsDownload) {
       logger.info("Accelerator needs to download bb for this version");
       this.#onPhase?.("downloading");
     }
