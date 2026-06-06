@@ -374,10 +374,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
     if (!status.available) {
       logger.info("Accelerator not available, falling back to WASM");
-      this.#onPhase?.("fallback");
-      const proof = await this.#proveLocally(executionSteps, "Local proof completed");
-      this.#onPhase?.("receive");
-      return proof;
+      return this.#fallbackToWasm(executionSteps, "Local proof completed");
     }
 
     if (status.needsDownload) {
@@ -422,13 +419,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           message: body?.message,
         });
         this.#onPhase?.("denied");
-        this.#onPhase?.("fallback");
-        const proof = await this.#proveLocally(
-          executionSteps,
-          "Local proof completed after denial",
-        );
-        this.#onPhase?.("receive");
-        return proof;
+        return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
       }
       throw err;
     }
@@ -461,6 +452,20 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     const durationMs = Math.round(performance.now() - start);
     logger.info(logLabel, { durationMs });
     this.#onPhase?.("proved", { durationMs });
+    return proof;
+  }
+
+  /**
+   * WASM fallback wrapper: emit "fallback" → run the local prover → emit "receive". Shared by the
+   * accelerator-unavailable and 403-denied paths (the "denied" phase stays at its call site).
+   */
+  async #fallbackToWasm(
+    executionSteps: PrivateExecutionStep[],
+    logLabel: string,
+  ): Promise<ChonkProofWithPublicInputs> {
+    this.#onPhase?.("fallback");
+    const proof = await this.#proveLocally(executionSteps, logLabel);
+    this.#onPhase?.("receive");
     return proof;
   }
 
