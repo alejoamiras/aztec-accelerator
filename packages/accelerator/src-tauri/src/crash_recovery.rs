@@ -3,6 +3,45 @@
 //! - **macOS**: Patches the LaunchAgent plist to add `KeepAlive` + `ThrottleInterval`,
 //!   so launchd restarts the app if it crashes.
 //! - **Linux**: Manages a systemd user service with `Restart=on-failure`.
+//!
+//! The per-platform logic lives behind the [`CrashRecovery`] trait, implemented by the
+//! platform-specific `PlatformRecovery` ZST. The `enable_crash_recovery` / `disable_crash_recovery`
+//! free functions are thin dispatch onto it, so callers stay platform-agnostic and the surface is
+//! mockable in tests.
+
+/// Platform crash-recovery control. `disable` returns whether the recovery mechanism is confirmed
+/// disarmed — always `true` where disarm is unconditional (macOS/Linux), the real /Query-verified
+/// result on Windows (where the updater MUST know the always-armed task is gone before NSIS mutates
+/// files).
+pub trait CrashRecovery {
+    fn enable(&self);
+    fn disable(&self) -> bool;
+}
+
+/// Enable crash recovery for the current platform (thin dispatch to the platform `CrashRecovery`).
+pub fn enable_crash_recovery() {
+    PlatformRecovery.enable();
+}
+
+/// Disable crash recovery. See [`CrashRecovery::disable`] for the `bool` contract — callers that must
+/// know the recovery is gone (the updater, before install) check it.
+pub fn disable_crash_recovery() -> bool {
+    PlatformRecovery.disable()
+}
+
+/// The current platform's crash-recovery implementation. A unit struct — the actual state lives in
+/// the OS (launchd plist / systemd unit / Task Scheduler task). Dispatches to the `#[cfg]`-selected
+/// `enable_impl` / `disable_impl`.
+pub struct PlatformRecovery;
+
+impl CrashRecovery for PlatformRecovery {
+    fn enable(&self) {
+        enable_impl();
+    }
+    fn disable(&self) -> bool {
+        disable_impl()
+    }
+}
 
 /// Must match `productName` in tauri.conf.json — the auto-launch crate uses this
 /// (not the identifier) as the LaunchAgent plist filename.
@@ -20,7 +59,7 @@ const SYSTEMD_NAME: &str = "aztec-accelerator";
 /// Previous implementation used `.replace("</dict>", ...)` which replaced ALL occurrences
 /// and could corrupt plists with nested dicts.
 #[cfg(target_os = "macos")]
-pub fn enable_crash_recovery() {
+fn enable_impl() {
     let plist_path = macos_plist_path();
     match std::fs::read_to_string(&plist_path) {
         Ok(content) => {
@@ -73,10 +112,11 @@ fn patch_plist_with_keepalive(content: &str) -> Option<String> {
 /// Remove crash recovery keys from the LaunchAgent plist.
 /// Call this after `manager.disable()` to clean up.
 #[cfg(target_os = "macos")]
-pub fn disable_crash_recovery() {
+fn disable_impl() -> bool {
     // The plugin recreates the plist from scratch on enable(), so disabling
     // just means the standard disable() removes the plist entirely. Nothing extra needed.
     tracing::info!("macOS crash recovery disabled (plist removed by plugin)");
+    true
 }
 
 #[cfg(target_os = "macos")]
@@ -90,7 +130,7 @@ fn macos_plist_path() -> std::path::PathBuf {
 /// Create and enable a systemd user service with `Restart=on-failure`.
 /// Call this after `manager.enable()`.
 #[cfg(target_os = "linux")]
-pub fn enable_crash_recovery() {
+fn enable_impl() {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -160,7 +200,7 @@ pub fn enable_crash_recovery() {
 /// Disable and remove the systemd user service.
 /// Call this after `manager.disable()`.
 #[cfg(target_os = "linux")]
-pub fn disable_crash_recovery() {
+fn disable_impl() -> bool {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "disable", SYSTEMD_NAME])
         .output();
@@ -174,6 +214,7 @@ pub fn disable_crash_recovery() {
     }
 
     tracing::info!("systemd user service disabled (crash recovery)");
+    true
 }
 
 // ── Windows ──────────────────────────────────────────────────────────────────
@@ -213,7 +254,7 @@ fn schtasks_exe() -> std::path::PathBuf {
 
 /// Register the Task Scheduler crash-recovery task. Call after `manager.enable()`.
 #[cfg(target_os = "windows")]
-pub fn enable_crash_recovery() {
+fn enable_impl() {
     use std::io::Write;
 
     let exe = match std::env::current_exe() {
@@ -278,7 +319,7 @@ pub fn enable_crash_recovery() {
 /// (removed or already absent), `false` if removal could not be verified — callers that rely on
 /// the task being gone (the updater, before NSIS mutates files) MUST check this and not proceed.
 #[cfg(target_os = "windows")]
-pub fn disable_crash_recovery() -> bool {
+fn disable_impl() -> bool {
     // Deletion is correctness-critical now: the repeating-trigger task relaunches the app a
     // minute after an intentional quit if it survives. So retry, and verify via /Query
     // (locale-independent — it exits non-zero when the task is absent) rather than trusting

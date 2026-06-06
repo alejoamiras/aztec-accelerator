@@ -47,8 +47,30 @@ all three). A cfg typo in the windows/linux block is CI-caught (~15 min), not lo
 3 blocks carefully, `cargo check` macOS locally, then lean on the gate. Then **rc dry-run** before any
 stable cut (blocking updater-smoke green).
 
-## Plan
-1. Implement the trait + 3 ZST impls + dispatch (verbatim body moves).
-2. `cargo test --lib` + `clippy` (macOS local) → PR → accelerator gate (all 3 platforms) green.
-3. rc dry-run (autonomous-allowed; rc only) validates the Windows updater path.
+## Concrete implementation plan (bodies read — ready for a focused pass)
+**Structural finding:** on each platform `enable` and `disable` are NOT contiguous — a helper sits
+between them (macOS `patch_plist_with_keepalive` L55-71 + `macos_plist_path` L82-88; linux inline;
+windows `schtasks_exe`/`task_xml`/`xml_escape`). So the impl block can't just wrap a line range.
+
+**~8 edits, all behavior-preserving (bodies verbatim):**
+1. Trait def at top (platform-agnostic): `pub trait CrashRecovery { fn enable(&self); fn disable(&self) -> bool; }`.
+2-4. Per platform: replace `pub fn enable_crash_recovery() {<body>}` with
+   `pub struct PlatformRecovery;` + `impl CrashRecovery for PlatformRecovery { fn enable(&self){<enable body>} fn disable(&self)->bool{<disable body>; true /*mac,linux*/} }`,
+   pulling the disable body up into the impl. Helpers stay as free fns after the impl.
+5-7. Per platform: delete the old standalone `disable_crash_recovery` fn (its body moved into the impl).
+8. Non-cfg dispatch free fns (signatures preserved; disable now `-> bool` on ALL platforms):
+   `pub fn enable_crash_recovery() { PlatformRecovery.enable() }` /
+   `pub fn disable_crash_recovery() -> bool { PlatformRecovery.disable() }`.
+   (`PlatformRecovery` is the per-platform cfg'd ZST; the trait is in-module so methods resolve.)
+
+**Callers unchanged** (commands.rs:47/50, main.rs:276/294, updater.rs:92-windows). The mac/linux
+callers ignore the now-`bool` return (statement position; not `#[must_use]` → no clippy warning).
+Windows `disable` already returned the bool. **updater.rs untouched → disarm ordering preserved.**
+
+**Validation:** `cargo test --lib` (macOS: `task_xml`/`patch_plist` generation tests guard bodies) +
+`cargo check` macOS local → PR → accelerator gate compiles windows+linux → **rc dry-run** (Windows
+updater-smoke) before any stable cut.
+
+**Design note (resolved):** plan's "free fns → thin dispatch [to ZST]" chosen over trait-wraps-fns —
+the former makes the free fns the trait's consumer (not a dead abstraction). No codex needed.
 LESSONS_FILE=implementations-plan/quality-refactor-2026-06-05/lessons/phase-6.md
