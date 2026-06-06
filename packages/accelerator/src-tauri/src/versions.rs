@@ -210,28 +210,33 @@ fn version_sort_key(version: &str) -> (String, u64) {
 /// - Sorts within each tier by version string (alphabetical, which works for date suffixes)
 /// - Returns versions exceeding the tier's retention limit (oldest first)
 /// - The bundled version is never evicted
-pub fn versions_to_evict(cached: &[String], bundled_version: &str) -> Vec<String> {
+pub fn versions_to_evict(
+    cached: &[AztecVersion],
+    bundled_version: &AztecVersion,
+) -> Vec<AztecVersion> {
     use std::collections::HashMap;
 
-    let mut by_tier: HashMap<NetworkTier, Vec<&String>> = HashMap::new();
+    // Q3-followup: `cached`/`bundled` are validated `AztecVersion`s, so tier + sort_key are read from
+    // the precomputed fields instead of re-parsing each element per call. Eviction OUTPUT is unchanged
+    // (pinned by the eviction char tests).
+    let mut by_tier: HashMap<NetworkTier, Vec<&AztecVersion>> = HashMap::new();
     for v in cached {
-        let tier = NetworkTier::from_version(v);
-        by_tier.entry(tier).or_default().push(v);
+        by_tier.entry(v.tier()).or_default().push(v);
     }
 
     let mut to_evict = Vec::new();
     for (tier, mut versions) in by_tier {
         if let Some(limit) = tier.retention_limit() {
-            // Sort ascending (oldest first). Use version-aware sort: for RC versions,
-            // parse the numeric suffix so "rc.2" < "rc.10" (not lexicographic where "rc.10" < "rc.2").
-            versions.sort_by_key(|v| version_sort_key(v));
+            // Sort ascending (oldest first). Uses the precomputed version-aware sort_key: for RC
+            // versions the numeric suffix makes "rc.2" < "rc.10" (not lexicographic "rc.10" < "rc.2").
+            versions.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
             // Remove bundled from the candidate list (it's always kept)
-            versions.retain(|v| v.as_str() != bundled_version);
+            versions.retain(|v| v.as_str() != bundled_version.as_str());
             // Evict oldest non-bundled versions until we're within the limit
             // (limit includes the bundled version if it's in this tier)
             let effective_limit = if cached
                 .iter()
-                .any(|v| v == bundled_version && NetworkTier::from_version(v) == tier)
+                .any(|v| v.as_str() == bundled_version.as_str() && v.tier() == tier)
             {
                 limit.saturating_sub(1)
             } else {
@@ -546,14 +551,24 @@ fn extract_bb_from_tarball(
 
 /// Clean up old cached versions per the retention policy.
 pub async fn cleanup_old_versions(bundled_version: &str) {
-    let cached = list_cached_versions();
-    let to_evict = versions_to_evict(&cached, bundled_version);
+    // `bundled_version` is always a real version; if it somehow can't be parsed, skip cleanup rather
+    // than evict against a mis-parsed bundled (defensive — unreachable in practice).
+    let Some(bundled) = AztecVersion::parse(bundled_version) else {
+        return;
+    };
+    // Parse the cached dir names into validated versions. An unparseable dir name is skipped — same
+    // net outcome as before (the old code classified it Mainnet → retention `None` → never evicted).
+    let cached: Vec<AztecVersion> = list_cached_versions()
+        .iter()
+        .filter_map(|s| AztecVersion::parse(s))
+        .collect();
+    let to_evict = versions_to_evict(&cached, &bundled);
 
     for version in &to_evict {
-        let dir = versions_base_dir().join(version);
+        let dir = versions_base_dir().join(version.as_str());
         match std::fs::remove_dir_all(&dir) {
-            Ok(()) => tracing::info!(version, "Evicted old bb version"),
-            Err(e) => tracing::warn!(version, error = %e, "Failed to evict bb version"),
+            Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
+            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
 }
@@ -561,6 +576,11 @@ pub async fn cleanup_old_versions(bundled_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: construct a validated `AztecVersion` (panics on an invalid literal — test-only).
+    fn av(s: &str) -> AztecVersion {
+        AztecVersion::parse(s).expect("test version literal must be valid")
+    }
 
     #[test]
     fn is_valid_version_accepts_real_aztec_versions() {
@@ -704,45 +724,45 @@ mod tests {
     #[test]
     fn evict_excess_nightlies() {
         let cached = vec![
-            "5.0.0-nightly.20260301".into(),
-            "5.0.0-nightly.20260302".into(),
-            "5.0.0-nightly.20260303".into(),
-            "5.0.0-nightly.20260304".into(),
+            av("5.0.0-nightly.20260301"),
+            av("5.0.0-nightly.20260302"),
+            av("5.0.0-nightly.20260303"),
+            av("5.0.0-nightly.20260304"),
         ];
-        let evicted = versions_to_evict(&cached, "5.0.0-nightly.20260304");
+        let evicted = versions_to_evict(&cached, &av("5.0.0-nightly.20260304"));
         // Keep 2, evict 2 oldest
         assert_eq!(evicted.len(), 2);
-        assert!(evicted.contains(&"5.0.0-nightly.20260301".to_string()));
-        assert!(evicted.contains(&"5.0.0-nightly.20260302".to_string()));
+        assert!(evicted.contains(&av("5.0.0-nightly.20260301")));
+        assert!(evicted.contains(&av("5.0.0-nightly.20260302")));
     }
 
     #[test]
     fn bundled_version_never_evicted() {
         let cached = vec![
-            "5.0.0-nightly.20260301".into(),
-            "5.0.0-nightly.20260302".into(),
-            "5.0.0-nightly.20260303".into(),
-            "5.0.0-nightly.20260304".into(),
+            av("5.0.0-nightly.20260301"),
+            av("5.0.0-nightly.20260302"),
+            av("5.0.0-nightly.20260303"),
+            av("5.0.0-nightly.20260304"),
         ];
         // Bundled is the oldest — should still not be evicted
-        let evicted = versions_to_evict(&cached, "5.0.0-nightly.20260301");
-        assert!(!evicted.contains(&"5.0.0-nightly.20260301".to_string()));
+        let evicted = versions_to_evict(&cached, &av("5.0.0-nightly.20260301"));
+        assert!(!evicted.contains(&av("5.0.0-nightly.20260301")));
         // 4 versions, keep 2, but bundled is protected, so evict the next oldest
         assert_eq!(evicted.len(), 2);
-        assert!(evicted.contains(&"5.0.0-nightly.20260302".to_string()));
-        assert!(evicted.contains(&"5.0.0-nightly.20260303".to_string()));
+        assert!(evicted.contains(&av("5.0.0-nightly.20260302")));
+        assert!(evicted.contains(&av("5.0.0-nightly.20260303")));
     }
 
     #[test]
     fn mainnet_never_evicted() {
         let cached = vec![
-            "1.0.0".into(),
-            "2.0.0".into(),
-            "3.0.0".into(),
-            "4.0.0".into(),
-            "5.0.0".into(),
+            av("1.0.0"),
+            av("2.0.0"),
+            av("3.0.0"),
+            av("4.0.0"),
+            av("5.0.0"),
         ];
-        let evicted = versions_to_evict(&cached, "5.0.0");
+        let evicted = versions_to_evict(&cached, &av("5.0.0"));
         assert!(evicted.is_empty());
     }
 
@@ -750,33 +770,33 @@ mod tests {
     fn rc_versions_sort_numerically_not_lexicographically() {
         // With lexicographic sort, rc.10 < rc.2 — wrong!
         // With numeric sort, rc.1 < rc.2 < rc.3 < rc.10 — correct.
-        let cached: Vec<String> = vec![
-            "4.0.0-rc.1".into(),
-            "4.0.0-rc.2".into(),
-            "4.0.0-rc.3".into(),
-            "4.0.0-rc.10".into(),
-            "4.0.0-rc.11".into(),
-            "4.0.0-rc.20".into(),
+        let cached = vec![
+            av("4.0.0-rc.1"),
+            av("4.0.0-rc.2"),
+            av("4.0.0-rc.3"),
+            av("4.0.0-rc.10"),
+            av("4.0.0-rc.11"),
+            av("4.0.0-rc.20"),
         ];
         // Testnet tier: keep 5, evict 1 (oldest = rc.1)
-        let evicted = versions_to_evict(&cached, "4.0.0-rc.20");
-        assert_eq!(evicted, vec!["4.0.0-rc.1"]);
+        let evicted = versions_to_evict(&cached, &av("4.0.0-rc.20"));
+        assert_eq!(evicted, vec![av("4.0.0-rc.1")]);
     }
 
     #[test]
     fn mixed_tiers() {
         let cached = vec![
-            "5.0.0-nightly.20260301".into(),
-            "5.0.0-nightly.20260302".into(),
-            "5.0.0-nightly.20260303".into(),
-            "5.0.0-devnet.20260301".into(),
-            "5.0.0-rc.1".into(),
-            "5.0.0".into(),
+            av("5.0.0-nightly.20260301"),
+            av("5.0.0-nightly.20260302"),
+            av("5.0.0-nightly.20260303"),
+            av("5.0.0-devnet.20260301"),
+            av("5.0.0-rc.1"),
+            av("5.0.0"),
         ];
-        let evicted = versions_to_evict(&cached, "5.0.0");
+        let evicted = versions_to_evict(&cached, &av("5.0.0"));
         // Nightlies: 3, keep 2, evict 1
         assert_eq!(evicted.len(), 1);
-        assert!(evicted.contains(&"5.0.0-nightly.20260301".to_string()));
+        assert!(evicted.contains(&av("5.0.0-nightly.20260301")));
     }
 
     /// CHARACTERIZATION (quality-refactor Phase 0 — Q3 guard). Edge cases the AztecVersion refactor
@@ -784,18 +804,15 @@ mod tests {
     #[test]
     fn versions_to_evict_edge_cases() {
         // Empty cache → nothing to evict.
-        assert!(versions_to_evict(&[], "5.0.0-nightly.20260301").is_empty());
+        assert!(versions_to_evict(&[], &av("5.0.0-nightly.20260301")).is_empty());
 
         // The only cached version IS the bundled one → never evicted (even alone, even over a limit).
-        let only_bundled = vec!["5.0.0-nightly.20260301".to_string()];
-        assert!(versions_to_evict(&only_bundled, "5.0.0-nightly.20260301").is_empty());
+        let only_bundled = vec![av("5.0.0-nightly.20260301")];
+        assert!(versions_to_evict(&only_bundled, &av("5.0.0-nightly.20260301")).is_empty());
 
         // Non-bundled nightlies at/under the tier limit (2) all stay.
-        let under_limit = vec![
-            "5.0.0-nightly.20260301".to_string(),
-            "5.0.0-nightly.20260302".to_string(),
-        ];
-        assert!(versions_to_evict(&under_limit, "5.0.0").is_empty());
+        let under_limit = vec![av("5.0.0-nightly.20260301"), av("5.0.0-nightly.20260302")];
+        assert!(versions_to_evict(&under_limit, &av("5.0.0")).is_empty());
     }
 
     #[test]
