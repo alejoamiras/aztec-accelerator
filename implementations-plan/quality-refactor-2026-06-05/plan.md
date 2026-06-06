@@ -67,13 +67,13 @@ Char test (Phase 0) pins the animation-active condition. Replace `StatusCallback
 ### Phase 4 — Value object `AztecVersion` (Q3 + 2 minors) ✓ MERGED (#300) [followup: versions_to_evict threading + bb_asset_name]
 `AztecVersion{raw,tier,sort_key}` with validation-as-constructor; `Deref<str>`+`AsRef<str>`. Thread `&AztecVersion` through internal APIs; `&str` boundary stays at server ingress (resolve_version constructs once). Subsumes `versions_to_evict` re-parse + `bb_asset_name`. *(Introduce Value Object.)* Char tests already strong (eviction/tier/sort); add ctor-rejects-==-is_valid_version. **Rollback:** revert (touches ~5 call sites + versions.rs/bb.rs).
 
-### Phase 5 — `download_bb` split (Q11) ▶ IN PROGRESS (part 1 install_version_dir #301; part 2 = download_tarball/verify_digest/postprocess_*)
+### Phase 5 — `download_bb` split (Q11) ✓ MERGED (part 1 #301, part 2 #303)
 After Q3. Char test (atomic-rename-cleanup) first. Extract `download_tarball` / `verify_digest` / `install_version_dir` (folds the 2 `remove_dir_all` arms) / `postprocess_unix`+`postprocess_macos`; orchestrator keeps guard+cache fast-path + the digest→extract ordering. *(Extract Method.)* **Rollback:** revert.
 
-### Phase 6 — Crash-recovery trait (Q4) [SAFETY-CRITICAL]
+### Phase 6 — Crash-recovery trait (Q4) ✓ MERGED (#305) [SAFETY-CRITICAL — rc-validated green: 1.0.5-rc.1]
 `trait CrashRecovery{enable(&self); disable(&self)->bool}` + per-platform ZSTs; mac/linux `disable` returns `true` (behavior-neutral); Windows keeps the query-gated bool. Free fns → thin dispatch. **Preserve the #96/#97 disarm-before-install ordering byte-for-byte** (Phase 0 sequence test + the updater-smoke CI gate are the proof). *(Extract Interface.)* **Rollback:** revert; re-run updater-smoke.
 
-### Phase 7 — Architectural splits [RISKY CORE PATH — rc dry-run after]
+### Phase 7 — Architectural splits ✓ MERGED (Q1 #308, Q2 #309–313, Q14 #307, Q7 #314; Q6 CUT) [rc-validated green: 1.0.5-rc.1]
 - **Q1 AppState** → `AppState{core:Arc<HeadlessState>, gui:Option<Arc<GuiCallbacks>>}`; handlers borrow `core`/`gui`; fixes main.rs clone-stutter. Keep headless `server/src/main.rs` green. *(Extract Class.)*
 - **Q2 server.rs** → split `bind.rs`/`tls.rs`/`handlers/prove.rs`; extract `authorize_origin` + prove core. server.rs = thin router+start. *(Extract Module / Extract Method.)* Depends on Q1.
 - **Q5 SDK** `#probeAndParseHealth` + `PhaseReporter` (public API unchanged). *(Extract Method / Extract Class.)*
@@ -82,11 +82,11 @@ After Q3. Char test (atomic-rename-cleanup) first. Extract `download_tarball` / 
 - **Q14** `is_auto_approved` reuse `canonicalize_origin` (tests guard the localhost set). *(Substitute Algorithm.)*
 - Each its own PR; the server/updater/safari ones gate on an **rc dry-run** before the next stable cut.
 
-### Phase 8 — SDK type break (Q5 + Q12, PAIRED) [BREAKING — lockstep playground]
+### Phase 8 — SDK type break (Q5 + Q12) — Q5·1 #probeHealth done #306 (Q5·2 PhaseReporter = churn, skipped); Q12 AcceleratorStatus union ✓ MERGED #315 (+MIGRATION.md); phase-event union = recommend CUT (owner); playground needs NO migration (verified builds green) [BREAKING — dev line; stable publish joint]
 **REFRAMED per consolidation Fact A (opus + codex both found it):** there is **no independent SDK semver to "major bump"** — `@alejoamiras/aztec-accelerator`'s published version is *derived from the Aztec `@aztec/stdlib` version* at publish (`scripts/get-sdk-publish-version.ts`, `_publish-sdk.yml`); `package.json` is a `0.0.0` placeholder; consumers install by Aztec version / dist-tag. So owner-decision-2 ("major bump") is **not literally executable** — see Ask A.
 **Working resolution (pending Ask A):** ship Q12 as a *clean type-break* — discriminated unions for `AcceleratorStatus` + the phase event (mirroring Phase-0-pinned reachable states; HTTP wire contract UNCHANGED, so decoupled from Q8 + from any server release) — landing on the post-1.0.4 dev line, published at the next Aztec-version bump with a `MIGRATION.md` + README update. **SPLIT Q5 and Q12 (adopted from codex's final audit — overrides the earlier pair decision):** land **Q5** (the `#probeHealth`/`#parseHealthResponse`/`PhaseReporter` extraction) first under the *existing* types, then **Q12** as the isolated breaking PR — preserves rollback granularity + clean review. The Q12 PR migrates `packages/playground` (aztec.ts + ascii-animation.ts) **and** the aztec-accelerator skill in the same PR (monorepo typecheck is the free in-repo consumer), **and adds a publish-guard / freezes `_aztec-update.yml` for the window** (Ask E — the SDK auto-publishes on upstream Aztec bumps; a half-migrated break must not auto-ship). *(Extract Method; Replace Primitive with Object.)* **Rollback:** revert before publish; after publish, patch forward (never unpublish).
 
-### Phase 9 — Minor sweep
+### Phase 9 — Minor sweep ✓ MERGED (window/dirs_next/certs #316, SDK #fallbackToWasm #317; Q13 copy-bb matrix CUT; frontend popup/bridge already done in #77)
 Frontend popup scaffolding dedup + global-bridge module boundary; SDK `#fallbackToWasm` dedup; `open_or_focus_window(WindowConfig)`; inline `dirs_next`; certs test dedup w/ correct consts; copy-bb `PLATFORM_MATRIX` table (Q13) + `copyUnixBb`. One sweep PR (or 2).
 
 ---
