@@ -208,7 +208,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     ) {
       return this.#statusCache.result;
     }
+    return this.#probeAndParseHealth();
+  }
 
+  /**
+   * Probe the accelerator's `/health` (dual HTTP/HTTPS, one retry) and parse the response into an
+   * {@link AcceleratorStatus}, caching the result. Extracted from {@link AcceleratorProver.checkAcceleratorStatus}
+   * (Q5) — behavior-identical; the status-cache fast-path stays in the caller.
+   */
+  async #probeAndParseHealth(): Promise<AcceleratorStatus> {
     const sdkAztecVersion = this.#getAztecVersion();
     const httpUrl = `http://${this.#acceleratorHost}:${this.#acceleratorPort}/health`;
     const httpsUrl = `https://${this.#acceleratorHost}:${this.#acceleratorHttpsPort}/health`;
