@@ -124,26 +124,15 @@ impl AuthorizationManager {
 
     /// Returns true for localhost origins that should be auto-approved.
     pub fn is_auto_approved(origin: &str) -> bool {
-        // Parse the origin to extract the host
-        if let Some(host_part) = origin
-            .strip_prefix("http://")
-            .or_else(|| origin.strip_prefix("https://"))
-        {
-            // Handle IPv6 bracket notation: [::1]:5173 → [::1]
-            let host = if host_part.starts_with('[') {
-                // IPv6: take everything up to and including the closing bracket
-                host_part
-                    .find(']')
-                    .map(|i| &host_part[..=i])
-                    .unwrap_or(host_part)
-            } else {
-                // IPv4 or hostname: take everything before the port separator
-                host_part.split(':').next().unwrap_or(host_part)
-            };
-            matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-        } else {
-            false
-        }
+        // Q14: reuse the same `url::Url` parsing as `canonicalize_origin` (Substitute Algorithm)
+        // instead of the hand-rolled prefix-strip + ':'-split host extraction. The input is already
+        // canonical, so this is behavior-identical — pinned by `auto_approved_localhost_variants`
+        // (incl. the `[::1]` IPv6 case) + `non_localhost_not_auto_approved`.
+        Url::parse(origin)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            .is_some_and(|h| matches!(h.trim_end_matches('.'), "localhost" | "127.0.0.1" | "[::1]"))
     }
 
     /// Returns true if the origin is approved (auto-approved or in the approved list).
