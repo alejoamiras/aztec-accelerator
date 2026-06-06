@@ -347,75 +347,16 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
         return Ok(bb_path);
     }
 
-    let url = download_url(version);
-    tracing::info!(version, %url, "Downloading bb");
-
-    let response = http_client().get(&url).send().await?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to download bb v{version}: HTTP {}",
-            response.status()
-        )
-        .into());
-    }
-
-    // Bounded streaming download: read the body in chunks with a running counter so a server that
-    // omits Content-Length (chunked encoding) cannot OOM us by streaming gigabytes. The advertised
-    // length is an early fail-fast; the per-chunk counter is the real ceiling. 64 MB cap: download_bb
-    // fetches the platform tarball (barretenberg-amd64-linux is ~17 MB today, avm-class builds ~30 MB),
-    // so this is ~2x the largest current asset with room to grow. Mirrors copy-bb.ts
-    // MAX_BB_TARBALL_BYTES (64 MB) — the sibling build-time fetch of the same artifact.
-    const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
-    if let Some(len) = response.content_length() {
-        if len > MAX_DOWNLOAD_BYTES as u64 {
-            return Err(format!(
-                "bb v{version} download too large (advertised {len} bytes, max {MAX_DOWNLOAD_BYTES})"
-            )
-            .into());
-        }
-    }
-    let mut response = response; // chunk() takes &mut self
-    let mut bytes: Vec<u8> = Vec::with_capacity(8 * 1024 * 1024);
-    while let Some(chunk) = response.chunk().await? {
-        if bytes.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
-            return Err(format!(
-                "bb v{version} download exceeded {MAX_DOWNLOAD_BYTES} bytes — aborting"
-            )
-            .into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    // Download the tarball (bounded streaming) and verify its integrity before touching the fs
+    // (Q11: extracted to `download_tarball` + `verify_digest`; the digest→extract ordering — verify
+    // BEFORE install — is preserved here in the orchestrator).
+    let bytes = download_tarball(version).await?;
     tracing::info!(
         version,
         bytes = bytes.len(),
         "Download complete, verifying integrity"
     );
-
-    // Verify download integrity against GitHub API digest.
-    // Fail closed: if we can't verify, we don't execute. The bundled bb sidecar
-    // always works without verification; this only affects on-demand downloads.
-    let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
-    match fetch_github_asset_digest(version, &asset_name).await {
-        Ok(Some(expected)) => {
-            let actual = sha256_hex(&bytes);
-            if actual != expected {
-                return Err(format!(
-                    "Integrity check failed for bb v{version}: expected sha256:{expected}, got sha256:{actual}"
-                )
-                .into());
-            }
-            tracing::info!(version, digest = %actual, "Download integrity verified");
-        }
-        Ok(None) => {
-            return Err(format!(
-                "Cannot verify bb v{version}: no digest available from GitHub API"
-            )
-            .into());
-        }
-        Err(e) => {
-            return Err(format!("Cannot verify bb v{version}: digest fetch failed: {e}").into());
-        }
-    }
+    verify_digest(version, &bytes).await?;
 
     // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
     // `install_version_dir` so the cleanup/rename is unit-testable without the network).
@@ -471,6 +412,71 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
 
     tracing::info!(version, "bb cached successfully");
     Ok(final_path)
+}
+
+/// Download the bb tarball for `version` with a bounded-streaming read. The 64 MB cap (advertised
+/// Content-Length is an early fail-fast; the running per-chunk counter is the real ceiling) stops a
+/// Content-Length-omitting server from OOM-ing us by streaming gigabytes. Mirrors copy-bb.ts
+/// `MAX_BB_TARBALL_BYTES`. Byte-identical to the pre-Q11 inline block.
+async fn download_tarball(version: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    let url = download_url(version);
+    tracing::info!(version, %url, "Downloading bb");
+
+    let response = http_client().get(&url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download bb v{version}: HTTP {}",
+            response.status()
+        )
+        .into());
+    }
+
+    const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+    if let Some(len) = response.content_length() {
+        if len > MAX_DOWNLOAD_BYTES as u64 {
+            return Err(format!(
+                "bb v{version} download too large (advertised {len} bytes, max {MAX_DOWNLOAD_BYTES})"
+            )
+            .into());
+        }
+    }
+    let mut response = response; // chunk() takes &mut self
+    let mut bytes: Vec<u8> = Vec::with_capacity(8 * 1024 * 1024);
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bb v{version} download exceeded {MAX_DOWNLOAD_BYTES} bytes — aborting"
+            )
+            .into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Verify the downloaded `bytes` against the GitHub release asset's published SHA-256 digest.
+/// **Fail-closed:** a missing digest (`Ok(None)`) or a fetch error is an error, not a skip — we never
+/// install unverified code. The bundled sidecar path never reaches here. Byte-identical to the
+/// pre-Q11 inline block.
+async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
+    match fetch_github_asset_digest(version, &asset_name).await {
+        Ok(Some(expected)) => {
+            let actual = sha256_hex(bytes);
+            if actual != expected {
+                return Err(format!(
+                    "Integrity check failed for bb v{version}: expected sha256:{expected}, got sha256:{actual}"
+                )
+                .into());
+            }
+            tracing::info!(version, digest = %actual, "Download integrity verified");
+            Ok(())
+        }
+        Ok(None) => {
+            Err(format!("Cannot verify bb v{version}: no digest available from GitHub API").into())
+        }
+        Err(e) => Err(format!("Cannot verify bb v{version}: digest fetch failed: {e}").into()),
+    }
 }
 
 /// Install an extracted bb tarball into `version_dir` via a temp dir + atomic rename.
