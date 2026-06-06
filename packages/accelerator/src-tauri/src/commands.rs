@@ -141,7 +141,6 @@ pub async fn enable_safari_support(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     use crate::certs;
-    use crate::server::HTTPS_PORT;
 
     certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
 
@@ -155,9 +154,9 @@ pub async fn enable_safari_support(
     // Start HTTPS server with the full shared state (includes auth, config, popup callback)
     let tls_config =
         certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
-    let mut state = (**shared_state).clone();
-    // https_port lives in the Arc'd core now (Q1); make_mut copies-on-write since the Arc is shared.
-    Arc::make_mut(&mut state.core).https_port = Some(HTTPS_PORT);
+    // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping it
+    // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
+    let state = (**shared_state).clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = crate::server::start_https(state, tls_config).await {
             tracing::error!("HTTPS server error: {e}");

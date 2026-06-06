@@ -8,6 +8,7 @@ use axum::{
 use http::Method;
 use serde_json::json;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -78,7 +79,11 @@ pub type ShowAuthPopupCallback = Arc<dyn Fn(&str) + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct HeadlessState {
     pub bundled_version: Option<String>,
-    pub https_port: Option<u16>,
+    /// `true` once `start_https` has actually bound the HTTPS listener. Shared (Arc'd atomic) across
+    /// the HTTP + HTTPS servers so `/health` advertises `https_port` from the REAL bind state — not
+    /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
+    /// (HTTPS skipped, but `safari_support` config stays on). (Q7)
+    pub https_bound: Arc<AtomicBool>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores.
@@ -157,13 +162,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "bb_available": bb::find_bb(None).is_ok(),
     });
 
-    // Report HTTPS port if Safari Support is enabled (reads live config, not static state,
-    // so runtime enable_safari_support is reflected immediately without restart).
-    let safari_enabled = state
-        .config
-        .as_ref()
-        .is_some_and(|cfg| cfg.read().safari_support);
-    if state.https_port.is_some() || safari_enabled {
+    // Advertise https_port only when the HTTPS listener actually bound (set by start_https after a
+    // successful bind), NOT when the config merely requests Safari support. Keying off the config flag
+    // would point the SDK at a dead port on the untrusted-CA startup path (HTTPS skipped, config still
+    // on). The shared Arc'd flag also reflects a runtime enable_safari_support without a restart. (Q7)
+    if state.https_bound.load(Ordering::Relaxed) {
         body["https_port"] = json!(HTTPS_PORT);
     }
 
@@ -247,15 +250,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_includes_https_port_when_safari_enabled() {
-        let cfg = crate::config::AcceleratorConfig {
-            safari_support: true,
-            ..Default::default()
-        };
+    async fn health_advertises_https_port_when_https_bound() {
+        // https_bound = true (set by start_https once the listener actually binds) → /health
+        // advertises the HTTPS port so the SDK can connect.
         let state = AppState {
             core: Arc::new(HeadlessState {
-                config: Some(Arc::new(RwLock::new(cfg))),
-                https_port: Some(59834),
+                https_bound: Arc::new(AtomicBool::new(true)),
                 ..Default::default()
             }),
             ..Default::default()
@@ -275,7 +275,45 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["https_port"], 59834);
+        assert_eq!(json["https_port"], HTTPS_PORT);
+    }
+
+    #[tokio::test]
+    async fn health_hides_https_port_when_safari_configured_but_not_bound() {
+        // The untrusted-CA startup path: safari_support stays ON in config, but HTTPS never bound
+        // (https_bound = false). /health must NOT advertise https_port, or the SDK probes a dead
+        // port. Regression guard for the Q7 health-signal fix.
+        let cfg = crate::config::AcceleratorConfig {
+            safari_support: true,
+            ..Default::default()
+        };
+        let state = AppState {
+            core: Arc::new(HeadlessState {
+                config: Some(Arc::new(RwLock::new(cfg))),
+                https_bound: Arc::new(AtomicBool::new(false)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let app = router(state);
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.get("https_port").is_none(),
+            "https_port must be absent when HTTPS hasn't bound, even if safari_support is configured"
+        );
     }
 
     #[tokio::test]

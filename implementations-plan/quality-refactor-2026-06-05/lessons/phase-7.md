@@ -163,3 +163,17 @@ each slice. Result: server.rs is now thin **router + start + health + shared err
 6. PR: flag the **behavior change to the owner** (Ask B) — reset-on-untrusted means cfg flips off when Keychain trust is lost (re-enable re-prompts); proof is manual/integration (Keychain-dependent), note the gap.
 
 **Test-surface caveat (like Q6):** the orchestration is Keychain/filesystem-dependent; the helper extraction is what MAKES the decision unit-testable. The end-to-end proof is the rc/manual macOS check, not a unit test.
+
+---
+
+## Q7 — IMPLEMENTED as the health-signal fix (owner chose Option B, 2026-06-06)
+
+When reached, surfaced the untrusted-CA ambiguity to the owner (bug vs intentional). **Owner chose Option B: keep config (untrusted-skip is intentional — preserve user intent on transient Keychain trust loss), fix the REAL bug = /health advertised a dead port.** So NOT the reset-on-untrusted from the earlier scoping note.
+
+**Root cause:** `/health` advertised `https_port` on `state.https_port.is_some() || safari_support_config`. The `|| config` fallback existed because runtime `enable_safari_support` set `https_port` only on a *clone* (Arc make_mut COW), never the shared state health reads. So on the untrusted-CA startup path (HTTPS skipped, config still on) — and ALSO on a bind-failure (try_start_https returned `Some` *before* the fire-and-forget spawn, regardless of whether start_https actually bound) — health pointed the SDK at a dead port.
+
+**Fix (shared bind-truth flag):** replaced `HeadlessState.https_port: Option<u16>` with `https_bound: Arc<AtomicBool>`. `start_https` flips it true *after* `bind_with_retry` succeeds (captured before `router(state)` consumes state). health advertises iff `https_bound` — drops the config-flag fallback entirely. The Arc'd atomic stays shared across the HTTP server, the HTTPS server, AND runtime-enable (clone shares the Arc even through make_mut COW), so all three observe the real bind state. Retired the vestigial `https_port` field + its 4 propagation sites (main.rs try_start_https now returns `()`; commands.rs runtime-enable no longer make_muts; unused HTTPS_PORT imports dropped).
+
+**Why it's strictly more correct:** success → advertises (✓ unchanged); untrusted/bind-fail → now correctly hidden (was a dead-port advertisement); runtime-enable → advertises once bound (more accurate timing than the old config-flag). Pinned by 2 unit tests: `health_advertises_https_port_when_https_bound` + the regression guard `health_hides_https_port_when_safari_configured_but_not_bound`.
+
+**Behavior change to communicate (Ask B):** an auto-updated user on the untrusted-CA path previously saw `health.https_port` present (SDK then failed to connect); now it's absent so the SDK cleanly falls back to HTTP. No config/UX change, no Keychain re-prompt. 128 lib tests + clippy -D warnings + headless check green. The macOS HTTPS path itself is still Keychain-dependent (integration/manual proof), but the health LOGIC is now unit-tested.

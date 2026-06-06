@@ -4,6 +4,7 @@
 //! optional). Extracted from server.rs (Q2).
 
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 
@@ -16,6 +17,8 @@ pub async fn start_https(
     state: AppState,
     tls_config: Arc<tokio_rustls::rustls::ServerConfig>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Capture the shared bind-state flag before `router` consumes `state`.
+    let https_bound = state.https_bound.clone();
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], HTTPS_PORT));
     // Same restart race as the HTTP listener: an in-place update relaunches while
@@ -29,6 +32,8 @@ pub async fn start_https(
             return Ok(());
         }
     };
+    // The listener bound — mark HTTPS live so /health advertises https_port (Q7).
+    https_bound.store(true, Ordering::Relaxed);
 
     let acceptor = TlsAcceptor::from(tls_config);
     tracing::info!("HTTPS server listening on {addr}");
