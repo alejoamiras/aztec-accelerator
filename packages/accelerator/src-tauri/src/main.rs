@@ -6,7 +6,7 @@ mod windows;
 
 use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
-use aztec_accelerator::server::{AppState, HeadlessState, ServerStatus, HTTPS_PORT};
+use aztec_accelerator::server::{AppState, HeadlessState, ServerStatus};
 use aztec_accelerator::{certs, commands, config, log_dir, verified_sites};
 use parking_lot::RwLock;
 use std::path::Path;
@@ -48,24 +48,25 @@ fn open_in_browser(target: &impl AsRef<Path>) {
 
 // ── HTTPS startup ────────────────────────────────────────────────────────
 
-/// Try to start HTTPS server if Safari Support is configured and certs are valid.
+/// Try to start the HTTPS server if Safari Support is configured and certs are valid + trusted.
 /// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
-/// Returns the HTTPS port if started, None otherwise.
-fn try_start_https(state: &AppState) -> Option<u16> {
+/// `start_https` flips the shared `https_bound` flag once the listener actually binds, so `/health`
+/// advertises `https_port` from the real bind state rather than the config flag.
+fn try_start_https(state: &AppState) {
     let cfg = config::load();
     if !cfg.safari_support {
-        return None;
+        return;
     }
     if !certs::certs_exist() {
         tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
         reset_safari_support(state);
-        return None;
+        return;
     }
 
     // Verify the live CA is still trusted (macOS only).
     if !certs::is_ca_trusted() {
         tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
-        return None;
+        return;
     }
 
     let tls_config = match certs::load_rustls_config() {
@@ -76,12 +77,11 @@ fn try_start_https(state: &AppState) -> Option<u16> {
             // fresh, matched, trusted set is generated, instead of HTTPS being dead every launch.
             tracing::warn!("Failed to load TLS config ({e}) — resetting Safari Support to recover");
             reset_safari_support(state);
-            return None;
+            return;
         }
     };
 
-    let mut state_for_https = state.clone();
-    Arc::make_mut(&mut state_for_https.core).https_port = Some(HTTPS_PORT);
+    let state_for_https = state.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = aztec_accelerator::server::start_https(state_for_https, tls_config).await {
             tracing::error!("HTTPS server error: {e}");
@@ -96,8 +96,6 @@ fn try_start_https(state: &AppState) -> Option<u16> {
             tracing::warn!("Background leaf renewal: {e}");
         }
     });
-
-    Some(HTTPS_PORT)
 }
 
 /// Disable Safari Support in config (certs missing/invalid/untrusted) so the user can re-enable to
@@ -347,7 +345,7 @@ fn main() {
             let state = AppState {
                 core: Arc::new(HeadlessState {
                     bundled_version: Some(bundled_version),
-                    https_port: None,
+                    https_bound: Default::default(),
                     config: Some(config_state.clone()),
                     auth_manager: Some(auth_manager.clone()),
                     prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
@@ -372,12 +370,12 @@ fn main() {
             // a readable mint-any-cert primitive. Runs regardless of Safari Support; the keyless CA
             // anchor that remains can't sign anything. Idempotent.
             certs::migrate_legacy_ca_key();
-            let https_port = try_start_https(&state);
+            try_start_https(&state);
 
-            // Manage the shared state for Tauri commands (e.g. enable_safari_support)
-            let mut state_with_https = state.clone();
-            Arc::make_mut(&mut state_with_https.core).https_port = https_port;
-            app.manage::<SharedAppState>(Arc::new(state_with_https));
+            // Manage the shared state for Tauri commands (e.g. enable_safari_support). It shares the
+            // Arc'd https_bound flag with the HTTP server's state, so start_https flipping it after a
+            // successful bind is visible to /health (no separate https_port propagation needed). (Q7)
+            app.manage::<SharedAppState>(Arc::new(state.clone()));
 
             // ── Startup diagnostics ──
             // Update both the status menu item text AND tray tooltip so the
@@ -395,8 +393,7 @@ fn main() {
             windows::open_settings_window(app.handle());
 
             // ── HTTP server ──
-            let mut http_state = state;
-            Arc::make_mut(&mut http_state.core).https_port = https_port;
+            let http_state = state;
             let status_for_server = status_for_diagnostics;
             let server_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
