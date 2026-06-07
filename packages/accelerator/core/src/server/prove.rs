@@ -59,7 +59,7 @@ pub(crate) async fn resolve_version<'a>(
     let bundled = state
         .bundled_version
         .as_deref()
-        .unwrap_or(env!("AZTEC_BB_VERSION"));
+        .unwrap_or(super::DEFAULT_BB_VERSION);
 
     if v != bundled && !versions::version_bb_path(&version).exists() {
         tracing::info!(version = %version, "Version not cached, downloading");

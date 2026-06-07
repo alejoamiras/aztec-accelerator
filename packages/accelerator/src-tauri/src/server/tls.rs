@@ -8,8 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 
-use super::bind::bind_with_retry;
-use super::{router, AppState, HTTPS_PORT};
+use accelerator_core::server::{bind_with_retry, router, AppState, HTTPS_PORT};
 
 /// Start an HTTPS listener using the provided TLS config.
 /// Runs independently from HTTP — errors are logged but never crash the app.
