@@ -79,6 +79,10 @@ pub type ShowAuthPopupCallback = Arc<dyn Fn(&str) + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct HeadlessState {
     pub bundled_version: Option<String>,
+    /// Injected app/release version for `/health.version`, decoupling it from `env!("CARGO_PKG_VERSION")`
+    /// (which resolves to whichever crate compiles this module — wrong once `server.rs` lives in core).
+    /// Falls back to the compile-time value while constructors are migrated. (core-extraction Phase 0)
+    pub app_version: Option<String>,
     /// `true` once `start_https` has actually bound the HTTPS listener. Shared (Arc'd atomic) across
     /// the HTTP + HTTPS servers so `/health` advertises `https_port` from the REAL bind state — not
     /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
@@ -156,7 +160,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let mut body = json!({
         "status": "ok",
         "api_version": 1,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": state.app_version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")),
         "aztec_version": bundled,
         "available_versions": available,
         "bb_available": bb::find_bb(None).is_ok(),
@@ -247,6 +251,33 @@ mod tests {
             json.get("https_port").is_none(),
             "https_port should be absent without Safari support"
         );
+    }
+
+    #[tokio::test]
+    async fn health_reports_injected_app_version() {
+        // /health.version must reflect the injected app_version, not env!("CARGO_PKG_VERSION") — so the
+        // reported version stays correct once server.rs is compiled inside the core crate. (Phase 0)
+        let state = AppState {
+            core: Arc::new(HeadlessState {
+                app_version: Some("9.9.9-injected".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["version"], "9.9.9-injected");
     }
 
     #[tokio::test]

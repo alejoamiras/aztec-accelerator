@@ -64,6 +64,7 @@ async fn main() {
             auth_manager,
             config,
             prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
+            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             ..Default::default()
         }),
         ..Default::default()
