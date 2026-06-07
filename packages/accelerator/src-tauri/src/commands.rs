@@ -213,12 +213,11 @@ pub fn respond_update_prompt(
         "update" => {
             // Save auto-update preference from the checkbox
             {
-                // NOTE (Q9 / Ask B): this site intentionally SWALLOWS the save error (logs + continues)
-                // — preserved here for behavior parity. Making it propagate is a deliberate behavior
-                // change shipped as a separate, owner-surfaced PR.
-                if let Err(e) = mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update)) {
-                    tracing::warn!("Failed to save auto-update preference: {e}");
-                }
+                // Q9 / Ask B (ship the fix): propagate the save error instead of swallowing it, so a
+                // failed auto-update-preference write surfaces to the user rather than the update
+                // silently proceeding on a stale preference. Rare (disk-write failure); the pending
+                // update is left untaken on the early return, so a retry re-saves and updates.
+                mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update))?;
             }
 
             // Take the stored Update object — no redundant network re-check
