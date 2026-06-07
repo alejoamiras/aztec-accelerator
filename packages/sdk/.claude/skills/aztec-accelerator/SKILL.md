@@ -92,11 +92,18 @@ Use `setOnPhase(callback)` to change the callback later, or `setOnPhase(null)` t
 
 ### 6. Health check for status UI
 
+`checkAcceleratorStatus()` returns a **discriminated union on `available`** — narrow before reading
+state-specific fields (see `MIGRATION.md`):
+
 ```typescript
 const status = await prover.checkAcceleratorStatus();
-// status.available       — accelerator is reachable and compatible
-// status.needsDownload   — accelerator needs to download bb for this version
-// status.protocol        — "http" or "https" (which succeeded)
+if (status.available) {
+  // status.needsDownload      — accelerator needs to download bb for this version
+  // status.protocol           — "http" or "https" (which succeeded)
+  // status.acceleratorVersion — also available here
+} else {
+  // status.reason — "offline" | "error" | "version-mismatch"
+}
 ```
 
 ### 7. Force WASM mode (testing/benchmarking)
