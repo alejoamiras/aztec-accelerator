@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Core Extraction</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.92rem; }
+    th { background: #f3f3f3; }
+  </style>
+</head>
+<body>
+  <h1>Core Extraction — splitting the "engine" out of the desktop app</h1>
+  <p>The Aztec Accelerator ships two things from one Rust codebase: a <strong>desktop app</strong> (system-tray
+  GUI, the thing you click) and a <strong>headless server</strong> (no GUI — other people run it in <em>their</em>
+  CI to make Aztec proving fast). Today the headless server is built <em>on top of</em> the desktop app's code,
+  so it drags in the entire desktop GUI toolkit (Tauri, a web-view engine, certificate libraries…) — <strong>475
+  packages</strong> — even though it never shows a window. This plan carves out a clean, GUI-free <strong>engine
+  crate (<code>accelerator-core</code>)</strong> that both the desktop app and the headless server build on. The
+  headless server then stops compiling all that GUI machinery — smaller, faster, fewer places for a supply-chain
+  attack to hide.</p>
+
+  <h2>Why this tier was chosen (<code>/blueprint deep</code>)</h2>
+  <p>Risk rubric: <strong>blast radius</strong> (HIGH — it touches the release pipeline of a code-signed,
+  auto-updating app), <strong>external coupling</strong> (MED-HIGH — the headless artifact runs in other
+  projects' CI), <strong>security sensitivity</strong> (MED — supply-chain surface of that artifact). Two-plus
+  HIGH dimensions → <code>deep</code>. We ran <strong>three independent plans</strong> (me + codex + an opus
+  architect), then a <strong>two-model contradiction-check</strong> that caught two real blocking bugs before a
+  single line was written.</p>
+
+  <h2>The one big decision (and the dissent that won)</h2>
+  <p>How clean should the cut be? Two options: <strong>(a)</strong> move <em>everything</em> non-GUI into the
+  engine and switch the GUI-only bits (HTTPS, certificates) on/off with build flags; or <strong>(b)</strong>
+  move only what the headless server actually needs, leaving the certificate/HTTPS code in the desktop app.
+  Two of three planners picked (a). <strong>Codex argued (b)</strong>: "don't make leanness a <em>convention</em>
+  (a flag someone can flip) when you can make it <em>structural</em> (the code simply isn't there)." We verified
+  the desktop's HTTPS code already plugs into a shared <code>router()</code> — so (b) is cheap — and adopted it.
+  The headless server now <em>structurally cannot</em> pull in the certificate libraries, which is strictly safer.</p>
+
+  <h2>Phases (each a small, safe, separately-shippable PR)</h2>
+  <div class="phase"><h3>Phase 0 — Make the version label explicit</h3><p>Before moving anything: today the app's
+  reported version is baked in by "whichever crate compiles this file." If we just moved the file, the headless
+  server would silently report the wrong version. So first we <em>pass the version in</em> explicitly. (Both
+  reviewers caught that this is required in <strong>two</strong> spots, not one — miss it and the new engine
+  won't even compile.)</p></div>
+  <div class="phase"><h3>Phase 1 — Create the engine <em>and</em> point the desktop app at it (one safe step)</h3><p>Make
+  <code>accelerator-core</code>, move the GUI-free modules (HTTP server, proving, version resolution, config,
+  auth) into it, and switch the desktop app to build on it (a thin "wrapper" keeps every existing import path
+  working, so the GUI code barely changes). This must be <strong>one</strong> step — the instant the modules
+  move out, the desktop app has to already point at the engine or it won't build. The engine needs no build
+  script at all now.</p></div>
+  <div class="phase"><h3>Phase 2 — Point the headless server at the engine (the payoff)</h3><p>The headless server
+  drops its dependency on the desktop app and builds on the engine directly. We assert its dependency tree no
+  longer contains Tauri / the GUI toolkit / certificate + TLS-serving libraries (it keeps the small HTTP client
+  it needs to download <code>bb</code>), and measure how much smaller + faster it got.</p></div>
+  <div class="phase"><h3>Phase 3 — Speed up the headless CI build</h3><p>Stop installing desktop-only stuff
+  (Linux web-view libraries, the Tauri pre-build) on the headless build legs (there are three), wire up the
+  headless version source, add a CI tripwire that fails if the GUI deps ever sneak back in, and report the
+  measured before/after numbers.</p></div>
+  <div class="phase"><h3>Phase 4 — Prove nothing broke (release dry-run)</h3><p>A release-candidate dry-run runs
+  the real auto-update tests on macOS / Linux / Windows to prove the signed desktop app still updates correctly.
+  <strong>This step dispatches a release, so it's yours to trigger</strong> — the autonomous run stops here.</p></div>
+
+  <h2>Human context</h2>
+  <p>The desktop app is <em>code-signed and notarized</em> (Apple's tamper-seal) and updates itself in place. A
+  past release (1.0.1) broke that seal by accidentally bundling a second program into the app. We confirmed this
+  plan <strong>doesn't</strong> repeat that: adding a shared <em>library</em> doesn't add a second program, so the
+  signed bundle's shape is unchanged. That's why the cut is safe — but the release dry-run still proves it.</p>
+
+  <h2>Open questions — now resolved</h2>
+  <ul>
+    <li><strong>Where does the headless server get its "default bb version" from</strong> once we stop baking it
+    in? → Inject it from the packaging step (not a stale compile-time string). Decided.</li>
+    <li><strong>What should <code>/health</code> report as the version?</strong> → The injected release version,
+    not the engine crate's internal version. Decided.</li>
+    <li><strong>Could a future shared workspace re-introduce the GUI deps into headless?</strong> → Option (b)
+    makes that structurally impossible; a CI tripwire guards against it anyway.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm <strong>scope</strong>: engine = headless-needs-only (Option b); certs/verified-sites/HTTPS stay in the desktop app; CI restructure + measurement included.</li>
+      <li>Confirm <strong>tier</strong> (<code>deep</code>) — or override.</li>
+      <li><strong>/harden</strong>: not scheduled (behavior-preserving refactor that <em>reduces</em> surface). Confirm.</li>
+      <li>Approve / conditionally approve / reject. (Final codex gate verdict is being recorded in <code>plan.md</code>.)</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>For the autonomous implementation session. <code>/goal</code> survives <code>claude --resume</code> as a
+    durable stop-condition; <code>/loop</code> self-paces but doesn't survive resume.</p>
+    <p class="warning">Use exactly ONE per session — they don't compose (setting one replaces the other).</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /goal</h3>
+      <p class="muted">Completion is transcript-observable (phases ✓, the <code>cargo tree</code> assertion, tests green), and it cleanly stops before the owner-only release.</p>
+      <pre><code>/goal Phases 0-3 marked ✓ in implementations-plan/core-extraction-2026-06-07/plan.md (the per-phase headers in the file); for each, the agent printed `LESSONS_FILE=implementations-plan/core-extraction-2026-06-07/lessons/phase-N.md` in the transcript; the transcript shows `cargo tree -p accelerator-server` with NO tauri/tauri-plugin/rcgen/tokio-rustls; `bun run test`, `cargo test` (core + src-tauri), `bun run lint`, and `bun run lint:actions` all report exit 0; `/code-review max --fix` applied+committed and the codex post-impl audit clean (or high/critical addressed). STOP before Phase 4 (the rc dry-run dispatches a release — owner-only) and surface it. Never merge to main without green CI; never dispatch a release.</code></pre>
+    </div>
+
+    <h3>Alternative: /loop</h3>
+    <pre><code>/loop Each turn: read implementations-plan/core-extraction-2026-06-07/plan.md + lessons/ as source-of-truth for phase status; `git status`; if a PR is open, `gh pr view --json statusCheckRollup` (no --watch). CI in flight on HEAD? watch up to 10 min. Failed check or local failure? triage+fix, `/codex xhigh` if non-trivial, commit small+push (stop after 5 fails on one step). In-flight phase green? mark it ✓ in plan.md, file lessons/phase-N.md, print `LESSONS_FILE=…`, advance. Nothing in flight? do the next pending step (edit → cargo test/bun run test → cargo fmt/lint → commit → push). All of Phases 0-3 ✓? run `/code-review max --fix` → commit → codex post-impl audit (adversarial) → address high/critical, then STOP and surface the Phase-4 rc dry-run for the owner. Never merge to main or dispatch a release.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a> · drafts: <a href="plan-main-draft.md">main</a> / <a href="plan-codex-draft.md">codex</a> / <a href="plan-opus-draft.md">opus</a></p>
+</body>
+</html>
