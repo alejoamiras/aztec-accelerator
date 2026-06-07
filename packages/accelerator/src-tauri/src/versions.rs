@@ -325,7 +325,7 @@ async fn fetch_github_asset_digest(
 /// Flow: check cache → GET tarball → verify digest → extract to temp dir → atomic rename → chmod.
 /// Returns the path to the cached `bb` binary.
 /// Validate a version string before it is used to build cache paths or download URLs. THE single
-/// source of truth for both the HTTP ingress (`server.rs::resolve_version`) and the `download_bb`
+/// source of truth for both the HTTP ingress (`server::prove::resolve_version`) and the `download_bb`
 /// sink. Rejects path-traversal + injection: non-empty, `<= 128` chars, ASCII alnum/`.`/`-`/`_`,
 /// no leading dot, no `..` sequence.
 pub fn is_valid_version(version: &str) -> bool {
