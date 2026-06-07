@@ -301,10 +301,24 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
       this.#acceleratorProtocol = protocol;
 
-      const data = (await response.json()) as {
-        aztec_version?: string;
-        available_versions?: string[];
-      };
+      let data: { aztec_version?: string; available_versions?: string[] };
+      try {
+        data = (await response.json()) as {
+          aztec_version?: string;
+          available_versions?: string[];
+        };
+      } catch {
+        // Reachable but returned unparseable JSON — that's "error" (the host answered), NOT
+        // "offline" (which means both probes failed). Reset the cached protocol since a
+        // misbehaving responder shouldn't pin it for subsequent /prove calls.
+        this.#acceleratorProtocol = null;
+        return cacheAndReturn({
+          available: false,
+          reason: "error",
+          sdkAztecVersion,
+          protocol,
+        });
+      }
 
       const acceleratorVersion = data.aztec_version;
       const availableVersions = data.available_versions;
