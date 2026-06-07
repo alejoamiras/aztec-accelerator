@@ -345,6 +345,7 @@ fn main() {
             let state = AppState {
                 core: Arc::new(HeadlessState {
                     bundled_version: Some(bundled_version),
+                    app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                     https_bound: Default::default(),
                     config: Some(config_state.clone()),
                     auth_manager: Some(auth_manager.clone()),
