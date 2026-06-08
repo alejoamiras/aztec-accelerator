@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Headless CI Slim</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Headless CI Slim — the core-extraction follow-up</h1>
+  <p>We already made the headless server <strong>build</strong> 56% lighter (no desktop GUI code). But the CI
+  robots that build it still act like they're building the full desktop app — they install the Linux desktop GUI
+  libraries (WebKit/GTK) and run the desktop "prebuild" step. This plan tells the **two CI jobs that only build +
+  health-check the server** (not the proving ones) to skip that desktop busywork, so they're leaner and faster.
+  Plus two small correctness tidies the post-extraction audit flagged.</p>
+
+  <h2>Why this tier was chosen (<code>/blueprint mid</code>)</h2>
+  <p>It's a contained CI-config change, but it brushes the release-adjacent jobs (one high dimension: blast
+  radius), so it earns the dual audit — codex + an opus architect both reviewed it and <strong>both picked the
+  same approach</strong>, then caught real defects (a CI step that would've started failing, a wrong file path, a
+  test we wrongly assumed existed). All fixed before approval.</p>
+
+  <h2>Phases</h2>
+  <div class="phase"><h3>Phase 1 — A "just the version" helper</h3><p>The desktop prebuild does two jobs: copy the
+  `bb` binary AND figure out its version. The slimmed jobs only need the version. So we pull the version-figuring
+  bit into its own tiny, tested helper the lean jobs can call without copying anything.</p></div>
+  <div class="phase"><h3>Phase 2 — Add on/off switches to the shared setup</h3><p>The CI "setup recipe" is shared
+  by everyone. We add two switches (default = "on", so nothing changes for anyone) that let a job say "skip the
+  desktop GUI libraries" and "skip the prebuild."</p></div>
+  <div class="phase"><h3>Phase 3 — Flip the switches on the two lean jobs (+ the tidies)</h3><p>Smoke and
+  Release-Smoke turn both switches off. Smoke gets its version from the new helper instead of the (now-absent)
+  prebuild file. The audit's two correctness fixes land here: the proving e2e test gets the right version so it
+  doesn't do a needless download, and we add a sanity check on the reported version.</p></div>
+  <div class="phase"><h3>Phase 4 — Notes</h3><p>Document the leftover cleanup (the same GUI-library list still
+  lives in a couple of other places) and mark this done.</p></div>
+
+  <h2>Human context</h2>
+  <p>The proof here <em>is</em> the CI run: this very change makes the Smoke / Release-Smoke / e2e jobs run on its
+  own pull request, so a green check literally proves the slim works — no separate release rehearsal needed. One
+  expected, harmless change: the lean Smoke job's health check will now report <code>bb_available: false</code>
+  (because we stopped copying `bb` there) — that's correct, and nothing depends on it.</p>
+
+  <h2>Open questions — all resolved</h2>
+  <ul>
+    <li><strong>How far to slim?</strong> → Just the two bb-less jobs; leave the proving e2e alone. (Your call.)</li>
+    <li><strong>Validate with a release rehearsal?</strong> → No — the PR's own CI proves it. (Your call.)</li>
+    <li><strong>Shared switches vs a separate setup recipe?</strong> → Shared switches (both auditors: a separate recipe would duplicate — and risk drifting — all the shared parts to guard just two lines).</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm <strong>scope</strong>: bb-less legs only (Smoke + Release-Smoke); e2e untouched; the 2 codex tidies included.</li>
+      <li>Confirm <strong>tier</strong> (<code>mid</code>) — or override.</li>
+      <li><strong>/harden</strong>: not scheduled (CI refactor that reduces surface). Confirm.</li>
+      <li>Approve / conditionally approve / reject. (Final codex gate verdict is being recorded in <code>plan.md</code>.)</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>For the autonomous implementation session. <code>/goal</code> survives <code>claude --resume</code>; <code>/loop</code> self-paces but doesn't.</p>
+    <p class="warning">Use exactly ONE per session — they don't compose.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /goal</h3>
+      <p class="muted">Completion is transcript-observable — the PR's own green CI (Smoke / Release-Smoke / e2e) is the proof.</p>
+      <pre><code>/goal All phases marked ✓ in implementations-plan/headless-ci-slim-2026-06-08/plan.md; for each, the agent printed `LESSONS_FILE=implementations-plan/headless-ci-slim-2026-06-08/lessons/phase-N.md` in the transcript; `bun run test` + `bun run lint:actions` report exit 0; the PR's CI shows Smoke, Release-Smoke, and the e2e all green (the slim is self-proving on its own PR); `/code-review max --fix` applied+committed and codex post-impl audit clean (or high/critical addressed). Never merge to main without green CI.</code></pre>
+    </div>
+
+    <h3>Alternative: /loop</h3>
+    <pre><code>/loop Each turn: read implementations-plan/headless-ci-slim-2026-06-08/plan.md + lessons/ for phase status; `git status`; if a PR is open, `gh pr view --json statusCheckRollup` (no --watch). CI in flight? watch up to 10 min. Failed check (esp. the slimmed Smoke/Release-Smoke/e2e)? triage+fix, `/codex xhigh` if non-trivial, commit small+push (stop after 5 fails on one step). Phase green? mark ✓ in plan.md, file lessons/phase-N.md, print LESSONS_FILE=…, advance. Nothing in flight? next pending step (edit → bun run test/lint:actions → commit → push). All phases ✓? `/code-review max --fix` → commit → codex post-impl audit → address high/critical, then stop + surface. Never merge to main without green CI.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="audit-codex.md">codex audit</a> · <a href="audit-opus.md">opus audit</a> · <a href="./lessons/">Lessons</a></p>
+</body>
+</html>

@@ -52,9 +52,17 @@ jobs:
         if: inputs.build_accelerator
         run: bun run --cwd packages/accelerator prebuild
 
-      - name: Set BB_BINARY_PATH
+      - name: Set BB_BINARY_PATH + AZTEC_BB_VERSION
         if: inputs.build_accelerator
-        run: echo "BB_BINARY_PATH=$(pwd)/packages/accelerator/src-tauri/binaries/bb-x86_64-unknown-linux-gnu" >> "$GITHUB_ENV"
+        run: |
+          echo "BB_BINARY_PATH=$(pwd)/packages/accelerator/src-tauri/binaries/bb-x86_64-unknown-linux-gnu" >> "$GITHUB_ENV"
+          # /prove fast-path fix (core-extraction codex finding #1): surface the prebuild's resolved bb version
+          # so the headless server's bundled_version isn't "unknown" → the "requested == bundled" download-skip
+          # works + /health.aztec_version is truthful. Persist via $GITHUB_ENV (the server launches in a later step).
+          # Read into a var FIRST so a missing/unreadable AZTEC_VERSION fails the step (set -e) instead of
+          # silently writing an empty value — `echo "VAR=$(cat …)"` swallows the cat failure. (codex post-impl)
+          AZTEC_BB_VERSION="$(cat packages/accelerator/src-tauri/AZTEC_VERSION)"
+          echo "AZTEC_BB_VERSION=$AZTEC_BB_VERSION" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         if: inputs.build_accelerator

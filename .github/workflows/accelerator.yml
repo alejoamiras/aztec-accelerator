@@ -140,6 +140,9 @@ jobs:
           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
           rust-workspaces: packages/accelerator/server -> target
           rust-components: ""
+          # Headless smoke: no desktop GUI libs, no bb copy (it only builds + health-checks the server).
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
       - name: Build headless server
         # `accelerator-server` lives in a sibling crate at `../server/`
         # — see Cargo.toml docs.
@@ -158,10 +161,11 @@ jobs:
           echo "headless tree clean: $(echo "$TREE" | wc -l) packages, no tauri/rcgen/tokio-rustls"
       - name: Launch and health check
         run: |
-          # bb-version hook: surface the prebuild's resolved @aztec/bb.js version (written to AZTEC_VERSION
-          # by copy-bb.ts) to /health via the runtime env — core is build.rs-free, so the server reads
-          # AZTEC_BB_VERSION at construct-time. Without this, /health.aztec_version would be "unknown".
-          AZTEC_BB_VERSION="$(cat AZTEC_VERSION 2>/dev/null || echo unknown)"
+          # bb-version hook (version-only): this leg skips the full prebuild, so resolve the live @aztec/bb.js
+          # version directly (no bb copy) and surface it to /health via the runtime env — core is build.rs-free,
+          # so the server reads AZTEC_BB_VERSION at construct-time. Run the script by ABSOLUTE path (the job's
+          # working-dir is src-tauri; a bare `bun run` would also echo a `$ …` line into the capture).
+          AZTEC_BB_VERSION="$(bun "$GITHUB_WORKSPACE/packages/accelerator/scripts/bb-version.ts")"
           export AZTEC_BB_VERSION
           ../server/target/debug/accelerator-server &
           SERVER_PID=$!
@@ -195,6 +199,9 @@ jobs:
           echo "$HEALTH" | jq -e '.status == "ok"' > /dev/null
           # bb-version hook worked → /health.aztec_version reflects the injected version, not "unknown".
           echo "$HEALTH" | jq -e '.aztec_version != "unknown"' > /dev/null
+          # /health.version shape-guard (non-empty string). NOTE: bb_available is INTENTIONALLY not asserted —
+          # this leg skips the bb copy, so /health.bb_available is legitimately false here.
+          echo "$HEALTH" | jq -e '(.version | type) == "string" and (.version | length) > 0' > /dev/null
           echo "Smoke test passed"
           kill $SERVER_PID 2>/dev/null || true
 
@@ -216,6 +223,9 @@ jobs:
           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
           rust-workspaces: packages/accelerator/server -> target
           rust-components: ""
+          # Release smoke: build + package only (no /health, no bb) → no desktop libs, no prebuild.
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
       - name: Build release headless server (linux-x86_64)
         # `accelerator-server` lives in a sibling crate at `../server/`.
         run: cargo build --release --manifest-path ../server/Cargo.toml
