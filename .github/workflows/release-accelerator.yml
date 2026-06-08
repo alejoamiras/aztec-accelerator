@@ -266,17 +266,21 @@ jobs:
           rust-cache-key: accelerator-server-${{ matrix.target }}
           rust-workspaces: packages/accelerator/server -> target
           rust-components: ""
+          # Headless release build: no desktop GUI libs, no bb-copy prebuild — the server is build.rs-free and
+          # its version comes from the patched server/Cargo.toml below, not the prebuild. (slim follow-up B)
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
 
       - name: Patch version in Cargo.toml
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          # Patch BOTH the desktop lib crate (its version is what /health reports
-          # via env! from the shared lib) AND the server crate (its version is
-          # what `accelerator-server --version` reports).
-          sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" packages/accelerator/src-tauri/Cargo.toml
+          # Patch the SERVER crate version: post-core-extraction it is the single source for BOTH
+          # `accelerator-server --version` AND `/health.version` (the server injects its own CARGO_PKG_VERSION
+          # as app_version). build-headless compiles server -> accelerator-core, NOT src-tauri, so the old
+          # src-tauri patch was dead. (slim follow-up B)
           sed -i.bak "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" packages/accelerator/server/Cargo.toml
-          rm -f packages/accelerator/src-tauri/Cargo.toml.bak packages/accelerator/server/Cargo.toml.bak
+          rm -f packages/accelerator/server/Cargo.toml.bak
 
       - name: Build accelerator-server
         working-directory: packages/accelerator/server
@@ -284,10 +288,10 @@ jobs:
         # `src-tauri`) so that `tauri build` cannot pick it up as a
         # stowaway in the desktop .app's MacOS/ folder. The committed
         # server/Cargo.lock pins transitive deps (cargo resolves FROM it by
-        # default). We do NOT pass --locked here: this step patches the
-        # src-tauri path-dep version above, which would make --locked reject
-        # the (intentionally) now-stale lock. Reviewability comes from the
-        # lock being committed + diffed in PRs.
+        # default). We do NOT pass --locked here: the version-patch above edits
+        # server/Cargo.toml, which stales the server lock's own `accelerator-server`
+        # entry, so --locked would reject the (intentionally) now-stale lock.
+        # Reviewability comes from the lock being committed + diffed in PRs.
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Assert server self-reports the release version
