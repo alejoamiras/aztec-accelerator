@@ -140,14 +140,26 @@ async function fetchWindowsBb(version: string, destExe: string): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  // Resolve @aztec/bb.js two ways: bb-prover is a direct sdk dep; bb.js is its dep.
+/**
+ * Resolve the LIVE `@aztec/bb.js` version + package root from the installed dependency tree (bb-prover
+ * is a direct SDK dep; bb.js is its dep). Single source of truth for the bb version — the committed
+ * AZTEC_VERSION file can drift. Extracted so the lean headless CI legs can read the version without the
+ * full bb-copy prebuild. (core-extraction Phase 3b)
+ */
+export function resolveAztecBb(): { version: string; bbJsRoot: string } {
   const sdkDir = join(import.meta.dirname!, "..", "..", "sdk");
   const bbProverEntry = Bun.resolveSync("@aztec/bb-prover", sdkDir);
   const bbJsPkgJson = Bun.resolveSync("@aztec/bb.js/package.json", dirname(bbProverEntry));
   const bbJsRoot = dirname(bbJsPkgJson);
-  // The LIVE version drives both the npm build dir AND the Windows release tag.
-  const aztecVersion: string = JSON.parse(readFileSync(bbJsPkgJson, "utf8")).version;
+  const version: string = JSON.parse(readFileSync(bbJsPkgJson, "utf8")).version;
+  return { version, bbJsRoot };
+}
+
+async function main(): Promise<void> {
+  // Single source of truth for the bb version + package root (the prebuild + the version-only CI step
+  // both call resolveAztecBb — keeps them from drifting). The LIVE version drives the npm build dir,
+  // the Windows release tag, and the AZTEC_VERSION file written below.
+  const { version: aztecVersion, bbJsRoot } = resolveAztecBb();
 
   const platform = process.platform;
   const triple = getTargetTriple();

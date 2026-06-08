@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   assertSha256,
+  resolveAztecBb,
   resolveWindowsBbChecksum,
   WINDOWS_BB_ASSET,
   WINDOWS_BB_CHECKSUMS,
@@ -34,5 +36,15 @@ describe("windows bb.exe sidecar supply chain", () => {
     const data = Buffer.from("bb.exe bytes");
     const sha = createHash("sha256").update(data).digest("hex");
     expect(() => assertSha256(data, sha, "test")).not.toThrow();
+  });
+});
+
+describe("aztec bb version resolver (Phase 3b — the version-only CI path)", () => {
+  test("resolves a live @aztec/bb.js version + package root from the dep tree", () => {
+    const { version, bbJsRoot } = resolveAztecBb();
+    // A real semver-ish version (e.g. 4.2.0 / 4.2.0-aztecnr-rc.2), never the "unknown" fallback.
+    expect(version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(version).not.toBe("unknown");
+    expect(existsSync(bbJsRoot)).toBe(true);
   });
 });

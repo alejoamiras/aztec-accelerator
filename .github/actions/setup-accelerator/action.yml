@@ -35,12 +35,27 @@ inputs:
       release jobs should pass an empty string to skip unused components.
     required: false
     default: "clippy,rustfmt"
+  install-tauri-system-deps:
+    description: |
+      When "false", install ONLY the headless build dep (libssl-dev, for reqwest) and SKIP the desktop
+      Tauri GUI libraries (WebKit/GTK/appindicator/rsvg/patchelf). Default "true" preserves desktop behavior.
+      Compared as a STRING (GHA inputs are strings) — gates use `!= 'false'` / `== 'false'`.
+    required: false
+    default: "true"
+  run-prebuild:
+    description: |
+      When "false", SKIP the copy-bb.ts prebuild (the bb-binary copy) AND the host/target assertion (which
+      exists only to protect host-selected sidecar copying, not pure headless builds). Default "true".
+    required: false
+    default: "true"
 
 runs:
   using: composite
   steps:
     - name: Assert host matches rust-target
-      if: inputs.rust-target != ''
+      # The host==target guard protects host-selected bb-sidecar copying, so it is only relevant when the
+      # prebuild runs. Pure headless builds (run-prebuild: false) don't select a sidecar → skip it.
+      if: inputs.rust-target != '' && inputs.run-prebuild != 'false'
       shell: bash
       env:
         REQUESTED_TARGET: ${{ inputs.rust-target }}
@@ -61,12 +76,18 @@ runs:
         fi
         echo "Host=$HOST matches rust-target=$REQUESTED_TARGET"
 
-    - name: Install Linux system dependencies
-      if: runner.os == 'Linux'
+    - name: Install Linux system dependencies (desktop — Tauri GUI + headless)
+      if: runner.os == 'Linux' && inputs.install-tauri-system-deps != 'false'
       shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+    - name: Install Linux system dependencies (headless-only — libssl for reqwest)
+      if: runner.os == 'Linux' && inputs.install-tauri-system-deps == 'false'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev
 
     - uses: oven-sh/setup-bun@v2
       with:
@@ -92,5 +113,6 @@ runs:
         shared-key: ${{ inputs.rust-cache-key }}
 
     - name: Copy bb sidecar
+      if: inputs.run-prebuild != 'false'
       shell: bash
       run: bun run --cwd packages/accelerator prebuild
