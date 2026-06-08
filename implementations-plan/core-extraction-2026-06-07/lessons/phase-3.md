@@ -27,5 +27,18 @@ the owner's stated priority, I did NOT do this unsupervised — recommended as a
 `setup-accelerator-headless` variant, or boolean inputs defaulting to current behavior). Its build-time win is
 incremental on top of the already-realized −56% dependency-surface drop, which is the headline result.
 
+## Codex post-impl audit (session 019ea4be) — verdict: "extraction looks clean"; 2 minor findings → Phase 3b
+Confirmed clean: wrapper exports (no shadow/missing), `https_bound` cross-crate wiring, no new deps, bb
+download+execute hot path moved-not-changed.
+1. **[minor] `AZTEC_BB_VERSION` delivery changed** (compile-time bake → runtime env). `prove.rs` uses
+   `bundled_version` for the "requested == bundled → skip download" fast-path; with the env unset it's now
+   `"unknown"`, so the fast-path never matches → an unnecessary download (or offline failure) in MANUAL/release
+   headless runs. **CI e2e is unaffected** (the prebuild caches bb → `version_bb_path` exists → no download).
+   Fix in Phase 3b: extend the bb-version hook (export `AZTEC_BB_VERSION`) to ALL headless legs (e2e +
+   release-smoke + the release tarball's documented run), not just the PR Smoke job.
+2. **[test gap] smoke asserts `.aztec_version` but not `.version`** → a future constructor omission could
+   silently fall back to the core crate version. Add a `.version` assert in Phase 3b (note: core + server share
+   the workspace version today, so it needs a value that distinguishes them to be meaningful).
+
 ## Attempts
 - GREEN. Safe parts only; SC2155 fixed on the first actionlint pass.
