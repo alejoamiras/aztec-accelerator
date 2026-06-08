@@ -6,9 +6,9 @@
 //! Set `ALLOWED_ORIGINS=origin1,origin2` to restrict which origins can call `/prove`.
 //! When unset, all origins are auto-approved (no auth_manager).
 
-use aztec_accelerator::authorization::AuthorizationManager;
-use aztec_accelerator::config::AcceleratorConfig;
-use aztec_accelerator::server::{start, AppState, HeadlessState};
+use accelerator_core::authorization::AuthorizationManager;
+use accelerator_core::config::AcceleratorConfig;
+use accelerator_core::server::{start, AppState, HeadlessState};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing_subscriber::fmt;
@@ -65,6 +65,10 @@ async fn main() {
             config,
             prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
             app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            // bb-version injected from the runtime env (the Phase-3 CI hook sets AZTEC_BB_VERSION from the
+            // copy-bb.ts @aztec/bb.js resolution). Unset → None → core's "unknown" default; /prove is
+            // unaffected (callers pass x-aztec-version). (core-extraction Phase 2)
+            bundled_version: std::env::var("AZTEC_BB_VERSION").ok(),
             ..Default::default()
         }),
         ..Default::default()

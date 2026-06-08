@@ -116,7 +116,7 @@ GUI crate. GUI callbacks (`on_status`, `show_auth_popup`) are already injected v
   CI only runs clippy/test in `src-tauri` (final codex), so the new crate would otherwise ship untested.
 - Green gate: `cargo test` (core + src-tauri) + WebDriver/e2e + `bun run lint`. → `lessons/phase-1.md`.
 
-**Phase 2 — Repoint headless onto core (the payoff).**
+**Phase 2 — ✓ DONE (446→194 pkgs, −56%; no tauri/rcgen/tokio-rustls) — Repoint headless onto core (the payoff).**
 - `server/Cargo.toml`: replace `aztec-accelerator = { path = "../src-tauri" }` with
   `accelerator-core = { path = "../core" }`. `server/src/main.rs`: `use aztec_accelerator::…` →
   `use accelerator_core::…`, and **construct `HeadlessState` injecting `app_version` (its own
