@@ -52,7 +52,7 @@ de-drift follow-up. The audit should weigh whether B's drift-kill is worth foldi
 1. Edit `_e2e.yml:49` → `libssl-dev` only. `bun run lint:actions`. Self-proves on the PR gate (the SDK E2E runs
    with `build_accelerator: true` → builds + runs the headless server + proves). → `lessons/phase-a.md`.
 
-**Part B — PR2 (`build-headless`, rc-gated):**
+**Part B — ✓ DONE (code → PR #331; rc owner-gated) — PR2 (`build-headless`, rc-gated):**
 2. `build-headless` (release-accelerator.yml:263+): **(a)** add `install-tauri-system-deps: "false"` +
    `run-prebuild: "false"` to the composite `with:`; **(b)** delete the dead `sed` on `src-tauri/Cargo.toml` (:277)
    + its `.bak` rm; **(c)** fix the version-patch comment (:274-276) — only the SERVER crate is patched;
