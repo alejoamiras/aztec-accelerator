@@ -3,6 +3,31 @@
 version = 3
 
 [[package]]
+name = "accelerator-core"
+version = "1.0.5-rc.1"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "dirs 6.0.0",
+ "flate2",
+ "hex",
+ "http",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "time",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "url",
+ "which",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -258,6 +283,7 @@ dependencies = [
 name = "aztec-accelerator"
 version = "1.0.5-rc.1"
 dependencies = [
+ "accelerator-core",
  "axum",
  "base64 0.22.1",
  "dirs 6.0.0",

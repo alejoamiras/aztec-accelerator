@@ -1,0 +1,41 @@
+[package]
+name = "accelerator-core"
+version = "1.0.5-rc.1"
+description = "GUI-agnostic core of the Aztec Accelerator: HTTP proving server, bb cache, version resolution, origin authorization."
+edition = "2021"
+rust-version = "1.77.2"
+# Standalone package — deliberately NOT a `[workspace]` member, same spirit as src-tauri's `autobins=false`.
+# Keeping `core` / `src-tauri` / `server` as independent build units (each with its own Cargo.lock) means the
+# headless `accelerator-server` resolves `accelerator-core` with only ITS features, so a GUI dependency can
+# never feature-unify Tauri / rustls / rcgen into the headless build. Do NOT add a `[workspace]` spanning these.
+# See implementations-plan/core-extraction-2026-06-07/plan.md.
+#
+# Core is intentionally `build.rs`-free: the `AZTEC_VERSION` read, `verified-sites.json` check, and
+# `tauri_build::build()` all stay in src-tauri/build.rs. The bb-version default is injected via
+# `HeadlessState.bundled_version` (Phase 0), so core has no `env!("AZTEC_BB_VERSION")`.
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+base64 = "0.22"
+tempfile = "3"
+tracing = "0.1"
+dirs = "6"
+which = "7"
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
+http = "1"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+flate2 = "1"
+tar = "0.4"
+hex = "0.4"
+sha2 = "0.11"
+url = "2"
+time = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["test-util"] }
+serial_test = "3"

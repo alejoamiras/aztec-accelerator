@@ -93,7 +93,7 @@ GUI crate. GUI callbacks (`on_status`, `show_auth_popup`) are already injected v
   tray.rs:79/80, updater.rs:40) — Phase 0 is *narrowly* server/core decoupling, NOT "all version sourcing
   injected." New test: `/health.version == injected`. → `lessons/phase-0.md`.
 
-**Phase 1 — Create `accelerator-core` AND rewire the GUI onto it, in ONE atomic PR. [merged per final codex — the move is NOT merge-green if split]**
+**Phase 1 — ✓ DONE — Create `accelerator-core` AND rewire the GUI onto it, in ONE atomic PR. [merged per final codex — the move is NOT merge-green if split]**
 - *Why atomic:* "create core (additive)" and "rewire src-tauri" can't be two separate green PRs — the instant
   the modules MOVE out of `src-tauri/src/`, `src-tauri/src/lib.rs` (still `pub mod`s them) and the headless
   binary (still `use aztec_accelerator::…`) break. So one PR moves the modules into `core/` AND repoints

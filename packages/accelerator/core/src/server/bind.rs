@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 
 /// Bind `addr`, retrying briefly on `AddrInUse` so a just-exited prior instance (a restart overlap)
 /// is waited out, while a genuine second-instance conflict still fails fast.
-pub(crate) async fn bind_with_retry(addr: SocketAddr) -> std::io::Result<TcpListener> {
+pub async fn bind_with_retry(addr: SocketAddr) -> std::io::Result<TcpListener> {
     // 100ms polling, 5s budget: the restart overlap clears in well under a
     // second, so this is responsive AND fails a genuine second-instance
     // conflict reasonably fast (it surfaces "port in use" rather than stalling).
