@@ -144,8 +144,25 @@ jobs:
         # `accelerator-server` lives in a sibling crate at `../server/`
         # — see Cargo.toml docs.
         run: cargo build --manifest-path ../server/Cargo.toml
+      - name: Assert headless tree has no GUI/TLS-serving deps (core-extraction regression guard)
+        # Tripwire: if a future change (or an accidental [workspace]) ever pulls the Tauri / webview /
+        # TLS-serving / cert-gen tree back into the headless binary, fail loudly. Protects the ~56%
+        # dependency-surface reduction from the accelerator-core extraction.
+        run: |
+          TREE=$(cargo tree --manifest-path ../server/Cargo.toml -p accelerator-server --edges normal --prefix none | sort -u)
+          if echo "$TREE" | grep -iqE '^(tauri|tao |wry|rcgen|tokio-rustls|x509-parser|rustls-pemfile)'; then
+            echo "::error::headless dep tree regressed — a GUI/TLS-serving crate leaked back in:"
+            echo "$TREE" | grep -iE '^(tauri|tao |wry|rcgen|tokio-rustls|x509-parser|rustls-pemfile)'
+            exit 1
+          fi
+          echo "headless tree clean: $(echo "$TREE" | wc -l) packages, no tauri/rcgen/tokio-rustls"
       - name: Launch and health check
         run: |
+          # bb-version hook: surface the prebuild's resolved @aztec/bb.js version (written to AZTEC_VERSION
+          # by copy-bb.ts) to /health via the runtime env — core is build.rs-free, so the server reads
+          # AZTEC_BB_VERSION at construct-time. Without this, /health.aztec_version would be "unknown".
+          AZTEC_BB_VERSION="$(cat AZTEC_VERSION 2>/dev/null || echo unknown)"
+          export AZTEC_BB_VERSION
           ../server/target/debug/accelerator-server &
           SERVER_PID=$!
 
@@ -176,6 +193,8 @@ jobs:
           fi
 
           echo "$HEALTH" | jq -e '.status == "ok"' > /dev/null
+          # bb-version hook worked → /health.aztec_version reflects the injected version, not "unknown".
+          echo "$HEALTH" | jq -e '.aztec_version != "unknown"' > /dev/null
           echo "Smoke test passed"
           kill $SERVER_PID 2>/dev/null || true
 
