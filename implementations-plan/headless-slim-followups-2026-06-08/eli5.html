@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Headless Slim Follow-ups</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Headless Slim Follow-ups — finishing the job</h1>
+  <p>Two leftover spots from the core-extraction arc still install desktop GUI libraries (and run a desktop
+  pre-step) on CI jobs that only build the <em>headless</em> server. This trims them. It's split into two
+  pull requests because they prove themselves very differently: one is checked by the normal PR gate; the other
+  touches the <strong>release pipeline</strong>, which can only be proven by cutting a release-candidate.</p>
+
+  <h2>Why this tier was chosen (<code>/blueprint mid</code>)</h2>
+  <p>Small CI edits, but one of them lives in the release workflow (blast radius: HIGH — the tarball ships to other
+  teams' CI). That one high-risk dimension earns the dual audit. Both codex and an opus architect reviewed it →
+  <strong>both picked the same approach</strong> and verified the trickiest claim (that a leftover version-patch is
+  truly dead code) by checking the lockfile directly.</p>
+
+  <h2>Phases</h2>
+  <div class="phase"><h3>Part A — the e2e job (one-line, merges normally)</h3><p>The SDK end-to-end test job
+  installs the desktop GUI libraries but only compiles the headless server. Drop the GUI libraries (keep the one
+  the HTTP client needs, and keep the step that fetches the real <code>bb</code> the test proves against). One line.
+  Its own PR gate proves it.</p></div>
+  <div class="phase"><h3>Part B — the release build (rc-gated, separate PR)</h3><p>The job that builds the 4-platform
+  release headless tarballs does the same desktop busywork. Flip the two switches we already added in Phase 3b to
+  skip it. While we're in there: a leftover step still patches a file (<code>src-tauri</code>) this job doesn't even
+  compile anymore — both auditors confirmed it's dead — so we remove it and fix two now-wrong comments.</p></div>
+  <div class="phase"><h3>Part B validation — you cut a release-candidate</h3><p>The release build can't be checked
+  by a PR. You dispatch a release-candidate (<code>rc.N</code>) on the branch; it builds the slimmed tarballs and
+  runs the real auto-update tests against them. Merge once it's green.</p></div>
+
+  <h2>Human context — the rc is a real publish, not a sandbox</h2>
+  <p>Important: a release-candidate run is <strong>not</strong> a harmless dry-run. It pushes a public
+  <code>accelerator-v1.0.5-rc.N</code> tag and creates a GitHub <em>pre-release</em> with the assets. It does
+  <em>not</em> update the production auto-update feed (that's skipped for pre-releases), so your real 1.0.x users
+  are untouched — but it <em>is</em> a real publish. Two rules: treat it as such, and <strong>use a fresh
+  <code>rc.N</code> every run</strong> (reusing a number re-points an old tag at new files).</p>
+
+  <h2>Open questions — all resolved</h2>
+  <ul>
+    <li><strong>One PR or two?</strong> → Two (you chose): the safe e2e change merges now; the release change is rc-gated separately.</li>
+    <li><strong>Edit the e2e inline, or route it through the shared setup recipe?</strong> → Inline (both auditors: routing it in is a bigger refactor of a release-adjacent file for marginal dedup; do it as a future cleanup).</li>
+    <li><strong>Is that leftover version-patch safe to delete?</strong> → Yes — verified the release build never compiles that crate.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm <strong>scope</strong>: Part A (e2e GUI-libs drop) + Part B (release build-headless slim + dead-patch/comment cleanup); split into 2 PRs.</li>
+      <li>Confirm <strong>tier</strong> (<code>mid</code>) — or override.</li>
+      <li><strong>/harden</strong>: not scheduled (slim reduces surface). Confirm.</li>
+      <li>Approve / conditionally approve / reject. (Final codex gate verdict is being recorded in <code>plan.md</code>.)</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>For the autonomous implementation session. <code>/goal</code> survives <code>claude --resume</code>; <code>/loop</code> self-paces but doesn't.</p>
+    <p class="warning">Use exactly ONE per session — they don't compose.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /goal</h3>
+      <p class="muted">Part A is PR-gate-observable; Part B stops at the owner-dispatched rc (a real publish — not mine to cut).</p>
+      <pre><code>/goal Part A + Part B marked ✓ in implementations-plan/headless-slim-followups-2026-06-08/plan.md; for each, the agent printed `LESSONS_FILE=implementations-plan/headless-slim-followups-2026-06-08/lessons/phase-N.md` in the transcript; `bun run lint:actions` reports exit 0; Part A's PR shows the SDK E2E green and is mergeable; Part B is committed + pushed with the rc-validation SURFACED for the owner (do NOT dispatch the release rc — owner-only); `/code-review max --fix` applied+committed and codex post-impl audit clean (or high/critical addressed). Never merge to main without green CI; never dispatch a release.</code></pre>
+    </div>
+
+    <h3>Alternative: /loop</h3>
+    <pre><code>/loop Each turn: read implementations-plan/headless-slim-followups-2026-06-08/plan.md + lessons/ for status; `git status`; if a PR is open, `gh pr view --json statusCheckRollup` (no --watch). CI in flight? watch up to 10 min. Failed check? triage+fix, `/codex xhigh` if non-trivial, commit small+push (stop after 5 fails on one step). Phase green? mark ✓ in plan.md, file lessons/phase-N.md, print LESSONS_FILE=…, advance. Nothing in flight? next pending step (edit → bun run lint:actions → commit → push). Both parts ✓ (Part B = pushed, rc surfaced for the owner)? `/code-review max --fix` → commit → codex post-impl audit → address high/critical, then stop + surface. Never merge to main without green CI; never dispatch a release rc.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="audit-codex.md">codex audit</a> · <a href="audit-opus.md">opus audit</a> · <a href="./lessons/">Lessons</a></p>
+</body>
+</html>

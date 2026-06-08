@@ -46,7 +46,9 @@ jobs:
         if: inputs.build_accelerator
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+          # Headless only: this leg builds just `accelerator-server` (no Tauri GUI) → drop WebKit/GTK; keep
+          # libssl-dev for reqwest (the bb download). (core-extraction Phase 3b follow-up)
+          sudo apt-get install -y libssl-dev
 
       - name: Copy bb sidecar
         if: inputs.build_accelerator
