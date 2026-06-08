@@ -127,7 +127,7 @@ GUI crate. GUI callbacks (`on_status`, `show_auth_popup`) are already injected v
   in); the tripwire targets the GUI/serving subtree, NOT "all TLS." Record NEW build-time + package count;
   compute delta. → `lessons/phase-2.md`.
 
-**Phase 3 — CI restructure + measurement (Q3). [scope widened + claims corrected by final codex]**
+**Phase 3 — ✓ core done (tripwire + bb-version hook + measurement); setup-slimming DEFERRED → owner (release-pipeline risk; see lessons/phase-3.md) — CI restructure + measurement (Q3). [scope widened + claims corrected by final codex]**
 - Headless setup drops WebKit/GTK + the Tauri Bun-prebuild — but is **NOT** "Rust-only": `reqwest` still needs
   `libssl-dev` (native-tls) unless we deliberately switch reqwest to `rustls-tls` (a dep choice — note it, don't
   silently assume). The desktop-only setup to strip lives in **THREE places**, not just `build-headless`:
