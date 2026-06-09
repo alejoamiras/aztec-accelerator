@@ -877,9 +877,9 @@ mod tests {
 
         // Pre-approve the origin in config
         if let Some(ref cfg) = state.config {
-            cfg.write()
-                .approved_origins
-                .push("https://approved-site.com".to_string());
+            cfg.write().approved_origins.push(
+                crate::authorization::CanonicalOrigin::parse("https://approved-site.com").unwrap(),
+            );
         }
 
         let app = router(state);

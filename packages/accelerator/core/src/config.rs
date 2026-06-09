@@ -1,3 +1,4 @@
+use crate::authorization::CanonicalOrigin;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -45,8 +46,8 @@ pub struct AcceleratorConfig {
     pub config_version: u32,
     #[serde(default)]
     pub safari_support: bool,
-    #[serde(default)]
-    pub approved_origins: Vec<String>,
+    #[serde(default, deserialize_with = "de_approved_origins")]
+    pub approved_origins: Vec<CanonicalOrigin>,
     #[serde(default)]
     pub speed: Speed,
     /// None = never asked, Some(true) = auto-update, Some(false) = manual
@@ -80,53 +81,43 @@ pub fn config_path() -> PathBuf {
 
 /// Load config from disk. Returns default if missing or malformed.
 ///
-/// Also runs a one-shot migration on `approved_origins`: canonicalizes each entry
-/// via [`crate::authorization::canonicalize_origin`] and drops entries that fail
-/// canonicalization (logged). Dedupes survivors. If the canonicalized set differs
-/// from what was loaded, rewrites the file on disk so the migration only runs once.
+/// `approved_origins` is canonicalized at the serde boundary by [`de_approved_origins`]
+/// (drop-invalid + dedupe), so already-canonical entries load 1:1 and no migration or
+/// on-disk resave is needed (F-02).
 pub fn load() -> AcceleratorConfig {
     let path = config_path();
-    let mut config = match std::fs::read_to_string(&path) {
+    match std::fs::read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
             tracing::warn!(path = %path.display(), error = %e, "Malformed config, using defaults");
             AcceleratorConfig::default()
         }),
         Err(_) => AcceleratorConfig::default(),
-    };
-    if migrate_approved_origins(&mut config.approved_origins) {
-        if let Err(e) = save(&config) {
-            tracing::warn!(error = %e, "Failed to persist canonicalized approved_origins");
-        }
     }
-    config
 }
 
-/// Canonicalize each entry in `origins`, dropping un-canonicalizable entries
-/// and deduping survivors (order-preserving). Returns `true` if the resulting
-/// set differs from the input (caller should re-save).
-fn migrate_approved_origins(origins: &mut Vec<String>) -> bool {
-    use crate::authorization::canonicalize_origin;
-    let original = std::mem::take(origins);
+/// Lenient deserializer for `approved_origins`: reads `Vec<String>`, canonicalizes each via
+/// [`CanonicalOrigin`], DROPS (with a warning) entries that fail, and dedupes survivors
+/// order-preserving. Replaces the old load-time `migrate_approved_origins` + resave —
+/// canonicalization happens here, idempotently, so existing canonical configs deserialize
+/// 1:1. A single bad entry can't fail the whole config load (matches the prior tolerance).
+fn de_approved_origins<'de, D>(d: D) -> Result<Vec<CanonicalOrigin>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = <Vec<String> as Deserialize>::deserialize(d)?;
+    let mut out: Vec<CanonicalOrigin> = Vec::with_capacity(raw.len());
     let mut dropped: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for entry in &original {
-        match canonicalize_origin(entry) {
-            Some(canon) => {
-                if seen.insert(canon.clone()) {
-                    origins.push(canon);
-                }
-            }
-            None => dropped.push(entry.clone()),
+    for entry in raw {
+        match CanonicalOrigin::try_from(entry) {
+            Ok(canon) if !out.contains(&canon) => out.push(canon),
+            Ok(_) => {} // duplicate, drop silently
+            Err(e) => dropped.push(e.0),
         }
     }
     if !dropped.is_empty() {
-        tracing::warn!(
-            count = dropped.len(),
-            dropped = ?dropped,
-            "Dropped un-canonicalizable approved_origins entries during migration"
-        );
+        tracing::warn!(count = dropped.len(), dropped = ?dropped, "Dropped un-canonicalizable approved_origins entries on load");
     }
-    origins.as_slice() != original.as_slice()
+    Ok(out)
 }
 
 /// Save config to disk. Creates parent directories if needed.
@@ -189,10 +180,7 @@ mod tests {
 
         let original = AcceleratorConfig {
             safari_support: true,
-            approved_origins: vec![
-                "https://example.com".to_string(),
-                "https://other.dev".to_string(),
-            ],
+            approved_origins: vec![co("https://example.com"), co("https://other.dev")],
             speed: Speed::Balanced,
             auto_update: Some(true),
             ..Default::default()
@@ -315,80 +303,80 @@ mod tests {
     #[test]
     fn approved_origins_removal() {
         let mut config = AcceleratorConfig {
-            approved_origins: vec!["https://a.com".to_string(), "https://b.com".to_string()],
+            approved_origins: vec![co("https://a.com"), co("https://b.com")],
             ..Default::default()
         };
-        config.approved_origins.retain(|o| o != "https://a.com");
-        assert_eq!(config.approved_origins, vec!["https://b.com"]);
+        config
+            .approved_origins
+            .retain(|o| o.as_str() != "https://a.com");
+        assert_eq!(config.approved_origins, vec![co("https://b.com")]);
     }
 
-    // ─── migrate_approved_origins ───────────────────────────────────
+    // ─── de_approved_origins (F-02 — replaces migrate_approved_origins) ──
+
+    fn co(s: &str) -> CanonicalOrigin {
+        CanonicalOrigin::parse(s).expect("canonical test origin")
+    }
+
+    /// Deserialize a JSON array literal through `de_approved_origins`.
+    fn de_origins(json_array: &str) -> Vec<CanonicalOrigin> {
+        #[derive(Deserialize)]
+        struct W {
+            #[serde(deserialize_with = "de_approved_origins")]
+            v: Vec<CanonicalOrigin>,
+        }
+        serde_json::from_str::<W>(&format!("{{\"v\":{json_array}}}"))
+            .unwrap()
+            .v
+    }
 
     #[test]
-    fn migrate_no_change_when_already_canonical() {
-        let mut origins = vec![
-            "https://nulo.sh".to_string(),
-            "chrome-extension://abc".to_string(),
-        ];
-        let changed = migrate_approved_origins(&mut origins);
-        assert!(!changed);
+    fn de_origins_keeps_canonical() {
         assert_eq!(
-            origins,
-            vec![
-                "https://nulo.sh".to_string(),
-                "chrome-extension://abc".to_string()
-            ],
+            de_origins(r#"["https://nulo.sh","chrome-extension://abc"]"#),
+            vec![co("https://nulo.sh"), co("chrome-extension://abc")],
         );
     }
 
     #[test]
-    fn migrate_canonicalizes_mixed_case_and_default_port() {
-        let mut origins = vec![
-            "HTTPS://NULO.SH:443".to_string(),
-            "https://faucet.nulo.sh/".to_string(),
-        ];
-        let changed = migrate_approved_origins(&mut origins);
-        assert!(changed);
+    fn de_origins_canonicalizes_mixed_case_and_default_port() {
         assert_eq!(
-            origins,
-            vec![
-                "https://nulo.sh".to_string(),
-                "https://faucet.nulo.sh".to_string()
-            ],
+            de_origins(r#"["HTTPS://NULO.SH:443","https://faucet.nulo.sh/"]"#),
+            vec![co("https://nulo.sh"), co("https://faucet.nulo.sh")],
         );
     }
 
     #[test]
-    fn migrate_dedupes_after_canonicalization() {
-        let mut origins = vec![
-            "https://nulo.sh".to_string(),
-            "HTTPS://nulo.sh".to_string(),
-            "https://nulo.sh:443".to_string(),
-        ];
-        let changed = migrate_approved_origins(&mut origins);
-        assert!(changed);
-        assert_eq!(origins, vec!["https://nulo.sh".to_string()]);
-    }
-
-    #[test]
-    fn migrate_drops_uncanonicalizable() {
-        let mut origins = vec![
-            "https://nulo.sh".to_string(),
-            "not a url".to_string(),
-            "https://nulo.sh/admin".to_string(),
-        ];
-        let changed = migrate_approved_origins(&mut origins);
-        assert!(changed);
-        assert_eq!(origins, vec!["https://nulo.sh".to_string()]);
-    }
-
-    #[test]
-    fn migrate_preserves_order() {
-        let mut origins = vec!["https://b.com".to_string(), "https://a.com".to_string()];
-        migrate_approved_origins(&mut origins);
+    fn de_origins_dedupes() {
         assert_eq!(
-            origins,
-            vec!["https://b.com".to_string(), "https://a.com".to_string()],
+            de_origins(r#"["https://nulo.sh","HTTPS://nulo.sh","https://nulo.sh:443"]"#),
+            vec![co("https://nulo.sh")],
         );
+    }
+
+    #[test]
+    fn de_origins_drops_uncanonicalizable() {
+        assert_eq!(
+            de_origins(r#"["https://nulo.sh","not a url","https://nulo.sh/admin"]"#),
+            vec![co("https://nulo.sh")],
+        );
+    }
+
+    #[test]
+    fn de_origins_preserves_order() {
+        assert_eq!(
+            de_origins(r#"["https://b.com","https://a.com"]"#),
+            vec![co("https://b.com"), co("https://a.com")],
+        );
+    }
+
+    #[test]
+    fn raw_non_canonical_on_disk_roundtrips_to_canonical_in_memory() {
+        // opus M3: proves the deleted load-time resave is unnecessary — a non-canonical persisted
+        // entry deserializes to the canonical in-memory form, so compare-based remove/is_approved
+        // still work without rewriting the file.
+        let cfg: AcceleratorConfig =
+            serde_json::from_str(r#"{"approved_origins":["HTTPS://NULO.SH:443"]}"#).unwrap();
+        assert_eq!(cfg.approved_origins, vec![co("https://nulo.sh")]);
     }
 }

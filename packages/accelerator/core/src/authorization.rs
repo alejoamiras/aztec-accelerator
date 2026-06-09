@@ -57,6 +57,87 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
     }
 }
 
+/// An origin string guaranteed canonical (RFC 6454) **by construction**.
+///
+/// The only ways to build one run [`canonicalize_origin`], so a `CanonicalOrigin` can never
+/// hold a non-canonical value — the invariant the old comment-only "input is already canonical"
+/// contract tried (and could not enforce) to express. Compares/serializes as its inner string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalOrigin(String);
+
+impl CanonicalOrigin {
+    /// Canonicalize `input`; `None` if it is not a valid/allowed RFC-6454 origin.
+    pub fn parse(input: &str) -> Option<Self> {
+        canonicalize_origin(input).map(Self)
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for CanonicalOrigin {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+impl AsRef<str> for CanonicalOrigin {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+impl std::borrow::Borrow<str> for CanonicalOrigin {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Display for CanonicalOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl PartialEq<str> for CanonicalOrigin {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+/// Error: a string is not a canonical RFC-6454 origin.
+#[derive(Debug, Clone)]
+pub struct NonCanonicalOrigin(pub String);
+impl std::fmt::Display for NonCanonicalOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "not a canonical RFC 6454 origin: {}", self.0)
+    }
+}
+impl std::error::Error for NonCanonicalOrigin {}
+
+impl TryFrom<String> for CanonicalOrigin {
+    type Error = NonCanonicalOrigin;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        canonicalize_origin(&s)
+            .map(Self)
+            .ok_or(NonCanonicalOrigin(s))
+    }
+}
+
+impl serde::Serialize for CanonicalOrigin {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+impl<'de> serde::Deserialize<'de> for CanonicalOrigin {
+    /// Strict: a directly-deserialized `CanonicalOrigin` must already be canonical.
+    /// (The lenient drop-invalid path lives on the config Vec via `de_approved_origins`.)
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <String as serde::Deserialize>::deserialize(d)?;
+        Self::try_from(s).map_err(<D::Error as serde::de::Error>::custom)
+    }
+}
+
 /// Decision from the user about whether to authorize an origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthDecision {
@@ -137,10 +218,9 @@ impl AuthorizationManager {
 
     /// Returns true if the origin is approved (auto-approved or in the approved list).
     ///
-    /// The input `origin` is expected to ALREADY be canonical (use [`canonicalize_origin`]
-    /// at request ingress). Persisted entries in `approved_origins` are likewise canonical
-    /// (enforced by [`crate::config::load`]'s migration step).
-    pub fn is_approved(origin: &str, approved_origins: &[String]) -> bool {
+    /// Both `origin` and `approved_origins` are [`CanonicalOrigin`], so canonicality is
+    /// guaranteed by the type — no comment-only precondition, no bypassable ingress.
+    pub fn is_approved(origin: &CanonicalOrigin, approved_origins: &[CanonicalOrigin]) -> bool {
         Self::is_auto_approved(origin) || approved_origins.iter().any(|o| o == origin)
     }
 }
@@ -177,19 +257,24 @@ mod tests {
         ));
     }
 
+    /// Build a `CanonicalOrigin` for tests (panics if the literal isn't canonical).
+    fn co(s: &str) -> CanonicalOrigin {
+        CanonicalOrigin::parse(s).expect("canonical test origin")
+    }
+
     #[test]
     fn is_approved_checks_both() {
-        let approved = vec!["https://playground.aztec-accelerator.dev".to_string()];
+        let approved = vec![co("https://playground.aztec-accelerator.dev")];
         assert!(AuthorizationManager::is_approved(
-            "http://localhost:5173",
+            &co("http://localhost:5173"),
             &approved
         ));
         assert!(AuthorizationManager::is_approved(
-            "https://playground.aztec-accelerator.dev",
+            &co("https://playground.aztec-accelerator.dev"),
             &approved
         ));
         assert!(!AuthorizationManager::is_approved(
-            "https://evil.com",
+            &co("https://evil.com"),
             &approved
         ));
     }
@@ -368,5 +453,78 @@ mod tests {
         assert!(canonicalize_origin("").is_none());
         assert!(canonicalize_origin("not a url").is_none());
         assert!(canonicalize_origin("//nulo.sh").is_none());
+    }
+
+    // ─── CanonicalOrigin newtype (F-02) ─────────────────────────────────
+
+    #[test]
+    fn canonical_origin_parse_and_str() {
+        let o = CanonicalOrigin::parse("HTTPS://NULO.SH:443").unwrap();
+        assert_eq!(o.as_str(), "https://nulo.sh");
+        assert_eq!(o.to_string(), "https://nulo.sh");
+        assert!(o == *"https://nulo.sh"); // PartialEq<str>
+        assert!(CanonicalOrigin::parse("not a url").is_none());
+    }
+
+    #[test]
+    fn canonical_origin_serde_roundtrip_and_strict() {
+        let o = CanonicalOrigin::parse("https://nulo.sh").unwrap();
+        // serializes as the inner canonical string
+        assert_eq!(serde_json::to_string(&o).unwrap(), "\"https://nulo.sh\"");
+        // deserialize canonicalizes valid input...
+        let de: CanonicalOrigin = serde_json::from_str("\"HTTPS://NULO.SH:443\"").unwrap();
+        assert_eq!(de.as_str(), "https://nulo.sh");
+        // ...and STRICTLY rejects un-canonicalizable input (the lenient drop lives on the config Vec)
+        assert!(serde_json::from_str::<CanonicalOrigin>("\"not a url\"").is_err());
+        assert!(serde_json::from_str::<CanonicalOrigin>("\"https://x.com/admin\"").is_err());
+    }
+
+    #[test]
+    fn canonical_origin_rejects_special_origins() {
+        // Origin: null, blob:, javascript:, file:, data: — none are tuple/extension origins
+        for bad in [
+            "null",
+            "blob:https://x.com",
+            "javascript:alert(1)",
+            "file:///x",
+            "data:text/html,x",
+        ] {
+            assert!(CanonicalOrigin::parse(bad).is_none(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn canonical_origin_idn_punycode_no_homograph_collision() {
+        // A Unicode/IDN host normalizes to punycode (xn--…), distinct from the ASCII lookalike,
+        // so a homograph cannot alias an approved ASCII origin.
+        let ascii = CanonicalOrigin::parse("https://example.com").unwrap();
+        if let Some(u) = CanonicalOrigin::parse("https://ex\u{00e4}mple.com") {
+            assert!(
+                u.as_str().starts_with("https://xn--"),
+                "expected punycode, got {}",
+                u.as_str()
+            );
+            assert_ne!(u, ascii, "homograph must NOT collide with ASCII origin");
+        }
+    }
+
+    #[test]
+    fn canonical_origin_stable_on_odd_but_parseable_hosts() {
+        // port 0 is non-default → preserved; canonicalization stays idempotent on odd inputs
+        // (percent-encoded host, IPv6 zone-id) whatever url::Url decides for them.
+        if let Some(p0) = CanonicalOrigin::parse("https://x.com:0") {
+            assert_eq!(p0.as_str(), "https://x.com:0");
+        }
+        for odd in [
+            "https://x.com:0",
+            "https://[::1]:5173",
+            "https://ex%41mple.com",
+            "https://[fe80::1%25eth0]",
+        ] {
+            if let Some(once) = CanonicalOrigin::parse(odd) {
+                let twice = CanonicalOrigin::parse(once.as_str()).expect("re-parse of canonical");
+                assert_eq!(once, twice, "non-idempotent for {odd}");
+            }
+        }
     }
 }
