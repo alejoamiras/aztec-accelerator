@@ -172,12 +172,7 @@ pub async fn enable_safari_support(
         certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
     // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping it
     // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
-    let state = (**shared_state).clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::server::start_https(state, tls_config).await {
-            tracing::error!("HTTPS server error: {e}");
-        }
-    });
+    crate::server::spawn_https((**shared_state).clone(), tls_config);
 
     tracing::info!("Safari Support enabled via Settings");
     Ok(())
