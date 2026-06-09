@@ -17,20 +17,60 @@ pub fn certs_dir() -> PathBuf {
         .join("certs")
 }
 
-fn ca_cert_path() -> PathBuf {
-    certs_dir().join("ca.pem")
-}
-
+/// The legacy on-disk CA private key path. NOT part of [`CertPaths`] — the keyless-CA design never
+/// writes it; this exists only so `migrate_legacy_ca_key` can delete one left by older installs.
 fn ca_key_path() -> PathBuf {
     certs_dir().join("ca.key")
 }
 
-fn leaf_cert_path() -> PathBuf {
-    certs_dir().join("localhost.pem")
+/// The trio of TLS artifact paths that always travel together: CA cert, leaf cert, leaf key. Bundling
+/// them kills the 3×`&Path` arg-swap foot-gun (all the same type) + the basenames that were
+/// duplicated across the accessors, the staging set, and the swap. (F-07)
+struct CertPaths {
+    ca_cert: PathBuf,
+    leaf_cert: PathBuf,
+    leaf_key: PathBuf,
 }
 
-fn leaf_key_path() -> PathBuf {
-    certs_dir().join("localhost.key")
+impl CertPaths {
+    /// The live served set under `certs_dir()` (`ca.pem` / `localhost.pem` / `localhost.key`).
+    fn live() -> Self {
+        let dir = certs_dir();
+        Self {
+            ca_cert: dir.join("ca.pem"),
+            leaf_cert: dir.join("localhost.pem"),
+            leaf_key: dir.join("localhost.key"),
+        }
+    }
+
+    /// The staged set (`*.new`) under `dir`, written + (macOS) trusted before the atomic swap.
+    fn staged(dir: &std::path::Path) -> Self {
+        Self {
+            ca_cert: dir.join("ca.pem.new"),
+            leaf_cert: dir.join("localhost.pem.new"),
+            leaf_key: dir.join("localhost.key.new"),
+        }
+    }
+
+    /// True iff all three files exist (presence only — validity is checked by the caller).
+    fn exists(&self) -> bool {
+        self.ca_cert.exists() && self.leaf_cert.exists() && self.leaf_key.exists()
+    }
+
+    /// Best-effort remove all three (used to discard a failed staging).
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.ca_cert);
+        let _ = std::fs::remove_file(&self.leaf_cert);
+        let _ = std::fs::remove_file(&self.leaf_key);
+    }
+
+    /// Atomically rename this (staged) set over `live`, preserving order ca → leaf → key.
+    fn swap_into(&self, live: &CertPaths) -> std::io::Result<()> {
+        std::fs::rename(&self.ca_cert, &live.ca_cert)?;
+        std::fs::rename(&self.leaf_cert, &live.leaf_cert)?;
+        std::fs::rename(&self.leaf_key, &live.leaf_key)?;
+        Ok(())
+    }
 }
 
 /// 824 days — one day under Apple's inclusive 825-day TLS-server-cert cap (applies even to
@@ -88,30 +128,23 @@ fn leaf_params(
 /// triggers regeneration instead of being skipped forever. Note: `ca.key` is intentionally NOT
 /// required — it is never written.
 pub fn certs_exist() -> bool {
-    ca_cert_path().exists()
-        && leaf_cert_path().exists()
-        && leaf_key_path().exists()
-        && leaf_cert_days_remaining().map(|d| d > 0).unwrap_or(false)
+    CertPaths::live().exists() && leaf_cert_days_remaining().map(|d| d > 0).unwrap_or(false)
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
 /// The CA private key is generated in memory, signs the leaf, and is dropped at function end —
 /// **never written to disk.** Writing to caller-chosen paths lets rotation stage a new set
 /// (`*.new`) and atomically swap it in only after the new anchor is trusted.
-fn write_new_cert_set(
-    ca_cert_dst: &std::path::Path,
-    leaf_cert_dst: &std::path::Path,
-    leaf_key_dst: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn write_new_cert_set(paths: &CertPaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = OffsetDateTime::now_utc();
     let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let ca_cert = ca_params(now).self_signed(&ca_key)?;
     let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let leaf_cert = leaf_params(now)?.signed_by(&leaf_key, &ca_cert, &ca_key)?;
 
-    write_pem_file(ca_cert_dst, &ca_cert.pem())?;
-    write_pem_file(leaf_cert_dst, &leaf_cert.pem())?;
-    write_pem_file(leaf_key_dst, &leaf_key.serialize_pem())?;
+    write_pem_file(&paths.ca_cert, &ca_cert.pem())?;
+    write_pem_file(&paths.leaf_cert, &leaf_cert.pem())?;
+    write_pem_file(&paths.leaf_key, &leaf_key.serialize_pem())?;
     // `ca_key` drops here — the only copy of the CA signing key is gone.
     Ok(())
 }
@@ -125,7 +158,7 @@ fn generate_certs() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    write_new_cert_set(&ca_cert_path(), &leaf_cert_path(), &leaf_key_path())?;
+    write_new_cert_set(&CertPaths::live())?;
     tracing::info!(dir = %dir.display(), "Generated CA + leaf (CA signing key discarded, not written)");
     Ok(())
 }
@@ -201,8 +234,9 @@ fn write_pem_file(
 /// Load the leaf cert + key from PEM files and build a rustls ServerConfig.
 pub fn load_rustls_config(
 ) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
-    let cert_pem = std::fs::read(leaf_cert_path())?;
-    let key_pem = std::fs::read(leaf_key_path())?;
+    let live = CertPaths::live();
+    let cert_pem = std::fs::read(&live.leaf_cert)?;
+    let key_pem = std::fs::read(&live.leaf_key)?;
 
     let certs: Vec<_> =
         rustls_pemfile::certs(&mut BufReader::new(&cert_pem[..])).collect::<Result<Vec<_>, _>>()?;
@@ -222,7 +256,7 @@ pub fn load_rustls_config(
 /// Uses the actual X.509 certificate, not file mtime (which can be wrong if
 /// the file is copied, restored from backup, or touched).
 pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let pem_bytes = std::fs::read(leaf_cert_path())?;
+    let pem_bytes = std::fs::read(CertPaths::live().leaf_cert)?;
     let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_bytes)?;
     let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)?;
     let not_after = cert.validity().not_after.timestamp();
@@ -261,11 +295,9 @@ pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + S
 fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = certs_dir();
     std::fs::create_dir_all(&dir)?;
-    let staged_ca = dir.join("ca.pem.new");
-    let staged_leaf = dir.join("localhost.pem.new");
-    let staged_key = dir.join("localhost.key.new");
+    let staged = CertPaths::staged(&dir);
 
-    write_new_cert_set(&staged_ca, &staged_leaf, &staged_key)?;
+    write_new_cert_set(&staged)?;
 
     // Capture the OLD anchor's SHA-1 before touching the keychain, for removal after the swap.
     #[cfg(target_os = "macos")]
@@ -273,17 +305,13 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // macOS: trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
     #[cfg(target_os = "macos")]
-    if add_trusted_cert(&staged_ca).is_err() || !verify_cert_trusted(&staged_ca) {
-        let _ = std::fs::remove_file(&staged_ca);
-        let _ = std::fs::remove_file(&staged_leaf);
-        let _ = std::fs::remove_file(&staged_key);
+    if add_trusted_cert(&staged.ca_cert).is_err() || !verify_cert_trusted(&staged.ca_cert) {
+        staged.remove();
         return Err("new CA cert could not be trusted — kept the existing certs".into());
     }
 
     // Atomic swap: the new set replaces the live certs. Trust is content-keyed, so rename keeps it.
-    std::fs::rename(&staged_ca, ca_cert_path())?;
-    std::fs::rename(&staged_leaf, leaf_cert_path())?;
-    std::fs::rename(&staged_key, leaf_key_path())?;
+    staged.swap_into(&CertPaths::live())?;
 
     // Remove the OLD anchor now that the NEW one is live + trusted (no keyless-anchor accumulation).
     #[cfg(target_os = "macos")]
@@ -375,13 +403,13 @@ fn remove_trusted_cert_by_sha1(sha1: &str) {
 /// Install the live CA cert (`ca.pem`) as a trusted root. Public entry for the initial Safari-enable.
 #[cfg(target_os = "macos")]
 pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    add_trusted_cert(&ca_cert_path())
+    add_trusted_cert(&CertPaths::live().ca_cert)
 }
 
 /// Whether the live CA cert is still trusted in the macOS Keychain.
 #[cfg(target_os = "macos")]
 pub fn is_ca_trusted() -> bool {
-    verify_cert_trusted(&ca_cert_path())
+    verify_cert_trusted(&CertPaths::live().ca_cert)
 }
 
 // Non-macOS stubs — trust management is macOS-only.
@@ -504,7 +532,12 @@ mod tests {
         let leaf = tmp.path().join("localhost.pem");
         let key = tmp.path().join("localhost.key");
 
-        write_new_cert_set(&ca, &leaf, &key).unwrap();
+        write_new_cert_set(&CertPaths {
+            ca_cert: ca.clone(),
+            leaf_cert: leaf.clone(),
+            leaf_key: key.clone(),
+        })
+        .unwrap();
 
         assert!(ca.exists(), "ca.pem (anchor) should be written");
         assert!(
