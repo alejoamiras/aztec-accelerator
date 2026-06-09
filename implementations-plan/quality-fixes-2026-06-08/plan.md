@@ -19,7 +19,7 @@ Consolidated from 3 independent plans (main + codex + opus — see `_planner-{ma
 
 ## Per-finding approach (consolidated)
 
-### F-02 — `CanonicalOrigin` newtype (PR-1, do FIRST — it changes the type F-01's ctor references)
+### F-02 ✓ — `CanonicalOrigin` newtype (PR-1, do FIRST — it changes the type F-01's ctor references)
 New type in `core/src/authorization.rs`, mirroring the proven `AztecVersion` shape:
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -35,7 +35,7 @@ impl Deref<Target=str> / AsRef<str> / Display for CanonicalOrigin
 - **Type the pending map too** (codex): `AuthorizationManager.pending: HashMap<CanonicalOrigin, …>`. Auth signatures take `&CanonicalOrigin`. `authorize_origin()` parses the `Origin` header; `respond_auth()`/`remove_approved_origin()` re-parse the Tauri string arg (no command signature change → no frontend break).
 - **Headless ingress (closes the gap):** extract `fn parse_allowed_origins_env(raw: &str) -> Result<Vec<CanonicalOrigin>, String>` (pure, testable). **Policy: fail-fast** — any invalid entry returns `Err` and the server exits non-zero (operator security input; silent drop of an intended origin is dangerous). `server/src/main.rs:43-57` uses it.
 
-### F-01 — state constructors + selective non-`Option` (PR-1, after F-02)
+### F-01 ✓ — state constructors + selective non-`Option` (PR-1, after F-02)
 ```rust
 // core/src/server.rs — prove_semaphore + app_version become required; config/auth_manager/bundled_version stay Option
 impl HeadlessState {

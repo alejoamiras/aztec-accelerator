@@ -15,4 +15,11 @@ Branch: `quality/pr1-typed-invariants` off `main`.
 - Headless `parse_allowed_origins_env`: `trim → drop empty → canonicalize non-empty → dedupe → fail-fast ONLY on invalid non-empty`. **PRESENCE semantics preserved**: env present (even ⇒ empty list) still instantiates `Some(auth)+Some(config)` = deny-all-browser (NOT `(None,None)` auto-approve).
 
 ## Log
-- (in progress) implementing F-02 across authorization.rs, config.rs, auth.rs, server/main.rs, commands.rs.
+- **F-02 ✓** (commit e7aaeb3): CanonicalOrigin newtype (Serialize/strict-Deserialize/Deref/Borrow<str>/PartialEq<str>);
+  approved_origins: Vec<CanonicalOrigin> + lenient de_approved_origins (replaces migrate + load resave);
+  ingress/is_approved typed; headless parse_allowed_origins_env (fail-fast invalid, present-but-empty=deny-all);
+  respond_auth log-and-deny. Compiler caught 1 test site (server.rs:882). core 119 + server 5 green.
+- **F-01 ✓** (commit 6ac4c14): HeadlessState::headless + AppState::headless/desktop (flat callbacks, no wrapper —
+  audit-reverted DesktopCallbacks); prove_semaphore/app_version non-Option + manual Default; both binaries use ctors.
+  Compiler caught 3 test sites (drop Some / use Default). core 119 + server 5 + src-tauri 19 + clippy -D warnings green.
+- **Pending PR-1:** /code-review max --fix → codex post-impl → push → PR → CI.
