@@ -653,10 +653,18 @@ jobs:
           LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
           WINDOWS_X86_64_SIG=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip.sig' -exec cat {} \; 2>/dev/null || echo "")
 
-          # Assert all signatures are present — empty sigs produce broken auto-updates
-          for sig_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG; do
-            if [ -z "${!sig_name}" ]; then
-              echo "::error::Missing signature: $sig_name — cannot generate latest.json"
+          # Read artifact byte sizes (SEC-03): the client pre-flight-rejects an update whose advertised
+          # size exceeds its cap, BEFORE the plugin buffers the whole artifact into memory.
+          DARWIN_AARCH64_SIZE=$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
+          DARWIN_X86_64_SIZE=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
+          LINUX_X86_64_SIZE=$(find artifacts -name '*.AppImage' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
+          WINDOWS_X86_64_SIZE=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
+
+          # Assert all signatures AND sizes are present — empty values produce broken auto-updates
+          for var_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG \
+                          DARWIN_AARCH64_SIZE DARWIN_X86_64_SIZE LINUX_X86_64_SIZE WINDOWS_X86_64_SIZE; do
+            if [ -z "${!var_name}" ]; then
+              echo "::error::Missing $var_name — cannot generate latest.json"
               exit 1
             fi
           done
@@ -666,21 +674,25 @@ jobs:
             --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg darwin_aarch64_sig "$DARWIN_AARCH64_SIG" \
             --arg darwin_aarch64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \
+            --argjson darwin_aarch64_size "$DARWIN_AARCH64_SIZE" \
             --arg darwin_x86_64_sig "$DARWIN_X86_64_SIG" \
             --arg darwin_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \
+            --argjson darwin_x86_64_size "$DARWIN_X86_64_SIZE" \
             --arg linux_x86_64_sig "$LINUX_APPIMAGE_SIG" \
             --arg linux_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \
+            --argjson linux_x86_64_size "$LINUX_X86_64_SIZE" \
             --arg windows_x86_64_sig "$WINDOWS_X86_64_SIG" \
             --arg windows_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" \
+            --argjson windows_x86_64_size "$WINDOWS_X86_64_SIZE" \
             '{
               version: $version,
               notes: ("Aztec Accelerator " + $version),
               pub_date: $pub_date,
               platforms: {
-                "darwin-aarch64": { signature: $darwin_aarch64_sig, url: $darwin_aarch64_url },
-                "darwin-x86_64": { signature: $darwin_x86_64_sig, url: $darwin_x86_64_url },
-                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url },
-                "windows-x86_64": { signature: $windows_x86_64_sig, url: $windows_x86_64_url }
+                "darwin-aarch64": { signature: $darwin_aarch64_sig, url: $darwin_aarch64_url, size: $darwin_aarch64_size },
+                "darwin-x86_64": { signature: $darwin_x86_64_sig, url: $darwin_x86_64_url, size: $darwin_x86_64_size },
+                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url, size: $linux_x86_64_size },
+                "windows-x86_64": { signature: $windows_x86_64_sig, url: $windows_x86_64_url, size: $windows_x86_64_size }
               }
             }' > release-files/latest.json
 

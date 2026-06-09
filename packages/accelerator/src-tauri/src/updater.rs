@@ -57,9 +57,56 @@ pub async fn check_for_update(
     }
 }
 
+/// Hard ceiling on the auto-update artifact size (SEC-03). Real DMG/AppImage/NSIS artifacts are tens
+/// of MB; 500 MB is generous headroom that still stops a multi-GB memory blow-up.
+const MAX_UPDATE_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Pure size lookup over a `latest.json` value: the `size` of the `platforms.*` entry whose `url`
+/// matches `download_url`. `None` if absent. Split out from [`advertised_update_size`] so it can be
+/// unit-tested without constructing a plugin `Update` (which has private fields).
+fn size_from_feed(raw_json: &serde_json::Value, download_url: &str) -> Option<u64> {
+    raw_json
+        .get("platforms")?
+        .as_object()?
+        .values()
+        .find(|p| p.get("url").and_then(|u| u.as_str()) == Some(download_url))
+        .and_then(|p| p.get("size").and_then(serde_json::Value::as_u64))
+}
+
+/// The advertised artifact size for THIS platform, read from the feed JSON (`latest.json`) by matching
+/// the download URL. `None` if the feed omits `size` (older feeds). The feed is the same JSON the
+/// plugin will signature-check, so a feed declaring a huge size is rejected before the plugin buffers
+/// a single byte.
+fn advertised_update_size(update: &tauri_plugin_updater::Update) -> Option<u64> {
+    size_from_feed(&update.raw_json, update.download_url.as_str())
+}
+
 /// Download, verify Ed25519 signature, install, and restart the app.
 pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
     tracing::info!(version = %update.version, "Downloading update");
+
+    // SEC-03: pre-flight size cap. The plugin buffers the WHOLE artifact into memory before it
+    // verifies the signature, and its progress callback cannot abort that loop — so a tampered feed
+    // pointing at a multi-GB blob is a memory-DoS. Reject up front when the feed's advertised `size`
+    // exceeds the ceiling, BEFORE `download()`. This keeps the plugin's verified download path intact
+    // (no hand-rolled crypto). Availability-only: minisign still rejects tampered *bytes*; this just
+    // stops the buffer blow-up. A feed that OMITS `size` proceeds (older feeds) — the residual (a
+    // feed-controlling attacker omitting size to bypass the cap) already implies feed compromise,
+    // which the signature check, not the size cap, is the control for.
+    match advertised_update_size(&update) {
+        Some(size) if size > MAX_UPDATE_BYTES => {
+            tracing::error!(
+                size,
+                max = MAX_UPDATE_BYTES,
+                "Update artifact exceeds the size cap; refusing to download"
+            );
+            return;
+        }
+        Some(size) => tracing::info!(size, "Update artifact size within cap"),
+        None => {
+            tracing::warn!("Update feed omits artifact size; size cap not enforced for this update")
+        }
+    }
 
     // Download first (separate from install) so crash-recovery stays armed through the whole
     // download/verify span — a mid-download crash is still recovered.
@@ -126,5 +173,52 @@ fn rearm_crash_recovery_if_enabled(app: &AppHandle) {
     use tauri_plugin_autostart::ManagerExt;
     if app.autolaunch().is_enabled().unwrap_or(false) {
         crate::crash_recovery::enable_crash_recovery();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::size_from_feed;
+    use serde_json::json;
+
+    fn feed(aarch64_size: Option<u64>) -> serde_json::Value {
+        let mut plat = json!({ "signature": "sig", "url": "https://x.test/app-aarch64.tar.gz" });
+        if let Some(s) = aarch64_size {
+            plat["size"] = json!(s);
+        }
+        json!({
+            "version": "1.0.5",
+            "platforms": {
+                "darwin-aarch64": plat,
+                "linux-x86_64": { "signature": "s2", "url": "https://x.test/app-linux", "size": 123 },
+            }
+        })
+    }
+
+    #[test]
+    fn size_from_feed_matches_url() {
+        let f = feed(Some(42_000_000));
+        assert_eq!(
+            size_from_feed(&f, "https://x.test/app-aarch64.tar.gz"),
+            Some(42_000_000)
+        );
+        // A different platform's URL resolves to that platform's size.
+        assert_eq!(size_from_feed(&f, "https://x.test/app-linux"), Some(123));
+    }
+
+    #[test]
+    fn size_from_feed_none_when_absent_or_unmatched() {
+        // Matched platform omits size → None (older feed; cap not enforced for it).
+        assert_eq!(
+            size_from_feed(&feed(None), "https://x.test/app-aarch64.tar.gz"),
+            None
+        );
+        // URL matches no platform → None.
+        assert_eq!(size_from_feed(&feed(Some(10)), "https://x.test/nope"), None);
+        // No platforms object → None.
+        assert_eq!(
+            size_from_feed(&json!({ "version": "1" }), "https://x.test/x"),
+            None
+        );
     }
 }
