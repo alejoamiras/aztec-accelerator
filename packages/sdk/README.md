@@ -64,6 +64,7 @@ const prover = new AcceleratorProver(options?: AcceleratorProverOptions);
 | `setAcceleratorConfig(config)` | `void` | Update connection settings (port, host). Resets cached protocol. |
 | `setOnPhase(callback)` | `void` | Register a phase transition callback for UI animation. |
 | `createChonkProof(steps)` | `Promise<ChonkProofWithPublicInputs>` | Generate a proof — routes to accelerator or falls back to WASM. |
+| `setForceLocal(force)` | `void` | Force WASM proving, bypassing accelerator detection (testing). |
 
 ### `AcceleratorProverOptions`
 
@@ -87,17 +88,36 @@ interface AcceleratorConfig {
 
 ### `AcceleratorStatus`
 
-Returned by `checkAcceleratorStatus()`.
+Returned by `checkAcceleratorStatus()`. A **discriminated union** on `available` — narrow on `available`
+first (and on `reason` for the unavailable cases) so you only access fields valid for that state. (The
+prior flat interface let illegal field combinations typecheck; this is the post-Q12 shape — see
+[MIGRATION.md](./MIGRATION.md).)
 
 ```typescript
-interface AcceleratorStatus {
-  available: boolean;
-  needsDownload: boolean;
-  acceleratorVersion?: string;
-  availableVersions?: string[];
-  sdkAztecVersion?: string;
-  protocol?: "http" | "https";
-}
+type AcceleratorStatus =
+  | {
+      available: true;
+      needsDownload: boolean;        // must download bb for the SDK's Aztec version before proving
+      acceleratorVersion?: string;   // from /health (single-version protocol)
+      availableVersions?: string[];  // cached versions (multi-version protocol)
+      sdkAztecVersion?: string;
+      protocol: AcceleratorProtocol; // "http" | "https"
+    }
+  | { available: false; reason: "offline"; sdkAztecVersion?: string }
+  | { available: false; reason: "error"; sdkAztecVersion?: string; protocol: AcceleratorProtocol }
+  | {
+      available: false;
+      reason: "version-mismatch";
+      acceleratorVersion: string;
+      sdkAztecVersion?: string;
+      protocol: AcceleratorProtocol;
+    };
+```
+
+### `AcceleratorProtocol`
+
+```typescript
+type AcceleratorProtocol = "http" | "https";
 ```
 
 ### `AcceleratorPhase`

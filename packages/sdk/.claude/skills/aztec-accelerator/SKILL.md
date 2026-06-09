@@ -87,6 +87,7 @@ const prover = new AcceleratorProver({
 | `proved` | Proof complete | Server-reported proving time |
 | `fallback` | Accelerator unavailable, falling back to WASM | - |
 | `receive` | Deserializing proof response | - |
+| `denied` | User denied this site access (403) — falling back to WASM | - |
 
 Use `setOnPhase(callback)` to change the callback later, or `setOnPhase(null)` to remove it.
 
