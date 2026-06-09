@@ -53,6 +53,12 @@ pub struct AcceleratorConfig {
     /// None = never asked, Some(true) = auto-update, Some(false) = manual
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
+    /// SEC-04: when `true`, any `localhost`/`127.0.0.1`/`[::1]` origin is auto-approved with no
+    /// prompt. Defaults to **`false`** on desktop (a localhost page gets one remembered approval
+    /// prompt instead — closes the silent local-page hole); the headless binary sets it `true` (it
+    /// has no popup). Existing on-disk configs lacking the field deserialize to `false` (secure).
+    #[serde(default)]
+    pub auto_approve_localhost: bool,
 }
 
 impl Default for AcceleratorConfig {
@@ -63,6 +69,7 @@ impl Default for AcceleratorConfig {
             approved_origins: Vec::new(),
             speed: Speed::default(),
             auto_update: None,
+            auto_approve_localhost: false,
         }
     }
 }

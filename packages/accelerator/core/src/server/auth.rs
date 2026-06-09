@@ -1,8 +1,10 @@
 //! `/prove` origin authorization.
 //!
-//! Auto-approves localhost + persisted origins; otherwise popup-gates the request with a 60s
-//! auto-deny (`AUTH_DECISION_TIMEOUT`). Headless mode (no popup callback) denies unknown origins.
-//! Extracted from server.rs (Q2).
+//! Approves persisted origins (and localhost only when `auto_approve_localhost` is set — desktop
+//! default is prompt-once, SEC-04); otherwise popup-gates the request with a 60s auto-deny
+//! (`AUTH_DECISION_TIMEOUT`). Headless mode (no popup callback) denies unapproved origins. All
+//! requests are first constrained to a loopback `Host` (SEC-01a, `super::host`). Extracted from
+//! server.rs (Q2).
 
 use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
 use crate::config;
@@ -48,7 +50,11 @@ pub(crate) async fn authorize_origin(
 
     let approved = state.config.as_ref().is_some_and(|cfg| {
         let cfg = cfg.read();
-        AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
+        AuthorizationManager::is_approved(
+            &origin,
+            &cfg.approved_origins,
+            cfg.auto_approve_localhost,
+        )
     });
 
     if approved {

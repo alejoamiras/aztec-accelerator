@@ -222,12 +222,21 @@ impl AuthorizationManager {
             .is_some_and(|h| matches!(h.trim_end_matches('.'), "localhost" | "127.0.0.1" | "[::1]"))
     }
 
-    /// Returns true if the origin is approved (auto-approved or in the approved list).
+    /// Returns true if the origin is approved: in the persisted allowlist, OR — only when
+    /// `auto_approve_localhost` is set — an auto-approved localhost origin (SEC-04). With the flag
+    /// `false` (the desktop default) a localhost page is NOT silently trusted; it falls through to
+    /// the approval prompt (then, if remembered, joins `approved_origins`). The headless binary
+    /// passes `true` (no popup).
     ///
-    /// Both `origin` and `approved_origins` are [`CanonicalOrigin`], so canonicality is
-    /// guaranteed by the type — no comment-only precondition, no bypassable ingress.
-    pub fn is_approved(origin: &CanonicalOrigin, approved_origins: &[CanonicalOrigin]) -> bool {
-        Self::is_auto_approved(origin) || approved_origins.iter().any(|o| o == origin)
+    /// Both `origin` and `approved_origins` are [`CanonicalOrigin`], so canonicality is guaranteed by
+    /// the type — no comment-only precondition, no bypassable ingress.
+    pub fn is_approved(
+        origin: &CanonicalOrigin,
+        approved_origins: &[CanonicalOrigin],
+        auto_approve_localhost: bool,
+    ) -> bool {
+        (auto_approve_localhost && Self::is_auto_approved(origin))
+            || approved_origins.iter().any(|o| o == origin)
     }
 }
 
@@ -271,17 +280,30 @@ mod tests {
     #[test]
     fn is_approved_checks_both() {
         let approved = vec![co("https://playground.aztec-accelerator.dev")];
+        // auto_approve_localhost = true → localhost auto-approved.
         assert!(AuthorizationManager::is_approved(
             &co("http://localhost:5173"),
-            &approved
+            &approved,
+            true
         ));
+        // An explicitly-approved origin is approved regardless of the localhost flag.
         assert!(AuthorizationManager::is_approved(
             &co("https://playground.aztec-accelerator.dev"),
-            &approved
+            &approved,
+            false
         ));
+        // Unapproved non-localhost → denied.
         assert!(!AuthorizationManager::is_approved(
             &co("https://evil.com"),
-            &approved
+            &approved,
+            true
+        ));
+        // SEC-04: with the flag off (desktop default), localhost is NOT silently auto-approved —
+        // it must be prompted/remembered. This closes the silent local-page hole.
+        assert!(!AuthorizationManager::is_approved(
+            &co("http://localhost:5173"),
+            &approved,
+            false
         ));
     }
 
