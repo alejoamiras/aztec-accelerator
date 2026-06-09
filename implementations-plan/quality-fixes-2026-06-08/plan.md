@@ -61,17 +61,17 @@ Export `AcceleratorProtocol` from `index.ts`; replace README's obsolete flat `in
 ### F-06 — extract `AcceleratorTransport` (PR-4; internal; same public surface)
 New non-exported `AcceleratorTransport` in `src/lib/accelerator-transport.ts` owning URL construction, the dual http/https probe + protocol negotiation, the status cache, and one error model. **Keep `ky` for BOTH** health and prove (health uses `throwHttpErrors: false`) — preserves the thrown-error surface (the main risk; the team is break-sensitive). The **parse → `AcceleratorStatus`** discriminated-union construction stays in the prover (domain). Route every `#acceleratorProtocol` mutation through `transport.setProtocol` (the "doesn't cache protocol on non-ok" + "detected protocol used for subsequent /prove" tests pin exactly-when).
 
-### F-07 — `CertPaths` parameter object (PR-3; pure)
+### F-07 ✓ — `CertPaths` parameter object (PR-3; pure)
 ```rust
 struct CertPaths { ca_cert, leaf_cert, leaf_key: PathBuf }
 impl CertPaths { fn live()->Self; fn staged(dir:&Path)->Self; fn exists(&self)->bool; fn swap_into(&self, live:&CertPaths)->io::Result<()> }
 ```
 `write_new_cert_set(&CertPaths)`, `load_rustls_config_from(&CertPaths)`; public no-arg wrappers delegate to `CertPaths::live()`. **Keep `ca_key_path` standalone** (legacy-migration target, not part of the served triple). `certs_exist` keeps its **leaf-validity** check (not just `.exists()`). `swap_into` preserves rename order **ca→leaf→key**.
 
-### F-08 — `/prove` status ownership (PR-3; behavior-preserving)
+### F-08 ✓ — `/prove` status ownership (PR-3; behavior-preserving)
 `resolve_version` → `pub(crate) fn resolve_version(state, requested) -> Result<ResolvedVersion>` where `ResolvedVersion { version: Option<…>, needs_download: bool }` (no callbacks). `prove()` owns the sequence: emit `Proving` **before** the `needs_download` check → if `needs_download` { `Downloading`; `download_bb`; spawn cleanup; `Proving` } → `bb::prove` → `StatusGuard` drops to `Idle`. Update the 3 `resolve_version_*` tests (`server.rs:1046-1074`). **Preserve the redundant leading `Proving`** (today's download arm is `[Proving, Downloading, Proving, Idle]`) — do NOT "clean it up" (that'd be a tests-only behavior change on an uncovered path). `server.rs:626` pins only the no-download arm → the new download-arm test asserts the full **4-element** sequence.
 
-### F-09 — shared `spawn_https()` (PR-3; pure)
+### F-09 ✓ — shared `spawn_https()` (PR-3; pure)
 `pub fn spawn_https(state: AppState, tls: Arc<rustls::ServerConfig>)` in `src-tauri/src/server.rs` (spawn + error-log only). `main.rs::try_start_https` + `commands.rs::enable_safari_support` keep their distinct preambles and both call it. Do NOT unify the divergent TLS-load-failure policies (main resets Safari support; commands propagates the error — intentional).
 
 ---
