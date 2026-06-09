@@ -49,10 +49,10 @@ impl AppState { pub fn headless(core: HeadlessState) -> Self;
 - `config`/`auth_manager`/`bundled_version` **stay `Option`** (headless `None` mode verified at `server/src/main.rs:58`).
 - **Keep `AppState` callbacks FLAT (audit-reverted from `DesktopCallbacks`)** — the 3 callbacks are read in **core** (`prove.rs:160`, `auth.rs:59/83`); a "Desktop"-named struct field-accessed in GUI-agnostic core violates the core-extraction boundary and buys nothing (`AppState::desktop` takes 3 args fine). Both auditors → flat. The "callback data clump" sub-concern is dropped (not worth the boundary cost).
 
-### F-03 — decompose `.setup` (PR-2; pure move; uses PR-1's `AppState::desktop`)
+### F-03 ✓ — decompose `.setup` (PR-2; pure move; uses PR-1's `AppState::desktop`)
 Extract from `main.rs:260-462`: `build_tray_and_status`, `build_desktop_state -> AppState` (wires the 3 callbacks inline via `AppState::desktop(core, on_status, on_versions_changed, show_auth_popup)` — **no `DesktopCallbacks` wrapper; flat only**), `run_startup_diagnostics`, `spawn_http_server` (the Windows `#[cfg]` `AddrInUse` block moves **verbatim** here), `spawn_update_poller`. `.setup` becomes linear orchestration. The callback *builders* stay **local closures** inside `build_desktop_state` (lifetime churn if hoisted). `#[cfg]` gates move with their code. **Required gate (audit-promoted):** `spawn_http_server` moves the Windows-only `AddrInUse` bow-out (covered only by `_e2e-crash-recovery-windows.yml`, off the normal PR gate) → that workflow MUST run + be green before PR-2 merges, since F-03's whole claim is "pure move".
 
-### F-04 — `versions.rs` → façade + submodules (PR-2; pure move)
+### F-04 ✓ — `versions.rs` → façade + submodules (PR-2; pure move)
 Keep `pub mod versions;` in `lib.rs` and the `src-tauri/lib.rs` re-export **unchanged**. Convert `versions.rs` → `versions/mod.rs` (re-exports preserving every `versions::X` path) + `{version_id,platform,artifact_layout,cache,downloader}.rs`. macOS `xattr`+`codesign` finalize tail extracts into `downloader::finalize_macos_binary` (stays in the downloader slice). Inline tests move to the submodule owning the unit. Verified consumers (`bb.rs`, `core/server.rs`, `prove.rs`, `tray.rs`) need **no edits**.
 
 ### F-05 — SDK barrel canonical + doc-sync test (PR-4; additive)

@@ -23,4 +23,17 @@ Execute: rm versions.rs; write mod.rs + 5 files; `cargo test -p accelerator-core
 Extract `build_tray_and_status`, `build_desktop_state -> AppState` (wires the 3 callbacks inline via `AppState::desktop` — NO `DesktopCallbacks`), `run_startup_diagnostics`, `spawn_http_server` (Windows `#[cfg]` `AddrInUse` block moves verbatim), `spawn_update_poller`. Pure move; WebDriver E2E + compiler = validity. **Required gate:** `_e2e-crash-recovery-windows.yml` must be green before merge (moves the Windows arm).
 
 ## Log
-- (next tick) execute F-04 split per the mapping above → commit → F-03 → push → PR-2.
+- **F-04 ✓** (956f55d): `versions.rs` → `versions/mod.rs` + `versions/downloader.rs`. **Pragmatic 2-module
+  split** (vs planned 5-way): extracted the heaviest, most self-contained concern — the network
+  download/verify/install pipeline (`download_bb`/`download_tarball`/`verify_digest`/`install_version_dir`/
+  `extract_bb_from_tarball`) + the macOS finalize tail → `finalize_downloaded_binary`. Identity/platform/
+  layout/cache stay cohesive in mod.rs. Pure move: `download_bb` re-exported pub; shared helpers `pub(crate)`;
+  test-only re-export `#[cfg(test)]`-gated (clippy caught the non-test unused import). core 119 + clippy green;
+  consumers unchanged. Rationale: full 6-file redistribution of a 1209-line release-critical file is high-risk
+  via tooling; the 2-module split resolves the multi-responsibility smell reliably. Codex post-impl can assess.
+- **F-03 ✓** (947dbde): extracted `spawn_http_server` (incl. the AddrInUse/redundant-instance classification)
+  + `spawn_update_poller` from the 203-line `.setup`. **Partial decomposition** — the 2 most self-contained
+  spawn blocks; tray/callback/AppState wiring stays inline (capture-dense; plan said builders stay local
+  closures). Caught: `AppHandle` import was `webdriver`-gated → used full path `tauri::AppHandle` so the
+  always-compiled `spawn_http_server` builds under both features. default + webdriver clippy + 19 tests green.
+- **Next:** push PR-2 → watch CI (Windows crash-recovery E2E is the required gate for the moved AddrInUse arm).
