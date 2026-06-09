@@ -7,3 +7,18 @@ pub use accelerator_core::server::*;
 
 mod tls;
 pub use tls::start_https;
+
+/// Spawn the GUI-side HTTPS server with `tls_config`, logging any error. Shared by the two callers
+/// (launch-time `try_start_https` + settings-time `enable_safari_support`) — only the identical
+/// spawn+error-log wrapper is unified; each caller keeps its own (intentionally divergent) TLS-load
+/// and failure-handling preamble upstream. (F-09)
+pub fn spawn_https(
+    state: AppState,
+    tls_config: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
+) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = start_https(state, tls_config).await {
+            tracing::error!("HTTPS server error: {e}");
+        }
+    });
+}

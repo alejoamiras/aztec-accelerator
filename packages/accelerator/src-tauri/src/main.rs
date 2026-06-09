@@ -81,12 +81,7 @@ fn try_start_https(state: &AppState) {
         }
     };
 
-    let state_for_https = state.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = aztec_accelerator::server::start_https(state_for_https, tls_config).await {
-            tracing::error!("HTTPS server error: {e}");
-        }
-    });
+    aztec_accelerator::server::spawn_https(state.clone(), tls_config);
 
     // Pre-expiry auto-renewal runs OFF the startup path (a background thread) so the macOS trust
     // prompt can never block/hang launch. The running server keeps its already-loaded config; a
