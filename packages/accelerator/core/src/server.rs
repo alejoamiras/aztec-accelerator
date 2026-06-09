@@ -939,7 +939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prove_skips_auth_when_no_origin_header() {
+    async fn prove_allows_no_origin_only_with_trusted_loopback_host() {
         let (popup_tx, popup_rx) = std::sync::mpsc::channel();
         let (state, _auth) = auth_state_with_popup(popup_tx);
         let app = router(state);
@@ -957,7 +957,11 @@ mod tests {
             .await
             .unwrap();
 
-        // No Origin header = auto-approved (curl, same-origin)
+        // SEC-01b: a no-Origin request is allowed ONLY because it carries a trusted loopback Host
+        // (the SEC-01a guard vouched for it) — this is the legit curl/Node/local-script case. The
+        // DNS-rebinding no-Origin variant is 403'd at the Host guard (Host=evil.com), pinned by
+        // `prove_rejects_forged_host_dns_rebinding`. So the Host guard, not the Origin header, is the
+        // boundary for non-browser callers — the old "Origin omission = bypass" footgun is closed.
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
         assert!(
             popup_rx.try_recv().is_err(),
