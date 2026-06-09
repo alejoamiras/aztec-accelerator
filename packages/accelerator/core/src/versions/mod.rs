@@ -281,11 +281,19 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 
 /// Fetch the expected SHA-256 digest for a release asset from the GitHub API.
 ///
-/// GitHub stores a `digest` field (e.g. `"sha256:abcd..."`) on every release asset.
-/// This doesn't protect against a compromised GitHub account (attacker can re-upload),
-/// but catches download corruption and CDN issues.
+/// GitHub stores a `digest` field (e.g. `"sha256:abcd..."`) on every release asset. This catches
+/// download corruption and CDN issues.
 ///
-/// TODO: Verify against upstream signatures when Aztec starts signing releases.
+/// SECURITY (SEC-02, deferred — circular trust): the digest is fetched from the SAME GitHub control
+/// plane (`api.github.com`) that serves the binary, so an attacker who compromises the upstream
+/// release (account/CI) — or MITMs both endpoints — can serve a malicious `bb` tarball AND a matching
+/// digest; the check passes and the binary is installed + executed. A pure network MITM is blocked
+/// (both hops are HTTPS), but supply-chain compromise is NOT. The real fix is verifying an UPSTREAM
+/// PUBLISHER SIGNATURE pinned in the shipped app (minisign/cosign/TUF), the way our own auto-updater
+/// already does — but Aztec does not yet sign `bb` releases. Pinning known-good digests in the app is
+/// NOT a workaround: barretenberg nightlies ship EVERY night, so a pinned-digest manifest would be
+/// perpetually stale. Revisit once Aztec signs `bb`.
+/// Tracking: `implementations-plan/security-hardening-2026-06-09` (SEC-02) + a GitHub issue.
 pub(crate) async fn fetch_github_asset_digest(
     version: &str,
     asset_name: &str,

@@ -418,10 +418,14 @@ fn main() {
 
             // ── HTTPS startup ──
             // One-time migration: delete any legacy on-disk CA private key (older installs) — it was
-            // a readable mint-any-cert primitive. Runs regardless of Safari Support; the keyless CA
-            // anchor that remains can't sign anything. Idempotent.
-            certs::migrate_legacy_ca_key();
-            try_start_https(&state);
+            // a readable mint-any-cert primitive. SEC-08 fail-closed: if it CANNOT be removed, do NOT
+            // bring up Safari HTTPS — a live HTTPS server next to a readable mint-any-cert key + its
+            // still-trusted anchor is the exposure we're closing. HTTP is unaffected. Idempotent.
+            match certs::migrate_legacy_ca_key() {
+                Ok(()) => try_start_https(&state),
+                Err(e) => tracing::error!(error = %e,
+                    "SECURITY: legacy ca.key could not be removed — Safari HTTPS NOT started (HTTP unaffected)"),
+            }
 
             // Manage the shared state for Tauri commands (e.g. enable_safari_support). It shares the
             // Arc'd https_bound flag with the HTTP server's state, so start_https flipping it after a

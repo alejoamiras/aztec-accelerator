@@ -178,23 +178,42 @@ pub fn generate_and_save() -> Result<(), Box<dyn std::error::Error + Send + Sync
 /// Delete a legacy on-disk CA private key (`ca.key`) left by older installs — it is the readable
 /// mint-any-cert primitive (audit HIGH). The CA *cert* anchor stays trusted but, with no key, can
 /// sign nothing. Idempotent; safe on installs that never had one.
-pub fn migrate_legacy_ca_key() {
-    migrate_legacy_ca_key_at(&ca_key_path());
+pub fn migrate_legacy_ca_key() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    migrate_legacy_ca_key_at(&ca_key_path())
 }
 
-/// Inner, path-parameterized for testability.
-fn migrate_legacy_ca_key_at(ca_key: &std::path::Path) {
-    if ca_key.exists() {
+/// Inner, path-parameterized for testability. **SEC-08, fail-closed:** returns `Err` if `ca.key`
+/// still exists after the removal attempt (retried once for a transient lock/AV scan). The caller
+/// MUST treat that as a security failure and NOT bring up Safari HTTPS — a live HTTPS server next to
+/// a readable mint-any-cert key + its still-trusted anchor is the exact exposure we're closing.
+fn migrate_legacy_ca_key_at(
+    ca_key: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !ca_key.exists() {
+        return Ok(()); // never had one / already gone — the common path
+    }
+    for attempt in 0..2 {
         match std::fs::remove_file(ca_key) {
-            Ok(_) => tracing::warn!(
-                "Removed legacy on-disk CA key (ca.key) — the mint-any-cert primitive is gone. The \
-                 legacy keychain CA anchor (now keyless) remains; use Settings to fully remove it."
-            ),
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to delete legacy ca.key — the readable minting key persists")
+            Ok(_) => break,
+            Err(e) if attempt == 1 => {
+                tracing::error!(error = %e, "Failed to delete legacy ca.key after retry");
             }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
+    // Re-check: fail closed if it persists (a failed remove_file, an immutable flag, a perms issue).
+    if ca_key.exists() {
+        return Err(
+            "legacy ca.key persists after removal attempt — the readable mint-any-cert key is still \
+             on disk; refusing to proceed"
+                .into(),
+        );
+    }
+    tracing::warn!(
+        "Removed legacy on-disk CA key (ca.key) — the mint-any-cert primitive is gone. The legacy \
+         keychain CA anchor (now keyless) remains; use Settings to fully remove it."
+    );
+    Ok(())
 }
 
 /// Write a PEM file **atomically** with `0o600` perms: write a temp sibling (owner-only), fsync, then
@@ -577,12 +596,37 @@ mod tests {
         std::fs::write(&ca_key, "legacy key").unwrap();
         std::fs::write(&leaf, "leaf cert").unwrap();
 
-        migrate_legacy_ca_key_at(&ca_key);
+        migrate_legacy_ca_key_at(&ca_key)
+            .expect("removal of an existing legacy key should succeed");
 
         assert!(!ca_key.exists(), "legacy ca.key must be deleted");
         assert!(leaf.exists(), "the served leaf must be untouched");
 
-        // Idempotent: a second call on an absent key is a no-op (no panic).
-        migrate_legacy_ca_key_at(&ca_key);
+        // Idempotent: a second call on an absent key is Ok (no panic, no error).
+        migrate_legacy_ca_key_at(&ca_key).expect("absent key is Ok");
+    }
+
+    /// SEC-08: if the legacy key cannot be removed, migration FAILS (so the caller skips Safari HTTPS)
+    /// rather than proceeding with the readable mint-any-cert key still on disk.
+    #[cfg(unix)]
+    #[test]
+    fn migrate_fails_closed_when_key_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("locked");
+        std::fs::create_dir(&dir).unwrap();
+        let ca_key = dir.join("ca.key");
+        std::fs::write(&ca_key, "legacy key").unwrap();
+        // Read+execute only on the PARENT dir → `remove_file` inside it fails (needs dir-write).
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = migrate_legacy_ca_key_at(&ca_key);
+
+        // Restore perms so the tempdir can clean up.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            result.is_err(),
+            "must fail closed when the legacy key can't be removed"
+        );
     }
 }
