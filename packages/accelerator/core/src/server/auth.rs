@@ -4,7 +4,7 @@
 //! auto-deny (`AUTH_DECISION_TIMEOUT`). Headless mode (no popup callback) denies unknown origins.
 //! Extracted from server.rs (Q2).
 
-use crate::authorization::{AuthDecision, AuthorizationManager};
+use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
 use crate::config;
 use axum::http::StatusCode;
 
@@ -32,7 +32,7 @@ pub(crate) async fn authorize_origin(
         None => return Ok(()),
     };
 
-    let origin = match crate::authorization::canonicalize_origin(raw_origin) {
+    let origin = match CanonicalOrigin::parse(raw_origin) {
         Some(canon) => canon,
         None => {
             tracing::warn!(raw_origin = %raw_origin, "Invalid Origin header (path/query/userinfo/unknown scheme); rejecting");
@@ -68,7 +68,7 @@ pub(crate) async fn authorize_origin(
     }
 
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-    let (rx, is_first) = auth_manager.request(&origin).map_err(|_| {
+    let (rx, is_first) = auth_manager.request(origin.as_str()).map_err(|_| {
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
         (
             StatusCode::TOO_MANY_REQUESTS,
@@ -81,7 +81,7 @@ pub(crate) async fn authorize_origin(
 
     if is_first {
         if let Some(ref show_popup) = state.show_auth_popup {
-            show_popup(&origin);
+            show_popup(origin.as_str());
         }
     }
 
@@ -89,7 +89,7 @@ pub(crate) async fn authorize_origin(
         .await
         .map_err(|_| {
             tracing::warn!(origin = %origin, "Authorization timed out");
-            auth_manager.resolve(&origin, AuthDecision::Deny);
+            auth_manager.resolve(origin.as_str(), AuthDecision::Deny);
             (
                 StatusCode::FORBIDDEN,
                 json_error("authorization_timeout", "Authorization request timed out"),

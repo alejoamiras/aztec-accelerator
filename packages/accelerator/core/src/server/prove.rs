@@ -140,16 +140,12 @@ pub(crate) async fn prove(
     tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
     // Limit to one concurrent prove — bb already uses all cores.
-    let _permit = if let Some(ref sem) = state.prove_semaphore {
-        Some(sem.acquire().await.map_err(|_| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                json_error("service_unavailable", "Proving service shutting down"),
-            )
-        })?)
-    } else {
-        None
-    };
+    let _permit = state.prove_semaphore.acquire().await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json_error("service_unavailable", "Proving service shutting down"),
+        )
+    })?;
 
     let requested_version = parts
         .headers

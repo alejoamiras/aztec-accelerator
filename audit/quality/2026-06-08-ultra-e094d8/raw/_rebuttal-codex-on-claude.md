@@ -1,0 +1,40 @@
+10 `CONVERGES`, 10 `VALID / CODEX-MISSED`, 3 `OVER-ASSERTED`, 0 `REFUTED`.  
+Most important missed concrete gap: headless `ALLOWED_ORIGINS` bypasses canonicalization entirely in [server/src/main.rs:43](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/server/src/main.rs:43).
+
+**Verdicts**
+- `C1 — hand-rolled AppState/HeadlessState construction`: **CONVERGES** with Codex `C1-1`.
+- `C1 — Proving status clobbered/restored across prove/resolve_version`: **VALID / CODEX-MISSED**. The hidden status-ownership contract is real at [prove.rs:64](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/server/prove.rs:64), [prove.rs:94](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/server/prove.rs:94), [prove.rs:160](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/server/prove.rs:160).
+- `C1 — compute_threads feature envy`: **OVER-ASSERTED**. It is a single-use adapter; the server-owned part is the optional config boundary at [prove.rs:104](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/server/prove.rs:104), not duplicated domain logic.
+
+- `C2 — macOS Gatekeeper tail bolted onto download_bb`: **VALID / CODEX-MISSED**. The cross-platform install flow and macOS-only finalize step are mixed in one body at [versions.rs:342](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:342) and [versions.rs:383](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:383).
+- `C2 — duplicated xattr/codesign subprocess skeleton`: **VALID / CODEX-MISSED** at [versions.rs:385](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:385) and [versions.rs:397](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:397).
+- `C2 — platform identity smeared across cfg ladders`: **VALID / CODEX-MISSED**. `bb_binary_name`, `current_platform`, and macOS finalize policy do have to move together at [versions.rs:140](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:140), [versions.rs:160](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:160), [versions.rs:383](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/versions.rs:383).
+
+- `C3 — canonical origin as bare String`: **CONVERGES** with Codex `C3-1`.
+- `C3 — duplicated URL-parse/host-normalize block`: **VALID / CODEX-MISSED** at [authorization.rs:34](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/authorization.rs:34) and [authorization.rs:131](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/authorization.rs:131).
+- `C3 — is_approved depends on config::load migration order`: **CONVERGES** with Codex `C3-2`.
+
+- `C4 — 203-line setup bootstrap`: **CONVERGES** with Codex `C4-1`.
+- `C4 — duplicated HTTPS startup across main/commands`: **VALID / CODEX-MISSED**. The `load_rustls_config` + `spawn(start_https)` tail is duplicated at [main.rs:72](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/main.rs:72) and [commands.rs:155](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/commands.rs:155).
+- `C4 — auth popup label/close logic split across commands/windows`: **VALID / CODEX-MISSED** at [windows.rs:82](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/windows.rs:82) and [commands.rs:120](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/commands.rs:120).
+- `C4 — duplicated AppState assembly across GUI/headless`: **CONVERGES** with Codex `C4-2` and `C1-1`.
+
+- `C5 — cert path triplet data clump`: **CONVERGES** with Codex `C5-1`.
+- `C5 — duplicated security CLI wrapper scaffolding`: **VALID / CODEX-MISSED** at [certs.rs:316](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:316), [certs.rs:333](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:333), [certs.rs:347](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:347), [certs.rs:361](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:361).
+- `C5 — rotate() temporal coupling`: **OVER-ASSERTED**. The order is already localized and commented inside one cohesive routine at [certs.rs:257](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:257); the real smell is the path triplet/pairing, not a separate cross-module temporal coupler.
+- `C5 — duplicated section/doc markers`: **VALID / CODEX-MISSED**. The stale contradictory doc and duplicate banner are real at [certs.rs:219](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:219) and [certs.rs:298](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/certs.rs:298).
+
+- `C6 — README documents obsolete flat AcceleratorStatus`: **CONVERGES** with Codex `C6-1`.
+- `C6 — two HTTP stacks for one transport`: **CONVERGES** with Codex `C6-2`.
+- `C6 — #probeAndParseHealth long method`: **VALID / CODEX-MISSED** at [accelerator-prover.ts:252](/Users/alejoamiras/Projects/aztec-accelerator/packages/sdk/src/lib/accelerator-prover.ts:252).
+- `C6 — catch flattens every health failure to offline`: **OVER-ASSERTED**. Non-OK and bad-JSON cases are already split to `"error"` at [accelerator-prover.ts:291](/Users/alejoamiras/Projects/aztec-accelerator/packages/sdk/src/lib/accelerator-prover.ts:291) and [accelerator-prover.ts:305](/Users/alejoamiras/Projects/aztec-accelerator/packages/sdk/src/lib/accelerator-prover.ts:305); the outer catch at [accelerator-prover.ts:370](/Users/alejoamiras/Projects/aztec-accelerator/packages/sdk/src/lib/accelerator-prover.ts:370) really is the “both probes failed” bucket the type comment describes.
+- `C6 — AcceleratorProtocol exported in module but not barrel`: **CONVERGES** with Codex `C6-1`.
+- `C6 — setForceLocal shipped but undocumented in README`: **CONVERGES** with Codex `C6-1`.
+
+**Gaps (neither model caught)**
+- `C1/C3 — headless ALLOWED_ORIGINS bypasses the canonical-origin invariant`: **Primitive Obsession / invariant leakage**. [server/src/main.rs:43](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/server/src/main.rs:43) stores raw env strings directly into `approved_origins` at [server/src/main.rs:50](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/server/src/main.rs:50), completely bypassing `config::load`’s migration and any typed-origin boundary.
+
+**Disagreements to adjudicate**
+- `Origin Primitive Obsession`: C3 is right; C5-Claude’s “consistent convention” dismissal is wrong. `authorization.rs` explicitly relies on a comment-only canonicality precondition at [authorization.rs:140](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/authorization.rs:140), `config::load` exists to repair raw persisted strings at [config.rs:83](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/config.rs:83), and production headless ingress bypasses that repair at [server/src/main.rs:43](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/server/src/main.rs:43). Call: **a `CanonicalOrigin` newtype is warranted**.
+- `C1-1` vs `C4-4`: same root cause; dedupe in reduce. Don’t count the duplicated AppState assembly twice.
+- `Codex-only C5 — CrashRecovery trait speculative generality`: I side with Codex. The “mockable seam” claim at [crash_recovery.rs:7](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/crash_recovery.rs:7) is aspirational; actual callers only hit the free functions and no code uses trait polymorphism at [crash_recovery.rs:16](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/crash_recovery.rs:16)-[43](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/src-tauri/src/crash_recovery.rs:43).

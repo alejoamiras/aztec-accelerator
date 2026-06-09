@@ -342,29 +342,24 @@ fn main() {
                 });
 
             let is_animating_for_status = is_animating.clone();
-            let state = AppState {
-                core: Arc::new(HeadlessState {
-                    bundled_version: Some(bundled_version),
-                    app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                    https_bound: Default::default(),
-                    config: Some(config_state.clone()),
-                    auth_manager: Some(auth_manager.clone()),
-                    prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
-                }),
-                on_status: Some(Arc::new(move |status: ServerStatus| {
-                    let text = status.display_text();
-                    tracing::info!(text, "on_status callback fired");
-                    if let Err(e) = status_clone.set_text(text) {
-                        tracing::error!("set_text failed: {e}");
-                    }
-                    if let Err(e) = tray_clone.set_tooltip(Some(text)) {
-                        tracing::error!("set_tooltip failed: {e}");
-                    }
-                    is_animating_for_status.store(status.is_busy(), Ordering::Release);
-                })),
-                on_versions_changed: Some(on_versions_changed),
-                show_auth_popup: Some(show_auth_popup),
-            };
+            let on_status = Arc::new(move |status: ServerStatus| {
+                let text = status.display_text();
+                tracing::info!(text, "on_status callback fired");
+                if let Err(e) = status_clone.set_text(text) {
+                    tracing::error!("set_text failed: {e}");
+                }
+                if let Err(e) = tray_clone.set_tooltip(Some(text)) {
+                    tracing::error!("set_tooltip failed: {e}");
+                }
+                is_animating_for_status.store(status.is_busy(), Ordering::Release);
+            });
+            let core = HeadlessState::headless(
+                env!("CARGO_PKG_VERSION"),
+                Some(bundled_version),
+                Some(config_state.clone()),
+                Some(auth_manager.clone()),
+            );
+            let state = AppState::desktop(core, on_status, on_versions_changed, show_auth_popup);
 
             // ── HTTPS startup ──
             // One-time migration: delete any legacy on-disk CA private key (older installs) — it was

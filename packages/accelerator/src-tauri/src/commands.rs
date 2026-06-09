@@ -1,4 +1,4 @@
-use crate::authorization::{AuthDecision, AuthorizationManager};
+use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
 use crate::config::{self, AcceleratorConfig};
 use crate::verified_sites::VerifiedSitesRegistry;
 use parking_lot::RwLock;
@@ -65,7 +65,10 @@ pub fn remove_approved_origin(
     config: tauri::State<'_, ConfigState>,
     origin: String,
 ) -> Result<(), String> {
-    mutate_config(&config, |cfg| cfg.approved_origins.retain(|o| o != &origin))
+    mutate_config(&config, |cfg| {
+        cfg.approved_origins
+            .retain(|o| o.as_str() != origin.as_str())
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -109,12 +112,25 @@ pub fn respond_auth(
     allowed: bool,
     remember: bool,
 ) {
-    let decision = if allowed {
-        AuthDecision::Allow { remember }
-    } else {
-        AuthDecision::Deny
-    };
-    auth.resolve(&origin, decision);
+    match CanonicalOrigin::parse(&origin) {
+        Some(canonical) => {
+            let decision = if allowed {
+                AuthDecision::Allow { remember }
+            } else {
+                AuthDecision::Deny
+            };
+            auth.resolve(canonical.as_str(), decision);
+        }
+        None => {
+            // F-02: a non-canonical origin can't match any pending request (keys are canonical), so a
+            // tampered popup payload is never honored as Allow. This `resolve` is a no-op on the real
+            // (canonical-keyed) request, which then denies via its 60s timeout. Immediate deny would
+            // need a server-issued opaque request id (or a typed pending map) — deferred; the pending
+            // map typing was scoped out of F-02. (codex post-impl PR-1, Low)
+            tracing::warn!(origin = %origin, "respond_auth received a non-canonical origin; denying");
+            auth.resolve(&origin, AuthDecision::Deny);
+        }
+    }
 
     // Close the authorization popup window
     let label = format!("auth-{}", sanitize_window_label(&origin));
