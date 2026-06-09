@@ -127,14 +127,20 @@ impl serde::Serialize for CanonicalOrigin {
     }
 }
 impl<'de> serde::Deserialize<'de> for CanonicalOrigin {
-    /// Strict: a directly-deserialized `CanonicalOrigin` must already be canonical.
-    /// (The lenient drop-invalid path lives on the config Vec via `de_approved_origins`.)
+    /// Strict: a directly-deserialized `CanonicalOrigin` must ALREADY be canonical — no silent
+    /// normalization. The lenient canonicalize-and-drop path lives only on the config Vec via
+    /// `de_approved_origins`. (Use [`CanonicalOrigin::parse`]/`TryFrom` when you WANT canonicalization.)
     fn deserialize<D>(d: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let s = <String as serde::Deserialize>::deserialize(d)?;
-        Self::try_from(s).map_err(<D::Error as serde::de::Error>::custom)
+        match canonicalize_origin(&s) {
+            Some(canon) if canon == s => Ok(Self(s)),
+            _ => Err(<D::Error as serde::de::Error>::custom(format!(
+                "not an already-canonical RFC 6454 origin: {s:?}"
+            ))),
+        }
     }
 }
 
@@ -471,10 +477,13 @@ mod tests {
         let o = CanonicalOrigin::parse("https://nulo.sh").unwrap();
         // serializes as the inner canonical string
         assert_eq!(serde_json::to_string(&o).unwrap(), "\"https://nulo.sh\"");
-        // deserialize canonicalizes valid input...
-        let de: CanonicalOrigin = serde_json::from_str("\"HTTPS://NULO.SH:443\"").unwrap();
+        // an ALREADY-canonical string deserializes 1:1
+        let de: CanonicalOrigin = serde_json::from_str("\"https://nulo.sh\"").unwrap();
         assert_eq!(de.as_str(), "https://nulo.sh");
-        // ...and STRICTLY rejects un-canonicalizable input (the lenient drop lives on the config Vec)
+        // STRICT: a non-canonical-but-fixable string is REJECTED — no silent normalization. The
+        // lenient canonicalize+drop path is `de_approved_origins`, used only by the config Vec.
+        assert!(serde_json::from_str::<CanonicalOrigin>("\"HTTPS://NULO.SH:443\"").is_err());
+        // truly-invalid input is rejected too
         assert!(serde_json::from_str::<CanonicalOrigin>("\"not a url\"").is_err());
         assert!(serde_json::from_str::<CanonicalOrigin>("\"https://x.com/admin\"").is_err());
     }

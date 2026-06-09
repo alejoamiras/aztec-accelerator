@@ -122,8 +122,11 @@ pub fn respond_auth(
             auth.resolve(canonical.as_str(), decision);
         }
         None => {
-            // F-02: a non-canonical origin can never match a pending request (keys are canonical).
-            // Log + deny explicitly instead of letting it hang to the auth timeout; never honor Allow.
+            // F-02: a non-canonical origin can't match any pending request (keys are canonical), so a
+            // tampered popup payload is never honored as Allow. This `resolve` is a no-op on the real
+            // (canonical-keyed) request, which then denies via its 60s timeout. Immediate deny would
+            // need a server-issued opaque request id (or a typed pending map) — deferred; the pending
+            // map typing was scoped out of F-02. (codex post-impl PR-1, Low)
             tracing::warn!(origin = %origin, "respond_auth received a non-canonical origin; denying");
             auth.resolve(&origin, AuthDecision::Deny);
         }
