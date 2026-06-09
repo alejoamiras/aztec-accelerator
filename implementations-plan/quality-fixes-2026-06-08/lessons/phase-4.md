@@ -28,6 +28,38 @@ on fetch) → they exercise BOTH stacks through the new transport unchanged. Add
 tests (baseUrl http-vs-https-after-negotiation). **Required PR-4 gate:** `bun run --cwd packages/sdk build`
 (not just `tsc --noEmit`) — the publish artifact is `dist/`, source-only typecheck can't prove it.
 
+## F-06 — implemented (e9ec00b), PR-4 #336 in CI
+New **internal** `class AcceleratorTransport` (`src/lib/accelerator-transport.ts`, NOT barrel-exported)
+owns all accelerator network I/O: endpoint/URL construction, the dual HTTP/HTTPS `/health` probe +
+protocol negotiation (`setProtocol`/`baseUrl`), the status cache (`getFreshCachedStatus`/`cacheStatus`,
+TTL moved here), and the `/prove` POST (`postProve`). `AcceleratorProver` keeps the domain logic:
+parsing `/health` → the `AcceleratorStatus` union, and the `403`→denied interpretation. Runtime dep is
+one-directional (prover imports the transport *value*; transport imports prover *types* only → erased,
+no cycle). `setAcceleratorConfig` → `transport.configure` (resets protocol + status cache).
+
+### Two non-obvious gotchas (both verified before the switch)
+1. **ky-for-/health must pass `{ retry: 0, throwHttpErrors: false, timeout: 2000 }` to stay behavior-
+   identical to the old raw `fetch`.** Without `throwHttpErrors:false`, a 500 would *throw* → both
+   probes reject → `Promise.any` AggregateError → mapped to `offline` (WRONG — must be reason:`error`).
+   Without `retry:0`, ky's default GET-retry would re-fetch a 500 **3×** and stack on top of the single
+   explicit retry. With both flags, ky resolves any HTTP status / rejects only on network+timeout —
+   exactly raw-fetch semantics. The 31 prover tests (which mock `globalThis.fetch`, and ky rides on it)
+   pass unchanged → behavior-preservation proof. Verified against the offline-retry-timing, 500-non-ok,
+   malformed-JSON-200, Safari-mixed-content, and protocol-winner tests specifically.
+2. **`postProve` body must be typed `Uint8Array<ArrayBuffer>`, not bare `Uint8Array`.** Under TS6's
+   generic `Uint8Array<TArrayBuffer>`, a bare param widens to `Uint8Array<ArrayBufferLike>` which is NOT
+   assignable to ky's `BodyInit` (wants ArrayBuffer-backed, excludes SharedArrayBuffer). The old inline
+   `new Uint8Array(msgpack)` was already `<ArrayBuffer>`; the extraction surfaced the variance.
+
+Also: `res.json<{proof}>()` (ky's typed shorthand) → `(await res.json()) as {proof:string}` since
+`postProve` returns a plain `Response`. Added 10 `AcceleratorTransport` unit tests (baseUrl negotiation,
+cache TTL, `configure` reset, probe winner / mixed-content / non-2xx-resolves / offline-rejects).
+Gates green locally: `tsc --noEmit`, `bun run build` (dist artifact), 41 unit tests, biome.
+`LESSONS_FILE=implementations-plan/quality-fixes-2026-06-08/lessons/phase-4.md`
+
 ## Next
-- implement F-06 → commit → push PR-4 (F-05+F-06) → codex post-impl → CI green → merge.
-- both PR-3 + PR-4 merged → /code-review max --fix (the net diff) → final codex post-impl → /harden security.
+- PR-3 #335: clippy fix pushed (gate `CertPaths::remove` to macOS — Linux dead-code); CI re-running.
+- PR-4 #336: F-05+F-06 pushed; CI running (sdk.yml + app.yml, since playground depends on the SDK).
+- both green → mark F-06 ✓ in plan.md + merge both → /code-review max --fix (net diff) → final codex
+  post-impl → /harden security. (plan.md ✓ marks + this lessons finalization land in the closing docs PR,
+  since main is branch-protected and re-pushing a green branch just to tweak docs wastes a CI cycle.)

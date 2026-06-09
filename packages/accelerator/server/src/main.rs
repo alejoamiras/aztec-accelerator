@@ -42,8 +42,9 @@ async fn main() {
     // Without it, auth_manager is None and all origins are auto-approved.
     let (auth_manager, config) = if let Ok(origins_str) = std::env::var("ALLOWED_ORIGINS") {
         // PRESENCE semantics (F-02): the var being SET enables gating even if it parses to an
-        // empty list (= deny ALL browser origins) — exactly as before. Only an invalid NON-empty
-        // entry is fatal (operator security input → fail loud, don't silently drop).
+        // empty list — exactly as before. An empty list denies every NON-localhost browser origin;
+        // localhost/127.0.0.1/[::1] stay auto-approved via `AuthorizationManager::is_auto_approved`.
+        // Only an invalid NON-empty entry is fatal (operator security input → fail loud, don't drop).
         let origins = match parse_allowed_origins_env(&origins_str) {
             Ok(o) => o,
             Err(e) => {
@@ -85,8 +86,9 @@ async fn main() {
 /// Pipeline: split on `,` → trim → drop empty segments → canonicalize each non-empty entry →
 /// dedupe (order-preserving). Returns `Err` (operator should fix it) only when a NON-empty
 /// entry is not a valid RFC-6454 origin. An all-empty value (`""`, `",,"`, whitespace) yields
-/// an empty list, NOT an error — the caller still enables gating (deny-all), preserving today's
-/// "var present ⇒ gated" behavior.
+/// an empty list, NOT an error — the caller still enables gating, preserving today's
+/// "var present ⇒ gated" behavior. An empty list denies every NON-localhost origin (localhost,
+/// 127.0.0.1, [::1] stay auto-approved via `AuthorizationManager::is_auto_approved`).
 fn parse_allowed_origins_env(raw: &str) -> Result<Vec<CanonicalOrigin>, String> {
     let mut out: Vec<CanonicalOrigin> = Vec::new();
     for seg in raw.split(',') {
@@ -122,7 +124,8 @@ mod tests {
     #[test]
     fn present_but_empty_yields_empty_list_not_error() {
         // The security-critical case: a present-but-empty value must NOT error (the caller keys on
-        // presence to enable deny-all gating). Empty/whitespace/trailing-comma all parse to [].
+        // presence to enable gating, which denies non-localhost origins). Empty/whitespace/
+        // trailing-comma all parse to [].
         for raw in ["", "   ", ",", ",,", " , "] {
             assert_eq!(
                 parse_allowed_origins_env(raw).unwrap(),
