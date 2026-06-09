@@ -58,6 +58,9 @@ impl CertPaths {
     }
 
     /// Best-effort remove all three (used to discard a failed staging).
+    /// Only the macOS trust-failure path discards a staged set, so this is
+    /// macOS-only — gating it keeps Linux/Windows clippy `-D warnings` clean.
+    #[cfg(target_os = "macos")]
     fn remove(&self) {
         let _ = std::fs::remove_file(&self.ca_cert);
         let _ = std::fs::remove_file(&self.leaf_cert);
