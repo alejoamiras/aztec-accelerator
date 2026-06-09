@@ -24,6 +24,7 @@ pub use bind::bind_with_retry;
 mod probe;
 pub use probe::healthy_aztec_on_port;
 mod auth;
+mod host;
 mod prove;
 
 const PORT: u16 = 59833;
@@ -190,7 +191,16 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
     Ok(())
 }
 
+/// Build the router for the HTTP listener (port [`PORT`]). Thin shim over [`router_for_port`].
 pub fn router(state: AppState) -> Router {
+    router_for_port(state, PORT)
+}
+
+/// Build the router, gating every request on a trusted loopback `Host`/`:authority` for
+/// `expected_port` (SEC-01a — the DNS-rebinding keystone, see [`host`]). Each listener passes its
+/// own port (HTTP [`PORT`], HTTPS [`HTTPS_PORT`]) so a `:59834` authority can't pass on the `:59833`
+/// listener. The guard is the OUTERMOST layer → it runs before CORS and the routes.
+pub fn router_for_port(state: AppState, expected_port: u16) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST])
@@ -209,6 +219,11 @@ pub fn router(state: AppState) -> Router {
             http::header::HeaderName::from_static("cross-origin-resource-policy"),
             HeaderValue::from_static("cross-origin"),
         ))
+        // Outermost layer (added last → runs first): reject any non-loopback / wrong-port Host
+        // before route or CORS logic. Behaviour-preserving for real loopback clients.
+        .layer(axum::middleware::from_fn(move |req, next| {
+            host::guard(expected_port, req, next)
+        }))
         .with_state(state)
 }
 
@@ -287,6 +302,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -336,6 +352,7 @@ mod tests {
         let response = router(state)
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -364,6 +381,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -399,6 +417,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -422,6 +441,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("OPTIONS")
                     .uri("/prove")
                     .header("origin", "http://localhost:5173")
@@ -455,6 +475,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("OPTIONS")
                     .uri("/prove")
                     .header("origin", "http://localhost:5173")
@@ -485,6 +506,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .header("origin", "http://localhost:5173")
                     .body(Body::empty())
@@ -517,6 +539,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -536,6 +559,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -567,6 +591,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -628,6 +653,7 @@ mod tests {
         assert_error(
             router(AppState::default()),
             Request::builder()
+                .header("host", "127.0.0.1:59833")
                 .method("POST")
                 .uri("/prove")
                 .header("content-type", "application/octet-stream")
@@ -645,6 +671,7 @@ mod tests {
         assert_error(
             router(state),
             Request::builder()
+                .header("host", "127.0.0.1:59833")
                 .method("POST")
                 .uri("/prove")
                 .header("content-type", "application/octet-stream")
@@ -667,6 +694,7 @@ mod tests {
         assert_error(
             router(state),
             Request::builder()
+                .header("host", "127.0.0.1:59833")
                 .method("POST")
                 .uri("/prove")
                 .header("content-type", "application/octet-stream")
@@ -714,6 +742,7 @@ mod tests {
         let response = router(state)
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -759,6 +788,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -808,6 +838,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -851,6 +882,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -883,6 +915,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -914,6 +947,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -928,6 +962,44 @@ mod tests {
         assert!(
             popup_rx.try_recv().is_err(),
             "popup should not fire without Origin"
+        );
+    }
+
+    /// SEC-01a: the DNS-rebinding attack shape — a rebound page makes a same-origin (no-Origin)
+    /// request whose `Host` is the attacker's domain, not loopback. The loopback-Host guard must
+    /// 403 it BEFORE the Origin gate (which would otherwise auto-approve the missing Origin), and
+    /// the popup must never fire.
+    #[tokio::test]
+    async fn prove_rejects_forged_host_dns_rebinding() {
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+        let (state, _auth) = auth_state_with_popup(popup_tx);
+        let app = router(state);
+
+        let response: axum::http::Response<_> = app
+            .oneshot(
+                Request::builder()
+                    .header("host", "evil.com:59833") // rebound attacker domain, not loopback
+                    .method("POST")
+                    .uri("/prove")
+                    .header("content-type", "application/octet-stream")
+                    .body(Body::from(vec![0u8; 10]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("invalid_host"),
+            "rebinding must be rejected by the Host guard (got: {body})"
+        );
+        assert!(
+            popup_rx.try_recv().is_err(),
+            "popup must not fire for a forged-Host request"
         );
     }
 
@@ -947,6 +1019,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -983,6 +1056,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -1013,6 +1087,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -1044,6 +1119,7 @@ mod tests {
         let response: axum::http::Response<_> = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .header("content-type", "application/octet-stream")
@@ -1167,6 +1243,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .body(Body::from(vec![0u8; 10]))
@@ -1184,6 +1261,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
+                    .header("host", "127.0.0.1:59833")
                     .method("POST")
                     .uri("/prove")
                     .body(Body::empty())
