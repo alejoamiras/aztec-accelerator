@@ -2,9 +2,9 @@ import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import type { CircuitSimulator } from "@aztec/simulator/client";
 import { type PrivateExecutionStep, serializePrivateExecutionSteps } from "@aztec/stdlib/kernel";
 import { ChonkProofWithPublicInputs } from "@aztec/stdlib/proofs";
-import ky, { HTTPError } from "ky";
-import ms from "ms";
+import { HTTPError } from "ky";
 import sdkPkg from "../../package.json" with { type: "json" };
+import { AcceleratorTransport } from "./accelerator-transport.js";
 import { logger } from "./logger.js";
 
 /** Sub-phases emitted during proof generation for UI animation. */
@@ -160,12 +160,8 @@ const DEFAULT_ACCELERATOR_HOST = "127.0.0.1";
  */
 export class AcceleratorProver extends BBLazyPrivateKernelProver {
   #onPhase: ((phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void) | null = null;
-  #acceleratorPort: number;
-  #acceleratorHttpsPort: number;
-  #acceleratorHost: string;
-  #acceleratorProtocol: "http" | "https" | null = null;
-  #statusCache: { result: AcceleratorStatus; timestamp: number } | null = null;
-  static readonly #STATUS_CACHE_TTL = 10_000; // 10 seconds
+  /** Owns endpoint URLs, protocol negotiation, the status cache, and `/health` + `/prove` I/O. */
+  #transport: AcceleratorTransport;
   #forceLocal = false;
 
   constructor(options?: AcceleratorProverOptions) {
@@ -192,23 +188,19 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
     const parsedPort = envPort ? Number.parseInt(envPort, 10) : NaN;
     const parsedHttpsPort = envHttpsPort ? Number.parseInt(envHttpsPort, 10) : NaN;
-    this.#acceleratorPort =
-      port ?? (Number.isNaN(parsedPort) ? DEFAULT_ACCELERATOR_PORT : parsedPort);
-    this.#acceleratorHttpsPort =
+    const resolvedPort = port ?? (Number.isNaN(parsedPort) ? DEFAULT_ACCELERATOR_PORT : parsedPort);
+    const resolvedHttpsPort =
       httpsPort ??
       (Number.isNaN(parsedHttpsPort) ? DEFAULT_ACCELERATOR_HTTPS_PORT : parsedHttpsPort);
-    this.#acceleratorHost = host ?? DEFAULT_ACCELERATOR_HOST;
+    const resolvedHost = host ?? DEFAULT_ACCELERATOR_HOST;
+    this.#transport = new AcceleratorTransport(resolvedHost, resolvedPort, resolvedHttpsPort);
   }
 
-  /** Configure the local accelerator connection (port, host). Resets cached protocol. */
+  /** Configure the local accelerator connection (port, host). Resets cached protocol + status. */
   setAcceleratorConfig(config: AcceleratorConfig) {
-    if (config.port !== undefined) this.#acceleratorPort = config.port;
-    if (config.httpsPort !== undefined) this.#acceleratorHttpsPort = config.httpsPort;
-    if (config.host !== undefined) this.#acceleratorHost = config.host;
-    // Reset BOTH the cached protocol and the status cache — both are keyed to the old
-    // endpoint, so a stale cache hit would report the wrong host/port for up to the TTL.
-    this.#acceleratorProtocol = null;
-    this.#statusCache = null;
+    // The transport resets BOTH the cached protocol and the status cache (each is keyed to
+    // the old endpoint, so a stale hit would report the wrong host/port for up to the TTL).
+    this.#transport.configure(config);
   }
 
   /** Register a callback for proof generation sub-phase transitions (for UI animation). */
@@ -221,13 +213,6 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#forceLocal = force;
   }
 
-  get #acceleratorBaseUrl(): string {
-    if (this.#acceleratorProtocol === "https") {
-      return `https://${this.#acceleratorHost}:${this.#acceleratorHttpsPort}`;
-    }
-    return `http://${this.#acceleratorHost}:${this.#acceleratorPort}`;
-  }
-
   /**
    * Probe the local accelerator's `/health` endpoint and return its status.
    * Use it to show "Accelerator connected" / "Offline" in your UI before a prove call.
@@ -235,12 +220,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   async checkAcceleratorStatus(): Promise<AcceleratorStatus> {
     // Return cached result if still fresh — avoids re-probing on every proof call
     // and eliminates the 1s retry delay when the accelerator is offline.
-    if (
-      this.#statusCache &&
-      Date.now() - this.#statusCache.timestamp < AcceleratorProver.#STATUS_CACHE_TTL
-    ) {
-      return this.#statusCache.result;
-    }
+    const cached = this.#transport.getFreshCachedStatus();
+    if (cached) return cached;
     return this.#probeAndParseHealth();
   }
 
@@ -251,46 +232,19 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    */
   async #probeAndParseHealth(): Promise<AcceleratorStatus> {
     const sdkAztecVersion = this.#getAztecVersion();
-    const httpUrl = `http://${this.#acceleratorHost}:${this.#acceleratorPort}/health`;
-    const httpsUrl = `https://${this.#acceleratorHost}:${this.#acceleratorHttpsPort}/health`;
-
-    // Probe with a single retry — the accelerator may be slow to start on first
-    // launch or after an update. Without retry, the SDK falls back to WASM unnecessarily.
-    const probe = () =>
-      Promise.any([
-        fetch(httpUrl, { signal: AbortSignal.timeout(2000) }).then((res) => ({
-          res,
-          protocol: "http" as const,
-        })),
-        fetch(httpsUrl, { signal: AbortSignal.timeout(2000) }).then((res) => ({
-          res,
-          protocol: "https" as const,
-        })),
-      ]);
-
-    const cacheAndReturn = (status: AcceleratorStatus): AcceleratorStatus => {
-      this.#statusCache = { result: status, timestamp: Date.now() };
-      return status;
-    };
+    const cacheAndReturn = (status: AcceleratorStatus): AcceleratorStatus =>
+      this.#transport.cacheStatus(status);
 
     try {
-      // Probe both HTTP and HTTPS in parallel — whichever responds first wins.
-      // Chrome/Firefox: HTTP responds (~1ms), HTTPS rejection silently ignored.
+      // Probe both HTTP and HTTPS in parallel (one retry after 1s) — whichever responds
+      // first wins. Chrome/Firefox: HTTP responds (~1ms), HTTPS rejection silently ignored.
       // Safari with HTTPS enabled: HTTP blocked (mixed content), HTTPS responds.
-      // Both offline: AggregateError → retry once after 1s, then { available: false }.
-      let result: { res: Response; protocol: "http" | "https" };
-      try {
-        result = await probe();
-      } catch {
-        // First probe failed — retry once after 1s
-        await new Promise((r) => setTimeout(r, 1000));
-        result = await probe();
-      }
-      const { res: response, protocol } = result;
+      // Both offline twice: probeHealth throws → caught below → { available: false }.
+      const { response, protocol } = await this.#transport.probeHealth();
 
       if (!response.ok) {
-        // Don't cache protocol on error — a fast error (e.g. HTTPS cert failure)
-        // would permanently set the wrong protocol for subsequent /prove calls.
+        // Don't pin the protocol on error — a fast error (e.g. HTTPS cert failure)
+        // would set the wrong protocol for subsequent /prove calls.
         return cacheAndReturn({
           available: false,
           reason: "error",
@@ -299,7 +253,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         });
       }
 
-      this.#acceleratorProtocol = protocol;
+      this.#transport.setProtocol(protocol);
 
       let data: { aztec_version?: string; available_versions?: string[] };
       try {
@@ -309,9 +263,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         };
       } catch {
         // Reachable but returned unparseable JSON — that's "error" (the host answered), NOT
-        // "offline" (which means both probes failed). Reset the cached protocol since a
-        // misbehaving responder shouldn't pin it for subsequent /prove calls.
-        this.#acceleratorProtocol = null;
+        // "offline" (which means both probes failed). Clear the pinned protocol since a
+        // misbehaving responder shouldn't drive subsequent /prove calls.
+        this.#transport.setProtocol(null);
         return cacheAndReturn({
           available: false,
           reason: "error",
@@ -368,7 +322,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         protocol,
       });
     } catch {
-      this.#acceleratorProtocol = null;
+      this.#transport.setProtocol(null);
       return cacheAndReturn({ available: false, reason: "offline", sdkAztecVersion });
     }
   }
@@ -397,7 +351,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     }
 
     logger.info("Accelerator available, proving natively", {
-      url: this.#acceleratorBaseUrl,
+      url: this.#transport.baseUrl,
     });
 
     this.#onPhase?.("serialize");
@@ -408,18 +362,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#onPhase?.("transmit");
     this.#onPhase?.("proving");
 
-    let res: Awaited<ReturnType<typeof ky.post>>;
+    let res: Response;
     const start = performance.now();
     try {
-      res = await ky.post(`${this.#acceleratorBaseUrl}/prove`, {
-        body: new Uint8Array(msgpack),
-        timeout: ms("10 min"),
-        retry: 0,
-        headers: {
-          "content-type": "application/octet-stream",
-          ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
-        },
-      });
+      res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion);
     } catch (err) {
       // 403: user denied this site, or authorization timed out — fall back to WASM
       if (err instanceof HTTPError && err.response.status === 403) {
@@ -446,7 +392,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     logger.info("Accelerator proof completed", { durationMs });
     this.#onPhase?.("proved", { durationMs });
 
-    const response = await res.json<{ proof: string }>();
+    const response = (await res.json()) as { proof: string };
     this.#onPhase?.("receive");
     const proofBuffer = Buffer.from(response.proof, "base64");
     return ChonkProofWithPublicInputs.fromBuffer(proofBuffer);
