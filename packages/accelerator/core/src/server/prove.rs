@@ -30,13 +30,28 @@ impl Drop for StatusGuard {
 }
 
 /// Validate and resolve the requested Aztec version. Downloads the bb binary if needed.
-pub(crate) async fn resolve_version<'a>(
+/// Outcome of version resolution: the version string for `bb::prove` (`None` = bundled default) and,
+/// when the requested version isn't cached + isn't the bundled one, the parsed version `prove()` must
+/// download first. **Pure** — no status emission, no download. (F-08: `prove` owns the whole
+/// Proving→Downloading→Proving status sequence so it lives in one place.)
+#[derive(Debug)]
+pub(crate) struct ResolvedVersion<'a> {
+    pub(crate) version: Option<&'a str>,
+    pub(crate) to_download: Option<versions::AztecVersion>,
+}
+
+pub(crate) fn resolve_version<'a>(
     state: &AppState,
     requested: &'a Option<String>,
-) -> Result<Option<&'a str>, ProveError> {
+) -> Result<ResolvedVersion<'a>, ProveError> {
     let v = match requested {
         Some(v) => v,
-        None => return Ok(None),
+        None => {
+            return Ok(ResolvedVersion {
+                version: None,
+                to_download: None,
+            })
+        }
     };
 
     // Construct the validated value object ONCE at the ingress boundary (Q3). Parse failure returns
@@ -61,42 +76,17 @@ pub(crate) async fn resolve_version<'a>(
         .as_deref()
         .unwrap_or(super::DEFAULT_BB_VERSION);
 
-    if v != bundled && !versions::version_bb_path(&version).exists() {
-        tracing::info!(version = %version, "Version not cached, downloading");
-        if let Some(ref cb) = state.on_status {
-            cb(ServerStatus::Downloading);
-        }
+    let to_download = if v != bundled && !versions::version_bb_path(&version).exists() {
+        tracing::info!(version = %version, "Version not cached, will download");
+        Some(version)
+    } else {
+        None
+    };
 
-        match versions::download_bb(&version).await {
-            Ok(_) => {
-                tracing::info!(version = %v, "Download complete");
-                let bundled_owned = bundled.to_string();
-                let on_versions_changed = state.on_versions_changed.clone();
-                tokio::spawn(async move {
-                    versions::cleanup_old_versions(&bundled_owned).await;
-                    if let Some(cb) = on_versions_changed {
-                        cb();
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::error!(version = %v, error = %e, "Failed to download bb");
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json_error(
-                        "download_failed",
-                        &format!("Failed to download bb v{v}: {e}"),
-                    ),
-                ));
-            }
-        }
-
-        if let Some(ref cb) = state.on_status {
-            cb(ServerStatus::Proving);
-        }
-    }
-
-    Ok(Some(v.as_str()))
+    Ok(ResolvedVersion {
+        version: Some(v.as_str()),
+        to_download,
+    })
 }
 
 /// Read the speed setting from config and convert to thread count.
@@ -160,7 +150,50 @@ pub(crate) async fn prove(
         cb: state.on_status.clone(),
     };
 
-    let version_for_prove = resolve_version(&state, &requested_version).await?;
+    // Resolve (pure: parse + cache check), then OWN the status sequence here (F-08): the whole
+    // Proving→(Downloading→Proving)→Idle machine lives in one function. `resolve_version` no longer
+    // emits status or downloads.
+    let ResolvedVersion {
+        version: version_for_prove,
+        to_download,
+    } = resolve_version(&state, &requested_version)?;
+    if let Some(version) = to_download {
+        if let Some(ref cb) = state.on_status {
+            cb(ServerStatus::Downloading);
+        }
+        match versions::download_bb(&version).await {
+            Ok(_) => {
+                tracing::info!(version = %version, "Download complete");
+                let bundled_owned = state
+                    .bundled_version
+                    .as_deref()
+                    .unwrap_or(super::DEFAULT_BB_VERSION)
+                    .to_string();
+                let on_versions_changed = state.on_versions_changed.clone();
+                tokio::spawn(async move {
+                    versions::cleanup_old_versions(&bundled_owned).await;
+                    if let Some(cb) = on_versions_changed {
+                        cb();
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!(version = %version, error = %e, "Failed to download bb");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json_error(
+                        "download_failed",
+                        &format!("Failed to download bb v{version}: {e}"),
+                    ),
+                ));
+            }
+        }
+        // Re-emit Proving after the Downloading interlude — preserves the redundant leading Proving so
+        // the download-arm sequence stays [Proving, Downloading, Proving, Idle]. (F-08 / opus H2)
+        if let Some(ref cb) = state.on_status {
+            cb(ServerStatus::Proving);
+        }
+    }
     let threads = compute_threads(&state);
 
     let start = std::time::Instant::now();

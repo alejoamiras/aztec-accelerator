@@ -1103,35 +1103,54 @@ mod tests {
         assert_eq!(compute_threads(&state), None);
     }
 
-    #[tokio::test]
-    async fn resolve_version_passes_valid_version() {
+    #[test]
+    fn resolve_version_flags_uncached_for_download() {
+        // F-08: resolve_version is now pure (sync, no download, no status). A valid, non-bundled,
+        // uncached version resolves Ok with `to_download` set — prove() then owns the download+status
+        // (Proving→Downloading→Proving). The full 4-element download-arm sequence can't be unit-tested
+        // (download_bb needs the network); the no-download arm is pinned by
+        // `prove_success_path_and_status_sequence`, and prove() emits Downloading/Proving structurally
+        // around this flag.
         let state = AppState::default();
         let version = Some("5.0.0-rc.1".to_string());
-        let result = resolve_version(&state, &version).await;
-        // May fail on download (no network in test) but should not reject the version
-        assert!(result.is_ok() || result.is_err());
-        // The key assertion: valid version string is not rejected as BAD_REQUEST
-        if let Err((status, _)) = &result {
-            assert_ne!(*status, StatusCode::BAD_REQUEST);
-        }
+        let resolved = resolve_version(&state, &version).expect("valid version resolves");
+        assert_eq!(resolved.version, Some("5.0.0-rc.1"));
+        assert!(
+            resolved.to_download.is_some(),
+            "uncached non-bundled version must be flagged for download"
+        );
     }
 
-    #[tokio::test]
-    async fn resolve_version_rejects_invalid_version() {
+    #[test]
+    fn resolve_version_no_download_for_bundled() {
+        // The bundled version is always present → never flagged for download (no Downloading status).
+        let core = HeadlessState::headless("1.0.0", Some("0.99.0".to_string()), None, None);
+        let state = AppState::headless(core);
+        let requested = Some("0.99.0".to_string());
+        let resolved = resolve_version(&state, &requested).expect("bundled resolves");
+        assert_eq!(resolved.version, Some("0.99.0"));
+        assert!(
+            resolved.to_download.is_none(),
+            "bundled version must NOT download"
+        );
+    }
+
+    #[test]
+    fn resolve_version_rejects_invalid_version() {
         let state = AppState::default();
         let version = Some("../../../etc/passwd".to_string());
-        let result = resolve_version(&state, &version).await;
+        let result = resolve_version(&state, &version);
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn resolve_version_returns_none_without_header() {
+    #[test]
+    fn resolve_version_returns_none_without_header() {
         let state = AppState::default();
-        let result = resolve_version(&state, &None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        let resolved = resolve_version(&state, &None).expect("no header resolves");
+        assert_eq!(resolved.version, None);
+        assert!(resolved.to_download.is_none());
     }
 
     // ── Failure-path tests ──
