@@ -161,8 +161,23 @@ pub enum AuthDecision {
 /// Prevents popup/memory spam from a malicious site generating many subdomains.
 const MAX_PENDING_ORIGINS: usize = 10;
 
+/// A pending authorization awaiting the user's decision: its origin (for display + cleanup) and the
+/// receivers of every request piggybacking on it.
+struct PendingRequest {
+    origin: String,
+    senders: Vec<oneshot::Sender<AuthDecision>>,
+}
+
+#[derive(Default)]
+struct PendingState {
+    /// origin → its current pending `request_id` (so repeat requests from one origin piggyback).
+    by_origin: HashMap<String, String>,
+    /// `request_id` → the pending request. Decisions resolve by **id**, not origin (SEC-06).
+    by_request: HashMap<String, PendingRequest>,
+}
+
 pub struct AuthorizationManager {
-    pending: Mutex<HashMap<String, Vec<oneshot::Sender<AuthDecision>>>>,
+    state: Mutex<PendingState>,
 }
 
 impl Default for AuthorizationManager {
@@ -174,36 +189,57 @@ impl Default for AuthorizationManager {
 impl AuthorizationManager {
     pub fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
+            state: Mutex::new(PendingState::default()),
         }
     }
 
     /// Register a pending authorization request for `origin`.
     ///
-    /// Returns `Ok((receiver, is_first))`. If `is_first` is true, the caller should
-    /// show the authorization popup. Otherwise, a popup is already showing and
-    /// this request will piggyback on that decision.
+    /// Returns `Ok((receiver, request_id, is_first))`. If `is_first` is true, the caller should show
+    /// the authorization popup carrying `request_id`. Otherwise a popup is already showing for this
+    /// origin and this request piggybacks on it (sharing the same `request_id` + decision).
     ///
-    /// Returns `Err` if the maximum number of pending origins is exceeded (DoS protection).
+    /// `request_id` is an **opaque, unguessable** UUID (SEC-06) — decisions are addressed by it, not
+    /// by origin string, so a caller that knows only an origin cannot resolve a concurrent request.
+    ///
+    /// Returns `Err` if the maximum number of pending requests is exceeded (DoS protection).
     pub fn request(
         &self,
         origin: &str,
-    ) -> Result<(oneshot::Receiver<AuthDecision>, bool), &'static str> {
+    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool), &'static str> {
         let (tx, rx) = oneshot::channel();
-        let mut pending = self.pending.lock();
-        let is_first = !pending.contains_key(origin);
-        if is_first && pending.len() >= MAX_PENDING_ORIGINS {
+        let mut st = self.state.lock();
+        // Piggyback on an existing pending request for this origin.
+        if let Some(request_id) = st.by_origin.get(origin).cloned() {
+            if let Some(req) = st.by_request.get_mut(&request_id) {
+                req.senders.push(tx);
+                return Ok((rx, request_id, false));
+            }
+        }
+        // New request.
+        if st.by_request.len() >= MAX_PENDING_ORIGINS {
             return Err("too many pending authorization requests");
         }
-        pending.entry(origin.to_string()).or_default().push(tx);
-        Ok((rx, is_first))
+        let request_id = uuid::Uuid::new_v4().to_string();
+        st.by_origin.insert(origin.to_string(), request_id.clone());
+        st.by_request.insert(
+            request_id.clone(),
+            PendingRequest {
+                origin: origin.to_string(),
+                senders: vec![tx],
+            },
+        );
+        Ok((rx, request_id, true))
     }
 
-    /// Resolve all pending requests for `origin` with the given decision.
-    pub fn resolve(&self, origin: &str, decision: AuthDecision) {
-        let mut pending = self.pending.lock();
-        if let Some(senders) = pending.remove(origin) {
-            for tx in senders {
+    /// Resolve the pending request identified by `request_id` with `decision`. Sends to every
+    /// piggybacking receiver and clears both maps. A no-op for an unknown/stale id (already resolved,
+    /// or a tampered/guessed id that matches nothing).
+    pub fn resolve(&self, request_id: &str, decision: AuthDecision) {
+        let mut st = self.state.lock();
+        if let Some(req) = st.by_request.remove(request_id) {
+            st.by_origin.remove(&req.origin);
+            for tx in req.senders {
                 let _ = tx.send(decision);
             }
         }
@@ -310,16 +346,15 @@ mod tests {
     #[tokio::test]
     async fn request_and_resolve() {
         let mgr = AuthorizationManager::new();
-        let (rx1, is_first1) = mgr.request("https://example.com").unwrap();
+        let (rx1, id1, is_first1) = mgr.request("https://example.com").unwrap();
         assert!(is_first1);
 
-        let (rx2, is_first2) = mgr.request("https://example.com").unwrap();
+        // A second request for the SAME origin piggybacks on the same request_id.
+        let (rx2, id2, is_first2) = mgr.request("https://example.com").unwrap();
         assert!(!is_first2);
+        assert_eq!(id1, id2, "same origin must share one request_id");
 
-        mgr.resolve(
-            "https://example.com",
-            AuthDecision::Allow { remember: true },
-        );
+        mgr.resolve(&id1, AuthDecision::Allow { remember: true });
 
         assert_eq!(rx1.await.unwrap(), AuthDecision::Allow { remember: true });
         assert_eq!(rx2.await.unwrap(), AuthDecision::Allow { remember: true });
@@ -328,8 +363,25 @@ mod tests {
     #[tokio::test]
     async fn resolve_deny() {
         let mgr = AuthorizationManager::new();
-        let (rx, _) = mgr.request("https://evil.com").unwrap();
-        mgr.resolve("https://evil.com", AuthDecision::Deny);
+        let (rx, id, _) = mgr.request("https://evil.com").unwrap();
+        mgr.resolve(&id, AuthDecision::Deny);
+        assert_eq!(rx.await.unwrap(), AuthDecision::Deny);
+    }
+
+    /// SEC-06: a decision addressed to a WRONG/unknown `request_id` must NOT resolve a pending
+    /// request. The old origin-keyed resolve let any caller that knew an origin resolve it; now the
+    /// opaque id is required, so a guessed/tampered id is a no-op.
+    #[tokio::test]
+    async fn resolve_ignores_wrong_request_id() {
+        let mgr = AuthorizationManager::new();
+        let (mut rx, id, _) = mgr.request("https://example.com").unwrap();
+        mgr.resolve("not-the-real-id", AuthDecision::Allow { remember: true });
+        assert!(
+            rx.try_recv().is_err(),
+            "a wrong request_id must not resolve the request"
+        );
+        // The correct id resolves it.
+        mgr.resolve(&id, AuthDecision::Deny);
         assert_eq!(rx.await.unwrap(), AuthDecision::Deny);
     }
 

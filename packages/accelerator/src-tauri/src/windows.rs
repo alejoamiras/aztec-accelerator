@@ -77,10 +77,16 @@ pub fn open_settings_window(app: &AppHandle) {
 pub fn show_auth_popup_window(
     app: &AppHandle,
     origin: &str,
+    request_id: &str,
     auth_manager: &Arc<AuthorizationManager>,
 ) {
     let label = format!("auth-{}", commands::sanitize_window_label(origin));
-    let url = format!("authorize.html?origin={}", urlencoding::encode(origin));
+    // SEC-06: carry the opaque request_id so the popup echoes it back to respond_auth.
+    let url = format!(
+        "authorize.html?origin={}&requestId={}",
+        urlencoding::encode(origin),
+        urlencoding::encode(request_id)
+    );
     if open_or_focus_window(
         app,
         WindowConfig {
@@ -103,6 +109,7 @@ pub fn show_auth_popup_window(
     // origin was already resolved by respond_auth (senders already consumed).
     let app_handle = app.clone();
     let origin_owned = origin.to_string();
+    let request_id_owned = request_id.to_string();
     let auth_manager = auth_manager.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(aztec_accelerator::server::AUTH_DECISION_TIMEOUT).await;
@@ -110,8 +117,8 @@ pub fn show_auth_popup_window(
         if let Some(window) = app_handle.get_webview_window(&label) {
             let _ = window.close();
         }
-        // Always try to resolve — no-op if already resolved by user click
-        auth_manager.resolve(&origin_owned, AuthDecision::Deny);
+        // SEC-06: resolve by request_id — no-op if respond_auth already consumed it.
+        auth_manager.resolve(&request_id_owned, AuthDecision::Deny);
         tracing::debug!(origin = %origin_owned, "Authorization timeout cleanup");
     });
 }

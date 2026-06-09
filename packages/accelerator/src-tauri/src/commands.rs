@@ -1,4 +1,4 @@
-use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
+use crate::authorization::{AuthDecision, AuthorizationManager};
 use crate::config::{self, AcceleratorConfig};
 use crate::verified_sites::VerifiedSitesRegistry;
 use parking_lot::RwLock;
@@ -108,31 +108,24 @@ pub fn get_verified_info(
 pub fn respond_auth(
     app: tauri::AppHandle,
     auth: tauri::State<'_, AuthState>,
+    request_id: String,
     origin: String,
     allowed: bool,
     remember: bool,
 ) {
-    match CanonicalOrigin::parse(&origin) {
-        Some(canonical) => {
-            let decision = if allowed {
-                AuthDecision::Allow { remember }
-            } else {
-                AuthDecision::Deny
-            };
-            auth.resolve(canonical.as_str(), decision);
-        }
-        None => {
-            // F-02: a non-canonical origin can't match any pending request (keys are canonical), so a
-            // tampered popup payload is never honored as Allow. This `resolve` is a no-op on the real
-            // (canonical-keyed) request, which then denies via its 60s timeout. Immediate deny would
-            // need a server-issued opaque request id (or a typed pending map) — deferred; the pending
-            // map typing was scoped out of F-02. (codex post-impl PR-1, Low)
-            tracing::warn!(origin = %origin, "respond_auth received a non-canonical origin; denying");
-            auth.resolve(&origin, AuthDecision::Deny);
-        }
-    }
+    let decision = if allowed {
+        AuthDecision::Allow { remember }
+    } else {
+        AuthDecision::Deny
+    };
+    // SEC-06: resolve by the opaque `request_id`, NOT the origin. A tampered/guessed payload with a
+    // wrong id is a harmless no-op (it can't resolve a *different* concurrent request, and the old
+    // origin-keyed resolve could); the real request then denies via its 60s timeout. The `origin` is
+    // used only to close the matching popup window (and, server-side in the `/prove` handler, to
+    // persist an `Allow { remember }`).
+    auth.resolve(&request_id, decision);
 
-    // Close the authorization popup window
+    // Close the authorization popup window (labelled by origin, matching windows.rs).
     let label = format!("auth-{}", sanitize_window_label(&origin));
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.close();
