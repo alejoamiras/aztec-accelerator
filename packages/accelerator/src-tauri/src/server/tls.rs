@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 
-use accelerator_core::server::{bind_with_retry, router, AppState, HTTPS_PORT};
+use accelerator_core::server::{bind_with_retry, router_for_port, AppState, HTTPS_PORT};
 
 /// Start an HTTPS listener using the provided TLS config.
 /// Runs independently from HTTP — errors are logged but never crash the app.
@@ -16,9 +16,11 @@ pub async fn start_https(
     state: AppState,
     tls_config: Arc<tokio_rustls::rustls::ServerConfig>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Capture the shared bind-state flag before `router` consumes `state`.
+    // Capture the shared bind-state flag before `router_for_port` consumes `state`.
     let https_bound = state.https_bound.clone();
-    let app = router(state);
+    // Pass HTTPS_PORT so the loopback-Host guard accepts `127.0.0.1:59834` (Safari) and rejects a
+    // `:59833` authority replayed onto the HTTPS listener.
+    let app = router_for_port(state, HTTPS_PORT);
     let addr = SocketAddr::from(([127, 0, 0, 1], HTTPS_PORT));
     // Same restart race as the HTTP listener: an in-place update relaunches while
     // the old process still holds 59834. Retry first; only fall back to HTTP-only
