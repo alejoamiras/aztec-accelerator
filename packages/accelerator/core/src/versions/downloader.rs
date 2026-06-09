@@ -213,15 +213,61 @@ pub(crate) fn install_version_dir(
 
 /// Extract the `bb` binary from a gzipped tarball.
 ///
+/// Hard ceiling on the DECOMPRESSED tarball size (SEC-07). The compressed download is already capped
+/// at 64 MB (`MAX_DOWNLOAD_BYTES`); 512 MB decompressed is ~8x that — well above any legit `bb` (a
+/// ≤64 MB-compressed binary inflates to at most a few hundred MB) yet far below a gzip bomb's
+/// potential (64 MB of zeros → tens of GB). Without it, `entry.unpack` would stream a bomb to disk.
+const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// A reader that errors once more than `cap` bytes have passed through it — the real backstop against
+/// a decompression bomb (the per-entry `header().size()` is attacker-controlled, so it is necessary
+/// but not sufficient on its own).
+struct CappedReader<R> {
+    inner: R,
+    read: u64,
+    cap: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for CappedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read = self.read.saturating_add(n as u64);
+        if self.read > self.cap {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "decompressed tarball exceeds {} byte cap (decompression bomb?)",
+                    self.cap
+                ),
+            ));
+        }
+        Ok(n)
+    }
+}
+
 /// Looks for an entry named `bb` (at any nesting level) in the archive.
 pub(crate) fn extract_bb_from_tarball(
     data: &[u8],
     dest: &std::path::Path,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    extract_bb_from_tarball_capped(data, dest, MAX_DECOMPRESSED_BYTES)
+}
+
+/// Inner, cap-parameterized for testing (a real 512 MB bomb is impractical to build in a unit test).
+fn extract_bb_from_tarball_capped(
+    data: &[u8],
+    dest: &std::path::Path,
+    cap: u64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     use flate2::read::GzDecoder;
     use tar::Archive;
 
-    let decoder = GzDecoder::new(data);
+    // SEC-07: cap cumulative decompressed bytes so a gzip bomb can't fill the disk via `unpack`.
+    let decoder = CappedReader {
+        inner: GzDecoder::new(data),
+        read: 0,
+        cap,
+    };
     let mut archive = Archive::new(decoder);
 
     for entry in archive.entries()? {
@@ -237,10 +283,81 @@ pub(crate) fn extract_bb_from_tarball(
                 )
                 .into());
             }
+            // Cheap pre-check: reject a header DECLARING more than the cap. The CappedReader is the
+            // real backstop against a lying header that under-declares then over-streams.
+            let declared = entry.header().size()?;
+            if declared > cap {
+                return Err(
+                    format!("bb entry declares {declared} bytes, exceeds {cap} byte cap").into(),
+                );
+            }
             entry.unpack(dest.join(bb_binary_name()))?;
             return Ok(());
         }
     }
 
     Err("bb binary not found in tarball".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Build a gzipped tar with the given entries: `(path, size, byte)`.
+    fn make_targz(entries: &[(&str, usize, u8)]) -> Vec<u8> {
+        let mut tar_buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buf);
+            for (path, size, byte) in entries {
+                let data = vec![*byte; *size];
+                let mut header = tar::Header::new_gnu();
+                header.set_size(*size as u64);
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append_data(&mut header, path, &data[..]).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        let mut gz = Vec::new();
+        let mut enc = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+        enc.write_all(&tar_buf).unwrap();
+        enc.finish().unwrap();
+        gz
+    }
+
+    #[test]
+    fn extracts_bb_within_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = format!("barretenberg/{}", bb_binary_name());
+        let gz = make_targz(&[(&entry, 4096, 0)]);
+        extract_bb_from_tarball_capped(&gz, dir.path(), 1024 * 1024).unwrap();
+        let out = dir.path().join(bb_binary_name());
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn rejects_bb_entry_declaring_over_cap() {
+        // The per-entry declared-size pre-check: a 2 MB bb against a 1 MB cap is rejected before unpack.
+        let dir = tempfile::tempdir().unwrap();
+        let entry = format!("barretenberg/{}", bb_binary_name());
+        let gz = make_targz(&[(&entry, 2 * 1024 * 1024, 0)]);
+        let err = extract_bb_from_tarball_capped(&gz, dir.path(), 1024 * 1024).unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
+        assert!(!dir.path().join(bb_binary_name()).exists());
+    }
+
+    #[test]
+    fn capped_reader_trips_on_cumulative_decompressed_bytes() {
+        // The real bomb backstop: a junk entry BEFORE bb whose data alone exceeds the cap → the
+        // CappedReader aborts as the archive advances past it (proves the running counter, not just
+        // the per-entry declared size, is enforced).
+        let dir = tempfile::tempdir().unwrap();
+        let bb = format!("x/{}", bb_binary_name());
+        let gz = make_targz(&[("junk.bin", 2 * 1024 * 1024, 7), (&bb, 16, 0)]);
+        let err = extract_bb_from_tarball_capped(&gz, dir.path(), 1024 * 1024).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cap") || msg.contains("bomb"), "got: {msg}");
+    }
 }
