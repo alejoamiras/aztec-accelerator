@@ -48,7 +48,11 @@ pub(crate) async fn authorize_origin(
 
     let approved = state.config.as_ref().is_some_and(|cfg| {
         let cfg = cfg.read();
-        AuthorizationManager::is_approved(&origin, &cfg.approved_origins)
+        AuthorizationManager::is_approved(
+            &origin,
+            &cfg.approved_origins,
+            cfg.auto_approve_localhost,
+        )
     });
 
     if approved {

@@ -73,6 +73,9 @@ async fn main() {
             );
             let cfg = AcceleratorConfig {
                 approved_origins: origins,
+                // Headless has no approval popup → keep localhost auto-approved (SEC-04/R13). The
+                // prompt-once default is desktop-only; operators scope localhost via ALLOWED_ORIGINS.
+                auto_approve_localhost: true,
                 ..Default::default()
             };
             (

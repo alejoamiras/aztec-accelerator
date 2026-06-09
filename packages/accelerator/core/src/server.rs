@@ -244,8 +244,15 @@ fn health_is_detailed(state: &AppState, headers: &axum::http::HeaderMap) -> bool
         return false; // malformed Origin → treat as untrusted → minimal
     };
     match state.config.as_ref() {
-        // Gated: detailed only for approved origins (is_approved includes auto-approved localhost).
-        Some(cfg) => AuthorizationManager::is_approved(&origin, &cfg.read().approved_origins),
+        // Gated: detailed only for approved origins (incl. auto-approved localhost when enabled).
+        Some(cfg) => {
+            let cfg = cfg.read();
+            AuthorizationManager::is_approved(
+                &origin,
+                &cfg.approved_origins,
+                cfg.auto_approve_localhost,
+            )
+        }
         // No gating config (headless --allow-all) → no fingerprint concern → serve detailed.
         None => true,
     }
@@ -848,10 +855,12 @@ mod tests {
         let state = AppState {
             core: Arc::new(HeadlessState {
                 bundled_version: Some("5.0.0-nightly.20260307".into()),
-                // Gated (config present, empty allowlist) → the Origin predicate applies.
-                config: Some(Arc::new(RwLock::new(
-                    crate::config::AcceleratorConfig::default(),
-                ))),
+                // Gated, with localhost auto-approve ON so the localhost probe below is "approved"
+                // and exercises the detailed tier (SEC-04 defaults this off; tested separately).
+                config: Some(Arc::new(RwLock::new(crate::config::AcceleratorConfig {
+                    auto_approve_localhost: true,
+                    ..Default::default()
+                }))),
                 ..Default::default()
             }),
             ..Default::default()
@@ -929,6 +938,15 @@ mod tests {
     async fn prove_auto_approves_localhost_origin() {
         let (popup_tx, popup_rx) = std::sync::mpsc::channel();
         let (state, _auth) = auth_state_with_popup(popup_tx);
+        // SEC-04: localhost auto-approve is now opt-in (desktop default is prompt-once). Enable it
+        // here to exercise the auto-approve path; the flag-OFF deny is pinned by
+        // `authorization::tests::is_approved_checks_both`.
+        state
+            .config
+            .as_ref()
+            .unwrap()
+            .write()
+            .auto_approve_localhost = true;
         let app = router(state);
 
         let response: axum::http::Response<_> = app
