@@ -227,7 +227,39 @@ pub fn router_for_port(state: AppState, expected_port: u16) -> Router {
         .with_state(state)
 }
 
-async fn health(State(state): State<AppState>) -> impl IntoResponse {
+/// SEC-05: whether `/health` returns the detailed body (version / cached versions / `bb_available` /
+/// `https_port`) or a minimal liveness body. Detailed only for an ABSENT Origin (local non-browser
+/// callers: curl / Node / CI) or an APPROVED Origin (`is_approved` covers auto-approved localhost). A
+/// present-but-unapproved cross-origin caller gets the minimal body — so a random website learns at
+/// most "an accelerator exists", not its version or cached set. After SEC-01a every caller already
+/// has a loopback Host, so the Origin (not the Host) is the right discriminant here.
+fn health_is_detailed(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let Some(raw) = headers
+        .get(http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return true; // no Origin → local, non-browser caller
+    };
+    let Some(origin) = crate::authorization::CanonicalOrigin::parse(raw) else {
+        return false; // malformed Origin → treat as untrusted → minimal
+    };
+    match state.config.as_ref() {
+        // Gated: detailed only for approved origins (is_approved includes auto-approved localhost).
+        Some(cfg) => AuthorizationManager::is_approved(&origin, &cfg.read().approved_origins),
+        // No gating config (headless --allow-all) → no fingerprint concern → serve detailed.
+        None => true,
+    }
+}
+
+async fn health(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    // SEC-05: starve cross-site fingerprinting — an unapproved cross-origin probe gets liveness only.
+    if !health_is_detailed(&state, &headers) {
+        return axum::Json(json!({ "status": "ok", "api_version": 1 }));
+    }
+
     let bundled = state
         .bundled_version
         .as_deref()
@@ -806,6 +838,70 @@ mod tests {
         assert!(versions
             .iter()
             .any(|v| v.as_str() == Some("5.0.0-nightly.20260307")));
+    }
+
+    /// SEC-05: a present-but-unapproved cross-origin `/health` probe gets a minimal liveness body
+    /// (no version/cache fingerprint); an auto-approved localhost origin gets the detailed body. The
+    /// no-Origin case (local tools, CI, `connectivity.test.ts`) stays detailed — covered above.
+    #[tokio::test]
+    async fn health_minimal_for_unapproved_cross_origin() {
+        let state = AppState {
+            core: Arc::new(HeadlessState {
+                bundled_version: Some("5.0.0-nightly.20260307".into()),
+                // Gated (config present, empty allowlist) → the Origin predicate applies.
+                config: Some(Arc::new(RwLock::new(
+                    crate::config::AcceleratorConfig::default(),
+                ))),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let app = router(state);
+
+        // Unapproved, non-localhost Origin → minimal body.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("host", "127.0.0.1:59833")
+                    .header("origin", "https://evil.example")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(
+            json.get("available_versions").is_none() && json.get("aztec_version").is_none(),
+            "must not leak version/cache to an unapproved origin (got: {json})"
+        );
+
+        // An auto-approved localhost Origin → detailed body.
+        let response2 = app
+            .oneshot(
+                Request::builder()
+                    .header("host", "127.0.0.1:59833")
+                    .header("origin", "http://localhost:5173")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert!(
+            json2.get("available_versions").is_some(),
+            "approved/localhost origin must get the detailed body (got: {json2})"
+        );
     }
 
     /// Helper: build an AppState with auth enabled and a mock popup callback.
