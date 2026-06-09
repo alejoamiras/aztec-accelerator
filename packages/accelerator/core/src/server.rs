@@ -80,13 +80,14 @@ pub type ShowAuthPopupCallback = Arc<dyn Fn(&str) + Send + Sync>;
 /// The server-side core state — everything the headless `accelerator-server` needs, with no GUI
 /// coupling. Lives behind an `Arc` in [`AppState`] so cloning the state is cheap (fixes the main.rs
 /// clone-stutter) (Q1).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HeadlessState {
     pub bundled_version: Option<String>,
     /// Injected app/release version for `/health.version`, decoupling it from `env!("CARGO_PKG_VERSION")`
     /// (which resolves to whichever crate compiles this module — wrong once `server.rs` lives in core).
-    /// Falls back to the compile-time value while constructors are migrated. (core-extraction Phase 0)
-    pub app_version: Option<String>,
+    /// Always set — by the binary (its release-patched version) via [`HeadlessState::headless`], or to
+    /// core's compile-time version by [`Default`]. (F-01)
+    pub app_version: String,
     /// `true` once `start_https` has actually bound the HTTPS listener. Shared (Arc'd atomic) across
     /// the HTTP + HTTPS servers so `/health` advertises `https_port` from the REAL bind state — not
     /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
@@ -94,8 +95,8 @@ pub struct HeadlessState {
     pub https_bound: Arc<AtomicBool>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
-    /// Limits concurrent proving to 1 — bb already uses all cores.
-    pub prove_semaphore: Option<Arc<Semaphore>>,
+    /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
+    pub prove_semaphore: Arc<Semaphore>,
 }
 
 /// Full app state: the headless `core` plus the optional GUI callbacks. `Deref`s to `core`, so the
@@ -113,6 +114,70 @@ impl std::ops::Deref for AppState {
     type Target = HeadlessState;
     fn deref(&self) -> &HeadlessState {
         &self.core
+    }
+}
+
+impl Default for HeadlessState {
+    /// `prove_semaphore` + `app_version` are always present; `app_version` falls back to core's
+    /// compile-time version (binaries inject their own via [`HeadlessState::headless`]). (F-01)
+    fn default() -> Self {
+        Self {
+            bundled_version: None,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            https_bound: Arc::new(AtomicBool::new(false)),
+            config: None,
+            auth_manager: None,
+            prove_semaphore: Arc::new(Semaphore::new(1)),
+        }
+    }
+}
+
+impl HeadlessState {
+    /// Construct headless server state. `app_version` is injected by the binary (its release-patched
+    /// version); `config`/`auth_manager`/`bundled_version` stay optional (the headless binary runs with
+    /// `config: None` when no origin gating is configured). (F-01)
+    pub fn headless(
+        app_version: impl Into<String>,
+        bundled_version: Option<String>,
+        config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
+        auth_manager: Option<Arc<AuthorizationManager>>,
+    ) -> Self {
+        Self {
+            app_version: app_version.into(),
+            bundled_version,
+            https_bound: Arc::new(AtomicBool::new(false)),
+            config,
+            auth_manager,
+            prove_semaphore: Arc::new(Semaphore::new(1)),
+        }
+    }
+}
+
+impl AppState {
+    /// Headless: core state with no GUI callbacks.
+    pub fn headless(core: HeadlessState) -> Self {
+        Self {
+            core: Arc::new(core),
+            on_status: None,
+            on_versions_changed: None,
+            show_auth_popup: None,
+        }
+    }
+
+    /// Desktop: core state plus the 3 GUI callback slots (flat — no wrapper struct, keeps `core`
+    /// GUI-agnostic). (F-01)
+    pub fn desktop(
+        core: HeadlessState,
+        on_status: StatusCallback,
+        on_versions_changed: VersionsChangedCallback,
+        show_auth_popup: ShowAuthPopupCallback,
+    ) -> Self {
+        Self {
+            core: Arc::new(core),
+            on_status: Some(on_status),
+            on_versions_changed: Some(on_versions_changed),
+            show_auth_popup: Some(show_auth_popup),
+        }
     }
 }
 
@@ -164,7 +229,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let mut body = json!({
         "status": "ok",
         "api_version": 1,
-        "version": state.app_version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION")),
+        "version": state.app_version.as_str(),
         "aztec_version": bundled,
         "available_versions": available,
         "bb_available": bb::find_bb(None).is_ok(),
@@ -263,7 +328,7 @@ mod tests {
         // reported version stays correct once server.rs is compiled inside the core crate. (Phase 0)
         let state = AppState {
             core: Arc::new(HeadlessState {
-                app_version: Some("9.9.9-injected".into()),
+                app_version: "9.9.9-injected".into(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -639,10 +704,7 @@ mod tests {
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let rec = recorded.clone();
         let state = AppState {
-            core: std::sync::Arc::new(HeadlessState {
-                prove_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
-                ..Default::default()
-            }),
+            core: std::sync::Arc::new(HeadlessState::default()),
             on_status: Some(std::sync::Arc::new(move |s: ServerStatus| {
                 rec.lock().unwrap().push(s.display_text().to_string())
             })),
@@ -727,7 +789,6 @@ mod tests {
             core: Arc::new(HeadlessState {
                 auth_manager: Some(auth_for_state),
                 config: Some(Arc::new(RwLock::new(cfg))),
-                prove_semaphore: Some(Arc::new(Semaphore::new(1))),
                 ..Default::default()
             }),
             show_auth_popup: Some(Arc::new(move |origin: &str| {

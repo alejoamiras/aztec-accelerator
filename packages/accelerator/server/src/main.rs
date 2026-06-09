@@ -64,20 +64,15 @@ async fn main() {
         (None, None)
     };
 
-    let state = AppState {
-        core: Arc::new(HeadlessState {
-            auth_manager,
-            config,
-            prove_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(1))),
-            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            // bb-version injected from the runtime env (the Phase-3 CI hook sets AZTEC_BB_VERSION from the
-            // copy-bb.ts @aztec/bb.js resolution). Unset → None → core's "unknown" default; /prove is
-            // unaffected (callers pass x-aztec-version). (core-extraction Phase 2)
-            bundled_version: std::env::var("AZTEC_BB_VERSION").ok(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let state = AppState::headless(HeadlessState::headless(
+        env!("CARGO_PKG_VERSION"),
+        // bb-version injected from the runtime env (the Phase-3 CI hook sets AZTEC_BB_VERSION from the
+        // copy-bb.ts @aztec/bb.js resolution). Unset → None → core's "unknown" default; /prove is
+        // unaffected (callers pass x-aztec-version). (core-extraction Phase 2)
+        std::env::var("AZTEC_BB_VERSION").ok(),
+        config,
+        auth_manager,
+    ));
 
     if let Err(e) = start(state).await {
         tracing::error!("Accelerator server error: {e}");
