@@ -28,14 +28,16 @@ test("shows decoded origin from URL params", async ({ page }) => {
 });
 
 test("allow calls respond_auth with correct args", async ({ page }) => {
-  await page.goto("/authorize.html?origin=https%3A%2F%2Fexample.com");
+  await page.goto("/authorize.html?origin=https%3A%2F%2Fexample.com&requestId=req-abc");
 
   await page.getByRole("button", { name: "Allow" }).click();
 
   const calls = await callsFor(page, "respond_auth");
   expect(calls.length).toBe(1);
+  // SEC-06: the opaque requestId from the URL is echoed back so the server resolves by id.
   // "Remember this site" checkbox defaults to checked
   expect(calls[0].args).toEqual({
+    requestId: "req-abc",
     origin: "https://example.com",
     allowed: true,
     remember: true,
@@ -43,7 +45,7 @@ test("allow calls respond_auth with correct args", async ({ page }) => {
 });
 
 test("deny calls respond_auth with correct args", async ({ page }) => {
-  await page.goto("/authorize.html?origin=https%3A%2F%2Fexample.com");
+  await page.goto("/authorize.html?origin=https%3A%2F%2Fexample.com&requestId=req-abc");
 
   await page.getByRole("button", { name: "Deny" }).click();
 
@@ -51,6 +53,7 @@ test("deny calls respond_auth with correct args", async ({ page }) => {
   expect(calls.length).toBe(1);
   // "Remember this site" checkbox defaults to checked — deny still sends remember: true
   expect(calls[0].args).toEqual({
+    requestId: "req-abc",
     origin: "https://example.com",
     allowed: false,
     remember: true,
@@ -69,7 +72,7 @@ test("buttons disabled after invoke prevents double-click", async ({ page }) => 
 });
 
 test("uncheck remember changes allow args", async ({ page }) => {
-  await page.goto("/authorize.html?origin=https%3A%2F%2Ftest.com");
+  await page.goto("/authorize.html?origin=https%3A%2F%2Ftest.com&requestId=req-xyz");
 
   // Uncheck "Remember this site"
   await page.locator("#remember").uncheck();
@@ -77,6 +80,7 @@ test("uncheck remember changes allow args", async ({ page }) => {
 
   const calls = await callsFor(page, "respond_auth");
   expect(calls[0].args).toEqual({
+    requestId: "req-xyz",
     origin: "https://test.com",
     allowed: true,
     remember: false,

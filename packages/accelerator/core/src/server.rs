@@ -75,8 +75,9 @@ impl ServerStatus {
 pub type StatusCallback = Arc<dyn Fn(ServerStatus) + Send + Sync>;
 pub type VersionsChangedCallback = Arc<dyn Fn() + Send + Sync>;
 
-/// Callback to show the authorization popup window. Takes the origin string.
-pub type ShowAuthPopupCallback = Arc<dyn Fn(&str) + Send + Sync>;
+/// Callback to show the authorization popup window. Takes the origin + the opaque `request_id`
+/// (SEC-06) the popup must echo back to `respond_auth` so decisions resolve by id, not origin.
+pub type ShowAuthPopupCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// The server-side core state — everything the headless `accelerator-server` needs, with no GUI
 /// coupling. Lives behind an `Arc` in [`AppState`] so cloning the state is cheap (fixes the main.rs
@@ -723,12 +724,15 @@ mod tests {
         .await;
 
         // origin_denied (403) — auth + deny
-        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
         let (state, auth) = auth_state_with_popup(popup_tx);
         let auth_clone = auth.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            auth_clone.resolve("https://evil.com", crate::authorization::AuthDecision::Deny);
+            let (_origin, request_id) =
+                tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
+                    .await
+                    .unwrap();
+            auth_clone.resolve(&request_id, crate::authorization::AuthDecision::Deny);
         });
         assert_error(
             router(state),
@@ -913,9 +917,10 @@ mod tests {
         );
     }
 
-    /// Helper: build an AppState with auth enabled and a mock popup callback.
+    /// Helper: build an AppState with auth enabled and a mock popup callback. The callback forwards
+    /// `(origin, request_id)` so tests can assert the origin AND resolve by the opaque id (SEC-06).
     fn auth_state_with_popup(
-        popup_tx: std::sync::mpsc::Sender<String>,
+        popup_tx: std::sync::mpsc::Sender<(String, String)>,
     ) -> (AppState, Arc<crate::authorization::AuthorizationManager>) {
         let auth = Arc::new(crate::authorization::AuthorizationManager::new());
         let auth_for_state = auth.clone();
@@ -926,8 +931,8 @@ mod tests {
                 config: Some(Arc::new(RwLock::new(cfg))),
                 ..Default::default()
             }),
-            show_auth_popup: Some(Arc::new(move |origin: &str| {
-                let _ = popup_tx.send(origin.to_string());
+            show_auth_popup: Some(Arc::new(move |origin: &str, request_id: &str| {
+                let _ = popup_tx.send((origin.to_string(), request_id.to_string()));
             })),
             ..Default::default()
         };
@@ -983,12 +988,13 @@ mod tests {
         let auth_clone = auth.clone();
         let (popup_seen_tx, popup_seen_rx) = tokio::sync::oneshot::channel::<String>();
         tokio::spawn(async move {
-            let origin = tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
-                .await
-                .unwrap();
-            let _ = popup_seen_tx.send(origin.clone());
+            let (origin, request_id) =
+                tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
+                    .await
+                    .unwrap();
+            let _ = popup_seen_tx.send(origin);
             auth_clone.resolve(
-                &origin,
+                &request_id,
                 crate::authorization::AuthDecision::Allow { remember: false },
             );
         });
@@ -1015,15 +1021,18 @@ mod tests {
 
     #[tokio::test]
     async fn prove_returns_403_when_origin_denied() {
-        let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
+        let (popup_tx, popup_rx) = std::sync::mpsc::channel();
         let (state, auth) = auth_state_with_popup(popup_tx);
         let app = router(state);
 
-        // Auto-deny after popup fires
+        // Auto-deny by request_id once the popup fires (SEC-06: resolve by opaque id, not origin).
         let auth_clone = auth.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            auth_clone.resolve("https://evil.com", crate::authorization::AuthDecision::Deny);
+            let (_origin, request_id) =
+                tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
+                    .await
+                    .unwrap();
+            auth_clone.resolve(&request_id, crate::authorization::AuthDecision::Deny);
         });
 
         let response: axum::http::Response<_> = app

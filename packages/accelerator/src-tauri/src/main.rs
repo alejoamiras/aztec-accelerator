@@ -387,10 +387,11 @@ fn main() {
             let app_handle_for_auth = app.handle().clone();
             let auth_manager_for_timeout = auth_manager.clone();
             let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback =
-                Arc::new(move |origin: &str| {
+                Arc::new(move |origin: &str, request_id: &str| {
                     windows::show_auth_popup_window(
                         &app_handle_for_auth,
                         origin,
+                        request_id,
                         &auth_manager_for_timeout,
                     );
                 });

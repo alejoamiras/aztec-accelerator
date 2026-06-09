@@ -74,7 +74,7 @@ pub(crate) async fn authorize_origin(
     }
 
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-    let (rx, is_first) = auth_manager.request(origin.as_str()).map_err(|_| {
+    let (rx, request_id, is_first) = auth_manager.request(origin.as_str()).map_err(|_| {
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
         (
             StatusCode::TOO_MANY_REQUESTS,
@@ -87,7 +87,7 @@ pub(crate) async fn authorize_origin(
 
     if is_first {
         if let Some(ref show_popup) = state.show_auth_popup {
-            show_popup(origin.as_str());
+            show_popup(origin.as_str(), &request_id);
         }
     }
 
@@ -95,7 +95,7 @@ pub(crate) async fn authorize_origin(
         .await
         .map_err(|_| {
             tracing::warn!(origin = %origin, "Authorization timed out");
-            auth_manager.resolve(origin.as_str(), AuthDecision::Deny);
+            auth_manager.resolve(&request_id, AuthDecision::Deny);
             (
                 StatusCode::FORBIDDEN,
                 json_error("authorization_timeout", "Authorization request timed out"),
