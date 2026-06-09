@@ -55,7 +55,7 @@ Extract from `main.rs:260-462`: `build_tray_and_status`, `build_desktop_state ->
 ### F-04 ✓ — `versions.rs` → façade + submodules (PR-2; pure move)
 Keep `pub mod versions;` in `lib.rs` and the `src-tauri/lib.rs` re-export **unchanged**. Convert `versions.rs` → `versions/mod.rs` (re-exports preserving every `versions::X` path) + `{version_id,platform,artifact_layout,cache,downloader}.rs`. macOS `xattr`+`codesign` finalize tail extracts into `downloader::finalize_macos_binary` (stays in the downloader slice). Inline tests move to the submodule owning the unit. Verified consumers (`bb.rs`, `core/server.rs`, `prove.rs`, `tray.rs`) need **no edits**.
 
-### F-05 — SDK barrel canonical + doc-sync test (PR-4; additive)
+### F-05 ✓ — SDK barrel canonical + doc-sync test (PR-4; additive)
 Export `AcceleratorProtocol` from `index.ts`; replace README's obsolete flat `interface AcceleratorStatus` with the union; add `setForceLocal` to the README method table; add the `denied` phase to the SKILL phase table (align all 5 surfaces). **Doc-sync test** `src/lib/public-contract.test.ts`: (a) type-imports `AcceleratorProtocol` from the barrel (compile-fail if dropped) + asserts the exact export-name set; (b) reads README/MIGRATION/SKILL and asserts required markers present + the obsolete `interface AcceleratorStatus {` snippet absent.
 
 ### F-06 — extract `AcceleratorTransport` (PR-4; internal; same public surface)
