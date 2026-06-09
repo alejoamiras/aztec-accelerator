@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blueprint ELI5 — quality-fixes</title>
+<style>
+  :root { --bg:#fff; --fg:#222; --muted:#666; --line:#e6e6e6; --soft:#fafafa; --accent:#0366d6; --warn:#b45309; --warnbg:#fff8e1; --ok:#1a7f37; --okbg:#eaf6ec; --blue:#0366d6; --bluebg:#eef6ff; }
+  @media (prefers-color-scheme: dark){ :root{ --bg:#161618; --fg:#e8e8ea; --muted:#9a9aa2; --line:#2c2c30; --soft:#1d1d20; --accent:#5aa9ff; --warn:#ffd166; --warnbg:#352c10; --ok:#7ee08a; --okbg:#15301c; --blue:#9cc2ea; --bluebg:#16242f; } }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; max-width:720px; margin:2rem auto; padding:0 1rem 4rem; color:var(--fg); background:var(--bg); line-height:1.6; }
+  h1,h2,h3{ font-weight:600; } h1{ font-size:1.7rem; margin-bottom:.4rem; } h2{ font-size:1.25rem; margin-top:2.4rem; } h3{ font-size:1.04rem; margin-top:1.3rem; color:var(--fg); }
+  code,pre{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88rem; } code{ background:var(--soft); padding:.08em .35em; border-radius:4px; }
+  pre{ background:var(--soft); padding:1rem; border-radius:6px; overflow-x:auto; white-space:pre-wrap; border:1px solid var(--line); }
+  .sub{ color:var(--muted); margin-bottom:1.4rem; }
+  .phase{ margin:1rem 0; padding:.9rem 1.15rem; border-left:3px solid var(--line); background:var(--soft); border-radius:0 6px 6px 0; }
+  .phase h3{ margin-top:0; } .pill{ font-size:.72rem; color:var(--muted); }
+  .warn{ color:var(--warn); font-weight:600; } .recommended{ background:var(--warnbg); border-left-color:var(--warn); }
+  .approval{ background:var(--bluebg); padding:1rem 1.25rem; border-left:3px solid var(--blue); border-radius:0 6px 6px 0; margin:1.4rem 0; }
+  .ok{ background:var(--okbg); border-left:3px solid var(--ok); padding:.8rem 1.15rem; border-radius:0 6px 6px 0; }
+  a{ color:var(--accent); } .muted{ color:var(--muted); font-size:.9rem; } ul{ padding-left:1.2rem; } li{ margin:.3rem 0; }
+  table{ border-collapse:collapse; width:100%; font-size:.9rem; margin:.6rem 0; } th,td{ text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+</style>
+</head>
+<body>
+
+<h1>Quality Fixes — aztec-accelerator</h1>
+<div class="sub">Blueprint <strong>deep</strong> · 9 audit findings · 4 PRs · plain-language companion to <a href="plan.md">plan.md</a></div>
+
+<p>We're fixing the <strong>9 maintainability findings</strong> from the recent quality audit — making the code <em>cheaper to change later</em>, and adding tests that prove each change is safe. None of these are bugs users hit today; it's about future-change cost. <strong>Behavior stays identical everywhere except one finding</strong> (F-02), which also closes a small real gap in how website addresses get approved.</p>
+
+<div class="ok">
+<strong>The shape of the work:</strong> 4 pull requests, grouped so each hits one CI gate cleanly. Three are pure tidy-ups proven safe by the compiler + the existing test suite + the real browser end-to-end tests. One (F-02) is a genuine improvement to a security-adjacent boundary, so it gets new tests and a security review afterward.</p>
+</div>
+
+<h2>Why "deep" (the heaviest planning tier)</h2>
+<p>We scored the risk rubric: <strong>blast radius = HIGH</strong> (this touches the server's core state, the origin-approval trust boundary, release-critical download/cert code, and the <em>published</em> SDK package) and <strong>security sensitivity = MED-HIGH</strong> (F-02 is literally the "who's allowed to ask for a proof" check). Two high dimensions → <code>deep</code>. Novelty is low (we just refactored this codebase), so not the even-heavier <code>mega-deep</code>. Three independent plans were drafted, cross-checked, and stress-tested by two adversarial audits.</p>
+
+<h2>What each PR does (plain language)</h2>
+
+<div class="phase">
+<h3>PR-1 — Typed invariants <span class="pill">F-01 + F-02 · the important one</span></h3>
+<p><strong>F-01:</strong> the server's shared settings are an "everything's optional, fill-in-by-hand" form copied in 3 places. We add proper constructors so a new setting is one edit the compiler checks — no more silently-empty fields.</p>
+<p><strong>F-02:</strong> an approved website address is stored as plain text, and the rule "it must be tidied into one standard spelling first" lives only in comments — one entry point skips it. We make a real <code>CanonicalOrigin</code> type whose only way to exist is <em>already tidied</em>, so the rule can't be bypassed anywhere. <span class="warn">This one changes behavior slightly</span>: a malformed address in the CI server's config now fails loudly at startup instead of silently never-matching.</p>
+</div>
+
+<div class="phase">
+<h3>PR-2 — Break up two giant files <span class="pill">F-03 + F-04 · pure reorganization</span></h3>
+<p><strong>F-03:</strong> the desktop app's startup is one 203-line do-everything block. We split it into named steps (build tray, wire callbacks, start servers…) so the launch reads like a checklist. <strong>F-04:</strong> the "everything about the prover binary" file (download, cache, platform, install…) splits into focused modules. Both are pure moves — the public names stay the same, the compiler + existing tests prove nothing broke.</p>
+</div>
+
+<div class="phase">
+<h3>PR-3 — Three small tidy-ups <span class="pill">F-07 + F-08 + F-09</span></h3>
+<p><strong>F-07:</strong> bundle the 3 cert file-paths (that always travel together, and could be swapped by accident) into one object. <strong>F-08:</strong> give one function clear ownership of the proving-status messages instead of two functions sharing a hidden handshake. <strong>F-09:</strong> de-duplicate the copy-pasted "start HTTPS" code.</p>
+</div>
+
+<div class="phase">
+<h3>PR-4 — SDK docs + transport <span class="pill">F-05 + F-06 · the published package</span></h3>
+<p><strong>F-05:</strong> the SDK's README currently documents the <em>old, retired</em> status shape (teaching the exact mistake a recent change fixed). We fix the docs, export a type that was promised-but-missing, and add a test so docs can't silently drift again. <strong>F-06:</strong> the SDK talks to one server using two different HTTP libraries — we unify them into one internal transport. No change to the public package surface (the compiler enforces that).</p>
+</div>
+
+<h2>Human context</h2>
+<p>This codebase just went through a deep quality refactor and a clean "core extraction" (splitting the GUI-free engine into its own crate). It's healthy — this work is <em>polish</em>, not rescue. The one part that deserves care is F-02, because it touches the security boundary that decides which web pages may request proofs; that's why it gets new tests <em>and</em> a <code>/harden security</code> pass afterward. We deliberately skipped writing "characterization" (golden-master) tests — the existing 90 Rust + 96 TS unit tests, the 9 real-browser end-to-end tests, and Rust's compiler already catch refactor breakage; we add tests only where there's genuinely new code or new behavior.</p>
+
+<h2>Open questions (small, with recommendations)</h2>
+<p>After three audits, only <strong>one</strong> is genuinely still your call; the rest are now decided/locked:</p>
+<ul>
+<li><strong>(Open) Resave removal (F-02):</strong> deleting an old migration step also stops a one-time rewrite of the config file. We back this with a round-trip test proving existing configs still load correctly. <em>Rec: safe (the file is app-private) — confirm.</em></li>
+<li><strong>(Decided) Windows arm (PR-2)</strong> → now a <em>required merge gate</em> (the Windows crash-recovery E2E must be green before PR-2 merges).</li>
+<li><strong>(Decided) Bad-input policy (F-02)</strong> → preserve today's behavior exactly: a <em>present-but-empty</em> <code>ALLOWED_ORIGINS</code> still denies all browser callers (we will NOT silently auto-approve); fail startup only on a genuinely invalid address. Pinned by a new test.</li>
+<li><strong>(Decided) Auth re-parse (F-02)</strong> → log-and-deny.</li>
+<li><strong>(Decided) SDK build (PR-4)</strong> → now a <em>required gate</em> (`bun run build` to prove the published artifact, not just source typecheck).</li>
+</ul>
+
+<div class="approval">
+<h2 style="margin-top:0">Approval decision needed from you</h2>
+<ul>
+<li>Confirm <strong>scope</strong> — all 9 findings, 4 PRs as grouped.</li>
+<li>Confirm <strong>tier</strong> — <code>deep</code> (per the rubric above).</li>
+<li>Confirm the <strong>4 open questions</strong> above (each has a recommendation).</li>
+<li>Confirm <strong><code>/harden security</code></strong> runs after implementation.</li>
+<li><strong>Approve</strong>, <strong>conditionally approve</strong> (with conditions), or <strong>reject</strong> (with blocking findings).</li>
+</ul>
+<p class="muted">Two adversarial audits (codex + opus) already ran and their fixes are folded in; a final fresh-codex verdict accompanies this gate.</p>
+</div>
+
+<section>
+<h2>Implementation seeds</h2>
+<p>Two ways to drive the autonomous build. <strong>Use exactly one per session — they don't compose</strong> (setting one replaces the other).</p>
+
+<div class="phase recommended">
+<h3>✅ Recommended: <code>/goal</code> <span class="pill">completion is transcript-observable (4 merged PRs + green gates)</span></h3>
+<pre><code>/goal All 4 PRs for quality-fixes-2026-06-08 opened + merged-green (or surfaced if a merge gate stalls); every finding F-01..F-09 marked ✓ in plan.md with a LESSONS_FILE=implementations-plan/quality-fixes-2026-06-08/lessons/phase-N.md printed; `/code-review max --fix` applied+committed per PR; codex post-impl audit clean (or High/Critical addressed); `bun run test` + `bun run lint` + `cargo test`/`clippy` all exit 0 in the transcript; SDK `tsc --noEmit` green. Behavior-preserving everywhere except F-02. Never merge to main without green CI; never push to main directly.</code></pre>
+</div>
+
+<h3>Alternative: <code>/loop</code></h3>
+<pre><code>/loop Implement quality-fixes-2026-06-08 PR-by-PR (PR-1 F-02→F-01, PR-2 F-04→F-03, PR-3 F-07→F-09→F-08, PR-4 F-05→F-06). Each turn: read plan.md + lessons/ for status; next pending finding → implement (concrete shapes in plan.md) → cargo test/clippy or bun test + tsc → commit per finding → when a PR's findings done, push + gh pr create + watch CI. Failed check → triage, /codex xhigh if non-trivial, fix, commit (stop after 5 fails on one step). PR green → mark its findings ✓ in plan.md + file lessons/phase-N.md + print LESSONS_FILE=…; auto-merge; next PR. All 4 merged → /code-review max --fix → codex post-impl audit → address high/critical → then /harden security → stop + surface. Never push to main; never merge without green CI.</code></pre>
+</section>
+
+<p class="muted" style="margin-top:2.5rem"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a> · <a href="../../audit/quality/2026-06-08-ultra-e094d8/report.html">the audit that found these</a></p>
+</body>
+</html>

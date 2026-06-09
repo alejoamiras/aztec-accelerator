@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quality Audit — aztec-accelerator</title>
+<style>
+  :root {
+    --bg:#ffffff; --fg:#1b1b1b; --muted:#666; --hairline:#e6e6e6; --surface:#fafafa;
+    --code:#f0f0f2; --link:#0366d6;
+    --high:#b3261e; --high-bg:#fdecea;
+    --med:#9a6700; --med-bg:#fff8e1;
+    --low:#5a5a5a; --low-bg:#f0f0f0;
+    --green:#1a7f37; --green-bg:#eaf6ec;
+    --info:#3a5573; --info-bg:#eef3f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#161618; --fg:#e8e8ea; --muted:#9a9aa2; --hairline:#2c2c30; --surface:#1d1d20;
+      --code:#26262b; --link:#5aa9ff;
+      --high:#ff8a80; --high-bg:#3a1d1b;
+      --med:#ffd166; --med-bg:#352c10;
+      --low:#b7b7bf; --low-bg:#2a2a2e;
+      --green:#7ee08a; --green-bg:#15301c;
+      --info:#9cc2ea; --info-bg:#16242f;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--fg); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         line-height:1.6; max-width:820px; margin:0 auto; padding:2rem 1.1rem 4rem; }
+  h1 { font-size:1.7rem; margin:0 0 .3rem; }
+  h2 { font-size:1.25rem; margin:2.6rem 0 .8rem; }
+  h3 { font-size:1.02rem; margin:1.4rem 0 .5rem; }
+  p { margin:.55rem 0; }
+  a { color:var(--link); }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em; background:var(--code);
+         padding:.1em .35em; border-radius:4px; }
+  .sub { color:var(--muted); font-size:.92rem; margin-bottom:1.4rem; }
+  .lead { font-size:1.02rem; }
+  /* stat strip */
+  .stats { display:flex; flex-wrap:wrap; gap:.5rem; margin:1.4rem 0; }
+  .stat { border:1px solid var(--hairline); border-radius:8px; padding:.5rem .8rem; background:var(--surface); min-width:74px; }
+  .stat b { display:block; font-size:1.4rem; line-height:1.1; }
+  .stat span { font-size:.74rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .stat.h b { color:var(--high); } .stat.m b { color:var(--med); } .stat.l b { color:var(--low); }
+  /* chips */
+  .chip { display:inline-block; font-size:.72rem; font-weight:600; padding:.12em .55em; border-radius:999px;
+          vertical-align:middle; }
+  .chip-high { color:var(--high); background:var(--high-bg); }
+  .chip-med  { color:var(--med);  background:var(--med-bg); }
+  .chip-low  { color:var(--low);  background:var(--low-bg); }
+  .chip-info { color:var(--info); background:var(--info-bg); font-weight:500; }
+  .chip-green{ color:var(--green);background:var(--green-bg); }
+  /* callouts */
+  .callout { border-radius:8px; padding:.9rem 1.1rem; margin:1.2rem 0; border-left:4px solid; }
+  .callout.green { background:var(--green-bg); border-color:var(--green); }
+  .callout.amber { background:var(--med-bg); border-color:var(--med); }
+  .callout h3 { margin:.1rem 0 .4rem; }
+  .callout p { margin:.3rem 0; font-size:.95rem; }
+  /* finding */
+  .finding { background:var(--surface); border:1px solid var(--hairline); border-radius:9px; padding:1.1rem 1.25rem; margin:1.1rem 0; }
+  .fh { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap; margin-bottom:.2rem; }
+  .fid { font-family:ui-monospace,monospace; font-size:.8rem; color:var(--muted); }
+  .ftitle { font-weight:600; font-size:1.04rem; }
+  .meta { margin:.35rem 0 .7rem; display:flex; flex-wrap:wrap; gap:.3rem; }
+  .eli5 p { margin:.5rem 0; }
+  .eli5 strong { color:var(--fg); }
+  details { margin-top:.7rem; border-top:1px dashed var(--hairline); padding-top:.5rem; }
+  summary { cursor:pointer; font-size:.86rem; color:var(--muted); font-weight:600; }
+  details p { font-size:.88rem; margin:.5rem 0; }
+  details code { font-size:.82em; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  footer { margin-top:3rem; padding-top:1.2rem; border-top:1px solid var(--hairline); color:var(--muted); font-size:.86rem; }
+  footer a { margin-right:1rem; }
+</style>
+</head>
+<body>
+
+<h1>Quality audit — aztec-accelerator</h1>
+<div class="sub">
+  <code>/harden quality ultra</code> · 2026-06-08 · run <code>2026-06-08-ultra-e094d8</code><br>
+  Scope: the <code>accelerator</code> Rust crates (core / src-tauri / server) + the <code>sdk</code> TypeScript public API.
+  Method: 12 cross-model finders (Claude Opus + Codex), two-way rebuttal, ultra Round-2, Codex coordinator, independent verifier.
+</div>
+
+<p class="lead">
+  <strong>Plain version:</strong> we hunted for code that <em>works fine today but is expensive to change tomorrow</em> —
+  not bugs, not security holes. Four independent AI passes argued with each other, then a fifth re-checked every
+  surviving claim against the real source.
+</p>
+<p>
+  <strong>The good news:</strong> this is a <strong>healthy codebase.</strong> It recently went through a deep refactor, and
+  it shows — only <strong>9 findings</strong> survived, none severe, and the reviewers kept bumping into things that were
+  <em>already</em> cleaned up. Think of this as polish, not rescue. And three of the four top findings are
+  <em>the same underlying habit</em> showing up in different places (see the theme box below).
+</p>
+
+<div class="stats">
+  <div class="stat"><b>9</b><span>findings</span></div>
+  <div class="stat h"><b>4</b><span>high</span></div>
+  <div class="stat m"><b>4</b><span>medium</span></div>
+  <div class="stat l"><b>1</b><span>low</span></div>
+  <div class="stat"><b>0</b><span>critical</span></div>
+</div>
+
+<div class="callout green">
+  <h3>💸 Cheapest high-value fixes — do these first (hours, not days)</h3>
+  <p><strong>F-05 — fix the SDK docs drift.</strong> The README literally teaches the old, retired status shape. Fix the docs + add a tiny test that fails when docs and code disagree.</p>
+  <p><strong>F-07 — bundle the 3 cert paths into one object.</strong> Removes a whole class of silent path mix-ups.</p>
+  <p class="muted">F-08 and F-09 are also hours each if you want a clean sweep.</p>
+</div>
+
+<div class="callout amber">
+  <h3>🧬 One habit explains the top of the list</h3>
+  <p><strong>F-01, F-02, and F-05 are the same mistake in three materials:</strong> an important rule is kept alive by
+  <em>comments and convention</em> instead of by a <em>type or a constructor that makes breaking the rule impossible.</em></p>
+  <p>Fix philosophy is identical for all three — push the rule into the type system (a wrapper type, a real constructor,
+  a single source-of-truth export). Land those three and most of this report disappears.</p>
+</div>
+
+<h2>Findings</h2>
+<p class="muted">Ordered by how much future change-cost they carry. Tap “Technical trace” for the file:line detail.</p>
+
+<!-- F-02 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-02</span>
+    <span class="ftitle">An approved website address is just loose text — and one door skips the lock</span></div>
+  <div class="meta"><span class="chip chip-info">Primitive Obsession</span><span class="chip chip-info">found by both</span><span class="chip chip-info">confidence: high</span><span class="chip chip-info">fix: days</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When a website asks the accelerator to make a proof, the app checks that site’s address
+    (its “origin”, like <code>https://app.example.com</code>) against an approved list. First it tidies each address into one
+    standard spelling so comparisons are reliable. But approved addresses are stored as plain text, and the rule “these are
+    always tidied first” lives only in code comments. One entry point — the headless server used in CI — skips the tidying
+    step and stores whatever it’s handed.</p>
+    <p><strong>What gets harder to change.</strong> Every new way an address can enter the system is a new chance to forget the
+    tidy-up step, after which approvals silently mismatch. A reviewer can’t trust the value; they have to trace every use and
+    ask “is this one already tidied?” The compiler can’t help — it’s all just text.</p>
+    <p><strong>The fix.</strong> Make a dedicated <code>CanonicalOrigin</code> type whose <em>only</em> way to exist runs the
+    tidy-up. Then holding an un-tidied address becomes impossible, the compiler enforces what comments currently beg for, and
+    a whole one-off “repair” routine deletes itself.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Scope:</strong> the bypass is in the headless <code>server</code> binary (a shipped tarball, but documented for CI/e2e); the desktop app loads origins via the canonicalizing <code>config::load</code>. So this is a type-invariant / future-footgun gap, <em>not</em> an attacker hole in the GUI product.</p>
+    <p><strong>Instances:</strong> <code>core/src/authorization.rs:21-58, 101-145</code> · <code>core/src/config.rs:41-55, 83-130</code> · <code>core/src/server/auth.rs:35-52</code> · <code>server/src/main.rs:43-57</code> (raw <code>ALLOWED_ORIGINS</code> env strings → <code>approved_origins</code>, no <code>url::Url</code> pass).</p>
+    <p><strong>Refactor:</strong> Replace Primitive with Object — <code>CanonicalOrigin(String)</code> + <code>#[serde(try_from="String")]</code>; store <code>Vec&lt;CanonicalOrigin&gt;</code>. Deletes <code>migrate_approved_origins</code> and the headless bypass. <em>Note:</em> finder C3 flagged this; finder C5 dismissed it — both rebuttals + a ground-truth read sided with C3.</p>
+  </details>
+</div>
+
+<!-- F-01 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-01</span>
+    <span class="ftitle">The server’s shared settings are a “fill-in-the-blanks” form everyone copies by hand</span></div>
+  <div class="meta"><span class="chip chip-info">Data Clumps · nullable bag</span><span class="chip chip-info">found by both</span><span class="chip chip-info">confidence: high</span><span class="chip chip-info">fix: days</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The server’s shared state (a concurrency lock, the version, some callbacks) lives in a
+    structure where almost every slot is “optional — may be empty.” Each of the three places that start the server fills this
+    form in by hand, slot by slot, then uses a “…and default the rest” shortcut.</p>
+    <p><strong>What gets harder to change.</strong> Add one new <em>required</em> setting and you must edit every startup spot
+    <em>and</em> several tests. Miss one, and the shortcut quietly leaves it empty — so it fails much later at runtime instead
+    of immediately at compile time.</p>
+    <p><strong>The fix.</strong> Add real constructors (<code>headless(…)</code>, <code>desktop(…)</code>) that build the form
+    correctly in one place, and make the always-needed slots non-optional. New setting → one edit, and the compiler checks
+    every caller for you. (The same already-extracted helpers exist elsewhere in this repo — this just extends the habit.)</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Prod instances:</strong> struct def <code>core/src/server.rs:83-119</code> · <code>server/src/main.rs:62-75</code> · <code>src-tauri/src/main.rs:345-367</code>.</p>
+    <p><strong>Corroborating (tests):</strong> ~5 hand-assembly sites in the <code>server.rs</code> test module (&gt;L210) — the missing constructor taxes tests too. <em>(The coordinator first listed these as prod debt; the verifier relabeled them.)</em></p>
+    <p><strong>Refactor:</strong> Extract Factory + make required deps non-<code>Option</code>; isolate GUI callbacks into a small desktop-extras type. Deletes repeated <code>Some(Arc::new(Semaphore::new(1)))</code> / <code>env!("CARGO_PKG_VERSION")</code> literals and the <code>..Default::default()</code> omission trap.</p>
+  </details>
+</div>
+
+<!-- F-05 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-05</span>
+    <span class="ftitle">The SDK’s instruction manual is hand-copied in 5 places — and they disagree</span></div>
+  <div class="meta"><span class="chip chip-info">Duplicate Code · Divergent Change</span><span class="chip chip-info">found by both</span><span class="chip chip-info">confidence: high</span><span class="chip chip-green">fix: hours · cheapest</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The public “shape” of the SDK (its types and methods) is written out by hand in five
+    places — the code, the export list, the README, a migration guide, and a bundled skill doc. They’ve drifted apart. Most
+    importantly, the README still documents the <em>old</em> status type that was deliberately replaced — the new one prevents
+    a whole category of mistakes, and the README is currently teaching the mistake.</p>
+    <p><strong>What gets harder to change.</strong> Change the API once and you must update five documents in lockstep. Miss
+    one and your users get contradictory instructions — or they follow the README and write code that breaks.</p>
+    <p><strong>The fix.</strong> Make the export list the single source of truth, correct today’s drift, and add a small test
+    that fails the build if the docs and the code disagree. This is the cheapest win on the list and it’s the most
+    user-visible one.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Drift, concretely:</strong> <code>README:88-101</code> shows the obsolete flat <code>interface AcceleratorStatus</code> vs the shipped discriminated union <code>accelerator-prover.ts:56-92</code>; the barrel <code>index.ts:1-8</code> omits <code>AcceleratorProtocol</code> (MIGRATION says it’s exported → the documented import fails); README’s method table omits <code>setForceLocal</code> (which the playground actually calls).</p>
+    <p><strong>Refactor:</strong> barrel as canonical surface + export/doc-sync test (or generated API snippet). <em>Minor sub-item (lower confidence):</em> the skill’s phase table omits a <code>denied</code> case of the separate <code>AcceleratorPhase</code> type.</p>
+  </details>
+</div>
+
+<!-- F-03 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-03</span>
+    <span class="ftitle">The desktop app’s startup is one 203-line do-everything block</span></div>
+  <div class="meta"><span class="chip chip-info">Long Method · Divergent Change</span><span class="chip chip-info">found by both</span><span class="chip chip-info">confidence: high</span><span class="chip chip-info">fix: days</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When the desktop app launches, a single ~203-line block does almost everything: builds the
+    tray icon, wires up callbacks, starts the web servers, handles “port already in use,” and kicks off the update checker —
+    all inline, in one function.</p>
+    <p><strong>What gets harder to change.</strong> To add or reorder one startup step, you have to read and safely edit a
+    200-line function that’s juggling about eight shared things at once (and re-cloning them repeatedly). Easy to disturb
+    something unrelated.</p>
+    <p><strong>The fix.</strong> Split it into named steps — <code>build_tray</code>, <code>wire_callbacks</code>,
+    <code>spawn_servers</code>, <code>spawn_update_poller</code> — so the launch function just lists the steps in order.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Instance:</strong> the <code>.setup</code> closure at <code>src-tauri/src/main.rs:260-462</code> — esp. <code>266-305</code>, <code>316-367</code>, <code>396-441</code> (inline <code>AddrInUse</code> / redundant-instance policy), <code>448-459</code>. Extract Function into bootstrap phases leaves <code>.setup</code> as orchestration only and removes most clone-stutter.</p>
+  </details>
+</div>
+
+<!-- F-04 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Med-high</span><span class="fid">F-04</span>
+    <span class="ftitle">One file does eight different jobs around the prover binary</span></div>
+  <div class="meta"><span class="chip chip-info">Large Class</span><span class="chip chip-info">found by codex (upheld)</span><span class="chip chip-info">confidence: med-high</span><span class="chip chip-info">fix: days</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> A single module owns everything about the <code>bb</code> prover binary: deciding the
+    version, naming the platform, building download URLs, downloading, hash-checking, installing, and cleaning up old
+    versions — about 18 functions.</p>
+    <p><strong>What gets harder to change.</strong> A tweak to any one concern (say, how the cache is laid out) means
+    reopening a file full of unrelated concerns and re-testing all of them together.</p>
+    <p><strong>The fix.</strong> Split into focused modules — version-id, platform, artifact-layout, cache, downloader/install.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Instance:</strong> <code>core/src/versions.rs</code>. <em>Honesty note from the verifier:</em> the headline “1209-line module” is misleading — that’s <strong>~582 prod LOC</strong>; the rest is inline tests. Still 18 prod fns across 8+ responsibilities (incl. the macOS <code>xattr</code>+<code>codesign</code> tail bolted into <code>download_bb:342-420</code>). Severity recalibrated high → med-high accordingly.</p>
+  </details>
+</div>
+
+<!-- F-07 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Med</span><span class="fid">F-07</span>
+    <span class="ftitle">Three certificate file paths always travel together as loose arguments</span></div>
+  <div class="meta"><span class="chip chip-info">Data Clumps</span><span class="chip chip-info">found by both</span><span class="chip chip-info">confidence: med</span><span class="chip chip-green">fix: hours · cheap</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Three file paths — the CA cert, the leaf cert, and the leaf key — always move together
+    through the TLS code, passed as three separate arguments. They’re all the same type, so accidentally swapping two of them
+    compiles fine and silently breaks.</p>
+    <p><strong>What gets harder to change.</strong> Rename a cert file or add a fourth artifact, and you must edit every place
+    that spells out the trio (existence checks, writers, loaders, cleanup, promotion).</p>
+    <p><strong>The fix.</strong> Bundle them into one <code>CertPaths</code> object with <code>live()</code> /
+    <code>staged()</code> constructors. Swaps become impossible and the filenames live in one place.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Instances:</strong> <code>src-tauri/src/certs.rs:20-33, 90-128, 201-205, 261-286</code> — all <code>&amp;Path</code> (compiler-invisible arg swaps); <code>rotate()</code> re-declares the trio as staged <code>*.new</code> files. Introduce Parameter Object also folds in the (otherwise over-asserted) <code>rotate()</code> ordering coupling.</p>
+  </details>
+</div>
+
+<!-- F-06 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Med</span><span class="fid">F-06</span>
+    <span class="ftitle">The SDK talks to one server using two different HTTP libraries</span></div>
+  <div class="meta"><span class="chip chip-info">Divergent Change · Temporal Coupling</span><span class="chip chip-info">found by both</span><span class="chip chip-info">confidence: med</span><span class="chip chip-info">fix: days</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> To reach the same local accelerator, the SDK uses two different HTTP tools — the browser’s
+    native <code>fetch</code> for the health check, and a library called <code>ky</code> for the actual proof — each with its
+    own timeout, retry, and error behavior.</p>
+    <p><strong>What gets harder to change.</strong> Want to add an auth header, a proxy, a path prefix, or smarter retries?
+    You now have to do it twice, in two different styles, and keep them consistent.</p>
+    <p><strong>The fix.</strong> Pull all server communication into one <code>AcceleratorTransport</code> class that owns URLs,
+    protocol choice, the status cache, and a single error model.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Instances:</strong> <code>sdk/src/lib/accelerator-prover.ts:163-168, 204-229, 235-374, 414-423</code> — <code>/health</code> via <code>fetch</code>+<code>Promise.any</code>+manual retry; <code>/prove</code> via <code>ky</code>; <code>#acceleratorProtocol</code> + <code>#statusCache</code> mutated in several spots. Extract Class shrinks the 122-line <code>#probeAndParseHealth</code> substantially.</p>
+  </details>
+</div>
+
+<!-- F-08 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Med</span><span class="fid">F-08</span>
+    <span class="ftitle">Two functions share a hidden handshake about proving status</span></div>
+  <div class="meta"><span class="chip chip-info">Temporal Coupling</span><span class="chip chip-info">found by claude</span><span class="chip chip-info">confidence: med</span><span class="chip chip-green">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> While making a proof, the server reports a status (“Proving”, “Downloading”). Two functions
+    share that job: one sets “Proving”, the other may overwrite it with “Downloading” and then has to remember to set it back
+    to “Proving” before returning — an unwritten handshake.</p>
+    <p><strong>What gets harder to change.</strong> Add a new phase or move the download step and you must preserve an ordering
+    rule that neither function’s signature mentions. Easy to miss.</p>
+    <p><strong>The fix.</strong> Let the main <code>prove()</code> function own the whole status sequence (it already sets up a
+    status guard); make the helper just return data, no side effects.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Instances:</strong> <code>core/src/server/prove.rs:64-96, 160-165</code>; characterization test at <code>core/src/server.rs:617-685</code>. <code>resolve_version()</code> restores <code>Proving</code> at <code>prove.rs:94-96</code> purely so the caller’s state machine still works.</p>
+  </details>
+</div>
+
+<!-- F-09 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-low">Low</span><span class="fid">F-09</span>
+    <span class="ftitle">The “start HTTPS” code is copy-pasted in two places</span></div>
+  <div class="meta"><span class="chip chip-info">Duplicate Code</span><span class="chip chip-info">found by claude</span><span class="chip chip-info">confidence: low</span><span class="chip chip-green">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The code that starts the HTTPS server — load the cert config, then spawn it — is duplicated
+    in two spots: once at launch, once when you toggle HTTPS in settings.</p>
+    <p><strong>What gets harder to change.</strong> Improve HTTPS startup once (say, add shutdown handling) and the other copy
+    can quietly keep the old behavior.</p>
+    <p><strong>The fix.</strong> Extract one shared <code>spawn_https()</code> helper; each caller keeps only its genuinely
+    different setup.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p><strong>Instances:</strong> <code>src-tauri/src/main.rs:72+86</code> and <code>src-tauri/src/commands.rs:156+161</code> — both <code>load_rustls_config()</code> then <code>spawn(start_https(state, tls))</code> with the same error logging.</p>
+  </details>
+</div>
+
+<h2>Patterns worth noticing</h2>
+<h3>1. Rules kept alive by comments, not by types</h3>
+<p>The three highest-priority findings (F-01, F-02, F-05) are one habit in disguise: a critical guarantee — “this state is
+complete”, “this origin is tidied”, “the docs match the code” — is maintained by convention and prose instead of by a type or
+a single source of truth. The cure is the same each time: make the rule un-breakable by construction. Do all three and the
+top of this report retires together.</p>
+<h3>2. The recent refactor left a little parallel wiring</h3>
+<p>F-01 and F-09 are both “the same assembly spelled twice” across the freshly-split core / desktop / headless boundary. The
+extraction was clean in structure; it just left some shared <em>construction</em> wanting a shared home.</p>
+<h3>3. This codebase is well looked-after</h3>
+<p>The reviewers repeatedly found things that were already fixed (a proper version type, extracted download/verify/install
+helpers, the safe status union, dedup helpers) and correctly left them alone. Low finding-count, zero findings refuted on
+re-check — a healthy baseline.</p>
+
+<h2 class="muted" style="font-size:1.05rem;">What we deliberately did <em>not</em> flag</h2>
+<p class="muted">For context: a few things the finders raised were checked and dropped — a single-use config adapter (not real
+duplication), a tiny one-implementation trait (real but trivially minor), and a suspected “errors get hidden” bug in the SDK
+that turned out to be <em>correct</em> (the error cases are already handled; the catch-all is genuinely the “both probes
+failed” case). Honest negatives matter as much as the findings.</p>
+
+<footer>
+  <strong>Full detail:</strong>
+  <a href="report.md">report.md</a>
+  <a href="findings/verified.md">verified.md</a>
+  <a href="findings/consolidated.md">consolidated.md</a>
+  <a href="raw/">raw finder outputs</a>
+  <br><br>
+  Read-only audit — no code was changed. 9 findings · 0 critical · cross-model + verified.
+</footer>
+
+</body>
+</html>

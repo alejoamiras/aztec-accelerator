@@ -1,0 +1,25 @@
+issues: 4. `DesktopCallbacks`, `F-02 → F-01` ordering, and deleting `migrate_approved_origins` are otherwise sound.
+
+- **High** — [plan.md §Security & Adversarial Considerations](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:106) and [§Assumptions / Facts](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:124) overstate the current bug. The plan says raw `ALLOWED_ORIGINS` “could never match” a canonicalized request origin, but today already-canonical env values do match: [server/src/main.rs](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/server/src/main.rs:43) stores the raw string, [auth.rs](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/server/auth.rs:35) canonicalizes the request, and [AuthorizationManager::is_approved](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/authorization.rs:143) does exact string equality. The real bug is “non-canonical env values silently fail,” not “headless auth is dead.” Fix: rewrite that section and surface fail-fast as a real operator-compatibility change, not a no-risk hardening.
+
+- **Medium** — [plan.md §F-02](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:22) contradicts [§Test plan / F-02](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:93). The newtype sketch derives `Serialize` only, but the tests promise a `CanonicalOrigin` serde round-trip. Fix: make the type explicitly `Deserialize` too, with strict direct deserialization on the newtype and lenient field-level `de_approved_origins` only on `AcceleratorConfig`; otherwise drop the “serde round-trip” claim and test only the config seam.
+
+- **Medium** — [plan.md §F-02](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:36) leaves env semantics underspecified in a way that can break operators. Current behavior trims and drops empty segments; `ALLOWED_ORIGINS=""` produces an empty approved list but still enables auth, and trailing commas are tolerated. A naive fail-fast parser would turn those into startup failures. Fix: specify `trim -> drop empty -> canonicalize non-empty -> dedupe -> fail only on invalid non-empty entries`, and add tests for empty var, trailing comma, duplicate entries, and whitespace-only tokens.
+
+- **Medium** — [plan.md §Security & Adversarial Considerations](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:106) misses several attack vectors and risks one hidden behavior change. Missing from the matrix: `Origin: null`, `blob:`, percent-encoded host, mixed-case punycode, IPv6 zone IDs, and port `0`/overflow. Also, [§F-02](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:33) talks about collapsing the duplicate parse logic and “fixing” the `ws`/`wss` vs `http`/`https` divergence; today localhost auto-approval is intentionally only `http|https` in [authorization.rs](/Users/alejoamiras/Projects/aztec-accelerator/packages/accelerator/core/src/authorization.rs:131). Fix: extend the matrix and pin current `ws://localhost` behavior with a test unless you explicitly accept widening it.
+
+- **Low** — [plan.md §Hard constraints](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:13) and [§F-05/F-06](/Users/alejoamiras/Projects/aztec-accelerator/implementations-plan/quality-fixes-2026-06-08/plan.md:59) are too weak on SDK publish-surface validation. `tsc --noEmit` is good for type safety, but it is not the same as checking emitted declarations; PR-4 is the one place where `.d.ts` drift matters. Fix: require `bun run build` in PR-4, or add a declaration-surface assertion against the built barrel. F-05 is intentionally additive; F-06 looks internal-only and should stay non-breaking if the class keeps only `#private` state.
+
+Facts:
+- The current headless path is not globally fail-closed; canonical env values already work.
+- `migrate_approved_origins` only has one live contract today: load-time canonicalize/drop/dedupe plus optional resave.
+
+Inferences:
+- `url::Url` behavior for `null`, `blob:`, percent-encoded hosts, zone IDs, and port `0` is being trusted but not pinned.
+- `respond_auth()` re-parsing a string into a typed pending-map key is safe only if parse failure semantics are defined; otherwise a malformed value just hangs until timeout.
+- `DesktopCallbacks` is safe: callback reads are localized, `Deref<Target=HeadlessState>` stays intact, and Tauri commands do not depend on flat callback fields.
+
+Asks:
+- Confirm the exact env policy for empty tokens / empty var / trailing comma, and document it as an operator-visible change.
+- Decide whether `respond_auth` parse failure should return an error or log-and-deny.
+- Add PR-4 `build`/declaration validation, not just `tsc --noEmit`.
