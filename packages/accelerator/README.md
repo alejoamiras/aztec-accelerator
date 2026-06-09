@@ -120,8 +120,9 @@ For the headless server binary (CI/testing), set `ALLOWED_ORIGINS=origin1,origin
 >
 > **Security caveats — read before deploying:**
 >
-> - The server listens on `127.0.0.1` only. On a single-tenant CI runner (GitHub-hosted) this is the auth boundary.
-> - `ALLOWED_ORIGINS` only gates **browser-driven** callers via the `Origin` header. Non-browser callers (curl, another process on the same host) can omit the header and bypass the check. This is acceptable for single-tenant CI but **unsafe for shared/self-hosted runners or any production environment**.
+> - The server listens on `127.0.0.1` only, AND (SEC-01a) every request must carry a loopback `Host`/`:authority` (`127.0.0.1` / `localhost` / `[::1]`) on the listener port — this closes the DNS-rebinding vector where a remote web page rebinds its domain to loopback. A forged/non-loopback `Host` is rejected with `403 invalid_host` before any route logic.
+> - **Deny-by-default (SEC-01c):** with `ALLOWED_ORIGINS` unset the server now **gates** browser origins and **denies any non-localhost origin** (localhost/`127.0.0.1`/`[::1]` stay auto-approved). Set `ALLOWED_ORIGINS=a,b` to pre-approve specific origins, or pass `--allow-all` / `ACCEL_ALLOW_ALL=1` to opt back into approving every origin (mutually exclusive with `ALLOWED_ORIGINS` → fails loud). Unset no longer means "approve everyone".
+> - Non-browser callers on the **same host** (curl, another local process) can still reach `/prove` (loopback `Host`, no `Origin`) — inherent to a localhost service. Acceptable for single-tenant CI but **unsafe for shared/self-hosted runners or any production environment**.
 > - The tarball is shipped with a SHA-256 sidecar only, not a cryptographic signature. Verify the checksum before extracting.
 > - Do not run this as a service. Do not expose it on a public interface. Do not use on a multi-tenant host.
 
@@ -165,7 +166,8 @@ The accelerator will download the matching `bb` binary on the first prove reques
 
 | Env var | Effect |
 |---|---|
-| `ALLOWED_ORIGINS` | Comma-separated list of origins pre-approved for browser-driven `/prove` calls. If unset, all browser origins are auto-approved on the headless server. |
+| `ALLOWED_ORIGINS` | Comma-separated browser origins pre-approved for `/prove`. **Unset = deny-by-default** (non-localhost denied; localhost auto-approved). Mutually exclusive with `--allow-all` / `ACCEL_ALLOW_ALL`. |
+| `ACCEL_ALLOW_ALL` | `1` or `true` → approve **all** browser origins (the pre-SEC-01 behavior). Opt-in; mutually exclusive with `ALLOWED_ORIGINS`. Prefer `ALLOWED_ORIGINS` for an explicit allowlist. (`--allow-all` CLI flag is equivalent.) |
 | `BB_BINARY_PATH` | Path to a pre-installed `bb` binary, bypassing the auto-download. |
 | `RUST_LOG` | Standard `tracing-subscriber` filter (e.g. `info`, `debug`). |
 
