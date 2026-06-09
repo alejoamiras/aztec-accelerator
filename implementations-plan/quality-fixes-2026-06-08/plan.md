@@ -58,7 +58,7 @@ Keep `pub mod versions;` in `lib.rs` and the `src-tauri/lib.rs` re-export **unch
 ### F-05 ✓ — SDK barrel canonical + doc-sync test (PR-4; additive)
 Export `AcceleratorProtocol` from `index.ts`; replace README's obsolete flat `interface AcceleratorStatus` with the union; add `setForceLocal` to the README method table; add the `denied` phase to the SKILL phase table (align all 5 surfaces). **Doc-sync test** `src/lib/public-contract.test.ts`: (a) type-imports `AcceleratorProtocol` from the barrel (compile-fail if dropped) + asserts the exact export-name set; (b) reads README/MIGRATION/SKILL and asserts required markers present + the obsolete `interface AcceleratorStatus {` snippet absent.
 
-### F-06 — extract `AcceleratorTransport` (PR-4; internal; same public surface)
+### F-06 ✓ — extract `AcceleratorTransport` (PR-4; internal; same public surface)
 New non-exported `AcceleratorTransport` in `src/lib/accelerator-transport.ts` owning URL construction, the dual http/https probe + protocol negotiation, the status cache, and one error model. **Keep `ky` for BOTH** health and prove (health uses `throwHttpErrors: false`) — preserves the thrown-error surface (the main risk; the team is break-sensitive). The **parse → `AcceleratorStatus`** discriminated-union construction stays in the prover (domain). Route every `#acceleratorProtocol` mutation through `transport.setProtocol` (the "doesn't cache protocol on non-ok" + "detected protocol used for subsequent /prove" tests pin exactly-when).
 
 ### F-07 ✓ — `CertPaths` parameter object (PR-3; pure)
