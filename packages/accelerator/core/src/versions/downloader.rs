@@ -1,0 +1,246 @@
+//! bb tarball download → integrity-verify → atomic install pipeline.
+//!
+//! F-04: extracted from `versions.rs` — the heaviest, most self-contained responsibility (network
+//! download + digest verification + filesystem install), plus the macOS Gatekeeper finalize tail
+//! that was bolted onto the otherwise cross-platform flow (now its own `finalize_downloaded_binary`).
+//! The smaller identity/platform/layout/cache concerns stay in the `versions` module root.
+
+use super::{
+    bb_binary_name, current_platform, download_url, fetch_github_asset_digest, http_client,
+    sha256_hex, version_bb_path, versions_base_dir, AztecVersion,
+};
+use std::error::Error;
+use std::path::PathBuf;
+
+pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
+    // been built by `AztecVersion::parse`, which ran `is_valid_version`. An unsafe version therefore
+    // cannot reach this sink (`remove_dir_all` below) — the bypass the old sink-side recheck defended
+    // against is now structurally impossible. Deref to `&str` once so the existing path/URL/log sites
+    // stay byte-identical to the pre-Q3 callee.
+    let version: &str = version;
+    let bb_path = version_bb_path(version);
+    if bb_path.exists() {
+        tracing::info!(version, "bb already cached");
+        return Ok(bb_path);
+    }
+
+    // Download the tarball (bounded streaming) and verify its integrity before touching the fs
+    // (Q11: extracted to `download_tarball` + `verify_digest`; the digest→extract ordering — verify
+    // BEFORE install — is preserved here in the orchestrator).
+    let bytes = download_tarball(version).await?;
+    tracing::info!(
+        version,
+        bytes = bytes.len(),
+        "Download complete, verifying integrity"
+    );
+    verify_digest(version, &bytes).await?;
+
+    // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
+    // `install_version_dir` so the cleanup/rename is unit-testable without the network).
+    let version_dir = versions_base_dir().join(version);
+    install_version_dir(&version_dir, &bytes)?;
+
+    let final_path = version_dir.join(bb_binary_name());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // macOS: clear quarantine xattrs + ad-hoc re-sign so Gatekeeper doesn't SIGKILL the chmod'd
+    // binary. Extracted to `finalize_downloaded_binary` (a no-op off macOS) — F-04 folds the
+    // "macOS tail bolted onto the cross-platform flow" sub-finding.
+    finalize_downloaded_binary(&final_path, &version_dir, version)?;
+
+    tracing::info!(version, "bb cached successfully");
+    Ok(final_path)
+}
+
+/// macOS: clear extended attributes (quarantine, provenance) and ad-hoc re-sign the binary so
+/// Gatekeeper doesn't SIGKILL it (chmod after the original signature invalidates it). On codesign
+/// failure the partial cache dir is removed and an error returned — we never cache an unsignable
+/// binary. No-op on other platforms.
+#[cfg(target_os = "macos")]
+fn finalize_downloaded_binary(
+    final_path: &std::path::Path,
+    version_dir: &std::path::Path,
+    version: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let xattr_out = std::process::Command::new("xattr")
+        .args(["-cr"])
+        .arg(final_path)
+        .output();
+    if let Err(e) = &xattr_out {
+        tracing::warn!(version, error = %e, "Failed to clear quarantine xattrs");
+    } else if let Ok(out) = &xattr_out {
+        if !out.status.success() {
+            tracing::warn!(version, "xattr -cr failed with status {}", out.status);
+        }
+    }
+
+    let codesign_out = std::process::Command::new("codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(final_path)
+        .output();
+    match &codesign_out {
+        Err(e) => {
+            tracing::error!(version, error = %e, "Failed to ad-hoc sign bb binary");
+            // Clean up — don't cache a binary that can't be signed
+            let _ = std::fs::remove_dir_all(version_dir);
+            Err(format!("Failed to sign bb v{version}: {e}").into())
+        }
+        Ok(out) if !out.status.success() => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::error!(version, stderr = %stderr, "codesign failed");
+            let _ = std::fs::remove_dir_all(version_dir);
+            Err(format!("codesign failed for bb v{version}: {}", out.status).into())
+        }
+        Ok(_) => Ok(()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn finalize_downloaded_binary(
+    _final_path: &std::path::Path,
+    _version_dir: &std::path::Path,
+    _version: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    Ok(())
+}
+
+/// Download the bb tarball for `version` with a bounded-streaming read. The 64 MB cap (advertised
+/// Content-Length is an early fail-fast; the running per-chunk counter is the real ceiling) stops a
+/// Content-Length-omitting server from OOM-ing us by streaming gigabytes. Mirrors copy-bb.ts
+/// `MAX_BB_TARBALL_BYTES`. Byte-identical to the pre-Q11 inline block.
+async fn download_tarball(version: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    let url = download_url(version);
+    tracing::info!(version, %url, "Downloading bb");
+
+    let response = http_client().get(&url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download bb v{version}: HTTP {}",
+            response.status()
+        )
+        .into());
+    }
+
+    const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+    if let Some(len) = response.content_length() {
+        if len > MAX_DOWNLOAD_BYTES as u64 {
+            return Err(format!(
+                "bb v{version} download too large (advertised {len} bytes, max {MAX_DOWNLOAD_BYTES})"
+            )
+            .into());
+        }
+    }
+    let mut response = response; // chunk() takes &mut self
+    let mut bytes: Vec<u8> = Vec::with_capacity(8 * 1024 * 1024);
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "bb v{version} download exceeded {MAX_DOWNLOAD_BYTES} bytes — aborting"
+            )
+            .into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Verify the downloaded `bytes` against the GitHub release asset's published SHA-256 digest.
+/// **Fail-closed:** a missing digest (`Ok(None)`) or a fetch error is an error, not a skip — we never
+/// install unverified code. The bundled sidecar path never reaches here. Byte-identical to the
+/// pre-Q11 inline block.
+async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
+    match fetch_github_asset_digest(version, &asset_name).await {
+        Ok(Some(expected)) => {
+            let actual = sha256_hex(bytes);
+            if actual != expected {
+                return Err(format!(
+                    "Integrity check failed for bb v{version}: expected sha256:{expected}, got sha256:{actual}"
+                )
+                .into());
+            }
+            tracing::info!(version, digest = %actual, "Download integrity verified");
+            Ok(())
+        }
+        Ok(None) => {
+            Err(format!("Cannot verify bb v{version}: no digest available from GitHub API").into())
+        }
+        Err(e) => Err(format!("Cannot verify bb v{version}: digest fetch failed: {e}").into()),
+    }
+}
+
+/// Install an extracted bb tarball into `version_dir` via a temp dir + atomic rename.
+///
+/// Cleans up any stale partial-download temp dir, extracts into it, then removes any pre-existing
+/// `version_dir` and renames the temp dir into place — so the cache swap is atomic and a previously
+/// corrupt entry is replaced wholesale. The temp dir is a sibling named `.{name}.tmp` (derived from
+/// `version_dir`'s file name), matching the pre-Q11 inline behavior byte-for-byte.
+///
+/// Private + single-caller by design: `download_bb` passes `versions_base_dir().join(version)` where
+/// `version` came from a validated `AztecVersion`, so the `remove_dir_all` here never sees an
+/// attacker-derived path. Pinned by `install_version_dir_replaces_stale_and_extracts_atomically`.
+pub(crate) fn install_version_dir(
+    version_dir: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let name = version_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("invalid version dir (no file name)")?;
+    let tmp_dir = version_dir.with_file_name(format!(".{name}.tmp"));
+
+    // Clean up any leftover partial download
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)?;
+    }
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    extract_bb_from_tarball(bytes, &tmp_dir)?;
+
+    // Atomic rename — replace any pre-existing cache entry wholesale
+    if version_dir.exists() {
+        std::fs::remove_dir_all(version_dir)?;
+    }
+    std::fs::rename(&tmp_dir, version_dir)?;
+
+    Ok(())
+}
+
+/// Extract the `bb` binary from a gzipped tarball.
+///
+/// Looks for an entry named `bb` (at any nesting level) in the archive.
+pub(crate) fn extract_bb_from_tarball(
+    data: &[u8],
+    dest: &std::path::Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let decoder = GzDecoder::new(data);
+    let mut archive = Archive::new(decoder);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+
+        // Look for the bb binary (bb, or bb.exe on Windows) at any level in the archive
+        if path.file_name().and_then(|n| n.to_str()) == Some(bb_binary_name()) {
+            if entry.header().entry_type() != tar::EntryType::Regular {
+                return Err(format!(
+                    "bb entry in tarball is not a regular file (type: {:?})",
+                    entry.header().entry_type()
+                )
+                .into());
+            }
+            entry.unpack(dest.join(bb_binary_name()))?;
+            return Ok(());
+        }
+    }
+
+    Err("bb binary not found in tarball".into())
+}

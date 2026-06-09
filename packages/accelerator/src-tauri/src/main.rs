@@ -178,6 +178,65 @@ fn should_prevent_exit(code: Option<i32>) -> bool {
 
 // ── Main ─────────────────────────────────────────────────────────────────
 
+/// Spawn the HTTP accelerator server, classifying an `AddrInUse` bind failure structurally. A
+/// redundant Windows instance (Task Scheduler logon trigger + autostart Run key both fire) bows out
+/// with exit(0) when a healthy Aztec already owns :59833; any other failure surfaces in the tray and
+/// stays resident. (F-03: extracted verbatim from the `.setup` closure.)
+fn spawn_http_server(
+    state: aztec_accelerator::server::AppState,
+    status: tauri::menu::MenuItem<tauri::Wry>,
+    tray: tauri::tray::TrayIcon<tauri::Wry>,
+    app_handle: tauri::AppHandle,
+) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = aztec_accelerator::server::start(state).await {
+            // Classify AddrInUse STRUCTURALLY (by ErrorKind), not by display text — the OS string
+            // differs per platform (Windows WSAEADDRINUSE reads "Only one usage of each socket
+            // address…"), so a string match would miss it on Windows and skip the whole dual-launch
+            // fix on its target platform. bind_with_retry returns the io::Error, boxed by `?`.
+            let addr_in_use = e
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
+            // A redundant instance loses the :59833 bind — the autostart entry AND the crash-recovery
+            // launcher can both start us at logon. If a HEALTHY Aztec instance already owns the port,
+            // bow out with exit(0) rather than ghosting a tray with no server (exit 0 so the
+            // supervisor's restart-on-failure does NOT loop us). A foreign process / no answer is a
+            // real error: surface it and stay resident. WINDOWS-ONLY for now (the dual-launch is a new
+            // Windows issue); the `&&` short-circuits so /health is only probed on Windows.
+            if addr_in_use
+                && cfg!(target_os = "windows")
+                && aztec_accelerator::server::healthy_aztec_on_port().await
+            {
+                tracing::warn!(
+                    "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
+                );
+                app_handle.exit(0);
+                return;
+            }
+            tracing::error!("Accelerator server error: {e}");
+            let msg = if addr_in_use {
+                "Error: port 59833 in use"
+            } else {
+                "Error: server failed"
+            };
+            let _ = status.set_text(msg);
+            let _ = tray.set_tooltip(Some(msg));
+        }
+    });
+}
+
+/// Spawn the background update poller (5s warm-up, then every 12h). (F-03: extracted from `.setup`.)
+#[cfg(not(feature = "webdriver"))]
+fn spawn_update_poller(app_handle: AppHandle, config: ConfigState) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        loop {
+            run_update_check(&app_handle, &config).await;
+            tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
+        }
+    });
+}
+
 fn main() {
     // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
     // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
@@ -389,68 +448,19 @@ fn main() {
             windows::open_settings_window(app.handle());
 
             // ── HTTP server ──
-            let http_state = state;
-            let status_for_server = status_for_diagnostics;
-            let server_app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = aztec_accelerator::server::start(http_state).await {
-                    // Classify AddrInUse STRUCTURALLY (by ErrorKind), not by display text —
-                    // the OS string differs per platform (Windows WSAEADDRINUSE reads
-                    // "Only one usage of each socket address…"), so a string match would miss
-                    // it on Windows and skip the whole dual-launch fix on its target platform.
-                    // bind_with_retry returns the io::Error, boxed by `?` in server::start.
-                    let addr_in_use = e
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse);
-                    // A redundant instance loses the :59833 bind — the autostart entry AND the
-                    // crash-recovery launcher can both start us at logon. If a HEALTHY Aztec
-                    // instance already owns the port, bow out with exit(0) rather than ghosting a
-                    // tray with no server. exit 0 (not non-zero) so the supervisor's
-                    // restart-on-failure does NOT loop us. A foreign process / no answer is a real
-                    // error: surface it and stay resident.
-                    //
-                    // WINDOWS-ONLY for now: the dual-launch is a NEW Windows issue (Task Scheduler
-                    // logon trigger + the autostart Run key both fire). macOS/Linux have shipped
-                    // the stay-resident behavior for ages; we don't change them until P4's
-                    // updater-handoff gate proves the bow-out is safe there too (then drop the
-                    // `cfg!`). The `&&` short-circuits, so /health is only probed on Windows.
-                    if addr_in_use
-                        && cfg!(target_os = "windows")
-                        && aztec_accelerator::server::healthy_aztec_on_port().await
-                    {
-                        tracing::warn!(
-                            "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
-                        );
-                        server_app_handle.exit(0);
-                        return;
-                    }
-                    tracing::error!("Accelerator server error: {e}");
-                    let msg = if addr_in_use {
-                        "Error: port 59833 in use"
-                    } else {
-                        "Error: server failed"
-                    };
-                    let _ = status_for_server.set_text(msg);
-                    let _ = tray_for_diagnostics.set_tooltip(Some(msg));
-                }
-            });
+            spawn_http_server(
+                state,
+                status_for_diagnostics,
+                tray_for_diagnostics,
+                app.handle().clone(),
+            );
 
             // ── Background update check ──
-            // Compile-gated off for `webdriver` builds (the prompt window would
-            // steal WebDriver's active context mid-test); runtime-gated off for
-            // dev/CI builds via `should_poll_for_updates`. The shipped release
-            // desktop binary polls normally.
+            // Compile-gated off for `webdriver` builds (the prompt window would steal WebDriver's
+            // active context mid-test); runtime-gated off for dev/CI via `should_poll_for_updates`.
             #[cfg(not(feature = "webdriver"))]
             if should_poll_for_updates() {
-                let update_handle = app.handle().clone();
-                let update_config = config_state.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    loop {
-                        run_update_check(&update_handle, &update_config).await;
-                        tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
-                    }
-                });
+                spawn_update_poller(app.handle().clone(), config_state.clone());
             }
 
             Ok(())
