@@ -176,6 +176,24 @@ pub fn save_to(
     Ok(())
 }
 
+/// q7e3-F-13: lock the config, mutate via `f`, and save IFF `f` returns `true` (it changed something).
+/// Returns the save `Result` so each caller keeps its own save-failure disposition (`?` to propagate,
+/// `warn!`, or ignore) — preserving the three divergent policies the prior hand-rolled copies had, with
+/// one shared lock-mutate-save body in `core`. (The prior `mutate_config` helper lived in `src-tauri`,
+/// so core's `auth.rs` couldn't reach it.) The `bool` return keeps `auth.rs`'s conditional save from
+/// becoming an always-write on the piggyback-Allow path.
+pub fn lock_mutate_save(
+    lock: &parking_lot::RwLock<AcceleratorConfig>,
+    f: impl FnOnce(&mut AcceleratorConfig) -> bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut cfg = lock.write();
+    if f(&mut cfg) {
+        save(&cfg)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

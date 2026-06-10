@@ -86,12 +86,18 @@ pub(crate) async fn authorize_origin(
             tracing::info!(origin = %origin, remember, "Origin authorized");
             if remember {
                 if let Some(ref cfg_lock) = state.config {
-                    let mut cfg = cfg_lock.write();
-                    if !cfg.approved_origins.contains(&origin) {
-                        cfg.approved_origins.push(origin);
-                        if let Err(e) = config::save(&cfg) {
-                            tracing::warn!(error = %e, "Failed to persist approved origin");
+                    // q7e3-F-13: shared core helper; the closure's bool keeps the conditional save (only
+                    // when the origin is new) — no always-write on the piggyback-Allow path. Warn-and-
+                    // continue on save failure (a config-write error must NOT fail an approved prove).
+                    if let Err(e) = config::lock_mutate_save(cfg_lock, |cfg| {
+                        if cfg.approved_origins.contains(&origin) {
+                            false
+                        } else {
+                            cfg.approved_origins.push(origin);
+                            true
                         }
+                    }) {
+                        tracing::warn!(error = %e, "Failed to persist approved origin");
                     }
                 }
             }

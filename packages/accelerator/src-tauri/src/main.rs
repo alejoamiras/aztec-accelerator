@@ -97,9 +97,11 @@ fn try_start_https(state: &AppState) {
 /// regenerate a fresh, trusted cert set.
 fn reset_safari_support(state: &AppState) {
     if let Some(ref cfg_lock) = state.config {
-        let mut cfg = cfg_lock.write();
-        cfg.safari_support = false;
-        let _ = config::save(&cfg);
+        // q7e3-F-13: shared core helper; swallow the save error (best-effort reset, unchanged policy).
+        let _ = config::lock_mutate_save(cfg_lock, |cfg| {
+            cfg.safari_support = false;
+            true
+        });
     }
 }
 
