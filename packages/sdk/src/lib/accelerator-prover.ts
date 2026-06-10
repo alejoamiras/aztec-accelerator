@@ -11,6 +11,7 @@ import type {
   AcceleratorConfig,
   AcceleratorPhase,
   AcceleratorPhaseData,
+  AcceleratorProtocol,
   AcceleratorProverOptions,
   AcceleratorStatus,
 } from "./types.js";
@@ -188,62 +189,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         );
       }
 
-      const acceleratorVersion = data.aztec_version;
-      const availableVersions = data.available_versions;
-
-      // New multi-version protocol: check available_versions array
-      if (availableVersions) {
-        const needsDownload = sdkAztecVersion
-          ? !availableVersions.includes(sdkAztecVersion)
-          : false;
-        logger.info("Multi-version health check", {
-          sdkAztecVersion,
-          availableVersions,
-          needsDownload,
-          protocol,
-        });
-        return this.#transport.commitStatus(
-          {
-            available: true,
-            needsDownload,
-            acceleratorVersion,
-            availableVersions,
-            sdkAztecVersion,
-            protocol,
-          },
-          { pin: "set", protocol },
-        );
-      }
-
-      // Legacy protocol: exact version match
-      if (acceleratorVersion && acceleratorVersion !== "unknown") {
-        if (sdkAztecVersion && acceleratorVersion !== sdkAztecVersion) {
-          logger.warn("Accelerator Aztec version mismatch", {
-            accelerator: acceleratorVersion,
-            sdk: sdkAztecVersion,
-          });
-          return this.#transport.commitStatus(
-            {
-              available: false,
-              reason: "version-mismatch",
-              acceleratorVersion,
-              sdkAztecVersion,
-              protocol,
-            },
-            { pin: "set", protocol },
-          );
-        }
-      }
-      return this.#transport.commitStatus(
-        {
-          available: true,
-          needsDownload: false,
-          acceleratorVersion,
-          sdkAztecVersion,
-          protocol,
-        },
-        { pin: "set", protocol },
-      );
+      // q7e3-F-05: the version-policy decision is a pure function — a reachable, parsed /health
+      // always pins the winning protocol (`set`); only the available/needsDownload/mismatch shape varies.
+      return this.#transport.commitStatus(this.#classifyHealth(data, protocol, sdkAztecVersion), {
+        pin: "set",
+        protocol,
+      });
     } catch {
       // q7e3-F-06: both probes failed → offline; CLEAR the pin.
       return this.#transport.commitStatus(
@@ -251,6 +202,61 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         { pin: "clear" },
       );
     }
+  }
+
+  /**
+   * q7e3-F-05: pure version-policy. Classify a parsed `/health` body into the available /
+   * needs-download / version-mismatch status. No I/O, no caching, no protocol pinning (the caller owns
+   * those) — so the policy is isolated and unit-testable. Behavior-identical to the prior inline branches.
+   */
+  #classifyHealth(
+    data: { aztec_version?: string; available_versions?: string[] },
+    protocol: AcceleratorProtocol,
+    sdkAztecVersion: string | undefined,
+  ): AcceleratorStatus {
+    const acceleratorVersion = data.aztec_version;
+    const availableVersions = data.available_versions;
+
+    // New multi-version protocol: the SDK's version just needs to be in the cached set.
+    if (availableVersions) {
+      const needsDownload = sdkAztecVersion ? !availableVersions.includes(sdkAztecVersion) : false;
+      logger.info("Multi-version health check", {
+        sdkAztecVersion,
+        availableVersions,
+        needsDownload,
+        protocol,
+      });
+      return {
+        available: true,
+        needsDownload,
+        acceleratorVersion,
+        availableVersions,
+        sdkAztecVersion,
+        protocol,
+      };
+    }
+
+    // Legacy single-version protocol: exact match required (a known accelerator version that differs).
+    if (
+      acceleratorVersion &&
+      acceleratorVersion !== "unknown" &&
+      sdkAztecVersion &&
+      acceleratorVersion !== sdkAztecVersion
+    ) {
+      logger.warn("Accelerator Aztec version mismatch", {
+        accelerator: acceleratorVersion,
+        sdk: sdkAztecVersion,
+      });
+      return {
+        available: false,
+        reason: "version-mismatch",
+        acceleratorVersion,
+        sdkAztecVersion,
+        protocol,
+      };
+    }
+
+    return { available: true, needsDownload: false, acceleratorVersion, sdkAztecVersion, protocol };
   }
 
   async createChonkProof(
