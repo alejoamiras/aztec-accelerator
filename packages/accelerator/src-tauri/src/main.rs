@@ -48,25 +48,60 @@ fn open_in_browser(target: &impl AsRef<Path>) {
 
 // ── HTTPS startup ────────────────────────────────────────────────────────
 
+/// q7e3-F-01: the launch-time HTTPS gate as a pure value, lifted out of `try_start_https` so the
+/// reset-vs-skip asymmetry (the audit's most-fragile point) is unit-testable with zero mocks.
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchHttpsGate {
+    /// Safari Support is off — do nothing.
+    Disabled,
+    /// Enabled but certs are missing/invalid — reset `safari_support` so the user re-enables.
+    MissingCertsReset,
+    /// Certs present but the CA isn't trusted in the Keychain — skip WITHOUT reset (keep the opt-in).
+    UntrustedSkip,
+    /// Certs present and trusted — proceed to load TLS + spawn.
+    Ready,
+}
+
+/// Classify the launch HTTPS gate. `certs_exist` and `ca_trusted` are thunks so the original
+/// short-circuit holds exactly: `certs_exist` is not evaluated unless `safari_support`, and
+/// `ca_trusted` not unless `certs_exist` too. Trust is only ever VERIFIED at launch (the thunk wraps
+/// `is_ca_trusted`), never installed — launch must never raise the macOS Keychain prompt.
+fn classify_launch_https(
+    safari_support: bool,
+    certs_exist: impl FnOnce() -> bool,
+    ca_trusted: impl FnOnce() -> bool,
+) -> LaunchHttpsGate {
+    if !safari_support {
+        LaunchHttpsGate::Disabled
+    } else if !certs_exist() {
+        LaunchHttpsGate::MissingCertsReset
+    } else if !ca_trusted() {
+        LaunchHttpsGate::UntrustedSkip
+    } else {
+        LaunchHttpsGate::Ready
+    }
+}
+
 /// Try to start the HTTPS server if Safari Support is configured and certs are valid + trusted.
 /// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
 /// `start_https` flips the shared `https_bound` flag once the listener actually binds, so `/health`
 /// advertises `https_port` from the real bind state rather than the config flag.
 fn try_start_https(state: &AppState) {
     let cfg = config::load();
-    if !cfg.safari_support {
-        return;
-    }
-    if !certs::certs_exist() {
-        tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
-        reset_safari_support(state);
-        return;
-    }
-
-    // Verify the live CA is still trusted (macOS only).
-    if !certs::is_ca_trusted() {
-        tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
-        return;
+    // q7e3-F-01: the pre-load gate is now a tested pure classifier; the load-failure reset stays below
+    // (it depends on load_rustls_config's Result, not on these three booleans).
+    match classify_launch_https(cfg.safari_support, certs::certs_exist, certs::is_ca_trusted) {
+        LaunchHttpsGate::Disabled => return,
+        LaunchHttpsGate::MissingCertsReset => {
+            tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
+            reset_safari_support(state);
+            return;
+        }
+        LaunchHttpsGate::UntrustedSkip => {
+            tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
+            return;
+        }
+        LaunchHttpsGate::Ready => {}
     }
 
     let tls_config = match certs::load_rustls_config() {
@@ -498,5 +533,49 @@ mod tests {
     fn exit_allowed_for_restart() {
         // code=Some(i32::MAX) is sent by app.restart() during auto-update
         assert!(!should_prevent_exit(Some(i32::MAX)));
+    }
+
+    // q7e3-F-01 characterization (test-FIRST): the launch HTTPS gate's four outcomes + the
+    // reset-vs-skip asymmetry + both short-circuits (panicking thunks prove the unevaluated checks).
+    #[test]
+    fn launch_gate_disabled_short_circuits_everything() {
+        assert_eq!(
+            classify_launch_https(
+                false,
+                || panic!("certs_exist must not be checked when safari is off"),
+                || panic!("trust must not be checked when safari is off"),
+            ),
+            LaunchHttpsGate::Disabled
+        );
+    }
+
+    #[test]
+    fn launch_gate_missing_certs_resets_and_short_circuits_trust() {
+        // certs missing → reset; is_ca_trusted MUST NOT be called (preserves the original short-circuit).
+        assert_eq!(
+            classify_launch_https(
+                true,
+                || false,
+                || panic!("trust must not be checked when certs are missing")
+            ),
+            LaunchHttpsGate::MissingCertsReset
+        );
+    }
+
+    #[test]
+    fn launch_gate_untrusted_skips_without_reset() {
+        // certs present but untrusted → SKIP, NOT reset (the asymmetry the audit flagged as fragile).
+        assert_eq!(
+            classify_launch_https(true, || true, || false),
+            LaunchHttpsGate::UntrustedSkip
+        );
+    }
+
+    #[test]
+    fn launch_gate_ready_when_present_and_trusted() {
+        assert_eq!(
+            classify_launch_https(true, || true, || true),
+            LaunchHttpsGate::Ready
+        );
     }
 }
