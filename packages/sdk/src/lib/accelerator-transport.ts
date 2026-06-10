@@ -1,6 +1,7 @@
 import ky from "ky";
 import ms from "ms";
-import type { AcceleratorProtocol, AcceleratorStatus } from "./accelerator-prover.js";
+// q7e3-F-02: import shared types from the neutral module, not back from the prover (kills the 2-way edge).
+import type { AcceleratorProtocol, AcceleratorStatus } from "./types.js";
 
 /** How long a probed {@link AcceleratorStatus} stays fresh before a re-probe. */
 const STATUS_CACHE_TTL_MS = 10_000;
@@ -10,6 +11,12 @@ const HEALTH_PROBE_TIMEOUT_MS = 2_000;
 const PROBE_RETRY_DELAY_MS = 1_000;
 /** /prove is long-running (native bb proof) — generous timeout. */
 const PROVE_TIMEOUT_MS = ms("10 min");
+
+/** q7e3-F-06: the three protocol-pin transitions {@link AcceleratorTransport.commitStatus} can apply. */
+export type ProtocolTransition =
+  | { pin: "set"; protocol: AcceleratorProtocol }
+  | { pin: "clear" }
+  | { pin: "keep" };
 
 /**
  * Owns all network I/O to the local accelerator: endpoint/URL construction, the
@@ -52,6 +59,22 @@ export class AcceleratorTransport {
   /** Pin (or clear, with `null`) the protocol that `/prove` should use. */
   setProtocol(protocol: AcceleratorProtocol | null) {
     this.#protocol = protocol;
+  }
+
+  /**
+   * q7e3-F-06: single owner of the protocol-pin transition that the prover's probe previously
+   * scattered across three sites. Caches the parsed status AND applies the pin in one place, with the
+   * three transitions made explicit so a refactor can't silently flatten them:
+   * - `"set"`   — a parseable OK `/health` → pin the winning protocol (drives subsequent `/prove`).
+   * - `"clear"` — malformed-JSON or offline → unpin (a misbehaving/absent responder must not drive `/prove`).
+   * - `"keep"`  — a non-OK status (`!response.ok`) → leave any EXISTING pin untouched (a fast error,
+   *               e.g. an HTTPS cert failure, must not repin and must not clear a good pin).
+   */
+  commitStatus(status: AcceleratorStatus, transition: ProtocolTransition): AcceleratorStatus {
+    if (transition.pin === "set") this.#protocol = transition.protocol;
+    else if (transition.pin === "clear") this.#protocol = null;
+    // "keep" → #protocol unchanged.
+    return this.cacheStatus(status);
   }
 
   /** Base URL for `/prove` — `https` iff the negotiated protocol is `https`, else `http`. */

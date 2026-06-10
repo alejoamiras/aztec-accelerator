@@ -6,90 +6,15 @@ import { HTTPError } from "ky";
 import sdkPkg from "../../package.json" with { type: "json" };
 import { AcceleratorTransport } from "./accelerator-transport.js";
 import { logger } from "./logger.js";
-
-/** Sub-phases emitted during proof generation for UI animation. */
-export type AcceleratorPhase =
-  | "detect"
-  | "serialize"
-  | "transmit"
-  | "proving"
-  | "proved"
-  | "receive"
-  | "fallback"
-  | "downloading"
-  | "denied";
-
-/** Data payload for the `"proved"` phase — carries the actual proving duration. */
-export interface AcceleratorPhaseData {
-  durationMs: number;
-}
-
-export interface AcceleratorConfig {
-  /** Port the accelerator listens on (HTTP). Default: 59833. */
-  port?: number;
-  /** Port the accelerator listens on (HTTPS, for Safari). Default: 59834. */
-  httpsPort?: number;
-  /** Host the accelerator binds to. Default: "127.0.0.1". */
-  host?: string;
-}
-
-export interface AcceleratorProverOptions {
-  /** Circuit simulator. Defaults to WASMSimulator (lazy-loaded from @aztec/simulator/client). */
-  simulator?: CircuitSimulator;
-  /** Accelerator connection config (port, host). */
-  accelerator?: AcceleratorConfig;
-  /** Phase transition callback for UI animation. */
-  onPhase?: (phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void;
-}
-
-/** Protocol used to reach the accelerator's `/health` + `/prove` endpoints. */
-export type AcceleratorProtocol = "http" | "https";
-
-/**
- * Status of the local native accelerator, returned by {@link AcceleratorProver.checkAcceleratorStatus}.
- *
- * A discriminated union on `available` (Q12). The prior flat interface let illegal field combinations
- * typecheck (e.g. `available: false` carrying `availableVersions`, or `needsDownload` on an offline
- * result). Narrow on `available` first — and on `reason` for the unavailable cases — to access only the
- * fields valid for that state.
- */
-export type AcceleratorStatus =
-  | {
-      /** The accelerator is reachable and version-compatible. */
-      available: true;
-      /** Whether it must download `bb` for the SDK's Aztec version before it can prove. */
-      needsDownload: boolean;
-      /** Accelerator version from `/health` (`aztec_version`); absent on the multi-version protocol. */
-      acceleratorVersion?: string;
-      /** Aztec versions the accelerator already has cached (multi-version protocol). */
-      availableVersions?: string[];
-      /** The Aztec version this SDK expects (from its `@aztec/stdlib` dependency). */
-      sdkAztecVersion?: string;
-      /** Which protocol reached the accelerator. */
-      protocol: AcceleratorProtocol;
-    }
-  | {
-      available: false;
-      /** Both the HTTP and HTTPS probes failed — the accelerator isn't running. */
-      reason: "offline";
-      sdkAztecVersion?: string;
-    }
-  | {
-      available: false;
-      /** Reachable, but `/health` returned a non-OK HTTP status. */
-      reason: "error";
-      sdkAztecVersion?: string;
-      protocol: AcceleratorProtocol;
-    }
-  | {
-      available: false;
-      /** Reachable, but its Aztec version doesn't match the SDK's (legacy single-version protocol). */
-      reason: "version-mismatch";
-      /** The mismatched accelerator version. */
-      acceleratorVersion: string;
-      sdkAztecVersion?: string;
-      protocol: AcceleratorProtocol;
-    };
+// q7e3-F-02: published types now live in ./types.ts (a neutral module); index.ts re-exports them.
+import type {
+  AcceleratorConfig,
+  AcceleratorPhase,
+  AcceleratorPhaseData,
+  AcceleratorProtocol,
+  AcceleratorProverOptions,
+  AcceleratorStatus,
+} from "./types.js";
 
 /**
  * Create a lazy-loading proxy for CircuitSimulator that dynamically imports
@@ -232,8 +157,6 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    */
   async #probeAndParseHealth(): Promise<AcceleratorStatus> {
     const sdkAztecVersion = this.#getAztecVersion();
-    const cacheAndReturn = (status: AcceleratorStatus): AcceleratorStatus =>
-      this.#transport.cacheStatus(status);
 
     try {
       // Probe both HTTP and HTTPS in parallel (one retry after 1s) — whichever responds
@@ -243,17 +166,13 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       const { response, protocol } = await this.#transport.probeHealth();
 
       if (!response.ok) {
-        // Don't pin the protocol on error — a fast error (e.g. HTTPS cert failure)
-        // would set the wrong protocol for subsequent /prove calls.
-        return cacheAndReturn({
-          available: false,
-          reason: "error",
-          sdkAztecVersion,
-          protocol,
-        });
+        // q7e3-F-06: non-OK → KEEP any existing pin. A fast error (e.g. an HTTPS cert failure)
+        // must not pin the wrong protocol for /prove, nor clear an already-good pin.
+        return this.#transport.commitStatus(
+          { available: false, reason: "error", sdkAztecVersion, protocol },
+          { pin: "keep" },
+        );
       }
-
-      this.#transport.setProtocol(protocol);
 
       let data: { aztec_version?: string; available_versions?: string[] };
       try {
@@ -262,69 +181,82 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           available_versions?: string[];
         };
       } catch {
-        // Reachable but returned unparseable JSON — that's "error" (the host answered), NOT
-        // "offline" (which means both probes failed). Clear the pinned protocol since a
-        // misbehaving responder shouldn't drive subsequent /prove calls.
-        this.#transport.setProtocol(null);
-        return cacheAndReturn({
-          available: false,
-          reason: "error",
-          sdkAztecVersion,
-          protocol,
-        });
+        // Reachable but unparseable JSON — "error" (the host answered), NOT "offline" (both probes
+        // failed). q7e3-F-06: CLEAR the pin — a misbehaving responder shouldn't drive /prove.
+        return this.#transport.commitStatus(
+          { available: false, reason: "error", sdkAztecVersion, protocol },
+          { pin: "clear" },
+        );
       }
 
-      const acceleratorVersion = data.aztec_version;
-      const availableVersions = data.available_versions;
-
-      // New multi-version protocol: check available_versions array
-      if (availableVersions) {
-        const needsDownload = sdkAztecVersion
-          ? !availableVersions.includes(sdkAztecVersion)
-          : false;
-        logger.info("Multi-version health check", {
-          sdkAztecVersion,
-          availableVersions,
-          needsDownload,
-          protocol,
-        });
-        return cacheAndReturn({
-          available: true,
-          needsDownload,
-          acceleratorVersion,
-          availableVersions,
-          sdkAztecVersion,
-          protocol,
-        });
-      }
-
-      // Legacy protocol: exact version match
-      if (acceleratorVersion && acceleratorVersion !== "unknown") {
-        if (sdkAztecVersion && acceleratorVersion !== sdkAztecVersion) {
-          logger.warn("Accelerator Aztec version mismatch", {
-            accelerator: acceleratorVersion,
-            sdk: sdkAztecVersion,
-          });
-          return cacheAndReturn({
-            available: false,
-            reason: "version-mismatch",
-            acceleratorVersion,
-            sdkAztecVersion,
-            protocol,
-          });
-        }
-      }
-      return cacheAndReturn({
-        available: true,
-        needsDownload: false,
-        acceleratorVersion,
-        sdkAztecVersion,
+      // q7e3-F-05: the version-policy decision is a pure function — a reachable, parsed /health
+      // always pins the winning protocol (`set`); only the available/needsDownload/mismatch shape varies.
+      return this.#transport.commitStatus(this.#classifyHealth(data, protocol, sdkAztecVersion), {
+        pin: "set",
         protocol,
       });
     } catch {
-      this.#transport.setProtocol(null);
-      return cacheAndReturn({ available: false, reason: "offline", sdkAztecVersion });
+      // q7e3-F-06: both probes failed → offline; CLEAR the pin.
+      return this.#transport.commitStatus(
+        { available: false, reason: "offline", sdkAztecVersion },
+        { pin: "clear" },
+      );
     }
+  }
+
+  /**
+   * q7e3-F-05: pure version-policy. Classify a parsed `/health` body into the available /
+   * needs-download / version-mismatch status. No I/O, no caching, no protocol pinning (the caller owns
+   * those) — so the policy is isolated and unit-testable. Behavior-identical to the prior inline branches.
+   */
+  #classifyHealth(
+    data: { aztec_version?: string; available_versions?: string[] },
+    protocol: AcceleratorProtocol,
+    sdkAztecVersion: string | undefined,
+  ): AcceleratorStatus {
+    const acceleratorVersion = data.aztec_version;
+    const availableVersions = data.available_versions;
+
+    // New multi-version protocol: the SDK's version just needs to be in the cached set.
+    if (availableVersions) {
+      const needsDownload = sdkAztecVersion ? !availableVersions.includes(sdkAztecVersion) : false;
+      logger.info("Multi-version health check", {
+        sdkAztecVersion,
+        availableVersions,
+        needsDownload,
+        protocol,
+      });
+      return {
+        available: true,
+        needsDownload,
+        acceleratorVersion,
+        availableVersions,
+        sdkAztecVersion,
+        protocol,
+      };
+    }
+
+    // Legacy single-version protocol: exact match required (a known accelerator version that differs).
+    if (
+      acceleratorVersion &&
+      acceleratorVersion !== "unknown" &&
+      sdkAztecVersion &&
+      acceleratorVersion !== sdkAztecVersion
+    ) {
+      logger.warn("Accelerator Aztec version mismatch", {
+        accelerator: acceleratorVersion,
+        sdk: sdkAztecVersion,
+      });
+      return {
+        available: false,
+        reason: "version-mismatch",
+        acceleratorVersion,
+        sdkAztecVersion,
+        protocol,
+      };
+    }
+
+    return { available: true, needsDownload: false, acceleratorVersion, sdkAztecVersion, protocol };
   }
 
   async createChonkProof(
@@ -350,6 +282,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       this.#onPhase?.("downloading");
     }
 
+    return this.#proveRemote(executionSteps);
+  }
+
+  /**
+   * q7e3-F-11: the accelerated proving path — serialize, POST `/prove`, decode. A `403` (origin denied
+   * or auth timeout) emits `"denied"` and falls back to WASM; other errors propagate. Extracted from
+   * {@link AcceleratorProver.createChonkProof}; only reached when the accelerator is available.
+   */
+  async #proveRemote(executionSteps: PrivateExecutionStep[]): Promise<ChonkProofWithPublicInputs> {
     logger.info("Accelerator available, proving natively", {
       url: this.#transport.baseUrl,
     });
@@ -362,8 +303,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#onPhase?.("transmit");
     this.#onPhase?.("proving");
 
-    let res: Response;
     const start = performance.now();
+    let res: Response;
     try {
       res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion);
     } catch (err) {
@@ -384,8 +325,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       throw err;
     }
 
-    // Always emit "proved" so the UI never hangs on "proving": prefer the server's
-    // authoritative duration (x-prove-duration-ms), else the client-measured round-trip.
+    return this.#decodeProof(res, start);
+  }
+
+  /**
+   * q7e3-F-11: emit `"proved"` (the server's authoritative `x-prove-duration-ms` if present, else the
+   * client-measured round-trip — so the UI never hangs on `"proving"`), then `"receive"` + decode the
+   * base64 proof buffer.
+   */
+  async #decodeProof(res: Response, start: number): Promise<ChonkProofWithPublicInputs> {
     const serverMs = Number(res.headers.get("x-prove-duration-ms"));
     const durationMs =
       Number.isFinite(serverMs) && serverMs > 0 ? serverMs : Math.round(performance.now() - start);

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quality audit — aztec-accelerator (2026-06-10 max)</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1a1a1a; --muted:#666666; --hairline:#e4e4e4; --surface:#fafafa;
+    --code:#f0f0f0; --link:#0366d6;
+    --high:#b00020; --high-bg:#fde7ea; --med:#9a6700; --med-bg:#fff6db;
+    --low:#555555; --low-bg:#ededed; --green:#1a7f37; --green-bg:#e9f6ec;
+    --amber:#9a6700; --amber-bg:#fff6db;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1a1a1a; --fg:#e9e9e9; --muted:#9a9a9a; --hairline:#333333; --surface:#222222;
+      --code:#2a2a2a; --link:#5aa3f2;
+      --high:#ff6b81; --high-bg:#3a1f25; --med:#e3b341; --med-bg:#332a12;
+      --low:#aaaaaa; --low-bg:#2a2a2a; --green:#3fb950; --green-bg:#15271a;
+      --amber:#e3b341; --amber-bg:#332a12;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:820px;
+    margin:2.2rem auto;padding:0 1.1rem;color:var(--fg);background:var(--bg);line-height:1.62;}
+  h1{font-size:1.7rem;margin:0 0 .3rem;}
+  h2{font-size:1.25rem;margin:2.6rem 0 .6rem;border-bottom:1px solid var(--hairline);padding-bottom:.3rem;}
+  h3{font-size:1.05rem;margin:1.6rem 0 .4rem;}
+  p{margin:.5rem 0;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em;background:var(--code);
+    padding:.08em .36em;border-radius:4px;}
+  a{color:var(--link);text-decoration:none;} a:hover{text-decoration:underline;}
+  .sub{color:var(--muted);font-size:.92rem;margin-top:.2rem;}
+  .stats{display:flex;gap:.5rem;flex-wrap:wrap;margin:1.3rem 0;}
+  .stat{border:1px solid var(--hairline);border-radius:9px;padding:.5rem .95rem;background:var(--surface);text-align:center;min-width:74px;}
+  .stat b{font-size:1.45rem;display:block;line-height:1.1;}
+  .stat span{font-size:.76rem;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;}
+  .chip{display:inline-block;padding:.12em .6em;border-radius:999px;font-size:.74rem;font-weight:600;white-space:nowrap;}
+  .chip-high{background:var(--high-bg);color:var(--high);}
+  .chip-med{background:var(--med-bg);color:var(--med);}
+  .chip-low{background:var(--low-bg);color:var(--low);}
+  .chip-info{background:var(--low-bg);color:var(--low);font-weight:500;}
+  .callout{border-radius:9px;padding:.9rem 1.15rem;margin:1.2rem 0;border:1px solid var(--hairline);}
+  .callout.green{border-color:var(--green);background:var(--green-bg);}
+  .callout.amber{border-color:var(--amber);background:var(--amber-bg);}
+  .callout h3{margin:.1rem 0 .4rem;}
+  .callout p, .callout li{font-size:.93rem;}
+  .finding{background:var(--surface);border:1px solid var(--hairline);border-radius:9px;padding:1.15rem 1.25rem;margin:1.1rem 0;}
+  .fh{display:flex;gap:.55rem;align-items:baseline;flex-wrap:wrap;}
+  .fid{color:var(--muted);font-weight:600;font-size:.9rem;}
+  .ftitle{font-weight:600;font-size:1.02rem;}
+  .meta{margin:.55rem 0 .35rem;display:flex;gap:.35rem;flex-wrap:wrap;}
+  .eli5 p{margin:.45rem 0;}
+  .eli5 strong{color:var(--fg);}
+  details{margin-top:.7rem;border-top:1px dashed var(--hairline);padding-top:.5rem;}
+  summary{cursor:pointer;color:var(--link);font-weight:600;font-size:.9rem;}
+  details p{font-size:.9rem;margin:.45rem 0;}
+  .ix{color:var(--muted);font-size:.86rem;}
+  footer{margin-top:2.6rem;border-top:1px solid var(--hairline);padding-top:1rem;color:var(--muted);font-size:.9rem;}
+</style>
+</head>
+<body>
+
+<h1>Quality audit — Aztec Accelerator</h1>
+<p class="sub">Maintainability / change-cost only · run <code>2026-06-10-max-q7e3</code> · effort <strong>max</strong> · Fable ×6 finders + Codex xhigh ×3, cross-model convergence as the confidence signal · scope: <code>packages/accelerator</code> (core, src-tauri, server) + <code>packages/sdk</code>.</p>
+
+<div class="stats">
+  <div class="stat"><b>15</b><span>findings</span></div>
+  <div class="stat"><b>6</b><span>high pri</span></div>
+  <div class="stat"><b>6</b><span>medium</span></div>
+  <div class="stat"><b>3</b><span>low</span></div>
+  <div class="stat"><b>8</b><span>leads refuted</span></div>
+</div>
+
+<div class="callout green">
+  <h3>Cheapest fixes first (land these four — hours each, both models agree)</h3>
+  <p><strong>F-01</strong> extract the Safari-HTTPS bring-up sequence · <strong>F-02</strong> move SDK public types to <code>types.ts</code> · <strong>F-03</strong> a <code>ProveError</code> type for the 11 hand-built error tuples · <strong>F-04</strong> break up the 154-line <code>.setup()</code> blob. F-01 is the one to do today — its failure mode is the SEC-08 “M1” bug fixed earlier this session.</p>
+</div>
+
+<div class="callout amber">
+  <h3>Ship together</h3>
+  <p><strong>F-05 + F-06 + F-11</strong> all live in the one 440-line SDK hotspot file (<code>accelerator-prover.ts</code>) — refactor them in a single pass, not three. <strong>F-01 + F-04</strong> both touch <code>main.rs</code> startup; sequence them so they don't collide.</p>
+</div>
+
+<div class="callout">
+  <h3>The one theme worth internalizing</h3>
+  <p>The dominant smell isn't size or copy-paste — it's <strong>invariants kept true by a <code>// must…</code> comment instead of by a type or structure</strong>. Five top findings (F-01, F-06, F-09, F-10, F-13) are that exact shape. It already cost you once: F-01 is the root cause of the M1 bug. The codebase's (genuinely good) habit of heavy <code>SEC-xx/Q-xx</code> why-comments is quietly doing the job a type should — so the highest-traffic of these are worth converting into real seams (guard objects, owned state transitions, template methods).</p>
+</div>
+
+<h2>Findings</h2>
+
+<!-- F-01 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-01</span><span class="ftitle">Safari-HTTPS bring-up is a comment-enforced sequence, copied across two paths</span></div>
+  <div class="meta"><span class="chip chip-info">both ×3</span><span class="chip chip-info">Temporal Coupling + Duplicate Code</span><span class="chip chip-info">structural · hot</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Turning on Safari HTTPS needs a fixed order of cert steps — delete the old key → make certs → trust → load → start the server. That order is hand-written in two separate places: the app-launch path and the Settings toggle. They're kept identical only by a comment.</p>
+    <p><strong>What gets harder to change.</strong> Change the sequence (add a step, reorder one) and you must edit both copies perfectly — and a missed copy still compiles. This is not hypothetical: the bug fixed earlier today was the Settings path missing the "delete old key" step the launch path had.</p>
+    <p><strong>The fix.</strong> Put the sequence in one function (<code>certs::prepare_https(mode)</code>); both callers just call it. One place to change, impossible to half-update.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> <code>src-tauri/src/main.rs:55-94</code> (try_start_https), <code>main.rs:424-428</code> (startup gate), <code>commands.rs:151-180</code> (enable_safari_support), <code>certs.rs:170-182,257-345,427-433</code> (stepwise API).</p>
+    <p><strong>Refactoring:</strong> Form Template Method / Extract Function — <code>HttpsBootstrap::{prepare_at_launch, enable_from_settings}</code> owning the order. <strong>Verified</strong> by re-read; this is the SEC-08 M1 failure mode.</p>
+  </details>
+</div>
+
+<!-- F-02 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-02</span><span class="ftitle">SDK's public types live inside the file that changes every week</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Misplaced-Shared-Types + latent Cyclic Dependency</span><span class="chip chip-info">structural · hot</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The six types npm consumers import are defined inside the 440-line implementation file (the SDK's #1 hotspot). The transport file reaches back into that file to borrow two of them.</p>
+    <p><strong>What gets harder to change.</strong> Every internal tweak churns the same file that defines the public contract, so "did the public API change?" gets buried in implementation diffs — and the two files now point at each other.</p>
+    <p><strong>The fix.</strong> Move the types to a small <code>lib/types.ts</code> and re-export them from <code>index.ts</code>. The public contract gets a stable home and the back-pointer disappears.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> <code>sdk/src/lib/accelerator-prover.ts:11-92</code> (6 types), <code>accelerator-transport.ts:3</code> (type-only back-import), <code>index.ts:1-9</code>.</p>
+    <p><strong>Refactoring:</strong> Move shared types to <code>lib/types.ts</code>; re-export unchanged. Runtime-acyclic today only because the reverse leg is <code>import type</code>.</p>
+  </details>
+</div>
+
+<!-- F-03 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-03</span><span class="ftitle">Every server error is hand-built as a (status, string) pair — 11×, with one odd shape</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Duplicate Code / Data Clump</span><span class="chip chip-info">structural · hot</span><span class="chip chip-info">fix: hours–1 day</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Each error the proving server returns is assembled by hand as a <code>(status code, JSON string)</code> pair — 11 times — and one spot (<code>host.rs</code>) builds a structurally different body.</p>
+    <p><strong>What gets harder to change.</strong> Want to add a field to errors, or standardize the body shape? You edit all 11 spots and hope they match. The odd-one-out in <code>host.rs</code> silently won't.</p>
+    <p><strong>The fix.</strong> One <code>ProveError</code> type that knows how to turn itself into a response; each handler returns the type. No new library needed — a plain enum fits the codebase's deliberate "no thiserror/anyhow" style.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> def <code>server.rs:326</code>; 11 sites <code>server/prove.rs:63,122,134,182,222</code> + <code>server/auth.rs:41,67,79,99,105,132</code>; divergent shape <code>server/host.rs:69-72</code> (uses <code>axum::Json</code>, no <code>message</code> field — <strong>verified</strong> by re-read).</p>
+    <p><strong>Refactoring:</strong> Replace Error Tuple with Type — <code>enum ProveError</code> impl <code>IntoResponse</code>, preserving the pinned body contract.</p>
+  </details>
+</div>
+
+<!-- F-04 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-04</span><span class="ftitle">App startup is one 154-line function doing nine jobs</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Long Method + Divergent Change</span><span class="chip chip-info">structural · hot</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The desktop <code>.setup()</code> closure is ~154 lines doing about nine unrelated jobs (tray, crash recovery, HTTPS, diagnostics, update polling…) with ten near-identical "clone for X" bindings.</p>
+    <p><strong>What gets harder to change.</strong> Any startup change means wading into the whole blob, and none of it is unit-testable — you can only exercise it by launching the entire app.</p>
+    <p><strong>The fix.</strong> Split into named pieces — <code>init_tray</code> / <code>build_state</code> / <code>bootstrap_https</code> / <code>start_background_tasks</code> — each readable and testable.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instance:</strong> <code>src-tauri/src/main.rs:314-466</code> (clone/callback wiring concentrated at <code>362-417</code>).</p>
+    <p><strong>Refactoring:</strong> Extract Class <code>DesktopBootstrap</code>.</p>
+  </details>
+</div>
+
+<!-- F-05 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-05</span><span class="ftitle">One 96-line SDK method does everything about the health check</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Long Method + missing Factory</span><span class="chip chip-info">structural · hot</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> <code>#probeAndParseHealth</code> probes, parses JSON, picks legacy-vs-multi-version protocol, applies version policy, logs, mutates protocol state, caches, and hand-builds six different status objects — all in one method.</p>
+    <p><strong>What gets harder to change.</strong> Add a field to the status object and you must touch six branches; miss one and it still type-checks (the field is optional).</p>
+    <p><strong>The fix.</strong> Pull the parse/version steps into their own methods, and build the status objects through one factory function.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instance:</strong> <code>accelerator-prover.ts:233-328</code>; manual union construction ×6 at <code>248,269,291,308,317,326</code>.</p>
+    <p><strong>Refactoring:</strong> Extract Method + Introduce Factory for <code>AcceleratorStatus</code>.</p>
+  </details>
+</div>
+
+<!-- F-06 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-high">High</span><span class="fid">F-06</span><span class="ftitle">SDK remembers HTTP-vs-HTTPS by scattered side effects</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Temporal Coupling</span><span class="chip chip-info">structural · hot</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The SDK pins which protocol reached <code>/health</code> by setting a flag in some branches and clearing it in others — the "pin on success, clear on error/bad-JSON" rule is spread across three spots, then read later when sending a proof.</p>
+    <p><strong>What gets harder to change.</strong> Anyone adding a new health-check branch has to remember the pin/clear rule, or the SDK silently keeps talking to a stale endpoint.</p>
+    <p><strong>The fix.</strong> Let the transport own a single method that updates the protocol from the result — the rule lives in one place.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> pin <code>accelerator-prover.ts:256</code>; clear <code>268</code>, <code>325</code>; consumed in <code>accelerator-transport.ts:57-63,121-133</code> via <code>baseUrl</code>.</p>
+    <p><strong>Refactoring:</strong> Move Method — transport-owned <code>commitStatus(status)</code> deriving the pin from the discriminant.</p>
+  </details>
+</div>
+
+<!-- F-07 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Medium</span><span class="fid">F-07</span><span class="ftitle">One module is the version + cache + GitHub + layout hub</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Divergent Change</span><span class="chip chip-info">architectural</span><span class="chip chip-info">fix: ~1 day</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> <code>versions/mod.rs</code> mixes four unrelated jobs: what a version <em>is</em>, how long to keep cached versions, where files live, and talking to GitHub releases. (It's not a "Large Class" — both models noted ~62% of it is tests.)</p>
+    <p><strong>What gets harder to change.</strong> A retention tweak, a cache-folder rename, and a GitHub-API change all collide in the same file; touching one part means understanding the whole subsystem.</p>
+    <p><strong>The fix.</strong> Split into <code>version_policy</code> / <code>cache_layout</code> / <code>release_metadata</code>. The retention table is already clean — leave it.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> <code>versions/mod.rs:11-18,23-68,80-156,165-197,218-274,297-377</code>; <code>downloader.rs:8-58,116-212</code> (9-item <code>use super</code> back-import).</p>
+    <p><strong>Refactoring:</strong> Extract Module.</p>
+  </details>
+</div>
+
+<!-- F-08 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Medium</span><span class="fid">F-08</span><span class="ftitle">The "version" and "origin" wrapper types are abandoned past the front door</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Primitive Obsession</span><span class="chip chip-info">structural</span><span class="chip chip-info">fix: ~1 day each</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The code has proper <code>AztecVersion</code> and <code>CanonicalOrigin</code> wrapper types, but only uses them at the boundary — downstream, everything reverts to raw strings.</p>
+    <p><strong>What gets harder to change.</strong> The wrapper's guarantees stop at the edge, so every raw-string spot must be re-audited whenever version or origin rules get stricter. Old "already canonical" comments still mark the spots the wrapper was meant to make unnecessary.</p>
+    <p><strong>The fix.</strong> Thread the wrapper types (<code>&amp;AztecVersion</code>, <code>&amp;CanonicalOrigin</code>) through the hot paths instead of unwrapping them early.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>AztecVersion:</strong> <code>server.rs:37,87</code>, <code>prove.rs:38-40,74-89,140-159</code>, <code>bb.rs:18,27-32,75-81</code>, <code>versions/mod.rs:154-156,191-197,356-371</code>, <code>downloader.rs:21-54,116,156</code>. <strong>CanonicalOrigin:</strong> raw <code>&amp;str</code> in request()/by_origin/popup/remove_approved_origin; <code>authorization.rs:249-253</code>.</p>
+    <p><strong>Refactoring:</strong> Change Function Signature to pass the newtypes through.</p>
+  </details>
+</div>
+
+<!-- F-09 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Medium</span><span class="fid">F-09</span><span class="ftitle">Two lookup tables kept in sync by hand</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Temporal Coupling</span><span class="chip chip-info">structural</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The authorization manager keeps two indexes (by origin, by request id) that must be updated together on every change, with a defensive guard already hinting the sync is fragile.</p>
+    <p><strong>What gets harder to change.</strong> Add cancellation or expiry and you must remember to touch both tables in every mutator; one miss leaves a stuck or unresolvable request.</p>
+    <p><strong>The fix.</strong> Wrap the pair in one <code>PendingAuthorizations</code> type with methods that update both — or drop the second table entirely (it holds ≤10 entries; a scan is fine).</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> <code>authorization.rs:172-176,213-217,224-231,240-241</code> (defensive desync at <code>214</code>).</p>
+    <p><strong>Refactoring:</strong> Extract Class / Introduce Bidirectional Map.</p>
+  </details>
+</div>
+
+<!-- F-10 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Medium</span><span class="fid">F-10</span><span class="ftitle">Updater and crash-recovery share a hand-coded disarm/rearm protocol (Windows)</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Temporal Coupling + Inappropriate Intimacy</span><span class="chip chip-info">structural</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> On Windows, installing an update must disarm crash-recovery, install, then re-arm it — and re-arm on <em>every</em> exit path. The updater hand-codes this and re-arms in three spots, guarded by a comment ("every path that leaves the app running must end armed").</p>
+    <p><strong>What gets harder to change.</strong> Add a new early-return to the update flow and you'll forget to re-arm; the Windows recovery rule leaks into the updater.</p>
+    <p><strong>The fix.</strong> A guard object that re-arms automatically when it drops — <code>suspend_for_update(app, || install)</code> — so forgetting becomes impossible.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> <code>updater.rs:146-189</code> (3 rearm sites ~159/169/177) ↔ <code>crash_recovery.rs:12-18,26-29,322-349</code>, quit at <code>main.rs:338-347</code>.</p>
+    <p><strong>Refactoring:</strong> Introduce Guard Object (RAII <code>CrashRecoverySuspendGuard</code> + <code>defuse()</code> on restart).</p>
+  </details>
+</div>
+
+<!-- F-11 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Medium</span><span class="fid">F-11</span><span class="ftitle">The SDK's main proving method mixes six reasons to change</span></div>
+  <div class="meta"><span class="chip chip-info">both</span><span class="chip chip-info">Divergent Change + Long Method</span><span class="chip chip-info">structural</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> <code>createChonkProof</code> mixes UI phase events, availability fallback, 403-denial handling, request serialization, prove-duration extraction, and proof decoding.</p>
+    <p><strong>What gets harder to change.</strong> Six different kinds of change all land in the same method, so unrelated edits collide and the phase sequence is hard to trace.</p>
+    <p><strong>The fix.</strong> Extract three helpers (remote-prove / unavailable-fallback / decode-with-timing). Best done alongside F-05 and F-06 — same file.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instance:</strong> <code>accelerator-prover.ts:330-398</code> (phases <code>340,350,357,362-363,381,393,396</code>; fallback <code>343-346,369-383</code>; response <code>387-398</code>).</p>
+    <p><strong>Refactoring:</strong> Extract Method ×3.</p>
+  </details>
+</div>
+
+<!-- F-12 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-med">Medium</span><span class="fid">F-12</span><span class="ftitle">~715 lines of tests stranded in server.rs from a past refactor</span></div>
+  <div class="meta"><span class="chip chip-info">claude (codex partial)</span><span class="chip chip-info">Misplaced tests / Shotgun-Surgery residue</span><span class="chip chip-info">structural</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> A prior extraction moved code into <code>prove.rs</code>/<code>auth.rs</code>/<code>host.rs</code> but left their tests behind in <code>server.rs</code>, making it look like a 1424-line monolith when its real code is ~330 lines.</p>
+    <p><strong>What gets harder to change.</strong> Editing <code>prove.rs</code> means hunting its tests two files away; the file reads as huge and intimidating.</p>
+    <p><strong>The fix.</strong> Move each test block to the file it tests. Pure test move, zero production risk; <code>server.rs</code> drops to ~700 lines.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instance:</strong> production <code>server.rs:1-328</code>; tests <code>server.rs:330-1424</code> exercise the submodules, which have ~zero inline tests.</p>
+    <p><strong>Refactoring:</strong> Move Function (tests → owning modules).</p>
+  </details>
+</div>
+
+<!-- F-13 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-low">Low</span><span class="fid">F-13</span><span class="ftitle">"Lock, change, save" config pattern copied three times — with three different failure behaviors</span></div>
+  <div class="meta"><span class="chip chip-info">claude + map (codex disagreed → resolved)</span><span class="chip chip-info">Duplicate Code</span><span class="chip chip-info">local · cross-crate</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The lock→mutate→save pattern appears three times, and they behave differently when the save <em>fails</em>: one propagates the error, one logs a warning, one ignores it. A helper exists but two copies can't reach it (it lives in the wrong crate).</p>
+    <p><strong>What gets harder to change.</strong> A developer reading one site can't assume the others behave the same on save failure; adding fsync or retry means finding all three.</p>
+    <p><strong>The fix.</strong> Move one <code>lock_mutate_save</code> helper into <code>core/config.rs</code> so both crates share it and one save-failure policy.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances (verified):</strong> <code>commands.rs:12-19</code> (propagates) · <code>core/server/auth.rs:117-126</code> (warns) · <code>main.rs:98-104</code> reset_safari_support (<code>let _ =</code>, swallows). Codex's "already resolved" was a partial view — core's <code>auth.rs</code> can't import the <code>src-tauri</code> helper.</p>
+    <p><strong>Refactoring:</strong> Move helper to <code>core/config.rs</code>.</p>
+  </details>
+</div>
+
+<!-- F-14 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-low">Low</span><span class="fid">F-14</span><span class="ftitle">"Is this loopback?" implemented three times, with differing ::1 handling</span></div>
+  <div class="meta"><span class="chip chip-info">map (single-source)</span><span class="chip chip-info">Duplicate Code</span><span class="chip chip-info">local</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Three functions each carry their own copy of "is this <code>127.0.0.1</code> / <code>localhost</code> / <code>::1</code>?", and the <code>::1</code> bracket handling isn't identical between them.</p>
+    <p><strong>What gets harder to change.</strong> Adding or adjusting a loopback form means editing three places consistently by hand.</p>
+    <p><strong>The fix.</strong> One <code>is_loopback_host()</code> helper in core, called by all three. <em>(Whether the <code>::1</code> difference is also a real bug is a separate question for a bug audit — not scored here.)</em></p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instances:</strong> <code>server/host.rs</code> host_is_trusted, <code>authorization.rs</code> is_auto_approved, <code>authorization.rs</code> canonicalize_origin.</p>
+    <p><strong>Refactoring:</strong> Extract a shared <code>is_loopback_host()</code>.</p>
+  </details>
+</div>
+
+<!-- F-15 -->
+<div class="finding">
+  <div class="fh"><span class="chip chip-low">Low</span><span class="fid">F-15</span><span class="ftitle">Config load/save hardcode the path, so the test re-implements save</span></div>
+  <div class="meta"><span class="chip chip-info">claude</span><span class="chip chip-info">Global Data</span><span class="chip chip-info">local</span><span class="chip chip-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> <code>load()</code>/<code>save()</code> hardcode the config file path, so the roundtrip test has to re-implement <code>save</code> to point at a temp file — and the atomic write-tmp-rename block has no test of its own.</p>
+    <p><strong>What gets harder to change.</strong> You can't test load/save against a temp path without env tricks, and a test that duplicates <code>save</code> can't catch a real <code>save</code> regression.</p>
+    <p><strong>The fix.</strong> Add <code>load_from(path)</code>/<code>save_to(path)</code> with the hardcoded path as a thin wrapper; point the test at a tempdir.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <p class="ix"><strong>Instance:</strong> <code>core/src/config.rs</code> load()/save() + its roundtrip test.</p>
+    <p><strong>Refactoring:</strong> Parameterize the path (Extract / Introduce Parameter).</p>
+  </details>
+</div>
+
+<h2>Cross-cutting observations</h2>
+
+<h3>Comment-enforced invariants are the systemic theme</h3>
+<p>F-01, F-06, F-09, F-10, and F-13 share one root: an ordering or a two-place state held in sync by a <code>// must…</code> comment instead of by a type or structure. The heavy <code>SEC-xx/Q-xx/F-xx</code> why-comment habit is excellent documentation but is doubling as the <em>enforcement</em> mechanism — and F-01 proves that fails. Converting the highest-traffic of these into structural seams (guard objects, owned state transitions, template methods) removes a whole bug class.</p>
+
+<h3>Prior refactors genuinely paid down the big-ticket duplication</h3>
+<p>The expected "cross-crate AppState/gating duplication" came back <em>mostly already resolved</em> by the #325 core extraction — both models credited it. What remains cross-crate is a ~6-line tracing bootstrap (Low) and the stranded <code>server.rs</code> tests (F-12). The crate split is deliberately not a Cargo workspace and that's working — don't re-litigate it.</p>
+
+<h3>Parse-don't-validate is adopted but not finished</h3>
+<p><code>AztecVersion</code> and <code>CanonicalOrigin</code> exist and are correct at their construction edge, then decay to <code>&amp;str</code> downstream (F-08). The pattern is right; the follow-through is the remaining work.</p>
+
+<h3>Refuted leads (signal, not noise)</h3>
+<p>The agents rejected eight size-based or duplication leads outright — <code>server.rs</code> and <code>versions/mod.rs</code> "Large Class" (both ~60% tests), <code>crash_recovery</code>'s three platform impls (cleanly trait-dispatched), the network-tier retention "switch" (already a table), the bb-resolution ladder, <code>tls.rs</code>, <code>mutate_config</code> as Middle Man, and the config "Data Clump." Refuting is the discipline that keeps the finding list honest.</p>
+
+<footer>
+  Engineering detail: <a href="report.md">report.md</a> · <a href="findings/consolidated.md">consolidated.md</a> · <a href="findings/verified.md">verified.md</a> · raw cluster outputs in <a href="raw/">raw/</a>.<br>
+  Maintainability only — no security or correctness scoring. The report is the deliverable; no code was changed.
+</footer>
+
+</body>
+</html>
