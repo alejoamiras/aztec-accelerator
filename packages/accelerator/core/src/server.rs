@@ -566,6 +566,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // `#[serial]`: this test is a READER of the process-global `BB_BINARY_PATH` (via `find_bb` in
+    // both the skip-guard and the handler). `#[serial]` only excludes other `#[serial]` tests, so an
+    // unmarked reader still overlaps the serial writer (`prove_success_path_and_status_sequence`) —
+    // its fake exit-0 bb then turns this 500-assertion into a 200 (the CI flake on #346/#347).
+    #[serial]
     async fn prove_returns_error_when_bb_not_found() {
         // This test exercises the "bb not found" error path. When bb IS installed
         // on the dev machine, find_bb() succeeds and the real bb binary runs with
@@ -770,7 +775,16 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake_bb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // RAII: unset `BB_BINARY_PATH` even if the request below panics — a leaked var would poison
+        // every later `find_bb`-reading test in this process (they'd all see the fake bb).
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("BB_BINARY_PATH");
+            }
+        }
         std::env::set_var("BB_BINARY_PATH", &fake_bb);
+        let _guard = EnvGuard;
 
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let rec = recorded.clone();
@@ -794,7 +808,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("BB_BINARY_PATH");
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
@@ -1383,6 +1396,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // `#[serial]`: same `BB_BINARY_PATH` reader race as `prove_returns_error_when_bb_not_found` —
+    // garbage bodies DO reach bb (no deserialization gate before the spawn), so the serial writer's
+    // fake exit-0 bb can turn this not-2xx assertion into a 200.
+    #[serial]
     async fn prove_handles_empty_body() {
         let app = router(AppState::default());
         let response = app
