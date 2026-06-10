@@ -317,7 +317,8 @@ close (code-review + codex post-impl) is the verification. *(User picked "standa
   - F-03 ✓ (d02f914 test-first + 0c0d0d5 enum; text/plain + invalid_host pinned; 133/133)
   - F-15 ✓ (f31b203 — config load_from/save_to; 133/133)
   - F-09 ✓ (PendingState::insert/remove encapsulation; auth-flow tests + 133/133)
-  - F-01 ⬜ (test-first: launch-vs-settings) · F-04 ⬜ · F-10 ⬜ (test-first: rearm-before-restart) · F-13 ⬜ (core helper + src-tauri callers) — all src-tauri/cross-crate, next batch
+  - F-13 ✓ (core::config::lock_mutate_save + 3 callers; core 133/133 + src-tauri 19+3, both crates clippy-clean)
+  - F-01 ⬜ (test-first: launch-vs-settings) · F-04 ⬜ (.setup extract) · F-10 ⬜ (test-first: rearm-before-restart) — all src-tauri, next batch
 - **PR-3 ⬜:** F-07 · F-08 (incl. CanonicalOrigin threading that overlaps F-09 — see D-2).
 - **DEFERRED (gate decision, tracked-issue follow-ups, count ✓-resolved):** F-14 (loopback `::1`/`[::1]` → `/harden bugs` first) · F-08 `"unknown"` sentinel→Option (SDK wire contract).
 - **Per-PR close still owed:** PR-2 + PR-3 each need `/code-review max --fix` + codex post-impl on the diff + green cross-OS CI before merge.
