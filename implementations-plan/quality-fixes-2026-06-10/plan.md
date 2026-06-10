@@ -320,7 +320,8 @@ close (code-review + codex post-impl) is the verification. *(User picked "standa
   - F-13 ✓ (core::config::lock_mutate_save + 3 callers; core 133/133 + src-tauri 19+3, both crates clippy-clean)
   - F-10 ✓ (CrashRecoveryGuard rearm-before-restart, test-first; macOS clippy+3 guard tests, Windows path CI-validated)
   - F-01 ✓ (codex-consulted LIGHTER-SHAPE: pure LaunchHttpsGate classifier, 4 characterization tests FIRST incl. short-circuits + reset-vs-skip; deviation AFK-logged in lessons/phase-2.md)
-  - F-04 ⬜ (.setup extract) — LAST PR-2 finding
+  - F-04 ✓ (build_tray + build_desktop_state extracted; status consumed-by-value = clone-before-move compiler-enforced; manage-before-webdriver/HTTP kept inline; clippy default+webdriver features clean)
+  - ALL 8 PR-2 findings done — close sequence: /code-review max --fix → codex post-impl → push → cross-OS CI → merge
 - **PR-3 ⬜:** F-07 · F-08 (incl. CanonicalOrigin threading that overlaps F-09 — see D-2).
 - **DEFERRED (gate decision, tracked-issue follow-ups, count ✓-resolved):** F-14 (loopback `::1`/`[::1]` → `/harden bugs` first) · F-08 `"unknown"` sentinel→Option (SDK wire contract).
 - **Per-PR close still owed:** PR-2 + PR-3 each need `/code-review max --fix` + codex post-impl on the diff + green cross-OS CI before merge.
