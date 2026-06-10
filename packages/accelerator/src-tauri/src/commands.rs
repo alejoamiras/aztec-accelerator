@@ -120,24 +120,27 @@ pub fn respond_auth(
     };
     // SEC-06: resolve by the opaque `request_id`, NOT the origin. A tampered/guessed payload with a
     // wrong id is a harmless no-op (it can't resolve a *different* concurrent request, and the old
-    // origin-keyed resolve could); the real request then denies via its 60s timeout. The `origin` is
-    // used only to close the matching popup window (and, server-side in the `/prove` handler, to
-    // persist an `Allow { remember }`).
+    // origin-keyed resolve could); the real request then denies via its 60s timeout.
     auth.resolve(&request_id, decision);
 
-    // Close the authorization popup window (labelled by origin, matching windows.rs).
-    let label = format!("auth-{}", sanitize_window_label(&origin));
+    // Close the authorization popup window. SEC-06 post-impl (codex L3): the window is labelled by
+    // `request_id`, NOT origin — origin-keying let a resolved request's stale 60s timeout close the
+    // *live* window of a newer same-origin request (and respond_auth close the wrong one). `origin` is
+    // kept on the payload for diagnostics only.
+    tracing::debug!(origin = %origin, %request_id, allowed, "respond_auth decision");
+    let label = format!("auth-{}", sanitize_window_label(&request_id));
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.close();
     }
 }
 
-/// Create a unique, collision-free window label from an origin string.
-/// Uses a truncated SHA-256 hash to avoid collisions between similar origins
-/// (e.g. `example.com` vs `example_com` would collide with naive character replacement).
-pub fn sanitize_window_label(origin: &str) -> String {
+/// Create a unique, collision-free window label from an arbitrary key (an origin or, for auth
+/// popups, the opaque `request_id`). Uses a truncated SHA-256 hash to avoid collisions between
+/// similar keys (e.g. `example.com` vs `example_com` would collide with naive character replacement)
+/// and to keep the label charset window-system-safe.
+pub fn sanitize_window_label(key: &str) -> String {
     use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(origin.as_bytes());
+    let hash = Sha256::digest(key.as_bytes());
     hex::encode(&hash[..6])
 }
 
@@ -150,6 +153,15 @@ pub async fn enable_safari_support(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     use crate::certs;
+
+    // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
+    // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
+    // Safari HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
+    // the condition the startup gate closes. Fail closed: if the legacy key cannot be removed, refuse
+    // to enable (surfaced to the Settings UI). HTTP is unaffected.
+    certs::migrate_legacy_ca_key().map_err(|e| {
+        format!("Legacy CA key could not be removed; refusing to enable Safari HTTPS: {e}")
+    })?;
 
     certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
 

@@ -73,14 +73,18 @@ pub fn open_settings_window(app: &AppHandle) {
 /// Show the authorization popup for an unknown origin.
 /// Spawns a 60s timeout that auto-denies if the user doesn't respond.
 /// If the user closes the window without responding, the timeout will still
-/// fire and resolve all pending requests for this origin with Deny.
+/// fire and resolve THIS request (by `request_id`) with Deny.
 pub fn show_auth_popup_window(
     app: &AppHandle,
     origin: &str,
     request_id: &str,
     auth_manager: &Arc<AuthorizationManager>,
 ) {
-    let label = format!("auth-{}", commands::sanitize_window_label(origin));
+    // SEC-06 post-impl (codex L3): label the window by `request_id`, NOT origin. Origin-keying made a
+    // resolved request's stale 60s timeout (and respond_auth) close the *live* window of a newer
+    // same-origin request that reused the label. Only the first pending request per origin shows a
+    // popup (piggyback gate in server/auth.rs), so per-request labels never duplicate a popup.
+    let label = format!("auth-{}", commands::sanitize_window_label(request_id));
     // SEC-06: carry the opaque request_id so the popup echoes it back to respond_auth.
     let url = format!(
         "authorize.html?origin={}&requestId={}",
@@ -99,14 +103,14 @@ pub fn show_auth_popup_window(
             focus_if_open: false,
         },
     ) {
-        return; // popup already open for this origin — don't spawn a duplicate timeout
+        return; // popup already open for this request — don't spawn a duplicate timeout
     }
 
     // Spawn 60s timeout — always resolve with Deny if still pending.
     // This handles both: (a) user ignoring the popup, and (b) user closing the
     // window without clicking Allow/Deny. In case (b), the window is gone but
-    // the pending senders are still in the HashMap. resolve() is a no-op if the
-    // origin was already resolved by respond_auth (senders already consumed).
+    // the pending sender is still in the map. resolve() is a no-op if this
+    // request was already resolved by respond_auth (sender already consumed).
     let app_handle = app.clone();
     let origin_owned = origin.to_string();
     let request_id_owned = request_id.to_string();

@@ -90,9 +90,22 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
     // pointing at a multi-GB blob is a memory-DoS. Reject up front when the feed's advertised `size`
     // exceeds the ceiling, BEFORE `download()`. This keeps the plugin's verified download path intact
     // (no hand-rolled crypto). Availability-only: minisign still rejects tampered *bytes*; this just
-    // stops the buffer blow-up. A feed that OMITS `size` proceeds (older feeds) — the residual (a
-    // feed-controlling attacker omitting size to bypass the cap) already implies feed compromise,
-    // which the signature check, not the size cap, is the control for.
+    // stops the buffer blow-up.
+    //
+    // Residual (codex post-impl M2 + re-audit, tracked #345): this cap is best-effort and does NOT
+    // stop a *malicious* feed. Be honest about why — for the *availability* property the signature
+    // check is NOT the control, because the plugin buffers BEFORE it verifies. The advertised `size`
+    // lives in the same `raw_json` the (attacker-controlled) feed supplies, so it is NOT an independent
+    // authority: an attacker who can tamper the manifest defeats the cap either by OMITTING `size` (the
+    // `None` arm proceeds) OR by declaring a small false `size` while pointing `url` at a huge blob —
+    // both re-open the memory-DoS WITHOUT the signing key. So "make `size` mandatory" is INSUFFICIENT
+    // (a present size can lie). The only real fix is an independent bound on bytes actually read in the
+    // download path (a streaming abort cap), which `tauri-plugin-updater` does not expose — its
+    // `download()` buffers into an unbounded Vec with a non-aborting callback. Closing it needs either
+    // upstream plugin support for a streaming cap or replacing the verified download path — and the
+    // self-managed reqwest+minisign rewrite was rejected in audit R3 (it would make a hand-rolled
+    // verify the sole authenticity control = signature-bypass risk). Hence deferred, not "flip a flag":
+    // availability-only, requires feed compromise, integrity still enforced by minisign on the bytes.
     match advertised_update_size(&update) {
         Some(size) if size > MAX_UPDATE_BYTES => {
             tracing::error!(

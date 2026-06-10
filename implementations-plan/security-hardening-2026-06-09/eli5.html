@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — security-hardening-2026-06-09</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Security hardening — the localhost gate, the updater, and the certs</h1>
+  <p>The accelerator runs a tiny web server on your own machine that web pages talk to, so they can offload heavy proving to it. Our security audit found that a malicious website could sneak past the "who's allowed?" check, and a few other sharp edges around downloading the proving binary and managing certificates. This plan fixes 8 of the 9 findings (the 9th needs the Aztec team to sign their releases first — deferred with a note). It ships as 5 small pull requests, safest change first.</p>
+
+  <h2>Why this tier was chosen (deep)</h2>
+  <p>Two risk dimensions scored HIGH: <strong>blast radius</strong> (we're changing the security gate on an app that auto-updates real users — a mistake locks out legit sites or opens the door) and <strong>security sensitivity</strong> (it's literally a security plan on the trust boundary). Two HIGH ⇒ deep. That earned its keep: three independent planners agreed on the shape, then two adversarial auditors (codex + a fresh Opus reviewer) each found real problems — including one Critical hole the planners had completely missed — which we folded in before asking for your approval.</p>
+
+  <h2>Phases (the 5 PRs)</h2>
+  <div class="phase">
+    <h3>PR-1 — The keystone: check the "Host" label</h3>
+    <p>The attack ("DNS rebinding") works because the server only ever looked at one label on incoming requests (the "Origin") and never the "Host". We add a check that rejects any request whose Host isn't literally your own machine (<code>127.0.0.1</code>/<code>localhost</code>/<code>[::1]</code>) on the exact port. This one check kills the main attack, and — importantly — it breaks nothing, because every real client already sends the right Host. Ships first, alone, low-risk.</p>
+  </div>
+  <div class="phase">
+    <h3>PR-2 — Close the gate properly: Origin, headless default, /health, and localhost</h3>
+    <p>Build on PR-1: stop the headless server from approving <em>everyone</em> when it's started with no allowlist (you opt back into that with <code>--allow-all</code>); shrink what the public <code>/health</code> endpoint tells random websites (version, cache) while still letting your own tools read the details; and — the Critical the audit caught — stop <em>silently</em> trusting any page running on localhost. A bad local program shouldn't get free proving with no prompt.</p>
+  </div>
+  <div class="phase">
+    <h3>PR-3 — Give each approval its own ticket</h3>
+    <p>Today an Approve/Deny is matched to a request by the site's name. We switch to a unique, unguessable ticket per request, so a malformed reply can't silently miss and two requests from the same site can't share one decision.</p>
+  </div>
+  <div class="phase">
+    <h3>PR-4 — Don't let the updater eat all your memory</h3>
+    <p>The self-updater loads the whole download into memory before checking its signature. We add a size limit up front so a tampered feed can't point it at a giant file. (The audit talked us <em>out</em> of a fancier rewrite here — re-implementing the signature check ourselves would have been riskier than the problem it solved.)</p>
+  </div>
+  <div class="phase">
+    <h3>PR-5 — Tidy the download and certificate edges</h3>
+    <p>Cap how much the proving-binary archive can expand to (anti "zip bomb"); if an old leftover certificate key can't be deleted, refuse to start Safari HTTPS rather than limping on; and verify a new certificate properly chains before swapping it in. Plus a code note + tracking issue for the deferred bb-signature finding (the real fix needs Aztec to sign their nightly releases).</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p>"DNS rebinding" is the classic way a website attacks a service running on your own computer: it loads a page from <code>evil.com</code>, then quietly re-points <code>evil.com</code> at <code>127.0.0.1</code> so its next request lands on your local server while the browser still thinks it's the same site. The fix is to check the <em>Host</em> label, which still says <code>evil.com</code> — so we reject it. Everything else in this plan is defense-in-depth layered behind that one check. None of these were caused by the recent quality-fixes work; they're standing issues the audit surfaced.</p>
+
+  <h2>Open question — your call</h2>
+  <ul>
+    <li><strong>Localhost prompt (from the Critical finding C1).</strong> To close the "any local page is silently trusted" hole, the default becomes: a localhost page gets <em>one</em> approval prompt (then remembered), instead of silent auto-approval. That's slightly less zero-config for the playground/dev dApps (one extra click, once). The alternative is to keep silent auto-approval as the default and just document the risk + ship a toggle. The plan currently picks the <em>secure</em> default (prompt-once). Tell me if you'd rather keep silent-by-default.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope: 8 findings now, SEC-02 (bb signature) deferred with a tracked note.</li>
+      <li>Confirm tier: <code>deep</code> (2 HIGH risk dimensions).</li>
+      <li><strong>Confirm the localhost default</strong> — prompt-once (secure, recommended) vs silent-by-default (zero-config).</li>
+      <li>Confirm rollout: ship to prod via auto-update + re-run <code>/harden security</code> afterward.</li>
+      <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>Two options for the autonomous implementation session. <code>/goal</code> survives <code>claude --resume</code> and acts as a durable stop condition; <code>/loop</code> handles the per-session PR-by-PR cadence and CI watching. Last time we ran both together (a <code>/goal</code> stop-hook + a <code>/loop</code> for cadence) and it worked well.</p>
+    <p class="warning">Use exactly ONE per session as the active driver — they don't compose within a single session (setting one replaces the other).</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /loop (PR-by-PR with CI cadence)</h3>
+      <pre><code>/loop Implement security-hardening-2026-06-09 PR-by-PR (PR-1 Host guard → PR-2 origin/headless/health/localhost → PR-3 auth-id → PR-4 updater cap → PR-5 bb+cert+SEC-02 note). Each turn: read plan.md + lessons/; next pending PR → implement (concrete shapes in plan.md, incl. the R1–R10 revisions) → cargo test/clippy + bun test + tsc → commit per finding → push + gh pr create + watch CI. Failed check → triage, /codex xhigh if non-trivial, fix (stop after 5 fails). PR green → mark ✓ + lessons + LESSONS_FILE=…; merge; next. All merged → /code-review max --fix → codex post-impl → address high/critical → re-run /harden security → stop + surface. Never push to main; never merge without green CI; keep playground + SDK E2E (HTTP + Safari HTTPS) green.</code></pre>
+    </div>
+
+    <h3>Alternative: /goal (durable stop condition)</h3>
+    <pre><code>/goal All 5 PRs (PR-1..PR-5) for security-hardening-2026-06-09 merged-green; each PR's findings ✓ in plan.md with LESSONS_FILE=…/lessons/phase-N.md printed; /code-review max --fix applied+committed per PR; codex post-impl audit clean (or High/Critical addressed); bun run test + cargo test + cargo clippy -D warnings exit 0 and SDK tsc --noEmit green in the transcript; headless deny-by-default docs updated; SEC-02 deferral note + tracking issue filed; /harden security re-run. Never merge to main without green CI; keep playground + SDK E2E green.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a> · <a href="../../audit/security/2026-06-09-accel-closeout/report.html">Original audit report</a></p>
+</body>
+</html>
