@@ -323,5 +323,5 @@ close (code-review + codex post-impl) is the verification. *(User picked "standa
   - F-04 ✓ (build_tray + build_desktop_state extracted; status consumed-by-value = clone-before-move compiler-enforced; manage-before-webdriver/HTTP kept inline; clippy default+webdriver features clean)
   - ALL 8 PR-2 findings done — close sequence: /code-review max --fix → codex post-impl → push → cross-OS CI → merge
 - **PR-3 ⬜:** F-07 · F-08 (incl. CanonicalOrigin threading that overlaps F-09 — see D-2).
-- **DEFERRED (gate decision, tracked-issue follow-ups, count ✓-resolved):** F-14 (loopback `::1`/`[::1]` → `/harden bugs` first) · F-08 `"unknown"` sentinel→Option (SDK wire contract).
+- **DEFERRED ✓-resolved (tracked issues FILED):** F-14 → **#351** (loopback dedup; `/harden bugs` first) · F-08 `"unknown"` sentinel→Option → **#352** (SDK wire contract).
 - **Per-PR close still owed:** PR-2 + PR-3 each need `/code-review max --fix` + codex post-impl on the diff + green cross-OS CI before merge.
