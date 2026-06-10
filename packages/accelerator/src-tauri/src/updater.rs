@@ -92,17 +92,20 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
     // (no hand-rolled crypto). Availability-only: minisign still rejects tampered *bytes*; this just
     // stops the buffer blow-up.
     //
-    // Residual when the feed OMITS `size` (codex post-impl M2, tracked): the `None` arm proceeds. Be
-    // honest about why this is weaker than it looks — for the *availability* property the signature
-    // check is NOT the control, because the plugin buffers BEFORE it verifies. So an attacker who can
-    // only tamper the *manifest* (strip `size`, point the URL at a huge blob) re-opens the memory-DoS
-    // WITHOUT needing the signing key. The clean fix is to make `size` mandatory and fail closed on
-    // absence; it is deferred because the live prod `latest.json` is still size-less (PR-4 made the
-    // release workflow emit + assert `size` for all future cuts, but in-flight/served feeds predate
-    // it), so flipping now would brick auto-update until every served feed carries size. A
-    // self-managed ranged/HEAD Content-Length probe was rejected in audit R3 (do not reshape the
-    // verified download path). Flip to fail-closed once the served feed is confirmed to carry `size`
-    // across all supported update paths. See the tracking issue.
+    // Residual (codex post-impl M2 + re-audit, tracked #345): this cap is best-effort and does NOT
+    // stop a *malicious* feed. Be honest about why — for the *availability* property the signature
+    // check is NOT the control, because the plugin buffers BEFORE it verifies. The advertised `size`
+    // lives in the same `raw_json` the (attacker-controlled) feed supplies, so it is NOT an independent
+    // authority: an attacker who can tamper the manifest defeats the cap either by OMITTING `size` (the
+    // `None` arm proceeds) OR by declaring a small false `size` while pointing `url` at a huge blob —
+    // both re-open the memory-DoS WITHOUT the signing key. So "make `size` mandatory" is INSUFFICIENT
+    // (a present size can lie). The only real fix is an independent bound on bytes actually read in the
+    // download path (a streaming abort cap), which `tauri-plugin-updater` does not expose — its
+    // `download()` buffers into an unbounded Vec with a non-aborting callback. Closing it needs either
+    // upstream plugin support for a streaming cap or replacing the verified download path — and the
+    // self-managed reqwest+minisign rewrite was rejected in audit R3 (it would make a hand-rolled
+    // verify the sole authenticity control = signature-bypass risk). Hence deferred, not "flip a flag":
+    // availability-only, requires feed compromise, integrity still enforced by minisign on the bytes.
     match advertised_update_size(&update) {
         Some(size) if size > MAX_UPDATE_BYTES => {
             tracing::error!(

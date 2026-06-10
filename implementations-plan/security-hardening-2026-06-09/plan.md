@@ -124,6 +124,9 @@ Verdict: **SHIP-WITH-CHANGES** — no High/Critical; 2 Medium + 1 Low (two Claud
 
 Local gate after the fixes: `cargo fmt --check` ✓, `cargo clippy --all-targets -- -D warnings` ✓ (src-tauri+core), `cargo test` ✓ (src-tauri 19+3, core 132), `bun run test` ✓ (SDK `tsc --noEmit` + 120 unit tests, 0 fail). Lessons: `lessons/phase-6.md`.
 
+## Closeout re-audit (`/harden security`, run `2026-06-09-accel-reaudit-7f2a`)
+2× Claude opus cluster agents (ingress+auth; supply-chain+TLS+headless) + Codex xhigh consolidated, scoped to `packages/accelerator`, reading the resolved dep source (http 1.4.0 `Authority`, uuid v4, vendored `tauri-plugin-updater-2.10.1`). **All 8 findings (SEC-01, 01b/c, 03, 04, 05, 06, 07, 08) + M1 + L3 CONFIRMED CLOSED source→sink by all three agents.** No new High/Critical. One Medium residual = the **already-tracked updater memory-DoS (#345)**, sharpened by codex: the preflight `size` is attacker-controlled, so a malicious feed defeats the cap by OMITTING *or* LYING-LOW on `size` → "make `size` mandatory" is **insufficient**; the real fix is an independent download-path byte bound (streaming abort cap) which `tauri-plugin-updater` doesn't expose → needs upstream support or the R3-rejected rewrite. #345 + the `updater.rs:88` comment updated to reflect this. SEC-02 (#343) + SEC-09 (#344) deferrals confirmed still-open + accurately documented. Report (kept local, not pushed — open residuals on a public repo): `audit/security/2026-06-09-accel-reaudit-7f2a/report.{md,html}`.
+
 ## Seeds
 **/goal (recommended — completion is transcript-observable):**
 ```
