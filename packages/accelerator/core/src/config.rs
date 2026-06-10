@@ -92,8 +92,13 @@ pub fn config_path() -> PathBuf {
 /// (drop-invalid + dedupe), so already-canonical entries load 1:1 and no migration or
 /// on-disk resave is needed (F-02).
 pub fn load() -> AcceleratorConfig {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
+    load_from(&config_path())
+}
+
+/// q7e3-F-15: load from an explicit path (so tests exercise the real load instead of re-implementing
+/// it). Missing or malformed file → defaults.
+pub fn load_from(path: &std::path::Path) -> AcceleratorConfig {
+    match std::fs::read_to_string(path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
             tracing::warn!(path = %path.display(), error = %e, "Malformed config, using defaults");
             AcceleratorConfig::default()
@@ -127,10 +132,17 @@ where
     Ok(out)
 }
 
-/// Save config to disk. Creates parent directories if needed.
-/// Sets file permissions to 0o600 on Unix (owner read/write only).
+/// Save config to disk (to the default `config_path()`). Creates parent dirs; 0o600 on Unix.
 pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = config_path();
+    save_to(config, &config_path())
+}
+
+/// q7e3-F-15: save to an explicit path atomically (write-tmp-rename, 0o600 on Unix) — so tests exercise
+/// the real save (atomicity + perms + parent creation) instead of re-implementing it.
+pub fn save_to(
+    config: &AcceleratorConfig,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -160,7 +172,7 @@ pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error 
     {
         std::fs::write(&tmp_path, &json)?;
     }
-    std::fs::rename(&tmp_path, &path)?;
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -193,11 +205,11 @@ mod tests {
             ..Default::default()
         };
 
-        // Write via serde (same as save()) and read back
-        let json = serde_json::to_string_pretty(&original).unwrap();
-        std::fs::write(&cfg_path, &json).unwrap();
-        let loaded: AcceleratorConfig =
-            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        // q7e3-F-15: exercise the REAL save_to/load_from (atomic write-tmp-rename + 0o600 + the
+        // de_approved_origins deserializer) instead of re-implementing them — so this test can now
+        // catch a regression in save()/load() itself.
+        save_to(&original, &cfg_path).unwrap();
+        let loaded = load_from(&cfg_path);
 
         assert_eq!(loaded.safari_support, original.safari_support);
         assert_eq!(loaded.approved_origins, original.approved_origins);
