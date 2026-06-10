@@ -101,7 +101,7 @@ When no specific version is requested, the accelerator looks for the `bb` binary
 
 ## Site Authorization
 
-The accelerator uses a MetaMask-style approval flow. When a new website calls `/prove`, the user sees a popup asking to allow or deny access. Localhost origins are auto-approved (no popup for local development).
+The accelerator uses a MetaMask-style approval flow. When a new website calls `/prove`, the user sees a popup asking to allow or deny access. **Localhost origins are prompted once too** (then remembered if you choose **Remember**) — the desktop app no longer silently auto-approves localhost, so a malicious local page can't quietly use the accelerator. (The headless CI server *does* auto-approve localhost — it's an operator-controlled environment; see the [Headless Server section](#headless-server-for-ci-test-acceleration).)
 
 - **Allow + Remember**: the origin is saved to `~/.aztec-accelerator/config.json` and never prompted again
 - **Allow** (without Remember): approved for this session only
