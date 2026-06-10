@@ -90,9 +90,19 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
     // pointing at a multi-GB blob is a memory-DoS. Reject up front when the feed's advertised `size`
     // exceeds the ceiling, BEFORE `download()`. This keeps the plugin's verified download path intact
     // (no hand-rolled crypto). Availability-only: minisign still rejects tampered *bytes*; this just
-    // stops the buffer blow-up. A feed that OMITS `size` proceeds (older feeds) — the residual (a
-    // feed-controlling attacker omitting size to bypass the cap) already implies feed compromise,
-    // which the signature check, not the size cap, is the control for.
+    // stops the buffer blow-up.
+    //
+    // Residual when the feed OMITS `size` (codex post-impl M2, tracked): the `None` arm proceeds. Be
+    // honest about why this is weaker than it looks — for the *availability* property the signature
+    // check is NOT the control, because the plugin buffers BEFORE it verifies. So an attacker who can
+    // only tamper the *manifest* (strip `size`, point the URL at a huge blob) re-opens the memory-DoS
+    // WITHOUT needing the signing key. The clean fix is to make `size` mandatory and fail closed on
+    // absence; it is deferred because the live prod `latest.json` is still size-less (PR-4 made the
+    // release workflow emit + assert `size` for all future cuts, but in-flight/served feeds predate
+    // it), so flipping now would brick auto-update until every served feed carries size. A
+    // self-managed ranged/HEAD Content-Length probe was rejected in audit R3 (do not reshape the
+    // verified download path). Flip to fail-closed once the served feed is confirmed to carry `size`
+    // across all supported update paths. See the tracking issue.
     match advertised_update_size(&update) {
         Some(size) if size > MAX_UPDATE_BYTES => {
             tracing::error!(
