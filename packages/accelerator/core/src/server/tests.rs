@@ -612,9 +612,11 @@ fn auth_state_with_popup(
             config: Some(Arc::new(RwLock::new(cfg))),
             ..Default::default()
         }),
-        show_auth_popup: Some(Arc::new(move |origin: &str, request_id: &str| {
-            let _ = popup_tx.send((origin.to_string(), request_id.to_string()));
-        })),
+        show_auth_popup: Some(Arc::new(
+            move |origin: &crate::authorization::CanonicalOrigin, request_id: &str| {
+                let _ = popup_tx.send((origin.to_string(), request_id.to_string()));
+            },
+        )),
         ..Default::default()
     };
     (state, auth)
@@ -886,7 +888,10 @@ async fn prove_returns_429_when_too_many_pending_origins() {
     // Fill the AuthorizationManager to capacity (MAX_PENDING_ORIGINS = 10)
     let auth = state.auth_manager.as_ref().unwrap();
     for i in 0..10 {
-        let _ = auth.request(&format!("https://origin-{i}.com"));
+        let origin =
+            crate::authorization::CanonicalOrigin::parse(&format!("https://origin-{i}.com"))
+                .unwrap();
+        let _ = auth.request(&origin);
     }
 
     // The 11th distinct origin should get 429
