@@ -1023,8 +1023,9 @@ fn resolve_version_rejects_invalid_version() {
     let version = Some("../../../etc/passwd".to_string());
     let result = resolve_version(&state, &version);
     assert!(result.is_err());
-    let (status, _) = result.unwrap_err();
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // q7e3-F-03: ProveError is now a typed enum; assert via its IntoResponse status (still BAD_REQUEST).
+    let err = result.unwrap_err();
+    assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
 }
 
 #[test]

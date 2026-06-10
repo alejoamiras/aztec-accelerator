@@ -17,3 +17,21 @@ codex post-impl on the PR-1 diff: **SHIP** — no behavior delta; all 4 (F-02/05
 
 ## Remaining PR-2 order
 F-12 → F-03 [test-first: invalid_host + text/plain] → F-01 [test-first: launch-vs-settings] → F-04 → F-09 → F-10 [test-first: rearm-before-restart] → F-13 → F-15. (F-14 deferred → tracked issue.)
+
+## F-12 ✓ (committed 7cb82f1)
+File-extracted `server.rs` `mod tests` → `server/tests.rs` (`mod tests;`); `super::*` paths unchanged (file module = same module-tree node). server.rs 1424→331; core 132/132; clippy clean.
+
+## F-03 — test-first DONE (committed), enum refactor NEXT
+- **Characterization committed** (`q7e3-F-03` test): `invalid_host_reply_stays_application_json_without_message` pins host.rs's 403 + `application/json` + `{"error":"invalid_host"}` (NO message). Plus the existing `prove_error_responses_stay_text_plain_json_string` pins the prove/auth text/plain `{error,message}` sites. core 133/133.
+- **Enum to implement** (`server.rs:312` `type ProveError = (StatusCode, String)` → `enum ProveError` + `impl IntoResponse` delegating to `(status, json_error(code, &msg)).into_response()` so Content-Type stays text/plain; `json_error`/`ProveErrorBody` stay). **host.rs EXCLUDED** — keep its `axum::Json` invalid_host. Variants (exact status/code/message — copy verbatim):
+  - `InvalidVersion(String v)` → BAD_REQUEST, "invalid_version", `format!("Invalid x-aztec-version header (got '{v}')")` (prove.rs:64)
+  - `PayloadTooLarge(String e)` → PAYLOAD_TOO_LARGE, "payload_too_large", `format!("Body too large or unreadable: {e}")` (prove.rs:123)
+  - `ServiceUnavailable` → SERVICE_UNAVAILABLE, "service_unavailable", "Proving service shutting down" (prove.rs:135)
+  - `DownloadFailed{version,detail}` → INTERNAL_SERVER_ERROR, "download_failed", `format!("Failed to download bb v{version}: {detail}")` (prove.rs:183)
+  - `ProveFailed(String e)` → INTERNAL_SERVER_ERROR, "prove_failed", `e` (prove.rs:223, `e.to_string()`)
+  - `InvalidOrigin` → BAD_REQUEST, "invalid_origin", "Origin header is not a valid RFC 6454 origin" (auth.rs:41)
+  - `OriginDenied(String origin)` → FORBIDDEN, "origin_denied", `format!("Access denied for origin: {origin}")` (auth.rs:67 AND :132)
+  - `TooManyRequests` → TOO_MANY_REQUESTS, "too_many_requests", "Too many pending authorization requests" (auth.rs:79)
+  - `AuthorizationTimeout` → FORBIDDEN, "authorization_timeout", "Authorization request timed out" (auth.rs:99)
+  - `AuthorizationCancelled` → FORBIDDEN, "authorization_cancelled", "Authorization request was cancelled" (auth.rs:105)
+  - Update 11 call sites (prove.rs ×5, auth.rs ×6) to `Err(ProveError::Variant(..))`. Check `/prove` handler still returns `Result<_, ProveError>` (axum calls `.into_response()` on Err). Validate: 133/133 + the 2 characterization tests.

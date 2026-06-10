@@ -309,7 +309,79 @@ async fn health(
     axum::Json(body)
 }
 
-type ProveError = (StatusCode, String);
+/// Typed `/prove` + auth error (q7e3-F-03). Each variant maps to a fixed (status, error-code); the
+/// `IntoResponse` impl renders the SAME `text/plain` JSON-string body the prior `(StatusCode,
+/// json_error(..))` tuples produced (SDK `ky` keys on `text/plain` — pinned by
+/// `prove_error_responses_stay_text_plain_json_string`). The host-guard's `invalid_host` reply is
+/// deliberately NOT modeled here — it stays `axum::Json` (`application/json`, no `message`), pinned by
+/// `invalid_host_reply_stays_application_json_without_message`.
+#[derive(Debug)]
+pub(crate) enum ProveError {
+    InvalidVersion(String),
+    PayloadTooLarge(String),
+    ServiceUnavailable,
+    DownloadFailed { version: String, detail: String },
+    ProveFailed(String),
+    InvalidOrigin,
+    OriginDenied(String),
+    TooManyRequests,
+    AuthorizationTimeout,
+    AuthorizationCancelled,
+}
+
+impl IntoResponse for ProveError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, code, message): (StatusCode, &str, String) = match self {
+            ProveError::InvalidVersion(v) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_version",
+                format!("Invalid x-aztec-version header (got '{v}')"),
+            ),
+            ProveError::PayloadTooLarge(e) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!("Body too large or unreadable: {e}"),
+            ),
+            ProveError::ServiceUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "Proving service shutting down".to_string(),
+            ),
+            ProveError::DownloadFailed { version, detail } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "download_failed",
+                format!("Failed to download bb v{version}: {detail}"),
+            ),
+            ProveError::ProveFailed(e) => (StatusCode::INTERNAL_SERVER_ERROR, "prove_failed", e),
+            ProveError::InvalidOrigin => (
+                StatusCode::BAD_REQUEST,
+                "invalid_origin",
+                "Origin header is not a valid RFC 6454 origin".to_string(),
+            ),
+            ProveError::OriginDenied(origin) => (
+                StatusCode::FORBIDDEN,
+                "origin_denied",
+                format!("Access denied for origin: {origin}"),
+            ),
+            ProveError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_requests",
+                "Too many pending authorization requests".to_string(),
+            ),
+            ProveError::AuthorizationTimeout => (
+                StatusCode::FORBIDDEN,
+                "authorization_timeout",
+                "Authorization request timed out".to_string(),
+            ),
+            ProveError::AuthorizationCancelled => (
+                StatusCode::FORBIDDEN,
+                "authorization_cancelled",
+                "Authorization request was cancelled".to_string(),
+            ),
+        };
+        (status, json_error(code, &message)).into_response()
+    }
+}
 
 /// Typed `/prove` error body. Serialized to a JSON string and returned via `(StatusCode, String)`
 /// so the Content-Type stays `text/plain` — NOT `axum::Json` (which would flip it to
