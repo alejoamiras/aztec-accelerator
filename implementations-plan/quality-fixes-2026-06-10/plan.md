@@ -30,7 +30,8 @@ and finishing parse-don't-validate (F-08). Each is independently revertible.
 
 ## PR structure (3 PRs; sequence matters where files overlap)
 
-### PR-1 ✅/⬜ — SDK maintainability (one package, type-stable) — `packages/sdk`
+### PR-1 ✅ MERGED #349 — SDK maintainability (one package, type-stable) — `packages/sdk`
+*F-02 ✓ · F-06 ✓ (characterization-first) · F-05 ✓ · F-11 ✓. tsc + 45/45 unit; /code-review clean; codex post-impl SHIP (behavior-preserving confirmed); CI green; merged 2026-06-10.*
 *Independent of the Rust work; can land first or in parallel. The 4 findings all live in the 440-LOC
 hotspot file, so they ship together by necessity (the report's "ship together" set).*
 
@@ -308,3 +309,19 @@ close (code-review + codex post-impl) is the verification. *(User picked "standa
 ```
 /loop 15m Drive implementations-plan/quality-fixes-2026-06-10 forward, never idle. Each firing: read plan.md + lessons/ (authoritative); git status + log; PR open? gh pr view --json statusCheckRollup (no --watch); CI in-flight? gh run watch up to 10m. No task in hand? next pending finding in order (PR-1 F-02→F-06[test-first]→F-05→F-11; PR-2 F-12→F-03[test-first]→F-01[test-first]→F-04→F-09→F-10[test-first]→F-13→F-15; PR-3 F-07→F-08) → characterization-test-first where required → edit → cargo/bun test + clippy → commit (q7e3-F-NN prefix) → push. Stuck/decision? /codex xhigh, decide, log; never merge to main / never push to main / never expand scope. 5 fails same step? stop, reassess w/ codex. Phase green? mark ✓ in plan.md, file lessons, print LESSONS_FILE=…, advance. All ✓? per-PR already had /code-review max --fix + codex post-impl; write the wrap-up, surface, stop. Keep the ASCII checklist visible.
 ```
+
+## Status (live — updated each firing)
+- **PR-1 ✅ MERGED #349:** F-02 ✓ · F-05 ✓ · F-06 ✓ (characterization-first) · F-11 ✓.
+- **PR-2 (branch `quality/pr2-rust-q7e3`, in progress):**
+  - F-12 ✓ (7cb82f1 — server.rs 1424→331; 132/132)
+  - F-03 ✓ (d02f914 test-first + 0c0d0d5 enum; text/plain + invalid_host pinned; 133/133)
+  - F-15 ✓ (f31b203 — config load_from/save_to; 133/133)
+  - F-09 ✓ (PendingState::insert/remove encapsulation; auth-flow tests + 133/133)
+  - F-13 ✓ (core::config::lock_mutate_save + 3 callers; core 133/133 + src-tauri 19+3, both crates clippy-clean)
+  - F-10 ✓ (CrashRecoveryGuard rearm-before-restart, test-first; macOS clippy+3 guard tests, Windows path CI-validated)
+  - F-01 ✓ (codex-consulted LIGHTER-SHAPE: pure LaunchHttpsGate classifier, 4 characterization tests FIRST incl. short-circuits + reset-vs-skip; deviation AFK-logged in lessons/phase-2.md)
+  - F-04 ✓ (build_tray + build_desktop_state extracted; status consumed-by-value = clone-before-move compiler-enforced; manage-before-webdriver/HTTP kept inline; clippy default+webdriver features clean)
+  - ALL 8 PR-2 findings done — close sequence: /code-review max --fix → codex post-impl → push → cross-OS CI → merge
+- **PR-3 ⬜:** F-07 · F-08 (incl. CanonicalOrigin threading that overlaps F-09 — see D-2).
+- **DEFERRED ✓-resolved (tracked issues FILED):** F-14 → **#351** (loopback dedup; `/harden bugs` first) · F-08 `"unknown"` sentinel→Option → **#352** (SDK wire contract).
+- **Per-PR close still owed:** PR-2 + PR-3 each need `/code-review max --fix` + codex post-impl on the diff + green cross-OS CI before merge.

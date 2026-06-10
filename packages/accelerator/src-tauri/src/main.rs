@@ -48,25 +48,60 @@ fn open_in_browser(target: &impl AsRef<Path>) {
 
 // ── HTTPS startup ────────────────────────────────────────────────────────
 
+/// q7e3-F-01: the launch-time HTTPS gate as a pure value, lifted out of `try_start_https` so the
+/// reset-vs-skip asymmetry (the audit's most-fragile point) is unit-testable with zero mocks.
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchHttpsGate {
+    /// Safari Support is off — do nothing.
+    Disabled,
+    /// Enabled but certs are missing/invalid — reset `safari_support` so the user re-enables.
+    MissingCertsReset,
+    /// Certs present but the CA isn't trusted in the Keychain — skip WITHOUT reset (keep the opt-in).
+    UntrustedSkip,
+    /// Certs present and trusted — proceed to load TLS + spawn.
+    Ready,
+}
+
+/// Classify the launch HTTPS gate. `certs_exist` and `ca_trusted` are thunks so the original
+/// short-circuit holds exactly: `certs_exist` is not evaluated unless `safari_support`, and
+/// `ca_trusted` not unless `certs_exist` too. Trust is only ever VERIFIED at launch (the thunk wraps
+/// `is_ca_trusted`), never installed — launch must never raise the macOS Keychain prompt.
+fn classify_launch_https(
+    safari_support: bool,
+    certs_exist: impl FnOnce() -> bool,
+    ca_trusted: impl FnOnce() -> bool,
+) -> LaunchHttpsGate {
+    if !safari_support {
+        LaunchHttpsGate::Disabled
+    } else if !certs_exist() {
+        LaunchHttpsGate::MissingCertsReset
+    } else if !ca_trusted() {
+        LaunchHttpsGate::UntrustedSkip
+    } else {
+        LaunchHttpsGate::Ready
+    }
+}
+
 /// Try to start the HTTPS server if Safari Support is configured and certs are valid + trusted.
 /// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
 /// `start_https` flips the shared `https_bound` flag once the listener actually binds, so `/health`
 /// advertises `https_port` from the real bind state rather than the config flag.
 fn try_start_https(state: &AppState) {
     let cfg = config::load();
-    if !cfg.safari_support {
-        return;
-    }
-    if !certs::certs_exist() {
-        tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
-        reset_safari_support(state);
-        return;
-    }
-
-    // Verify the live CA is still trusted (macOS only).
-    if !certs::is_ca_trusted() {
-        tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
-        return;
+    // q7e3-F-01: the pre-load gate is now a tested pure classifier; the load-failure reset stays below
+    // (it depends on load_rustls_config's Result, not on these three booleans).
+    match classify_launch_https(cfg.safari_support, certs::certs_exist, certs::is_ca_trusted) {
+        LaunchHttpsGate::Disabled => return,
+        LaunchHttpsGate::MissingCertsReset => {
+            tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
+            reset_safari_support(state);
+            return;
+        }
+        LaunchHttpsGate::UntrustedSkip => {
+            tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
+            return;
+        }
+        LaunchHttpsGate::Ready => {}
     }
 
     let tls_config = match certs::load_rustls_config() {
@@ -97,9 +132,11 @@ fn try_start_https(state: &AppState) {
 /// regenerate a fresh, trusted cert set.
 fn reset_safari_support(state: &AppState) {
     if let Some(ref cfg_lock) = state.config {
-        let mut cfg = cfg_lock.write();
-        cfg.safari_support = false;
-        let _ = config::save(&cfg);
+        // q7e3-F-13: shared core helper; swallow the save error (best-effort reset, unchanged policy).
+        let _ = config::lock_mutate_save(cfg_lock, |cfg| {
+            cfg.safari_support = false;
+            true
+        });
     }
 }
 
@@ -232,6 +269,114 @@ fn spawn_update_poller(app_handle: AppHandle, config: ConfigState) {
     });
 }
 
+// ── Desktop bootstrap (q7e3-F-04) ────────────────────────────────────────
+// `.setup()` was a ~150-line Long Method closure. These phase helpers carry the capture-heavy
+// construction; the closure stays a thin, visibly-ordered sequencer because two orderings there are
+// load-bearing: SEC-08 migrate-first before HTTPS, and `manage::<SharedAppState>` before the
+// webdriver settings-window + HTTP spawn (commands/webdriver break at RUNTIME if reordered).
+
+/// Build the tray menu + icon with the static menu-event handler.
+fn build_tray(
+    app: &tauri::App,
+    dev_mode: bool,
+    bundled_version: &str,
+    status: &tauri::menu::MenuItem<tauri::Wry>,
+) -> Result<tauri::tray::TrayIcon, Box<dyn std::error::Error>> {
+    let menu = tray::build_tray_menu(&app.handle().clone(), dev_mode, bundled_version, status)?;
+    tray::build_tray_icon(app, &menu, move |app, event| match event.id().as_ref() {
+        "quit" => {
+            // The repeating-trigger crash-recovery task relaunches anything not
+            // running, so an intentional quit must delete it first or the app
+            // returns within ~1 min. A crash skips this path → the task survives
+            // → relaunch. Windows-only: mac/linux key on exit code (launchd
+            // SuccessfulExit:false / systemd on-failure), so a clean quit is a
+            // no-op there and the recovery entry must persist across quit.
+            #[cfg(target_os = "windows")]
+            aztec_accelerator::crash_recovery::disable_crash_recovery();
+            app.exit(0);
+        }
+        "show_logs" => open_in_browser(&log_dir()),
+        "open_github" => {
+            open_in_browser(&"https://github.com/alejoamiras/aztec-accelerator");
+        }
+        "settings" => windows::open_settings_window(app),
+        _ => {}
+    })
+}
+
+/// Wire the desktop `AppState`: the versions-changed tray rebuild, the auth popup, and the
+/// status-text/tooltip/animation callback. **Consumes `status`** (it moves into the versions-changed
+/// callback) — anything the caller needs afterwards must be cloned BEFORE this call, which turns the
+/// old "clone before the move" comment into a compiler-enforced property.
+#[allow(clippy::too_many_arguments)]
+fn build_desktop_state(
+    app: &tauri::App,
+    dev_mode: bool,
+    bundled_version: String,
+    status: tauri::menu::MenuItem<tauri::Wry>,
+    tray: &tauri::tray::TrayIcon,
+    is_animating: &Arc<AtomicBool>,
+    config_state: &ConfigState,
+    auth_manager: &AuthState,
+) -> AppState {
+    let status_clone = status.clone();
+    let tray_clone = tray.clone();
+
+    // Versions changed callback: rebuild the Versions submenu when versions change.
+    let app_handle = app.handle().clone();
+    let bundled_for_cb = bundled_version.clone();
+    let tray_for_versions = tray.clone();
+    let on_versions_changed: aztec_accelerator::server::VersionsChangedCallback =
+        Arc::new(move || {
+            if !dev_mode {
+                return;
+            }
+            match tray::build_tray_menu(&app_handle, dev_mode, &bundled_for_cb, &status) {
+                Ok(new_menu) => {
+                    let _ = tray_for_versions.set_menu(Some(new_menu));
+                    tracing::info!("Tray menu rebuilt (versions changed)");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to rebuild tray menu: {e}");
+                }
+            }
+        });
+
+    // Auth popup callback
+    let app_handle_for_auth = app.handle().clone();
+    let auth_manager_for_timeout = auth_manager.clone();
+    let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback =
+        Arc::new(move |origin: &str, request_id: &str| {
+            windows::show_auth_popup_window(
+                &app_handle_for_auth,
+                origin,
+                request_id,
+                &auth_manager_for_timeout,
+            );
+        });
+
+    let is_animating_for_status = is_animating.clone();
+    let on_status = Arc::new(move |status: ServerStatus| {
+        let text = status.display_text();
+        tracing::info!(text, "on_status callback fired");
+        if let Err(e) = status_clone.set_text(text) {
+            tracing::error!("set_text failed: {e}");
+        }
+        if let Err(e) = tray_clone.set_tooltip(Some(text)) {
+            tracing::error!("set_tooltip failed: {e}");
+        }
+        is_animating_for_status.store(status.is_busy(), Ordering::Release);
+    });
+
+    let core = HeadlessState::headless(
+        env!("CARGO_PKG_VERSION"),
+        Some(bundled_version),
+        Some(config_state.clone()),
+        Some(auth_manager.clone()),
+    );
+    AppState::desktop(core, on_status, on_versions_changed, show_auth_popup)
+}
+
 fn main() {
     // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
     // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
@@ -330,91 +475,26 @@ fn main() {
             }
 
             // ── Build tray ──
-            let menu =
-                tray::build_tray_menu(&app.handle().clone(), dev_mode, &bundled_version, &status)?;
-
-            let tray =
-                tray::build_tray_icon(app, &menu, move |app, event| match event.id().as_ref() {
-                    "quit" => {
-                        // The repeating-trigger crash-recovery task relaunches anything not
-                        // running, so an intentional quit must delete it first or the app
-                        // returns within ~1 min. A crash skips this path → the task survives
-                        // → relaunch. Windows-only: mac/linux key on exit code (launchd
-                        // SuccessfulExit:false / systemd on-failure), so a clean quit is a
-                        // no-op there and the recovery entry must persist across quit.
-                        #[cfg(target_os = "windows")]
-                        aztec_accelerator::crash_recovery::disable_crash_recovery();
-                        app.exit(0);
-                    }
-                    "show_logs" => open_in_browser(&log_dir()),
-                    "open_github" => {
-                        open_in_browser(&"https://github.com/alejoamiras/aztec-accelerator");
-                    }
-                    "settings" => windows::open_settings_window(app),
-                    _ => {}
-                })?;
+            let tray = build_tray(app, dev_mode, &bundled_version, &status)?;
 
             // ── Animation ──
             let is_animating = Arc::new(AtomicBool::new(false));
             tray::start_animation_loop(tray.clone(), app.handle().clone(), is_animating.clone());
 
             // ── Callbacks and AppState wiring ──
-            let status_clone = status.clone();
+            // q7e3-F-04: build_desktop_state CONSUMES `status`, so anything needed below must be
+            // cloned first — the old "clone before the move" comment, now compiler-enforced.
             let status_for_diagnostics = status.clone();
-            let tray_clone = tray.clone();
-
-            // Versions changed callback: rebuild the Versions submenu when versions change.
-            let app_handle = app.handle().clone();
-            let bundled_for_cb = bundled_version.clone();
-            let tray_for_versions = tray.clone();
-            let on_versions_changed: aztec_accelerator::server::VersionsChangedCallback =
-                Arc::new(move || {
-                    if !dev_mode {
-                        return;
-                    }
-                    match tray::build_tray_menu(&app_handle, dev_mode, &bundled_for_cb, &status) {
-                        Ok(new_menu) => {
-                            let _ = tray_for_versions.set_menu(Some(new_menu));
-                            tracing::info!("Tray menu rebuilt (versions changed)");
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to rebuild tray menu: {e}");
-                        }
-                    }
-                });
-
-            // Auth popup callback
-            let app_handle_for_auth = app.handle().clone();
-            let auth_manager_for_timeout = auth_manager.clone();
-            let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback =
-                Arc::new(move |origin: &str, request_id: &str| {
-                    windows::show_auth_popup_window(
-                        &app_handle_for_auth,
-                        origin,
-                        request_id,
-                        &auth_manager_for_timeout,
-                    );
-                });
-
-            let is_animating_for_status = is_animating.clone();
-            let on_status = Arc::new(move |status: ServerStatus| {
-                let text = status.display_text();
-                tracing::info!(text, "on_status callback fired");
-                if let Err(e) = status_clone.set_text(text) {
-                    tracing::error!("set_text failed: {e}");
-                }
-                if let Err(e) = tray_clone.set_tooltip(Some(text)) {
-                    tracing::error!("set_tooltip failed: {e}");
-                }
-                is_animating_for_status.store(status.is_busy(), Ordering::Release);
-            });
-            let core = HeadlessState::headless(
-                env!("CARGO_PKG_VERSION"),
-                Some(bundled_version),
-                Some(config_state.clone()),
-                Some(auth_manager.clone()),
+            let state = build_desktop_state(
+                app,
+                dev_mode,
+                bundled_version,
+                status,
+                &tray,
+                &is_animating,
+                &config_state,
+                &auth_manager,
             );
-            let state = AppState::desktop(core, on_status, on_versions_changed, show_auth_popup);
 
             // ── HTTPS startup ──
             // One-time migration: delete any legacy on-disk CA private key (older installs) — it was
@@ -496,5 +576,49 @@ mod tests {
     fn exit_allowed_for_restart() {
         // code=Some(i32::MAX) is sent by app.restart() during auto-update
         assert!(!should_prevent_exit(Some(i32::MAX)));
+    }
+
+    // q7e3-F-01 characterization (test-FIRST): the launch HTTPS gate's four outcomes + the
+    // reset-vs-skip asymmetry + both short-circuits (panicking thunks prove the unevaluated checks).
+    #[test]
+    fn launch_gate_disabled_short_circuits_everything() {
+        assert_eq!(
+            classify_launch_https(
+                false,
+                || panic!("certs_exist must not be checked when safari is off"),
+                || panic!("trust must not be checked when safari is off"),
+            ),
+            LaunchHttpsGate::Disabled
+        );
+    }
+
+    #[test]
+    fn launch_gate_missing_certs_resets_and_short_circuits_trust() {
+        // certs missing → reset; is_ca_trusted MUST NOT be called (preserves the original short-circuit).
+        assert_eq!(
+            classify_launch_https(
+                true,
+                || false,
+                || panic!("trust must not be checked when certs are missing")
+            ),
+            LaunchHttpsGate::MissingCertsReset
+        );
+    }
+
+    #[test]
+    fn launch_gate_untrusted_skips_without_reset() {
+        // certs present but untrusted → SKIP, NOT reset (the asymmetry the audit flagged as fragile).
+        assert_eq!(
+            classify_launch_https(true, || true, || false),
+            LaunchHttpsGate::UntrustedSkip
+        );
+    }
+
+    #[test]
+    fn launch_gate_ready_when_present_and_trusted() {
+        assert_eq!(
+            classify_launch_https(true, || true, || true),
+            LaunchHttpsGate::Ready
+        );
     }
 }

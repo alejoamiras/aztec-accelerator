@@ -176,6 +176,29 @@ struct PendingState {
     by_request: HashMap<String, PendingRequest>,
 }
 
+impl PendingState {
+    /// q7e3-F-09: insert a new pending request, updating BOTH indexes. The origin↔request_id coupling
+    /// lives here, not hand-synced at each call site, so a future mutator can't update one map and
+    /// forget the other.
+    fn insert(&mut self, origin: String, request_id: String, tx: oneshot::Sender<AuthDecision>) {
+        self.by_origin.insert(origin.clone(), request_id.clone());
+        self.by_request.insert(
+            request_id,
+            PendingRequest {
+                origin,
+                senders: vec![tx],
+            },
+        );
+    }
+
+    /// q7e3-F-09: remove a pending request by id, updating BOTH indexes; returns it if present.
+    fn remove(&mut self, request_id: &str) -> Option<PendingRequest> {
+        let req = self.by_request.remove(request_id)?;
+        self.by_origin.remove(&req.origin);
+        Some(req)
+    }
+}
+
 pub struct AuthorizationManager {
     state: Mutex<PendingState>,
 }
@@ -221,14 +244,7 @@ impl AuthorizationManager {
             return Err("too many pending authorization requests");
         }
         let request_id = uuid::Uuid::new_v4().to_string();
-        st.by_origin.insert(origin.to_string(), request_id.clone());
-        st.by_request.insert(
-            request_id.clone(),
-            PendingRequest {
-                origin: origin.to_string(),
-                senders: vec![tx],
-            },
-        );
+        st.insert(origin.to_string(), request_id.clone(), tx);
         Ok((rx, request_id, true))
     }
 
@@ -237,8 +253,7 @@ impl AuthorizationManager {
     /// or a tampered/guessed id that matches nothing).
     pub fn resolve(&self, request_id: &str, decision: AuthDecision) {
         let mut st = self.state.lock();
-        if let Some(req) = st.by_request.remove(request_id) {
-            st.by_origin.remove(&req.origin);
+        if let Some(req) = st.remove(request_id) {
             for tx in req.senders {
                 let _ = tx.send(decision);
             }

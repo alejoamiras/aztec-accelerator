@@ -8,9 +8,8 @@
 
 use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
 use crate::config;
-use axum::http::StatusCode;
 
-use super::{json_error, AppState, ProveError, AUTH_DECISION_TIMEOUT};
+use super::{AppState, ProveError, AUTH_DECISION_TIMEOUT};
 
 /// Check if the request origin is authorized. Returns Ok(()) if approved.
 pub(crate) async fn authorize_origin(
@@ -38,13 +37,7 @@ pub(crate) async fn authorize_origin(
         Some(canon) => canon,
         None => {
             tracing::warn!(raw_origin = %raw_origin, "Invalid Origin header (path/query/userinfo/unknown scheme); rejecting");
-            return Err((
-                StatusCode::BAD_REQUEST,
-                json_error(
-                    "invalid_origin",
-                    "Origin header is not a valid RFC 6454 origin",
-                ),
-            ));
+            return Err(ProveError::InvalidOrigin);
         }
     };
 
@@ -64,25 +57,13 @@ pub(crate) async fn authorize_origin(
     // No popup callback = headless mode → deny immediately
     if state.show_auth_popup.is_none() {
         tracing::info!(origin = %origin, "Origin not approved (no popup available), denying");
-        return Err((
-            StatusCode::FORBIDDEN,
-            json_error(
-                "origin_denied",
-                &format!("Access denied for origin: {origin}"),
-            ),
-        ));
+        return Err(ProveError::OriginDenied(origin.to_string()));
     }
 
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
     let (rx, request_id, is_first) = auth_manager.request(origin.as_str()).map_err(|_| {
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
-        (
-            StatusCode::TOO_MANY_REQUESTS,
-            json_error(
-                "too_many_requests",
-                "Too many pending authorization requests",
-            ),
-        )
+        ProveError::TooManyRequests
     })?;
 
     if is_first {
@@ -96,32 +77,27 @@ pub(crate) async fn authorize_origin(
         .map_err(|_| {
             tracing::warn!(origin = %origin, "Authorization timed out");
             auth_manager.resolve(&request_id, AuthDecision::Deny);
-            (
-                StatusCode::FORBIDDEN,
-                json_error("authorization_timeout", "Authorization request timed out"),
-            )
+            ProveError::AuthorizationTimeout
         })?
-        .map_err(|_| {
-            (
-                StatusCode::FORBIDDEN,
-                json_error(
-                    "authorization_cancelled",
-                    "Authorization request was cancelled",
-                ),
-            )
-        })?;
+        .map_err(|_| ProveError::AuthorizationCancelled)?;
 
     match decision {
         AuthDecision::Allow { remember } => {
             tracing::info!(origin = %origin, remember, "Origin authorized");
             if remember {
                 if let Some(ref cfg_lock) = state.config {
-                    let mut cfg = cfg_lock.write();
-                    if !cfg.approved_origins.contains(&origin) {
-                        cfg.approved_origins.push(origin);
-                        if let Err(e) = config::save(&cfg) {
-                            tracing::warn!(error = %e, "Failed to persist approved origin");
+                    // q7e3-F-13: shared core helper; the closure's bool keeps the conditional save (only
+                    // when the origin is new) — no always-write on the piggyback-Allow path. Warn-and-
+                    // continue on save failure (a config-write error must NOT fail an approved prove).
+                    if let Err(e) = config::lock_mutate_save(cfg_lock, |cfg| {
+                        if cfg.approved_origins.contains(&origin) {
+                            false
+                        } else {
+                            cfg.approved_origins.push(origin);
+                            true
                         }
+                    }) {
+                        tracing::warn!(error = %e, "Failed to persist approved origin");
                     }
                 }
             }
@@ -129,13 +105,7 @@ pub(crate) async fn authorize_origin(
         }
         AuthDecision::Deny => {
             tracing::info!(origin = %origin, "Origin denied");
-            Err((
-                StatusCode::FORBIDDEN,
-                json_error(
-                    "origin_denied",
-                    &format!("Access denied for origin: {origin}"),
-                ),
-            ))
+            Err(ProveError::OriginDenied(origin.to_string()))
         }
     }
 }

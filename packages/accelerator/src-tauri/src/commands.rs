@@ -13,9 +13,13 @@ fn mutate_config(
     config: &ConfigState,
     f: impl FnOnce(&mut AcceleratorConfig),
 ) -> Result<(), String> {
-    let mut cfg = config.write();
-    f(&mut cfg);
-    config::save(&cfg).map_err(|e| e.to_string())
+    // q7e3-F-13: delegate to core's shared lock_mutate_save; mutate_config keeps its always-save +
+    // propagate policy (the closure always returns true).
+    config::lock_mutate_save(config, |cfg| {
+        f(cfg);
+        true
+    })
+    .map_err(|e| e.to_string())
 }
 pub type AuthState = Arc<AuthorizationManager>;
 pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;

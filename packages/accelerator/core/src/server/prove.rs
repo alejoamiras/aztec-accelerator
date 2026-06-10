@@ -6,14 +6,14 @@
 //! from server.rs (Q2).
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use serde_json::json;
 
 use crate::{bb, versions};
 
 use super::auth::authorize_origin;
-use super::{json_error, AppState, ProveError, ServerStatus, StatusCallback};
+use super::{AppState, ProveError, ServerStatus, StatusCallback};
 
 /// Drop guard that resets tray status to Idle when the prove handler exits for any reason
 /// (success, error, client disconnect, panic).
@@ -60,13 +60,7 @@ pub(crate) fn resolve_version<'a>(
     let version = match versions::AztecVersion::parse(v) {
         Some(av) => av,
         None => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                json_error(
-                    "invalid_version",
-                    &format!("Invalid x-aztec-version header (got '{v}')"),
-                ),
-            ));
+            return Err(ProveError::InvalidVersion(v.to_string()));
         }
     };
     tracing::info!(version = %version, "Requested Aztec version");
@@ -119,23 +113,16 @@ pub(crate) async fn prove(
         .await
         .map_err(|e| {
             tracing::warn!("Failed to read request body: {e}");
-            (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                json_error(
-                    "payload_too_large",
-                    &format!("Body too large or unreadable: {e}"),
-                ),
-            )
+            ProveError::PayloadTooLarge(e.to_string())
         })?;
     tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
     // Limit to one concurrent prove — bb already uses all cores.
-    let _permit = state.prove_semaphore.acquire().await.map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            json_error("service_unavailable", "Proving service shutting down"),
-        )
-    })?;
+    let _permit = state
+        .prove_semaphore
+        .acquire()
+        .await
+        .map_err(|_| ProveError::ServiceUnavailable)?;
 
     let requested_version = parts
         .headers
@@ -179,13 +166,10 @@ pub(crate) async fn prove(
             }
             Err(e) => {
                 tracing::error!(version = %version, error = %e, "Failed to download bb");
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json_error(
-                        "download_failed",
-                        &format!("Failed to download bb v{version}: {e}"),
-                    ),
-                ));
+                return Err(ProveError::DownloadFailed {
+                    version: version.to_string(),
+                    detail: e.to_string(),
+                });
             }
         }
         // Re-emit Proving after the Downloading interlude — preserves the redundant leading Proving so
@@ -218,12 +202,7 @@ pub(crate) async fn prove(
         }
     }
 
-    let proof = result.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json_error("prove_failed", &e.to_string()),
-        )
-    })?;
+    let proof = result.map_err(|e| ProveError::ProveFailed(e.to_string()))?;
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &proof);
 
     let mut response = axum::Json(json!({ "proof": encoded })).into_response();

@@ -160,21 +160,25 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
         return;
     }
 
+    // q7e3-F-10: recovery is now disarmed (Windows) — the guard re-arms on EVERY exit path below. Drop
+    // covers the install-failure return; the restart arm calls rearm_now() explicitly FIRST, because
+    // app.restart() never returns (Drop would never fire there). The old per-arm `// must rearm`
+    // comments are now structurally enforced by the guard.
+    #[cfg(target_os = "windows")]
+    let mut recovery_guard = CrashRecoveryGuard::new(|| rearm_crash_recovery_if_enabled(app));
+
     match update.install(bytes) {
         Ok(()) => {
-            // Re-arm BEFORE restarting: a failed relaunch must not leave recovery off while
-            // autostart is on. IgnoreNew + the exit-0-if-healthy guard absorb any brief
-            // double-launch with the restarted build.
+            // IgnoreNew + the exit-0-if-healthy guard absorb any brief double-launch with the
+            // restarted build.
             #[cfg(target_os = "windows")]
-            rearm_crash_recovery_if_enabled(app);
+            recovery_guard.rearm_now();
             tracing::info!("Update installed, restarting");
             app.restart();
         }
         Err(e) => {
             tracing::error!("Update install failed: {e}");
-            // The app keeps running, so crash-recovery must resume (only if it should be armed).
-            #[cfg(target_os = "windows")]
-            rearm_crash_recovery_if_enabled(app);
+            // The app keeps running; recovery_guard's Drop re-arms on return (Windows, only if armed).
         }
     }
 }
@@ -189,9 +193,53 @@ fn rearm_crash_recovery_if_enabled(app: &AppHandle) {
     }
 }
 
+/// q7e3-F-10: structural guard for the Windows crash-recovery disarm→rearm invariant — *every* path
+/// that leaves the app running (or restarts it) must end with recovery re-armed. Previously enforced by
+/// a `// must rearm` comment at each of three exit sites. `Drop` re-arms automatically on the
+/// early-return paths (install failure, etc.); the restart path MUST call [`rearm_now`] explicitly
+/// FIRST, because `app.restart()` never returns — so `Drop` would never fire and recovery would be left
+/// off (autostart on, task disarmed). `rearm_now` is idempotent with `Drop` (a flag prevents a
+/// double-rearm). Generic over the rearm action so the ordering invariant is unit-testable without a
+/// Tauri `AppHandle`. Compiled on Windows (its only real use) and under `test` (so the invariant is
+/// pinned on every platform's CI); never in the non-test build of other platforms.
+///
+/// [`rearm_now`]: CrashRecoveryGuard::rearm_now
+#[cfg(any(target_os = "windows", test))]
+struct CrashRecoveryGuard<F: FnMut()> {
+    rearm: F,
+    rearmed: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl<F: FnMut()> CrashRecoveryGuard<F> {
+    fn new(rearm: F) -> Self {
+        Self {
+            rearm,
+            rearmed: false,
+        }
+    }
+
+    /// Re-arm now (idempotent). Call this BEFORE a no-return `app.restart()`.
+    fn rearm_now(&mut self) {
+        if !self.rearmed {
+            (self.rearm)();
+            self.rearmed = true;
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl<F: FnMut()> Drop for CrashRecoveryGuard<F> {
+    /// Re-arms on scope exit unless [`rearm_now`](CrashRecoveryGuard::rearm_now) already did — covers
+    /// every early-return path without a per-site comment.
+    fn drop(&mut self) {
+        self.rearm_now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::size_from_feed;
+    use super::{size_from_feed, CrashRecoveryGuard};
     use serde_json::json;
 
     fn feed(aarch64_size: Option<u64>) -> serde_json::Value {
@@ -233,5 +281,49 @@ mod tests {
             size_from_feed(&json!({ "version": "1" }), "https://x.test/x"),
             None
         );
+    }
+
+    // q7e3-F-10 characterization (test-FIRST): the crash-recovery guard's rearm-before-restart +
+    // no-double-rearm invariant. `app.restart()` never returns, so the restart path must `rearm_now()`
+    // explicitly and Drop must NOT then re-arm again; the install-failure path relies on Drop alone.
+    #[test]
+    fn crash_recovery_guard_rearms_on_drop() {
+        let count = std::cell::Cell::new(0);
+        {
+            let _g = CrashRecoveryGuard::new(|| count.set(count.get() + 1));
+        }
+        assert_eq!(
+            count.get(),
+            1,
+            "Drop must re-arm once on the early-return path"
+        );
+    }
+
+    #[test]
+    fn crash_recovery_guard_rearm_now_before_restart_does_not_double() {
+        let count = std::cell::Cell::new(0);
+        {
+            let mut g = CrashRecoveryGuard::new(|| count.set(count.get() + 1));
+            g.rearm_now();
+            assert_eq!(
+                count.get(),
+                1,
+                "rearm_now re-arms immediately, before the no-return app.restart()"
+            );
+        }
+        assert_eq!(
+            count.get(),
+            1,
+            "Drop must NOT re-arm again after rearm_now (no double-rearm)"
+        );
+    }
+
+    #[test]
+    fn crash_recovery_guard_rearm_now_is_idempotent() {
+        let count = std::cell::Cell::new(0);
+        let mut g = CrashRecoveryGuard::new(|| count.set(count.get() + 1));
+        g.rearm_now();
+        g.rearm_now();
+        assert_eq!(count.get(), 1, "rearm_now is idempotent");
     }
 }
