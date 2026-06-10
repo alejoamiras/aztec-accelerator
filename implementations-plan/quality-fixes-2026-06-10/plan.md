@@ -1,4 +1,10 @@
-# Plan — quality-fixes-2026-06-10 (blueprint mid)
+# Plan — quality-fixes-2026-06-10 (blueprint mid) — ✅ COMPLETE 2026-06-10
+
+**All 15 findings resolved:** 13 implemented behavior-preserving across PR-1 #349 (SDK), PR-2 #350
+(Rust seams), PR-3 #353 (day-scale) — every PR merged green (macOS+Windows legs) with `/code-review
+max` + a codex post-impl audit (SHIP ×3, zero behavior deltas); 2 sub-items deferred as tracked
+issues (#351 F-14 loopback dedup, #352 F-08 "unknown" sentinel). Characterization-first tests landed
+BEFORE their refactors for F-03/F-01/F-06/F-10. Lessons: `lessons/phase-{1,2,3}.md`.
 
 Implement all 15 findings from the `/harden-quality max` run `2026-06-10-max-q7e3`
 (`audit/quality/2026-06-10-max-q7e3/report.md`). **Behavior-preserving refactors only** — every
