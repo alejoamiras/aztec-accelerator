@@ -1,3 +1,4 @@
+export { AcceleratorProver } from "./lib/accelerator-prover.js";
 export type {
   AcceleratorConfig,
   AcceleratorPhase,
@@ -5,5 +6,4 @@ export type {
   AcceleratorProtocol,
   AcceleratorProverOptions,
   AcceleratorStatus,
-} from "./lib/accelerator-prover.js";
-export { AcceleratorProver } from "./lib/accelerator-prover.js";
+} from "./lib/types.js";

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import type { AcceleratorStatus } from "./accelerator-prover.js";
 import { AcceleratorTransport } from "./accelerator-transport.js";
+import type { AcceleratorStatus } from "./types.js";
 
 const offlineStatus: AcceleratorStatus = { available: false, reason: "offline" };
 
