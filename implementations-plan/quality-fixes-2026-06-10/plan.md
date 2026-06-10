@@ -309,3 +309,14 @@ close (code-review + codex post-impl) is the verification. *(User picked "standa
 ```
 /loop 15m Drive implementations-plan/quality-fixes-2026-06-10 forward, never idle. Each firing: read plan.md + lessons/ (authoritative); git status + log; PR open? gh pr view --json statusCheckRollup (no --watch); CI in-flight? gh run watch up to 10m. No task in hand? next pending finding in order (PR-1 F-02→F-06[test-first]→F-05→F-11; PR-2 F-12→F-03[test-first]→F-01[test-first]→F-04→F-09→F-10[test-first]→F-13→F-15; PR-3 F-07→F-08) → characterization-test-first where required → edit → cargo/bun test + clippy → commit (q7e3-F-NN prefix) → push. Stuck/decision? /codex xhigh, decide, log; never merge to main / never push to main / never expand scope. 5 fails same step? stop, reassess w/ codex. Phase green? mark ✓ in plan.md, file lessons, print LESSONS_FILE=…, advance. All ✓? per-PR already had /code-review max --fix + codex post-impl; write the wrap-up, surface, stop. Keep the ASCII checklist visible.
 ```
+
+## Status (live — updated each firing)
+- **PR-1 ✅ MERGED #349:** F-02 ✓ · F-05 ✓ · F-06 ✓ (characterization-first) · F-11 ✓.
+- **PR-2 (branch `quality/pr2-rust-q7e3`, in progress):**
+  - F-12 ✓ (7cb82f1 — server.rs 1424→331; 132/132)
+  - F-03 ✓ (d02f914 test-first + 0c0d0d5 enum; text/plain + invalid_host pinned; 133/133)
+  - F-15 ✓ (f31b203 — config load_from/save_to; 133/133)
+  - F-01 ⬜ (test-first: launch-vs-settings) · F-04 ⬜ · F-09 ⬜ (coordinate w/ F-08 per D-2) · F-10 ⬜ (test-first: rearm-before-restart) · F-13 ⬜ (core helper + src-tauri callers)
+- **PR-3 ⬜:** F-07 · F-08 (incl. CanonicalOrigin threading that overlaps F-09 — see D-2).
+- **DEFERRED (gate decision, tracked-issue follow-ups, count ✓-resolved):** F-14 (loopback `::1`/`[::1]` → `/harden bugs` first) · F-08 `"unknown"` sentinel→Option (SDK wire contract).
+- **Per-PR close still owed:** PR-2 + PR-3 each need `/code-review max --fix` + codex post-impl on the diff + green cross-OS CI before merge.
