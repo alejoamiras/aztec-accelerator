@@ -1,0 +1,9 @@
+# Fresh opus adversarial audit (agentId af5d005f9938b59eb) — verdict: CONDITIONAL APPROVE
+
+Full audit in the implementation transcript. Blocking findings:
+- **C1 [Critical]** localhost-auto-approve silent hole: a malicious page on ANY `http://localhost:<port>` sends `Origin: http://localhost:x` (auto-approved, no popup) + `Host: 127.0.0.1` (passes the Host gate) → silent proof. The absent-Origin reconciliation never reconciles with `is_auto_approved` (`authorization.rs:222`). SEC-04 was opt-out-default-off → ships the hole open. (codex MISSED this — opus-only.)
+- **C2 [Critical]** SEC-05 minimal `/health` breaks `connectivity.test.ts:32-33` (no-Origin Node probe asserts `available_versions`) + `accelerator.yml:201` smoke (`aztec_version != unknown`). Detailed tier must serve loopback-no-Origin callers; update both tests in-PR.
+- **H1 [High]** PR-4 self-managed download = sole authenticity control (plugin `install()` doesn't re-verify); hand-rolled minisign bug = signature bypass. Downgrade to pre-flight size cap keeping `plugin.download()` verify.
+- **H2** SEC-09 `security verify-cert -c leaf -r ca`: `-r` ADDS an anchor, doesn't RESTRICT; a leaf chaining to a *different* trusted anchor could pass. macOS manual smoke must test the negative.
+- **M1** Host-parser: use the authority grammar (userinfo in h2 `:authority`, per-protocol absent-authority); **M2** SEC-08 fail-closed gate must hook the HTTPS-start sites (startup + `enable_safari_support`), not just `certs.rs`; **M3** SEC-09 symlink Windows worry is moot (cert subsystem is macOS-only); **M4** SEC-07 test must cover the lying-header case (declared small / actual large).
+- Confirmed sound: keystone Host-allowlist (SDK emits `127.0.0.1:{59833,59834}` → no false-positive), per-listener router, CanonicalOrigin, headless deny mechanics, keyless CA, SEC-02 deferral.
