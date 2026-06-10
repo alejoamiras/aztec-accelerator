@@ -156,8 +156,6 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    */
   async #probeAndParseHealth(): Promise<AcceleratorStatus> {
     const sdkAztecVersion = this.#getAztecVersion();
-    const cacheAndReturn = (status: AcceleratorStatus): AcceleratorStatus =>
-      this.#transport.cacheStatus(status);
 
     try {
       // Probe both HTTP and HTTPS in parallel (one retry after 1s) — whichever responds
@@ -167,17 +165,13 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       const { response, protocol } = await this.#transport.probeHealth();
 
       if (!response.ok) {
-        // Don't pin the protocol on error — a fast error (e.g. HTTPS cert failure)
-        // would set the wrong protocol for subsequent /prove calls.
-        return cacheAndReturn({
-          available: false,
-          reason: "error",
-          sdkAztecVersion,
-          protocol,
-        });
+        // q7e3-F-06: non-OK → KEEP any existing pin. A fast error (e.g. an HTTPS cert failure)
+        // must not pin the wrong protocol for /prove, nor clear an already-good pin.
+        return this.#transport.commitStatus(
+          { available: false, reason: "error", sdkAztecVersion, protocol },
+          { pin: "keep" },
+        );
       }
-
-      this.#transport.setProtocol(protocol);
 
       let data: { aztec_version?: string; available_versions?: string[] };
       try {
@@ -186,16 +180,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           available_versions?: string[];
         };
       } catch {
-        // Reachable but returned unparseable JSON — that's "error" (the host answered), NOT
-        // "offline" (which means both probes failed). Clear the pinned protocol since a
-        // misbehaving responder shouldn't drive subsequent /prove calls.
-        this.#transport.setProtocol(null);
-        return cacheAndReturn({
-          available: false,
-          reason: "error",
-          sdkAztecVersion,
-          protocol,
-        });
+        // Reachable but unparseable JSON — "error" (the host answered), NOT "offline" (both probes
+        // failed). q7e3-F-06: CLEAR the pin — a misbehaving responder shouldn't drive /prove.
+        return this.#transport.commitStatus(
+          { available: false, reason: "error", sdkAztecVersion, protocol },
+          { pin: "clear" },
+        );
       }
 
       const acceleratorVersion = data.aztec_version;
@@ -212,14 +202,17 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           needsDownload,
           protocol,
         });
-        return cacheAndReturn({
-          available: true,
-          needsDownload,
-          acceleratorVersion,
-          availableVersions,
-          sdkAztecVersion,
-          protocol,
-        });
+        return this.#transport.commitStatus(
+          {
+            available: true,
+            needsDownload,
+            acceleratorVersion,
+            availableVersions,
+            sdkAztecVersion,
+            protocol,
+          },
+          { pin: "set", protocol },
+        );
       }
 
       // Legacy protocol: exact version match
@@ -229,25 +222,34 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             accelerator: acceleratorVersion,
             sdk: sdkAztecVersion,
           });
-          return cacheAndReturn({
-            available: false,
-            reason: "version-mismatch",
-            acceleratorVersion,
-            sdkAztecVersion,
-            protocol,
-          });
+          return this.#transport.commitStatus(
+            {
+              available: false,
+              reason: "version-mismatch",
+              acceleratorVersion,
+              sdkAztecVersion,
+              protocol,
+            },
+            { pin: "set", protocol },
+          );
         }
       }
-      return cacheAndReturn({
-        available: true,
-        needsDownload: false,
-        acceleratorVersion,
-        sdkAztecVersion,
-        protocol,
-      });
+      return this.#transport.commitStatus(
+        {
+          available: true,
+          needsDownload: false,
+          acceleratorVersion,
+          sdkAztecVersion,
+          protocol,
+        },
+        { pin: "set", protocol },
+      );
     } catch {
-      this.#transport.setProtocol(null);
-      return cacheAndReturn({ available: false, reason: "offline", sdkAztecVersion });
+      // q7e3-F-06: both probes failed → offline; CLEAR the pin.
+      return this.#transport.commitStatus(
+        { available: false, reason: "offline", sdkAztecVersion },
+        { pin: "clear" },
+      );
     }
   }
 

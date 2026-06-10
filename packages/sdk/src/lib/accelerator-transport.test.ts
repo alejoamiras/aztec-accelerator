@@ -65,6 +65,44 @@ describe("AcceleratorTransport", () => {
     });
   });
 
+  // q7e3-F-06: pin the three-way set/clear/keep transition so a refactor can't flatten it. The
+  // audit's concern: a "derive pin from the status discriminant" rewrite would unify the two
+  // error exits — but `!response.ok` must KEEP an existing pin while malformed-JSON must CLEAR it.
+  describe("commitStatus protocol-pin transitions", () => {
+    const okStatus: AcceleratorStatus = {
+      available: true,
+      needsDownload: false,
+      protocol: "https",
+    };
+    const errStatus: AcceleratorStatus = { available: false, reason: "error", protocol: "https" };
+
+    test('"set" pins the winning protocol (drives /prove)', () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus(okStatus, { pin: "set", protocol: "https" });
+      expect(t.baseUrl).toBe("https://127.0.0.1:59834");
+    });
+
+    test('"keep" leaves an EXISTING pin untouched (the !response.ok case)', () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.setProtocol("https"); // a prior OK probe pinned https
+      t.commitStatus(errStatus, { pin: "keep" });
+      expect(t.baseUrl).toBe("https://127.0.0.1:59834"); // still https — NOT cleared, NOT repinned
+    });
+
+    test('"clear" unpins (the malformed-JSON / offline case)', () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.setProtocol("https"); // a prior OK probe pinned https
+      t.commitStatus(errStatus, { pin: "clear" });
+      expect(t.baseUrl).toBe("http://127.0.0.1:59833"); // back to the http default
+    });
+
+    test("caches the status it commits", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(t.commitStatus(offlineStatus, { pin: "clear" })).toEqual(offlineStatus);
+      expect(t.getFreshCachedStatus()).toEqual(offlineStatus);
+    });
+  });
+
   describe("probeHealth", () => {
     let originalFetch: typeof globalThis.fetch;
     beforeEach(() => {
