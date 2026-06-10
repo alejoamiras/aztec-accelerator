@@ -196,19 +196,16 @@ pub fn is_valid_version(version: &str) -> bool {
 }
 
 /// Clean up old cached versions per the retention policy.
-pub async fn cleanup_old_versions(bundled_version: &str) {
-    // `bundled_version` is always a real version; if it somehow can't be parsed, skip cleanup rather
-    // than evict against a mis-parsed bundled (defensive — unreachable in practice).
-    let Some(bundled) = AztecVersion::parse(bundled_version) else {
-        return;
-    };
+/// q7e3-F-08: takes the validated `&AztecVersion` (callers parse; an unparseable bundled skips
+/// cleanup at the call site — same defensive outcome as the old internal parse-else-return).
+pub async fn cleanup_old_versions(bundled: &AztecVersion) {
     // Parse the cached dir names into validated versions. An unparseable dir name is skipped — same
     // net outcome as before (the old code classified it Mainnet → retention `None` → never evicted).
     let cached: Vec<AztecVersion> = list_cached_versions()
         .iter()
         .filter_map(|s| AztecVersion::parse(s))
         .collect();
-    let to_evict = versions_to_evict(&cached, &bundled);
+    let to_evict = versions_to_evict(&cached, bundled);
 
     for version in &to_evict {
         let dir = versions_base_dir().join(version.as_str());

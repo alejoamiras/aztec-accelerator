@@ -996,9 +996,9 @@ fn resolve_version_flags_uncached_for_download() {
     let state = AppState::default();
     let version = Some("5.0.0-rc.1".to_string());
     let resolved = resolve_version(&state, &version).expect("valid version resolves");
-    assert_eq!(resolved.version, Some("5.0.0-rc.1"));
+    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
     assert!(
-        resolved.to_download.is_some(),
+        resolved.needs_download,
         "uncached non-bundled version must be flagged for download"
     );
 }
@@ -1010,9 +1010,9 @@ fn resolve_version_no_download_for_bundled() {
     let state = AppState::headless(core);
     let requested = Some("0.99.0".to_string());
     let resolved = resolve_version(&state, &requested).expect("bundled resolves");
-    assert_eq!(resolved.version, Some("0.99.0"));
+    assert_eq!(resolved.version.as_deref(), Some("0.99.0"));
     assert!(
-        resolved.to_download.is_none(),
+        !resolved.needs_download,
         "bundled version must NOT download"
     );
 }
@@ -1033,7 +1033,7 @@ fn resolve_version_returns_none_without_header() {
     let state = AppState::default();
     let resolved = resolve_version(&state, &None).expect("no header resolves");
     assert_eq!(resolved.version, None);
-    assert!(resolved.to_download.is_none());
+    assert!(!resolved.needs_download);
 }
 
 // ── Failure-path tests ──

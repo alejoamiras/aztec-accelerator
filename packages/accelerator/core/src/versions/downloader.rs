@@ -17,12 +17,12 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
     // been built by `AztecVersion::parse`, which ran `is_valid_version`. An unsafe version therefore
     // cannot reach this sink (`remove_dir_all` below) — the bypass the old sink-side recheck defended
-    // against is now structurally impossible. Deref to `&str` once so the existing path/URL/log sites
-    // stay byte-identical to the pre-Q3 callee.
-    let version: &str = version;
+    // against is now structurally impossible. q7e3-F-08: the path/URL sinks now take `&AztecVersion`
+    // themselves; deref to `&str` only for the log/digest sites (byte-identical strings).
+    let version_str: &str = version;
     let bb_path = version_bb_path(version);
     if bb_path.exists() {
-        tracing::info!(version, "bb already cached");
+        tracing::info!(version = version_str, "bb already cached");
         return Ok(bb_path);
     }
 
@@ -31,15 +31,15 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // BEFORE install — is preserved here in the orchestrator).
     let bytes = download_tarball(version).await?;
     tracing::info!(
-        version,
+        version = version_str,
         bytes = bytes.len(),
         "Download complete, verifying integrity"
     );
-    verify_digest(version, &bytes).await?;
+    verify_digest(version_str, &bytes).await?;
 
     // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
     // `install_version_dir` so the cleanup/rename is unit-testable without the network).
-    let version_dir = versions_base_dir().join(version);
+    let version_dir = versions_base_dir().join(version.as_str());
     install_version_dir(&version_dir, &bytes)?;
 
     let final_path = version_dir.join(bb_binary_name());
@@ -52,9 +52,9 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // macOS: clear quarantine xattrs + ad-hoc re-sign so Gatekeeper doesn't SIGKILL the chmod'd
     // binary. Extracted to `finalize_downloaded_binary` (a no-op off macOS) — F-04 folds the
     // "macOS tail bolted onto the cross-platform flow" sub-finding.
-    finalize_downloaded_binary(&final_path, &version_dir, version)?;
+    finalize_downloaded_binary(&final_path, &version_dir, version_str)?;
 
-    tracing::info!(version, "bb cached successfully");
+    tracing::info!(version = version_str, "bb cached successfully");
     Ok(final_path)
 }
 
@@ -114,9 +114,9 @@ fn finalize_downloaded_binary(
 /// Content-Length is an early fail-fast; the running per-chunk counter is the real ceiling) stops a
 /// Content-Length-omitting server from OOM-ing us by streaming gigabytes. Mirrors copy-bb.ts
 /// `MAX_BB_TARBALL_BYTES`. Byte-identical to the pre-Q11 inline block.
-async fn download_tarball(version: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+async fn download_tarball(version: &AztecVersion) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     let url = download_url(version);
-    tracing::info!(version, %url, "Downloading bb");
+    tracing::info!(version = %version, %url, "Downloading bb");
 
     let response = http_client().get(&url).send().await?;
     if !response.status().is_success() {
@@ -592,24 +592,22 @@ mod tests {
         // Use the bundled version — guaranteed to exist on GitHub releases
         let version = std::env::var("AZTEC_BB_VERSION").unwrap_or("4.2.0-aztecnr-rc.2".to_string());
 
+        let av = AztecVersion::parse(&version).expect("bundled version is valid");
+
         // Delete cached version to force a fresh download
         let cached_dir = versions_base_dir().join(&version);
         if cached_dir.exists() {
             std::fs::remove_dir_all(&cached_dir).unwrap();
         }
-        assert!(
-            !version_bb_path(&version).exists(),
-            "cache should be cleared"
-        );
+        assert!(!version_bb_path(&av).exists(), "cache should be cleared");
 
         // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
-        let av = AztecVersion::parse(&version).expect("bundled version is valid");
         let bb_path = download_bb(&av)
             .await
             .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
 
         // Verify the binary was cached in the right location
-        assert_eq!(bb_path, version_bb_path(&version));
+        assert_eq!(bb_path, version_bb_path(&av));
         assert!(bb_path.exists(), "bb binary should exist after download");
 
         // Verify it's a real file (not a directory or symlink)

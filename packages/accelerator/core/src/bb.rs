@@ -15,7 +15,10 @@ const PROVE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 /// 2. Bundled sidecar (Tauri externalBin) — `binaries/bb-{target-triple}` next to the executable
 /// 3. `~/.bb/bb` — user-installed via `bbup`
 /// 4. `bb` on `$PATH`
-pub fn find_bb(version: Option<&str>) -> Result<PathBuf, String> {
+///
+/// q7e3-F-08: `version` is the validated `&AztecVersion` — the cache-path lookup below is
+/// traversal-safe by construction.
+pub fn find_bb(version: Option<&versions::AztecVersion>) -> Result<PathBuf, String> {
     // 0. Explicit override via environment variable
     if let Ok(path) = std::env::var("BB_BINARY_PATH") {
         let explicit = PathBuf::from(&path);
@@ -74,7 +77,7 @@ fn home_dir_fallback() -> Option<PathBuf> {
 /// When `threads` is specified, passes `-t N` to limit parallelism.
 pub async fn prove(
     ivc_inputs: &[u8],
-    version: Option<&str>,
+    version: Option<&versions::AztecVersion>,
     threads: Option<usize>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let bb_path =
@@ -87,7 +90,7 @@ pub async fn prove(
     std::fs::write(&input_path, ivc_inputs)?;
 
     tracing::info!(
-        version = version.unwrap_or("bundled"),
+        version = version.map_or("bundled", |v| v.as_str()),
         ?threads,
         "Starting bb prove"
     );
@@ -270,7 +273,8 @@ mod tests {
     #[test]
     fn test_find_bb_with_version_checks_cache() {
         // Verify that find_bb with a version doesn't panic and follows the chain
-        let result = find_bb(Some("99.99.99-nonexistent"));
+        let version = versions::AztecVersion::parse("99.99.99-nonexistent").unwrap();
+        let result = find_bb(Some(&version));
         match result {
             Ok(path) => assert!(path.exists()),
             Err(msg) => assert!(msg.contains("bb binary not found")),

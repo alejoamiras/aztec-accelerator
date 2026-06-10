@@ -1,6 +1,7 @@
 //! On-disk layout of the bb version cache (`~/.aztec-accelerator/versions/`). q7e3-F-07: split from
 //! the `versions` module root; the root re-exports keep external paths unchanged.
 
+use super::version_policy::AztecVersion;
 use std::path::PathBuf;
 
 /// Returns the base directory for cached bb versions: `~/.aztec-accelerator/versions/`.
@@ -21,8 +22,12 @@ pub fn bb_binary_name() -> &'static str {
 }
 
 /// Returns the path to a cached bb binary for a given version.
-pub fn version_bb_path(version: &str) -> PathBuf {
-    versions_base_dir().join(version).join(bb_binary_name())
+/// q7e3-F-08: takes the validated `&AztecVersion` — an unvalidated string can no longer reach this
+/// path-building sink (the #99 traversal guard holds by construction).
+pub fn version_bb_path(version: &AztecVersion) -> PathBuf {
+    versions_base_dir()
+        .join(version.as_str())
+        .join(bb_binary_name())
 }
 
 /// List all cached bb versions by scanning `versions_base_dir()`.
@@ -47,7 +52,8 @@ mod tests {
 
     #[test]
     fn version_bb_path_format() {
-        let path = version_bb_path("5.0.0-nightly.20260307");
+        let version = AztecVersion::parse("5.0.0-nightly.20260307").unwrap();
+        let path = version_bb_path(&version);
         // Separator-agnostic: compare path components, and use the platform's bb name.
         let tail: std::path::PathBuf = [
             ".aztec-accelerator",

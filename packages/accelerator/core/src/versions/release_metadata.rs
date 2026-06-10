@@ -2,6 +2,7 @@
 //! asset-digest lookup (SEC-02 caveat inline). q7e3-F-07: split from the `versions` module root; the
 //! root re-exports keep external paths unchanged.
 
+use super::version_policy::AztecVersion;
 use std::error::Error;
 use std::time::Duration;
 
@@ -48,7 +49,9 @@ pub fn current_platform() -> &'static str {
 /// Returns the download URL for a bb tarball from Aztec's GitHub releases.
 ///
 /// Format: `https://github.com/AztecProtocol/aztec-packages/releases/download/v{VERSION}/barretenberg-{PLATFORM}.tar.gz`
-pub fn download_url(version: &str) -> String {
+/// q7e3-F-08: takes the validated `&AztecVersion` — an unvalidated string can no longer reach this
+/// URL-building sink.
+pub fn download_url(version: &AztecVersion) -> String {
     format!(
         "https://github.com/AztecProtocol/aztec-packages/releases/download/v{}/barretenberg-{}.tar.gz",
         version,
@@ -121,7 +124,8 @@ mod tests {
 
     #[test]
     fn download_url_format() {
-        let url = download_url("5.0.0-nightly.20260307");
+        let version = AztecVersion::parse("5.0.0-nightly.20260307").unwrap();
+        let url = download_url(&version);
         assert!(url.starts_with("https://github.com/AztecProtocol/aztec-packages/releases/download/v5.0.0-nightly.20260307/barretenberg-"));
         assert!(url.ends_with(".tar.gz"));
     }
@@ -154,6 +158,7 @@ mod tests {
         }
         // Use a known stable version that will always exist
         let version = std::env::var("AZTEC_BB_VERSION").unwrap_or("5.0.0-nightly.20260307".into());
+        let version = AztecVersion::parse(&version).expect("test version is valid");
         let url = download_url(&version);
         let client = reqwest::Client::new();
         let resp = client
