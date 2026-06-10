@@ -114,6 +114,13 @@ type AcceleratorStatus =
     };
 ```
 
+> **Origin approval affects `/health` detail.** Before the user approves your dApp's origin in the
+> accelerator popup, `/health` returns a *minimal* body, so `needsDownload` / `availableVersions` /
+> `acceleratorVersion` may be absent (and `needsDownload` can read `false` even though `bb` will
+> download on first use). After the user clicks **Allow**, the full status is reported. Proving works
+> in both cases — an unapproved-origin proof triggers an on-demand `bb` download rather than surfacing
+> the hint up front. (Applies to accelerators from the 2026-06 security-hardening release onward.)
+
 ### `AcceleratorProtocol`
 
 ```typescript
