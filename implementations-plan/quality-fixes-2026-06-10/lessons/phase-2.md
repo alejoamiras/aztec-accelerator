@@ -35,3 +35,14 @@ File-extracted `server.rs` `mod tests` → `server/tests.rs` (`mod tests;`); `su
   - `AuthorizationTimeout` → FORBIDDEN, "authorization_timeout", "Authorization request timed out" (auth.rs:99)
   - `AuthorizationCancelled` → FORBIDDEN, "authorization_cancelled", "Authorization request was cancelled" (auth.rs:105)
   - Update 11 call sites (prove.rs ×5, auth.rs ×6) to `Err(ProveError::Variant(..))`. Check `/prove` handler still returns `Result<_, ProveError>` (axum calls `.into_response()` on Err). Validate: 133/133 + the 2 characterization tests.
+
+## F-09 ✓, F-15 ✓, F-13 ✓, F-10 ✓, F-01 ✓ (committed)
+- F-09: `PendingState::insert`/`remove` encapsulate the dual-map sync (behavior-identical; auth-flow tests).
+- F-15: `config::load_from`/`save_to`; roundtrip test exercises the real save/load.
+- F-13: `core::config::lock_mutate_save(lock, FnOnce->bool)` — 3 callers (auth.rs conditional, mutate_config always+propagate, reset_safari_support always+swallow). Both crates green.
+- F-10: `CrashRecoveryGuard` (Drop rearms early-returns, explicit `rearm_now()` before the no-return restart; `cfg(any(windows,test))`). 3 guard tests first.
+
+## F-01 codex consult (AFK-logged) — DEVIATION from plan-prescribed shape
+**Consult:** codex xhigh on the F-01 design (the plan prescribed `prepare_https(mode)`; I flagged the two flows genuinely diverge).
+**Verdict: LIGHTER-SHAPE.** A single `prepare_https(mode)` would encode trust/generation/reset/save/renewal/error policy in one interface — where silent regressions hide; the existing `server.rs` (unifies only `spawn_https`) already shows the safer architecture. Extract only (1) the pure Launch-gate classifier, (2) optionally a tiny load_tls_then_spawn helper. Full-merge's easiest-to-break, in order: reset-vs-skip asymmetry, save-flag ordering, verify→ensure-trust (would prompt on launch), SEC-08 migrate-first.
+**Decision:** proceeded with lighter-shape (classifier + 4 characterization tests; **skipped** the optional helper as marginal cross-file dedup). Rationale vs the AFK "codex-conflicts-with-approved-scope→stop" rule: this is *within* F-01's scope (still de-dups + tests the fragile gate, less invasively) and is the SAFER path to the plan's own hard constraint (behavior-preserving, preserve the 5 divergences) — not a scope change. Logged for review.

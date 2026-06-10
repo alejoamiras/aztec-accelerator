@@ -319,7 +319,8 @@ close (code-review + codex post-impl) is the verification. *(User picked "standa
   - F-09 ✓ (PendingState::insert/remove encapsulation; auth-flow tests + 133/133)
   - F-13 ✓ (core::config::lock_mutate_save + 3 callers; core 133/133 + src-tauri 19+3, both crates clippy-clean)
   - F-10 ✓ (CrashRecoveryGuard rearm-before-restart, test-first; macOS clippy+3 guard tests, Windows path CI-validated)
-  - F-01 ⬜ (test-first: launch-vs-settings, macOS-gated) · F-04 ⬜ (.setup extract) — 2 left in PR-2
+  - F-01 ✓ (codex-consulted LIGHTER-SHAPE: pure LaunchHttpsGate classifier, 4 characterization tests FIRST incl. short-circuits + reset-vs-skip; deviation AFK-logged in lessons/phase-2.md)
+  - F-04 ⬜ (.setup extract) — LAST PR-2 finding
 - **PR-3 ⬜:** F-07 · F-08 (incl. CanonicalOrigin threading that overlaps F-09 — see D-2).
 - **DEFERRED (gate decision, tracked-issue follow-ups, count ✓-resolved):** F-14 (loopback `::1`/`[::1]` → `/harden bugs` first) · F-08 `"unknown"` sentinel→Option (SDK wire contract).
 - **Per-PR close still owed:** PR-2 + PR-3 each need `/code-review max --fix` + codex post-impl on the diff + green cross-OS CI before merge.
