@@ -282,6 +282,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       this.#onPhase?.("downloading");
     }
 
+    return this.#proveRemote(executionSteps);
+  }
+
+  /**
+   * q7e3-F-11: the accelerated proving path — serialize, POST `/prove`, decode. A `403` (origin denied
+   * or auth timeout) emits `"denied"` and falls back to WASM; other errors propagate. Extracted from
+   * {@link AcceleratorProver.createChonkProof}; only reached when the accelerator is available.
+   */
+  async #proveRemote(executionSteps: PrivateExecutionStep[]): Promise<ChonkProofWithPublicInputs> {
     logger.info("Accelerator available, proving natively", {
       url: this.#transport.baseUrl,
     });
@@ -294,8 +303,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#onPhase?.("transmit");
     this.#onPhase?.("proving");
 
-    let res: Response;
     const start = performance.now();
+    let res: Response;
     try {
       res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion);
     } catch (err) {
@@ -316,8 +325,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       throw err;
     }
 
-    // Always emit "proved" so the UI never hangs on "proving": prefer the server's
-    // authoritative duration (x-prove-duration-ms), else the client-measured round-trip.
+    return this.#decodeProof(res, start);
+  }
+
+  /**
+   * q7e3-F-11: emit `"proved"` (the server's authoritative `x-prove-duration-ms` if present, else the
+   * client-measured round-trip — so the UI never hangs on `"proving"`), then `"receive"` + decode the
+   * base64 proof buffer.
+   */
+  async #decodeProof(res: Response, start: number): Promise<ChonkProofWithPublicInputs> {
     const serverMs = Number(res.headers.get("x-prove-duration-ms"));
     const durationMs =
       Number.isFinite(serverMs) && serverMs > 0 ? serverMs : Math.round(performance.now() - start);
