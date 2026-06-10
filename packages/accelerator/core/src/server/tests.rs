@@ -1087,3 +1087,44 @@ async fn prove_handles_empty_body() {
         response.status()
     );
 }
+
+#[tokio::test]
+async fn invalid_host_reply_stays_application_json_without_message() {
+    // q7e3-F-03 characterization (test-FIRST): the host-guard's `invalid_host` reply is DELIBERATELY a
+    // minimal `application/json` body with NO `message` field — distinct from the `/prove` text/plain
+    // {error,message} errors. Pin it so the ProveError typing can't fold it into the text/plain shape.
+    let app = router(AppState::default());
+    let response: axum::http::Response<_> = app
+        .oneshot(
+            Request::builder()
+                .header("host", "evil.com:59833") // rebound attacker domain, not loopback
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let ct = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.starts_with("application/json"),
+        "invalid_host stays application/json (NOT the /prove text/plain shape), got {ct:?}"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "invalid_host");
+    assert!(
+        json.get("message").is_none(),
+        "invalid_host must NOT carry a message field (minimal host-guard reply)"
+    );
+}
