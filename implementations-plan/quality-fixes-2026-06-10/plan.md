@@ -30,7 +30,8 @@ and finishing parse-don't-validate (F-08). Each is independently revertible.
 
 ## PR structure (3 PRs; sequence matters where files overlap)
 
-### PR-1 ✅/⬜ — SDK maintainability (one package, type-stable) — `packages/sdk`
+### PR-1 ✅ MERGED #349 — SDK maintainability (one package, type-stable) — `packages/sdk`
+*F-02 ✓ · F-06 ✓ (characterization-first) · F-05 ✓ · F-11 ✓. tsc + 45/45 unit; /code-review clean; codex post-impl SHIP (behavior-preserving confirmed); CI green; merged 2026-06-10.*
 *Independent of the Rust work; can land first or in parallel. The 4 findings all live in the 440-LOC
 hotspot file, so they ship together by necessity (the report's "ship together" set).*
 
