@@ -77,7 +77,10 @@ pub type VersionsChangedCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Callback to show the authorization popup window. Takes the origin + the opaque `request_id`
 /// (SEC-06) the popup must echo back to `respond_auth` so decisions resolve by id, not origin.
-pub type ShowAuthPopupCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// q7e3-F-08: the popup receives the validated `&CanonicalOrigin` (plus the opaque request id) — the
+/// desktop layer can no longer be handed a non-canonical origin string.
+pub type ShowAuthPopupCallback =
+    Arc<dyn Fn(&crate::authorization::CanonicalOrigin, &str) + Send + Sync>;
 
 /// The server-side core state — everything the headless `accelerator-server` needs, with no GUI
 /// coupling. Lives behind an `Arc` in [`AppState`] so cloning the state is cheap (fixes the main.rs

@@ -5,10 +5,11 @@
 //! that was bolted onto the otherwise cross-platform flow (now its own `finalize_downloaded_binary`).
 //! The smaller identity/platform/layout/cache concerns stay in the `versions` module root.
 
-use super::{
-    bb_binary_name, current_platform, download_url, fetch_github_asset_digest, http_client,
-    sha256_hex, version_bb_path, versions_base_dir, AztecVersion,
+use super::cache_layout::{bb_binary_name, version_bb_path, versions_base_dir};
+use super::release_metadata::{
+    current_platform, download_url, fetch_github_asset_digest, http_client, sha256_hex,
 };
+use super::version_policy::AztecVersion;
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -16,12 +17,12 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
     // been built by `AztecVersion::parse`, which ran `is_valid_version`. An unsafe version therefore
     // cannot reach this sink (`remove_dir_all` below) — the bypass the old sink-side recheck defended
-    // against is now structurally impossible. Deref to `&str` once so the existing path/URL/log sites
-    // stay byte-identical to the pre-Q3 callee.
-    let version: &str = version;
+    // against is now structurally impossible. q7e3-F-08: the path/URL sinks now take `&AztecVersion`
+    // themselves; deref to `&str` only for the log/digest sites (byte-identical strings).
+    let version_str: &str = version;
     let bb_path = version_bb_path(version);
     if bb_path.exists() {
-        tracing::info!(version, "bb already cached");
+        tracing::info!(version = version_str, "bb already cached");
         return Ok(bb_path);
     }
 
@@ -30,15 +31,15 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // BEFORE install — is preserved here in the orchestrator).
     let bytes = download_tarball(version).await?;
     tracing::info!(
-        version,
+        version = version_str,
         bytes = bytes.len(),
         "Download complete, verifying integrity"
     );
-    verify_digest(version, &bytes).await?;
+    verify_digest(version_str, &bytes).await?;
 
     // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
     // `install_version_dir` so the cleanup/rename is unit-testable without the network).
-    let version_dir = versions_base_dir().join(version);
+    let version_dir = versions_base_dir().join(version.as_str());
     install_version_dir(&version_dir, &bytes)?;
 
     let final_path = version_dir.join(bb_binary_name());
@@ -51,9 +52,9 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // macOS: clear quarantine xattrs + ad-hoc re-sign so Gatekeeper doesn't SIGKILL the chmod'd
     // binary. Extracted to `finalize_downloaded_binary` (a no-op off macOS) — F-04 folds the
     // "macOS tail bolted onto the cross-platform flow" sub-finding.
-    finalize_downloaded_binary(&final_path, &version_dir, version)?;
+    finalize_downloaded_binary(&final_path, &version_dir, version_str)?;
 
-    tracing::info!(version, "bb cached successfully");
+    tracing::info!(version = version_str, "bb cached successfully");
     Ok(final_path)
 }
 
@@ -113,9 +114,9 @@ fn finalize_downloaded_binary(
 /// Content-Length is an early fail-fast; the running per-chunk counter is the real ceiling) stops a
 /// Content-Length-omitting server from OOM-ing us by streaming gigabytes. Mirrors copy-bb.ts
 /// `MAX_BB_TARBALL_BYTES`. Byte-identical to the pre-Q11 inline block.
-async fn download_tarball(version: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+async fn download_tarball(version: &AztecVersion) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     let url = download_url(version);
-    tracing::info!(version, %url, "Downloading bb");
+    tracing::info!(version = %version, %url, "Downloading bb");
 
     let response = http_client().get(&url).send().await?;
     if !response.status().is_success() {
@@ -359,5 +360,279 @@ mod tests {
         let err = extract_bb_from_tarball_capped(&gz, dir.path(), 1024 * 1024).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("cap") || msg.contains("bomb"), "got: {msg}");
+    }
+
+    #[test]
+    fn extract_bb_from_synthetic_tarball() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Create a synthetic tar.gz containing a file named "bb"
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let bb_content = b"#!/bin/sh\necho hello\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bb_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, bb_binary_name(), &bb_content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        extract_bb_from_tarball(&tarball, tmp.path()).unwrap();
+
+        let bb = tmp.path().join(bb_binary_name());
+        assert!(bb.exists());
+        let contents = std::fs::read_to_string(&bb).unwrap();
+        assert!(contents.contains("echo hello"));
+    }
+
+    /// Q11 atomic-rename-cleanup: `install_version_dir` extracts into a sibling temp dir then renames
+    /// it into place, replacing any stale cache entry wholesale and leaving no temp dir behind. Pins
+    /// the behavior the pre-Q11 inline block in `download_bb` had, now that it's a testable unit.
+    #[test]
+    fn install_version_dir_replaces_stale_and_extracts_atomically() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Minimal valid tarball containing the platform bb binary name.
+        let bb_content = b"#!/bin/sh\necho fake-bb\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bb_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, bb_binary_name(), &bb_content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-test");
+
+        // Fresh install → bb present.
+        install_version_dir(&version_dir, &tarball).unwrap();
+        assert!(
+            version_dir.join(bb_binary_name()).exists(),
+            "bb extracted on fresh install"
+        );
+
+        // A stale cache entry (junk file) is replaced wholesale by the atomic rename.
+        std::fs::write(version_dir.join("STALE_JUNK"), b"old").unwrap();
+        install_version_dir(&version_dir, &tarball).unwrap();
+        assert!(
+            version_dir.join(bb_binary_name()).exists(),
+            "bb re-extracted after replace"
+        );
+        assert!(
+            !version_dir.join("STALE_JUNK").exists(),
+            "stale entry removed by atomic replace"
+        );
+
+        // No leftover temp dir after the rename.
+        assert!(
+            !version_dir.with_file_name(".5.0.0-test.tmp").exists(),
+            "temp dir cleaned up after rename"
+        );
+    }
+
+    #[test]
+    fn extract_bb_from_nested_tarball() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Archive with bb nested under a directory: "barretenberg/bb"
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let bb_content = b"nested-bb";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bb_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    format!("barretenberg/{}", bb_binary_name()),
+                    &bb_content[..],
+                )
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        extract_bb_from_tarball(&tarball, tmp.path()).unwrap();
+
+        let bb = tmp.path().join(bb_binary_name());
+        assert!(bb.exists());
+        assert_eq!(std::fs::read_to_string(&bb).unwrap(), "nested-bb");
+    }
+
+    #[test]
+    fn extract_bb_fails_when_no_bb_in_archive() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let content = b"not-bb";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "other-file", &content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&tarball, tmp.path());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in tarball"));
+    }
+
+    #[test]
+    fn extract_bb_rejects_symlink_entry() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Create a tar.gz with a symlink named "bb" pointing to /etc/passwd
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_cksum();
+            builder
+                .append_link(&mut header, bb_binary_name(), "/etc/passwd")
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&tarball, tmp.path());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular file"));
+    }
+
+    #[test]
+    fn extract_bb_fails_on_corrupted_gzip() {
+        let corrupted = b"this is not valid gzip data at all";
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(corrupted, tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_bb_fails_on_empty_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&[], tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_bb_cleans_up_on_missing_bb() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        // Valid tar.gz with no "bb" entry — should fail and leave no artifacts
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let content = b"not-bb";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "other-file", &content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_bb_from_tarball(&tarball, tmp.path());
+        assert!(result.is_err());
+        // No "bb" file should have been created
+        assert!(!tmp.path().join("bb").exists());
+    }
+
+    /// Full download E2E: download a real bb binary from GitHub, verify SHA-256,
+    /// extract, and confirm the binary is cached and executable.
+    /// Gated behind ACCELERATOR_DOWNLOAD_TEST to avoid network calls in regular CI.
+    #[tokio::test]
+    async fn download_and_verify_bb() {
+        if std::env::var("ACCELERATOR_DOWNLOAD_TEST").is_err() {
+            eprintln!(
+                "Skipping download_and_verify_bb (set ACCELERATOR_DOWNLOAD_TEST=1 to enable)"
+            );
+            return;
+        }
+
+        // Use the bundled version — guaranteed to exist on GitHub releases
+        let version = std::env::var("AZTEC_BB_VERSION").unwrap_or("4.2.0-aztecnr-rc.2".to_string());
+
+        let av = AztecVersion::parse(&version).expect("bundled version is valid");
+
+        // Delete cached version to force a fresh download
+        let cached_dir = versions_base_dir().join(&version);
+        if cached_dir.exists() {
+            std::fs::remove_dir_all(&cached_dir).unwrap();
+        }
+        assert!(!version_bb_path(&av).exists(), "cache should be cleared");
+
+        // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
+        let bb_path = download_bb(&av)
+            .await
+            .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
+
+        // Verify the binary was cached in the right location
+        assert_eq!(bb_path, version_bb_path(&av));
+        assert!(bb_path.exists(), "bb binary should exist after download");
+
+        // Verify it's a real file (not a directory or symlink)
+        let metadata = std::fs::metadata(&bb_path).unwrap();
+        assert!(metadata.is_file(), "bb should be a regular file");
+        assert!(
+            metadata.len() > 1_000_000,
+            "bb binary should be >1MB (got {} bytes)",
+            metadata.len()
+        );
+
+        // Verify it's executable (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            assert!(
+                mode & 0o111 != 0,
+                "bb should be executable (mode: {mode:#o})"
+            );
+        }
+
+        // Clean up — don't leave test artifacts in the user's cache
+        if cached_dir.exists() {
+            std::fs::remove_dir_all(&cached_dir).unwrap();
+        }
     }
 }

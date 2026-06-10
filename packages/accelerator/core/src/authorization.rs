@@ -164,14 +164,16 @@ const MAX_PENDING_ORIGINS: usize = 10;
 /// A pending authorization awaiting the user's decision: its origin (for display + cleanup) and the
 /// receivers of every request piggybacking on it.
 struct PendingRequest {
-    origin: String,
+    /// q7e3-F-08: the validated origin (display + cleanup) — the maps are keyed by `CanonicalOrigin`,
+    /// so a non-canonical string can no longer enter the pending state.
+    origin: CanonicalOrigin,
     senders: Vec<oneshot::Sender<AuthDecision>>,
 }
 
 #[derive(Default)]
 struct PendingState {
     /// origin → its current pending `request_id` (so repeat requests from one origin piggyback).
-    by_origin: HashMap<String, String>,
+    by_origin: HashMap<CanonicalOrigin, String>,
     /// `request_id` → the pending request. Decisions resolve by **id**, not origin (SEC-06).
     by_request: HashMap<String, PendingRequest>,
 }
@@ -180,7 +182,12 @@ impl PendingState {
     /// q7e3-F-09: insert a new pending request, updating BOTH indexes. The origin↔request_id coupling
     /// lives here, not hand-synced at each call site, so a future mutator can't update one map and
     /// forget the other.
-    fn insert(&mut self, origin: String, request_id: String, tx: oneshot::Sender<AuthDecision>) {
+    fn insert(
+        &mut self,
+        origin: CanonicalOrigin,
+        request_id: String,
+        tx: oneshot::Sender<AuthDecision>,
+    ) {
         self.by_origin.insert(origin.clone(), request_id.clone());
         self.by_request.insert(
             request_id,
@@ -228,7 +235,7 @@ impl AuthorizationManager {
     /// Returns `Err` if the maximum number of pending requests is exceeded (DoS protection).
     pub fn request(
         &self,
-        origin: &str,
+        origin: &CanonicalOrigin,
     ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool), &'static str> {
         let (tx, rx) = oneshot::channel();
         let mut st = self.state.lock();
@@ -244,7 +251,7 @@ impl AuthorizationManager {
             return Err("too many pending authorization requests");
         }
         let request_id = uuid::Uuid::new_v4().to_string();
-        st.insert(origin.to_string(), request_id.clone(), tx);
+        st.insert(origin.clone(), request_id.clone(), tx);
         Ok((rx, request_id, true))
     }
 
@@ -361,11 +368,11 @@ mod tests {
     #[tokio::test]
     async fn request_and_resolve() {
         let mgr = AuthorizationManager::new();
-        let (rx1, id1, is_first1) = mgr.request("https://example.com").unwrap();
+        let (rx1, id1, is_first1) = mgr.request(&co("https://example.com")).unwrap();
         assert!(is_first1);
 
         // A second request for the SAME origin piggybacks on the same request_id.
-        let (rx2, id2, is_first2) = mgr.request("https://example.com").unwrap();
+        let (rx2, id2, is_first2) = mgr.request(&co("https://example.com")).unwrap();
         assert!(!is_first2);
         assert_eq!(id1, id2, "same origin must share one request_id");
 
@@ -378,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_deny() {
         let mgr = AuthorizationManager::new();
-        let (rx, id, _) = mgr.request("https://evil.com").unwrap();
+        let (rx, id, _) = mgr.request(&co("https://evil.com")).unwrap();
         mgr.resolve(&id, AuthDecision::Deny);
         assert_eq!(rx.await.unwrap(), AuthDecision::Deny);
     }
@@ -389,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_ignores_wrong_request_id() {
         let mgr = AuthorizationManager::new();
-        let (mut rx, id, _) = mgr.request("https://example.com").unwrap();
+        let (mut rx, id, _) = mgr.request(&co("https://example.com")).unwrap();
         mgr.resolve("not-the-real-id", AuthDecision::Allow { remember: true });
         assert!(
             rx.try_recv().is_err(),
@@ -404,12 +411,12 @@ mod tests {
     fn rejects_when_too_many_pending_origins() {
         let mgr = AuthorizationManager::new();
         for i in 0..MAX_PENDING_ORIGINS {
-            assert!(mgr.request(&format!("https://site{i}.com")).is_ok());
+            assert!(mgr.request(&co(&format!("https://site{i}.com"))).is_ok());
         }
         // One more should fail
-        assert!(mgr.request("https://one-too-many.com").is_err());
+        assert!(mgr.request(&co("https://one-too-many.com")).is_err());
         // Piggybacking on an existing origin should still work
-        assert!(mgr.request("https://site0.com").is_ok());
+        assert!(mgr.request(&co("https://site0.com")).is_ok());
     }
 
     // ─── canonicalize_origin ────────────────────────────────────────────

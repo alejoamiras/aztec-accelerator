@@ -612,9 +612,11 @@ fn auth_state_with_popup(
             config: Some(Arc::new(RwLock::new(cfg))),
             ..Default::default()
         }),
-        show_auth_popup: Some(Arc::new(move |origin: &str, request_id: &str| {
-            let _ = popup_tx.send((origin.to_string(), request_id.to_string()));
-        })),
+        show_auth_popup: Some(Arc::new(
+            move |origin: &crate::authorization::CanonicalOrigin, request_id: &str| {
+                let _ = popup_tx.send((origin.to_string(), request_id.to_string()));
+            },
+        )),
         ..Default::default()
     };
     (state, auth)
@@ -886,7 +888,10 @@ async fn prove_returns_429_when_too_many_pending_origins() {
     // Fill the AuthorizationManager to capacity (MAX_PENDING_ORIGINS = 10)
     let auth = state.auth_manager.as_ref().unwrap();
     for i in 0..10 {
-        let _ = auth.request(&format!("https://origin-{i}.com"));
+        let origin =
+            crate::authorization::CanonicalOrigin::parse(&format!("https://origin-{i}.com"))
+                .unwrap();
+        let _ = auth.request(&origin);
     }
 
     // The 11th distinct origin should get 429
@@ -996,9 +1001,9 @@ fn resolve_version_flags_uncached_for_download() {
     let state = AppState::default();
     let version = Some("5.0.0-rc.1".to_string());
     let resolved = resolve_version(&state, &version).expect("valid version resolves");
-    assert_eq!(resolved.version, Some("5.0.0-rc.1"));
+    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
     assert!(
-        resolved.to_download.is_some(),
+        resolved.needs_download,
         "uncached non-bundled version must be flagged for download"
     );
 }
@@ -1010,9 +1015,9 @@ fn resolve_version_no_download_for_bundled() {
     let state = AppState::headless(core);
     let requested = Some("0.99.0".to_string());
     let resolved = resolve_version(&state, &requested).expect("bundled resolves");
-    assert_eq!(resolved.version, Some("0.99.0"));
+    assert_eq!(resolved.version.as_deref(), Some("0.99.0"));
     assert!(
-        resolved.to_download.is_none(),
+        !resolved.needs_download,
         "bundled version must NOT download"
     );
 }
@@ -1033,7 +1038,7 @@ fn resolve_version_returns_none_without_header() {
     let state = AppState::default();
     let resolved = resolve_version(&state, &None).expect("no header resolves");
     assert_eq!(resolved.version, None);
-    assert!(resolved.to_download.is_none());
+    assert!(!resolved.needs_download);
 }
 
 // ── Failure-path tests ──

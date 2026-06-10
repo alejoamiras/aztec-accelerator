@@ -61,14 +61,14 @@ pub(crate) async fn authorize_origin(
     }
 
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-    let (rx, request_id, is_first) = auth_manager.request(origin.as_str()).map_err(|_| {
+    let (rx, request_id, is_first) = auth_manager.request(&origin).map_err(|_| {
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
         ProveError::TooManyRequests
     })?;
 
     if is_first {
         if let Some(ref show_popup) = state.show_auth_popup {
-            show_popup(origin.as_str(), &request_id);
+            show_popup(&origin, &request_id);
         }
     }
 

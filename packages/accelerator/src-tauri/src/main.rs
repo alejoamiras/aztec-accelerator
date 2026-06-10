@@ -345,15 +345,17 @@ fn build_desktop_state(
     // Auth popup callback
     let app_handle_for_auth = app.handle().clone();
     let auth_manager_for_timeout = auth_manager.clone();
-    let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback =
-        Arc::new(move |origin: &str, request_id: &str| {
+    let show_auth_popup: aztec_accelerator::server::ShowAuthPopupCallback = Arc::new(
+        move |origin: &aztec_accelerator::authorization::CanonicalOrigin, request_id: &str| {
+            // Deref-coerces to &str at the window boundary; the origin is canonical by type.
             windows::show_auth_popup_window(
                 &app_handle_for_auth,
                 origin,
                 request_id,
                 &auth_manager_for_timeout,
             );
-        });
+        },
+    );
 
     let is_animating_for_status = is_animating.clone();
     let on_status = Arc::new(move |status: ServerStatus| {

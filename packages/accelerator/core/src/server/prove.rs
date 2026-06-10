@@ -30,26 +30,28 @@ impl Drop for StatusGuard {
 }
 
 /// Validate and resolve the requested Aztec version. Downloads the bb binary if needed.
-/// Outcome of version resolution: the version string for `bb::prove` (`None` = bundled default) and,
-/// when the requested version isn't cached + isn't the bundled one, the parsed version `prove()` must
-/// download first. **Pure** — no status emission, no download. (F-08: `prove` owns the whole
+/// Outcome of version resolution: the validated version for `bb::prove` (`None` = bundled default)
+/// and whether `prove()` must download it first. **Pure** — no status emission, no download. (F-08:
+/// the old `Option<&str>` + `Option<AztecVersion>` double representation is collapsed into ONE
+/// validated `AztecVersion` + a `needs_download` flag; `prove` owns the whole
 /// Proving→Downloading→Proving status sequence so it lives in one place.)
 #[derive(Debug)]
-pub(crate) struct ResolvedVersion<'a> {
-    pub(crate) version: Option<&'a str>,
-    pub(crate) to_download: Option<versions::AztecVersion>,
+pub(crate) struct ResolvedVersion {
+    pub(crate) version: Option<versions::AztecVersion>,
+    /// Only meaningful when `version` is `Some` (the bundled default is never downloaded).
+    pub(crate) needs_download: bool,
 }
 
-pub(crate) fn resolve_version<'a>(
+pub(crate) fn resolve_version(
     state: &AppState,
-    requested: &'a Option<String>,
-) -> Result<ResolvedVersion<'a>, ProveError> {
+    requested: &Option<String>,
+) -> Result<ResolvedVersion, ProveError> {
     let v = match requested {
         Some(v) => v,
         None => {
             return Ok(ResolvedVersion {
                 version: None,
-                to_download: None,
+                needs_download: false,
             })
         }
     };
@@ -70,16 +72,14 @@ pub(crate) fn resolve_version<'a>(
         .as_deref()
         .unwrap_or(super::DEFAULT_BB_VERSION);
 
-    let to_download = if v != bundled && !versions::version_bb_path(&version).exists() {
+    let needs_download = v != bundled && !versions::version_bb_path(&version).exists();
+    if needs_download {
         tracing::info!(version = %version, "Version not cached, will download");
-        Some(version)
-    } else {
-        None
-    };
+    }
 
     Ok(ResolvedVersion {
-        version: Some(v.as_str()),
-        to_download,
+        version: Some(version),
+        needs_download,
     })
 }
 
@@ -142,13 +142,15 @@ pub(crate) async fn prove(
     // emits status or downloads.
     let ResolvedVersion {
         version: version_for_prove,
-        to_download,
+        needs_download,
     } = resolve_version(&state, &requested_version)?;
-    if let Some(version) = to_download {
+    // q7e3-F-08 borrow discipline: borrow the version for the download arm (`as_ref`), never move it —
+    // `bb::prove` still needs it after the download.
+    if let (true, Some(version)) = (needs_download, version_for_prove.as_ref()) {
         if let Some(ref cb) = state.on_status {
             cb(ServerStatus::Downloading);
         }
-        match versions::download_bb(&version).await {
+        match versions::download_bb(version).await {
             Ok(_) => {
                 tracing::info!(version = %version, "Download complete");
                 let bundled_owned = state
@@ -158,7 +160,13 @@ pub(crate) async fn prove(
                     .to_string();
                 let on_versions_changed = state.on_versions_changed.clone();
                 tokio::spawn(async move {
-                    versions::cleanup_old_versions(&bundled_owned).await;
+                    // q7e3-F-08: the caller parses now; an unparseable bundled (defensive,
+                    // unreachable in practice) skips cleanup — same outcome as the old internal
+                    // parse-else-return. The "unknown" sentinel still parses, so eviction semantics
+                    // in unknown-bundled builds are unchanged (#352 stays deferred).
+                    if let Some(bundled) = versions::AztecVersion::parse(&bundled_owned) {
+                        versions::cleanup_old_versions(&bundled).await;
+                    }
                     if let Some(cb) = on_versions_changed {
                         cb();
                     }
@@ -181,7 +189,7 @@ pub(crate) async fn prove(
     let threads = compute_threads(&state);
 
     let start = std::time::Instant::now();
-    let result = bb::prove(&body, version_for_prove, threads).await;
+    let result = bb::prove(&body, version_for_prove.as_ref(), threads).await;
     let elapsed = start.elapsed();
 
     match &result {
