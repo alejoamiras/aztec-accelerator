@@ -1,6 +1,6 @@
 [package]
 name = "aztec-accelerator"
-version = "1.0.5-rc.1"
+version = "1.0.6-rc.1"
 description = "Native proving accelerator for Aztec transactions"
 edition = "2021"
 rust-version = "1.77.2"
