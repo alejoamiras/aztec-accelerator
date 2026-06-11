@@ -653,12 +653,31 @@ jobs:
           LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
           WINDOWS_X86_64_SIG=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip.sig' -exec cat {} \; 2>/dev/null || echo "")
 
+          # Ground truth for debugging: the exact tree the extraction produced. The 1.0.5 cut failed
+          # here with empty sizes while the artifact zips verifiably contained the files — never
+          # debug this blind again.
+          echo "Artifacts tree:"
+          find artifacts -type f | sort
+
           # Read artifact byte sizes (SEC-03): the client pre-flight-rejects an update whose advertised
           # size exceeds its cap, BEFORE the plugin buffers the whole artifact into memory.
-          DARWIN_AARCH64_SIZE=$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
-          DARWIN_X86_64_SIZE=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
-          LINUX_X86_64_SIZE=$(find artifacts -name '*.AppImage' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
-          WINDOWS_X86_64_SIZE=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip' ! -name '*.sig' -exec stat -c%s {} \; 2>/dev/null | head -1)
+          # Glob + `wc -c` (not `find -exec stat`): the 1.0.5 stable deterministically got empty output
+          # from the find/stat pipeline on this exact tree; globs + wc have no such failure mode and
+          # nothing here swallows stderr.
+          first_file_size() {
+            for f in "$@"; do
+              if [ -f "$f" ]; then
+                wc -c <"$f" | tr -d ' '
+                return 0
+              fi
+            done
+            echo "::warning::first_file_size: no match for: $*" >&2
+            return 1
+          }
+          DARWIN_AARCH64_SIZE=$(first_file_size artifacts/accelerator-macos-arm64/*/*.app.tar.gz artifacts/accelerator-macos-arm64/*.app.tar.gz || true)
+          DARWIN_X86_64_SIZE=$(first_file_size artifacts/accelerator-macos-x86_64/*/*.app.tar.gz artifacts/accelerator-macos-x86_64/*.app.tar.gz || true)
+          LINUX_X86_64_SIZE=$(first_file_size artifacts/accelerator-linux-x86_64/*/*.AppImage artifacts/accelerator-linux-x86_64/*.AppImage || true)
+          WINDOWS_X86_64_SIZE=$(first_file_size artifacts/accelerator-windows-x86_64/*/*-setup.nsis.zip artifacts/accelerator-windows-x86_64/*-setup.nsis.zip || true)
 
           # Assert all signatures AND sizes are present — empty values produce broken auto-updates
           for var_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG \
