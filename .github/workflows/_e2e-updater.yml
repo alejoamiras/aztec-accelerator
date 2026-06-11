@@ -65,7 +65,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           N_VERSION: ${{ inputs.n-version }}
         run: |
-          N1_TAG=$(gh release list --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          N1_TAG=$(gh release list --exclude-pre-releases --limit 20 --json tagName --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
           if [ -z "$N1_TAG" ]; then
             echo "::error::no stable release found to use as N-1"
             exit 1

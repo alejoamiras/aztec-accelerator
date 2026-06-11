@@ -126,7 +126,11 @@ jobs:
             NOTES="SDK revision for Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
           fi
 
+          # ALWAYS --latest=false: `inputs.latest` governs the npm dist-tag only. The repo's GitHub
+          # "Latest" badge belongs to accelerator releases — the 4.2.0-revision.2 SDK release stole
+          # it from accelerator-v1.0.5 (2026-06-11), breaking the updater smokes' N-1 resolution
+          # and the releases/latest URL.
           gh release create "$TAG" \
             --title "$TAG" \
             --notes "$NOTES" \
-            ${{ inputs.latest && '--latest' || '--latest=false' }}
+            --latest=false
