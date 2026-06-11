@@ -56,6 +56,8 @@ export const WINDOWS_BB_ASSET = "barretenberg-amd64-windows.tar.gz";
 export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
   // @aztec/bb.js 4.2.0 — verified on windows-latest (Windows Prebuild Smoke CI gate).
   "4.2.0": "55043d74d20afd55cb3d3c5fd690b79f9d964ba52bfebd13bcba71b74a3d0c8f",
+  // @aztec/bb.js 4.3.1 — sha256 of barretenberg-amd64-windows.tar.gz from the v4.3.1 release.
+  "4.3.1": "58294203ba658d2c6d983dc22f68f3a2280f5107e9e973570e4adb751997fd2c",
 };
 
 export function windowsBbReleaseTag(version: string): string {
