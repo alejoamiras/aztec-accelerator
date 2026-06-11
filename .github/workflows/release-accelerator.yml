@@ -653,31 +653,21 @@ jobs:
           LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
           WINDOWS_X86_64_SIG=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip.sig' -exec cat {} \; 2>/dev/null || echo "")
 
-          # Ground truth for debugging: the exact tree the extraction produced. The 1.0.5 cut failed
-          # here with empty sizes while the artifact zips verifiably contained the files — never
-          # debug this blind again.
-          echo "Artifacts tree:"
+          # Ground truth for debugging (the 1.0.5 incident): by this point "Flatten and rename
+          # artifacts" has ALREADY mv'd every binary out of artifacts/ into release-files/ under its
+          # release name — artifacts/ holds only the desktop .sig files (which is why the sig reads
+          # above work). Any size/binary read MUST target release-files/, never artifacts/.
+          echo "Artifacts tree (post-flatten — sigs only):"
           find artifacts -type f | sort
 
           # Read artifact byte sizes (SEC-03): the client pre-flight-rejects an update whose advertised
-          # size exceeds its cap, BEFORE the plugin buffers the whole artifact into memory.
-          # Glob + `wc -c` (not `find -exec stat`): the 1.0.5 stable deterministically got empty output
-          # from the find/stat pipeline on this exact tree; globs + wc have no such failure mode and
-          # nothing here swallows stderr.
-          first_file_size() {
-            for f in "$@"; do
-              if [ -f "$f" ]; then
-                wc -c <"$f" | tr -d ' '
-                return 0
-              fi
-            done
-            echo "::warning::first_file_size: no match for: $*" >&2
-            return 1
-          }
-          DARWIN_AARCH64_SIZE=$(first_file_size artifacts/accelerator-macos-arm64/*/*.app.tar.gz artifacts/accelerator-macos-arm64/*.app.tar.gz || true)
-          DARWIN_X86_64_SIZE=$(first_file_size artifacts/accelerator-macos-x86_64/*/*.app.tar.gz artifacts/accelerator-macos-x86_64/*.app.tar.gz || true)
-          LINUX_X86_64_SIZE=$(first_file_size artifacts/accelerator-linux-x86_64/*/*.AppImage artifacts/accelerator-linux-x86_64/*.AppImage || true)
-          WINDOWS_X86_64_SIZE=$(first_file_size artifacts/accelerator-windows-x86_64/*/*-setup.nsis.zip artifacts/accelerator-windows-x86_64/*-setup.nsis.zip || true)
+          # size exceeds its cap, BEFORE the plugin buffers the whole artifact into memory. Read the
+          # RENAMED files in release-files/ — the exact bytes the latest.json URLs point at (the
+          # flatten step's EXPECTED assertion already guarantees they exist; a miss fails loudly here).
+          DARWIN_AARCH64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" | tr -d ' ')
+          DARWIN_X86_64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" | tr -d ' ')
+          LINUX_X86_64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" | tr -d ' ')
+          WINDOWS_X86_64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" | tr -d ' ')
 
           # Assert all signatures AND sizes are present — empty values produce broken auto-updates
           for var_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG \
