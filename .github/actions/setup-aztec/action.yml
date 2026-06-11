@@ -41,6 +41,13 @@ runs:
     - name: Install Foundry
       if: inputs.skip_cli != 'true'
       uses: foundry-rs/foundry-toolchain@v1
+      with:
+        # Pinned, not "stable": aztec's L1 deploy wrapper (l1-contracts/scripts/forge_broadcast.js,
+        # since 4.3.1) passes `--batch-size` WITHOUT `--batch`; foundry 1.7 made `--batch-size`
+        # require the new `--batch` flag, so a floating stable (1.7.1) fails the deploy with
+        # "required arguments were not provided: --batch". v1.4.1 is the lineage aztec bundles and
+        # tests against. Revisit when aztec's wrapper supports the 1.7 CLI.
+        version: v1.4.1
 
     - name: Cache Aztec CLI
       if: inputs.skip_cli != 'true'
