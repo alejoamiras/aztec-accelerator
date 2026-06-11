@@ -66,3 +66,21 @@ runs:
       run: |
         echo "$HOME/.aztec/versions/${{ steps.detect.outputs.version }}/bin" >> $GITHUB_PATH
         echo "$HOME/.aztec/versions/${{ steps.detect.outputs.version }}/node_modules/.bin" >> $GITHUB_PATH
+
+    - name: Ensure foundry-toolchain forge wins over the aztec-bundled forge
+      if: inputs.skip_cli != 'true'
+      shell: bash
+      run: |
+        # The aztec bundle ships its own forge in versions/<v>/bin. Since aztec 4.3.1 the L1 deploy
+        # path (l1-contracts/scripts/forge_broadcast.js) spawns bare `forge` with upstream-foundry
+        # args, but the 4.3.1-bundled forge's `script` CLI is incompatible (requires `--batch`) —
+        # the local network then fails L1 deploy and never comes up. The aztec bin dir was prepended
+        # to PATH above (the CLI itself needs it), so neutralize just the bundled forge: the
+        # foundry-toolchain forge (installed earlier in this action) must be the one that resolves.
+        AZTEC_BIN="$HOME/.aztec/versions/${{ steps.detect.outputs.version }}/bin"
+        if [ -x "$AZTEC_BIN/forge" ]; then
+          mv "$AZTEC_BIN/forge" "$AZTEC_BIN/forge.aztec-bundled"
+          echo "Renamed aztec-bundled forge out of the way: $AZTEC_BIN/forge.aztec-bundled"
+        fi
+        command -v forge >/dev/null || { echo "::error::no foundry-toolchain forge on PATH"; exit 1; }
+        echo "forge now resolves to: $(command -v forge) ($(forge --version | head -1))"
