@@ -2,6 +2,12 @@ name: Publish Testnet
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_sdk_publish:
+        description: "Deploy the playground only — skip re-publishing the SDK to npm"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: publish-testnet
@@ -37,11 +43,13 @@ jobs:
 
   publish-sdk:
     needs: [changes, e2e]
-    if: needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch'
+    # Skip when deploying the playground only. latest:false — while @aztec deps are rc-labeled the
+    # SDK ships on the `testnet` dist-tag, never npm `latest` (which stays on the last stable line).
+    if: (needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch') && inputs.skip_sdk_publish != true
     uses: ./.github/workflows/_publish-sdk.yml
     with:
       dist_tag: testnet
-      latest: true
+      latest: false
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
