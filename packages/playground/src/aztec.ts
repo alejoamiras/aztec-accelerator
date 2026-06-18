@@ -387,13 +387,15 @@ async function executeStep(opts: {
   };
 }
 
-/** Poll until a transaction is no longer pending. Throws on dropped or timed-out txs. */
+/** Poll until a transaction is mined. Throws on dropped, reverted, or timed-out txs. */
 async function waitForTx(txHash: TxHash): Promise<void> {
   const deadline = Date.now() + TX_TIMEOUT_MS;
   while (true) {
     const receipt = await state.node!.getTxReceipt(txHash);
     if (!receipt.isPending()) {
       if (receipt.isDropped()) throw new Error("Transaction dropped");
+      // v5: a mined tx can still have reverted in public execution — that is NOT success.
+      if (receipt.hasExecutionReverted()) throw new Error("Transaction reverted");
       return;
     }
     if (Date.now() > deadline) {
@@ -561,7 +563,7 @@ export async function deployToken(
     });
     steps.push(tokenStep);
 
-    const address = tokenDeploy.address!.toString();
+    const address = (await tokenDeploy.getAddress()).toString();
     const totalDurationMs = Date.now() - totalStart;
     log(
       `Token deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${address}`,
@@ -653,7 +655,7 @@ export async function runTokenFlow(
       onConfirming: () => onStep("confirming token deploy"),
       proveTracker,
     });
-    const token = TokenContract.at(tokenDeploy.address!, state.wallet);
+    const token = await TokenContract.at(await tokenDeploy.getAddress(), state.wallet);
     steps.push(tokenStep);
     log(
       `Token deployed in ${(tokenStep.durationMs / 1000).toFixed(1)}s → ${token.address.toString()}`,

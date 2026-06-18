@@ -69,7 +69,7 @@ bun run --cwd packages/sdk test:lint && bun run --cwd packages/sdk test:unit && 
 ```
 Pass: green; `dist/index.d.ts` exports the public types intact.
 
-### P3 — Playground + scripts migration
+### P3 — Playground + scripts migration ✓
 - **`aztec.ts:391` reverted-mined fix (codex):** today any non-pending/non-dropped receipt = success. v5 has **mined-but-reverted** as a distinct state — reject reverted mined receipts, don't silently pass. Re-derive `isPending`/`isDropped`/`isMined` from the 5.0 union (the brief's "add `.isMined()`" was wrong; the code already narrows — verify the methods still exist).
 - **Use the default canonical FPC (salt=0) — no deploy/fund:** `initializeFPC` (`aztec.ts:178-189`) uses salt=0 when `SPONSORED_FPC_SALT` is unset and only *registers* the instance (doesn't deploy). If P0 confirms the v5 testnet pre-deployed+funded its canonical SponsoredFPC, **drop the inline `dev:testnet` salt entirely** and rely on salt=0. The FeeJuice-`0x05`→`0x03` fixes in `deploy-sponsored-fpc.ts:110`/`batch-fund-fpc.ts:212` are then **contingency-only** (Appendix C — only if we must self-host a private FPC). Re-derive any deploy call shape that 5.0 moved to construction-time (`contractAddressSalt`/`universalDeploy`).
 - Confirm vite proxy COOP/COEP (`credentialless`) still permits bb.js workers + the new RPC origin.
