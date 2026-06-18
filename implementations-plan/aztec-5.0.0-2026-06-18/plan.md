@@ -93,7 +93,7 @@ This phase answers the user's "to be checked": does the **deployed** accelerator
 - **Green → SDK-only release is valid** (the deployed accelerator handles 5.0 bb transparently). Proceed to P5–P7.
 - **Red (bb CLI/input/output broke) → escalate to Appendix C** (the accelerator must be rebuilt+rereleased). Surface to the user before doing so.
 
-### P5 — Full local sweep + manual v5 smoke (no new CI gate)
+### P5 — Full local sweep + manual v5 smoke (no new CI gate) ✓ (manual smoke deferred)
 ```
 bun run lint && bun run lint:actions && bun run test
 bun run --cwd packages/sdk test:lint && bun run --cwd packages/sdk test:unit && bun run --cwd packages/sdk build
@@ -102,7 +102,7 @@ bun run --cwd packages/playground test:e2e          # 28 mocked
 ```
 **Manual v5 acceptance smoke (human, not a built gate — per user):** `bun run --cwd packages/playground dev:testnet` against `v5.testnet.rpc.aztec-labs.com` with the **default salt=0 FPC**; deploy + prove (native accelerator) + send; confirm it **mines** in the browser. This is the live-network acceptance the user wanted, run by hand. **Gate:** every command green + the manual v5 smoke mines.
 
-### P6 — Land the bump PR on `main`
+### P6 — Land the bump PR on `main` ✓ (CI green, auto-merge enabled)
 `main` is branch-protected (branch + PR + auto-merge; unsigned via `git -c commit.gpgsign=false`). CI runs `--frozen-lockfile` (min-age inert). **Gate:** `sdk.yml` + `accelerator.yml` + `app.yml` + `actionlint.yml` green; PR auto-merges. (Same-SHA-across-three-cuts machinery is **not needed** for SDK-only — there is one release artifact, the SDK publish, dispatched from merged `main`.)
 
 ### P7 — SDK npm publish (the release)
