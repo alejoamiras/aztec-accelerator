@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Aztec 5.0.0-rc.1 bump + release</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Aztec 5.0.0-rc.1 bump + release</h1>
+  <p>We're moving the whole project from Aztec <code>4.3.1</code> to <code>5.0.0-rc.1</code>. Aztec 5.0 is a <strong>hard fork</strong> — the cryptography and on-chain rules changed, so a 4.x app and a 5.x network can't talk. <strong>The key realization (yours):</strong> we probably do <em>not</em> need to re-release the desktop app. It already downloads whatever prover (bb) version the SDK asks for, at runtime, with its own integrity check. So if the prover's command-line interface didn't change, the <em>already-installed</em> app just fetches and runs the 5.0 prover by itself. That turns this from "migrate + rehearse + ship a desktop release + auto-update everyone" into <strong>"migrate + publish the SDK to npm"</strong> — far smaller and far less risky.</p>
+
+  <h2>Why this tier was chosen</h2>
+  <p>Planned at <strong>deep</strong> (hard fork = 5 of 6 risk dimensions HIGH) — three independent plans, two adversarial audits, a fresh-context final pass. The audits earned their keep: they caught that the test "proving" the prover works actually asserted nothing, and that the SDK would've shipped without real evidence. After your steer the <em>execution</em> shrinks to roughly a <strong>mid</strong>-sized job (SDK-only), but the migration + parity rigor from the deep audit still stands behind it.</p>
+
+  <h2>Phases (SDK-only path)</h2>
+  <div class="phase"><h3>P0 — Recon (no code)</h3><p>Read the real 5.0 type definitions; write down exactly what each thing we import changed. Also check the live v5 testnet for a ready-to-use, already-funded fee-payer contract (so we don't deploy our own).</p><p class="muted">Proves itself by: a complete signature-diff table + the fee-payer answer.</p></div>
+  <div class="phase"><h3>P1 — Bump the versions</h3><p>Point every <code>@aztec/*</code> at exactly <code>5.0.0-rc.1</code>. Our 7-day supply-chain gate would block this, so we use a one-command, local-only, documented override.</p><p class="muted">Proves itself by: no <code>4.3.1</code> left, clean frozen install, lint green.</p></div>
+  <div class="phase"><h3>P2 — Fix the SDK</h3><p>Our published library extends Aztec's prover. Fix whatever 5.0 changed. (A scary-looking "the app rejects the version string" risk turned out to be false — verified against the actual code + its passing test.)</p><p class="muted">Proves itself by: SDK type-check + unit tests + build green.</p></div>
+  <div class="phase"><h3>P3 — Fix the playground</h3><p>Handle "mined but reverted" correctly (a new 5.0 state), point at the v5 testnet, and use the network's default fee-payer (no deploy/funding needed).</p><p class="muted">Proves itself by: repo lint + tests + the 28 mocked UI tests green.</p></div>
+  <div class="phase"><h3>P4 — The decision gate: does the deployed app handle 5.0?</h3><p>The crux. Run the <em>existing</em> test that drives the real native prover, now against a local 5.0 network. If the fast native prover mines a 5.0 transaction — and we prove it actually used the native path, not a silent fallback — then the deployed app handles 5.0 on its own and <strong>SDK-only is confirmed</strong>. If not, we fall back to rebuilding+releasing the app (the contingency appendix).</p><p class="muted">Proves itself by: a 5.0 tx mines through the verified native path.</p></div>
+  <div class="phase"><h3>P5 — Full local check + manual v5 smoke</h3><p>Run everything (lint, tests, the 9 desktop UI tests), then <em>you/we manually</em> open the playground against the live v5 testnet and confirm a real deploy mines. That's the live-network acceptance — done by hand, not built as a new CI gate.</p><p class="muted">Proves itself by: every command green + the manual v5 deploy mines.</p></div>
+  <div class="phase"><h3>P6 — Merge the bump</h3><p>Open the PR, CI green, auto-merge.</p><p class="muted">Proves itself by: all PR checks green.</p></div>
+  <div class="phase"><h3>P7 — Publish the SDK (you dispatch)</h3><p>Publish the SDK to npm under the <code>testnet</code> tag (not <code>latest</code>, since the deps are a release-candidate). This is the release. Human-triggered.</p><p class="muted">Proves itself by: package on npm with provenance, <code>testnet</code> tag.</p></div>
+
+  <h2>Human context</h2>
+  <p>The "accelerator" is a desktop app that makes Aztec proving fast via a native binary instead of slow in-browser WASM. It already keeps a multi-version cache and downloads new prover versions on demand — which is exactly why an SDK-only release can work. The one thing that must hold: the prover's command-line + input/output interface didn't change between 4.3.1 and 5.0. We don't assume that — P4 proves it by actually running it.</p>
+
+  <h2>Decisions made (2026-06-18)</h2>
+  <ul>
+    <li><strong>Supply-chain gate:</strong> documented one-command override (don't wait for June 22). ✅</li>
+    <li><strong>Release shape:</strong> SDK-only; rebuild+release the desktop app only if P4 shows the prover interface broke (contingency). ✅</li>
+    <li><strong>SDK npm tag:</strong> <code>testnet</code>, not <code>latest</code> (deps are an rc). ✅</li>
+    <li><strong>Fee-payer:</strong> use the network's default (salt=0) sponsored FPC if it's deployed+funded on v5 — confirmed in P0. ✅</li>
+    <li><strong>No new live-testnet CI gate:</strong> replaced by a manual v5 smoke. ✅</li>
+  </ul>
+  <p class="muted">One thing still resolves during the work, not at the gate: P4's verdict (SDK-only vs the contingency appendix).</p>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm the <strong>SDK-only</strong> shape (rebuild+release the desktop app only if P4 fails).</li>
+      <li>Confirm scope/exclusions (no Noir-contract migration — we have none; no new live-testnet CI gate; manual v5 smoke instead).</li>
+      <li>The five earlier questions are answered (see "Decisions made"). Nothing left for you to decide here except go/no-go.</li>
+      <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds</h2>
+    <p>Two options for the autonomous implementation session. <code>/goal</code> survives <code>claude --resume</code> and stops when a condition holds; <code>/loop</code> fires on an interval until cleared (7-day expiry). The SDK publish (P7) is <strong>human-dispatched</strong>, so the seed drives P0–P6 and stops at the release boundary.</p>
+    <p class="warning">Use exactly ONE per session. They don't compose — setting one replaces the other.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /loop</h3>
+      <p class="muted">Most of the signal is CI/test runs and the release boundary is human-gated — a drive-forward loop that watches CI and stops before the SDK publish fits better than a single completion condition.</p>
+      <pre><code>/loop 15m Drive implementations-plan/aztec-5.0.0-2026-06-18 forward through P0–P6 only; never idle. Each firing: read plan.md + lessons/ (authoritative), git status + log; if a PR is open, gh pr view --json statusCheckRollup (no --watch); if CI in-flight, gh run watch up to 10m. No task in hand? take the next pending phase (P0 recon/types-first; P4 is the SDK-only-vs-contingency decision gate — run the existing accelerator-backed local-5.0 E2E and assert the native :59833 path mined), edit → bun run lint + the touched package's tests → commit → push. Stuck or a real decision (P4 verdict, parity assertion shape)? /codex xhigh, decide, log it. Same step failed 5×? stop, reassess with codex. If P4 is RED (bb CLI/input broke) STOP and surface — Appendix C (accelerator rebuild) needs human sign-off. Phase green ONLY when its plan.md validation gate passes — run it, paste output, mark ✓ in plan.md, file lessons, print LESSONS_FILE=implementations-plan/aztec-5.0.0-2026-06-18/lessons/phase-N.md, advance. HARD STOPS: never push to main directly, never dispatch the SDK publish (P7) or any release, never weaken committed bunfig.toml, never use a min-age override in CI (frozen only). When P0–P6 are ✓ and the bump PR is green: /code-review max --fix → commit → codex post-impl audit → address high/critical → wrap-up report → STOP for human SDK-publish dispatch.</code></pre>
+    </div>
+
+    <h3>Alternative: /goal</h3>
+    <pre><code>/goal Phases P0–P6 marked ✓ in implementations-plan/aztec-5.0.0-2026-06-18/plan.md, each ✓ backed by its plan.md validation gate reported passing in the transcript (P4 specifically: the accelerator-backed local-5.0 E2E mined a tx through the verified native :59833 path); for each phase LESSONS_FILE=implementations-plan/aztec-5.0.0-2026-06-18/lessons/phase-N.md printed; the bump PR green and auto-merged; /code-review max --fix applied + committed; codex post-impl audit done with high/critical addressed; bun run test and bun run lint:actions both exit 0. If P4 is RED, stop and surface (Appendix C needs human sign-off). Do NOT dispatch the SDK publish (P7) or weaken committed bunfig.toml — stop and surface for human release dispatch.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>
