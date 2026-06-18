@@ -449,16 +449,19 @@ export async function deployTestAccount(
     steps.push({ step: "create account", durationMs: Date.now() - stepStart });
     log(`Account: ${accountManager.address.toString()}`);
 
+    // 5.0: a self-paid account deploy uses from: NO_FROM. DeployAccountMethod then auto-sets
+    // sendMessagesAs = the new account, so it discovers its own constructor notes. A signer `from`
+    // tags those notes as that signer instead → in-circuit "Failed to get a note". The new address
+    // is also injected into additionalScopes by DeployAccountMethod, so we no longer pass it. Fee
+    // is paid by the Sponsored FPC regardless of from.
     const sendOpts = {
-      from: state.proofsRequired ? NO_FROM : state.registeredAddresses[0],
+      from: NO_FROM,
       skipClassPublication: true,
       fee: { paymentMethod: state.feePaymentMethod! },
-      // Account constructor initializes private storage — needs its own nullifier key in scope.
-      additionalScopes: [accountManager.address],
     };
 
-    // Step 2: Simulate (captures witness gen timing)
-    // Simulate may fail with NO_FROM (first deploy on live networks)
+    // Step 2: Simulate (captures witness gen timing). Best-effort: the try/catch below keeps the
+    // flow going if sim-stat extraction throws.
     onStep("simulating deploy");
     log("Simulating deploy...");
     stepStart = Date.now();
@@ -618,12 +621,11 @@ export async function runTokenFlow(
       log("Deploying second account (Bob) for transfer...");
       const bobManager = await state.embeddedWallet!.createSchnorrAccount(Fr.random(), Fr.random());
       const bobDeploy = await bobManager.getDeployMethod();
-      // Account constructor initializes private storage — needs its own nullifier key in scope.
+      // from: NO_FROM → DeployAccountMethod auto-scopes the new account + sets its tag sender (5.0).
       const bobSendOpts = {
         from: NO_FROM,
         skipClassPublication: true,
         fee,
-        additionalScopes: [bobManager.address],
       };
       const { timing: bobStep, txHash: bobTxHash } = await executeStep({
         step: "deploy bob",
@@ -655,7 +657,7 @@ export async function runTokenFlow(
       onConfirming: () => onStep("confirming token deploy"),
       proveTracker,
     });
-    const token = await TokenContract.at(await tokenDeploy.getAddress(), state.wallet);
+    const token = TokenContract.at(await tokenDeploy.getAddress(), state.wallet);
     steps.push(tokenStep);
     log(
       `Token deployed in ${(tokenStep.durationMs / 1000).toFixed(1)}s → ${token.address.toString()}`,

@@ -11,3 +11,16 @@ The FeeJuice-`0x05`→`0x03` script fixes (`deploy-sponsored-fpc.ts`/`batch-fund
 **Gate:** PASS — `aztec.ts` tsc errors gone (6 remaining = pre-existing bun:test/css config noise, present on main, not gated); `vite build` clean; `bun run lint` exit 0 (the lone `firstCallMs` warning is pre-existing on main); 8 mocked Playwright pass; `bun run test` exit 0 (73 unit + 6 scripts).
 
 LESSONS_FILE=implementations-plan/aztec-5.0.0-2026-06-18/lessons/phase-3.md
+
+## Follow-up: local-network E2E caught a real 5.0 deploy bug (2026-06-18)
+The mocked gate passed, but the full-stack **Local Network E2E** (playground deploying against a local 5.0 sandbox, app.yml) FAILED:
+```
+✗ Deploy failed: Assertion failed: Failed to get a note 'assert(self.is_some())'
+```
+Not a flake. The SDK e2e's `deploySchnorrAccount` (`from: NO_FROM`) passed, but the playground's `deployTestAccount` used `from: registeredAddresses[0]` (a funded signer) on local sandbox.
+
+**Codex consult (xhigh, session in /tmp/codex-98k5s5Cz) — source-verified verdict:** in 5.0, `DeployAccountMethod.prepareDeployOptions()` sets `sendMessagesAs = deployedAddress` ONLY when `from === NO_FROM`; `senderForTags = sendMessagesAs ?? (from===NO_FROM ? undefined : from)` (`@aztec/wallet-sdk/base_wallet.ts`). So a signer `from` tags the new account's constructor notes as that signer → the new account can't discover its own notes → "Failed to get a note".
+
+**Fix applied:** `deployTestAccount` → `from: NO_FROM` (drop the `proofsRequired ? NO_FROM : registeredAddresses[0]` ternary) + drop the now-redundant `additionalScopes: [accountManager.address]` (DeployAccountMethod injects it). Same `additionalScopes` cleanup on the `runTokenFlow` bob deploy (already NO_FROM). Verified: no new tsc errors, build clean, lint exit 0; CI local-network E2E re-verifies. Also dropped a dead `await TokenContract.at` (sync in 5.0, code-review nit).
+
+LESSONS_FILE=implementations-plan/aztec-5.0.0-2026-06-18/lessons/phase-3.md
