@@ -82,7 +82,7 @@ bun run --cwd packages/playground test:e2e     # 28 Playwright mocks (network-fr
 ```
 Pass: all green. (Mocked E2E cannot prove the testnet path — that's the manual v5 smoke in P5.)
 
-### P4 — Proving-parity = the SDK-only decision gate (crypto heart of the fork)
+### P4 — Proving-parity = the SDK-only decision gate (crypto heart of the fork) ✓ SDK-ONLY CONFIRMED
 This phase answers the user's "to be checked": does the **deployed** accelerator's native bb prove a 5.0 tx the network mines? Verified **empirically** by the *existing* accelerator-backed E2E against a **local 5.0 sandbox** — no new infra. **Audit-blocking precondition: the current harness proves nothing about mining.** `deploySchnorrAccount` (`e2e-helpers.ts:31-43`) calls `.send(...)` and returns **without `.wait()`**; the "Accelerated"/"Local (WASM)" tests (`proving.test.ts:79-104`) assert only `toBeDefined()`. So:
 - **First** add a mined+revert-aware `.wait()` to `deploySchnorrAccount` (assert non-pending, non-dropped, **not reverted**). Until this exists, the gate asserts nothing.
 - Run **both legs against the local 5.0 sandbox**: native via the real accelerator sidecar (`build_accelerator=true`, which exercises the runtime `download_bb`→`bb prove --scheme … --ivc_inputs_path …` path on 5.0 bb); forced-WASM via `setAcceleratorConfig({ port: 1 })` (offline→fallback path at `:198,277`) — **not** `setForceLocal(true)` (short-circuits before `/health`). Assert both mine.
