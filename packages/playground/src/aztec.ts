@@ -145,6 +145,34 @@ async function clearIndexedDB(): Promise<void> {
 }
 
 /**
+ * bb.js caches the CRS in IndexedDB (idb-keyval's `keyval-store`) under keys (`g1Data`/`g2Data`)
+ * that are NOT version-suffixed. Across an `@aztec/bb.js` bump the on-disk CRS format can change,
+ * but those keys aren't busted — so a returning visitor's stale blob (wrong bytes-per-point) gets
+ * fed to `SrsInitSrs` → "invalid points_buf size … got 128". Clear the CRS store once per bb
+ * version so a fresh, correctly-formatted CRS is downloaded. Only the bb.js CRS lives in
+ * `keyval-store`; wallet/PXE data uses `pxe-`/`wallet-` prefixed DBs (cleared separately above).
+ * Bump CRS_CACHE_VERSION whenever `@aztec/bb.js` changes the CRS format.
+ */
+const CRS_CACHE_VERSION = "5.0.0-rc.1";
+async function bustStaleCrsCacheOnce(log: LogFn): Promise<void> {
+  if (typeof indexedDB === "undefined" || typeof localStorage === "undefined") return;
+  const KEY = "bb-crs-cache-version";
+  try {
+    if (localStorage.getItem(KEY) === CRS_CACHE_VERSION) return;
+    await new Promise<void>((resolve) => {
+      const req = indexedDB.deleteDatabase("keyval-store");
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve(); // best-effort — a fresh CRS download will overwrite anyway
+      req.onblocked = () => resolve();
+    });
+    localStorage.setItem(KEY, CRS_CACHE_VERSION);
+    log("Reset bb.js CRS cache (prover version changed)", "info");
+  } catch {
+    // non-fatal: worst case the user clears site data manually
+  }
+}
+
+/**
  * Connect to the Aztec node and set up the AcceleratorProver.
  * Shared by both embedded and external wallet paths.
  */
@@ -227,6 +255,8 @@ async function doInitializeWallet(log: LogFn): Promise<boolean> {
 }
 
 export async function initializeWallet(log: LogFn): Promise<boolean> {
+  // Evict a stale-format CRS left by a previous bb version before any proving runs (see fn docs).
+  await bustStaleCrsCacheOnce(log);
   for (let attempt = 1; attempt <= MAX_INIT_ATTEMPTS; attempt++) {
     try {
       return await doInitializeWallet(log);
