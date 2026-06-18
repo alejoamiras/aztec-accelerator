@@ -49,7 +49,7 @@ const batchSizeIndex = cliArgs.indexOf("--batch-size");
 const batchSize = batchSizeIndex !== -1 ? Number(cliArgs[batchSizeIndex + 1]) : 50;
 
 // ── Environment ───────────────────────────────────────────────────────
-const nodeUrl = process.env.AZTEC_NODE_URL || "https://rpc.testnet.aztec-labs.com";
+const nodeUrl = process.env.AZTEC_NODE_URL || "https://v5.testnet.rpc.aztec-labs.com";
 const l1RpcUrl = process.env.L1_RPC_URL;
 const l1PrivateKey = process.env.L1_PRIVATE_KEY;
 
@@ -209,7 +209,8 @@ console.log(`  Bridged ${claim.claimAmount} wei to FPC, leaf: ${claim.messageLea
 // ── Step 3: Bootstrap ephemeral L2 account (for claiming) ───────────
 console.log("Step 3: Bootstrapping ephemeral L2 account...");
 
-const FEE_JUICE_ADDRESS = AztecAddress.fromBigInt(5n);
+// FeeJuice protocol contract — canonical address compacted to 0x03 in Aztec 5.0 (was 0x05)
+const FEE_JUICE_ADDRESS = AztecAddress.fromBigInt(3n);
 
 const explorerUrl = (txHash: string) => `https://testnet.aztecscan.xyz/tx-effects/${txHash}`;
 
@@ -266,7 +267,6 @@ const feeMethod = new FeeJuicePaymentMethodWithClaim(deployerAddress, {
 const { receipt: deployReceipt } = await deployMethod.send({
   from: NO_FROM,
   fee: { paymentMethod: feeMethod },
-  wait: { returnReceipt: true },
 });
 console.log(`  Account deployed in block ${deployReceipt.blockNumber}`);
 console.log(`  TX: ${explorerUrl(deployReceipt.txHash.toString())}\n`);
@@ -281,7 +281,7 @@ await waitForBlocks(2);
 const feeJuice = await FeeJuiceContract.at(FEE_JUICE_ADDRESS, wallet as any);
 const { receipt: claimReceipt } = await feeJuice.methods
   .claim(fpcInstance.address, claim.claimAmount, claim.claimSecret, claim.messageLeafIndex)
-  .send({ from: deployerAddress, wait: { returnReceipt: true } });
+  .send({ from: deployerAddress });
 console.log(
   `  Claimed! tx fee: ${claimReceipt.transactionFee}, block: ${claimReceipt.blockNumber}`,
 );

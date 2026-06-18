@@ -47,7 +47,7 @@ const saltIndex = cliArgs.indexOf("--salt");
 const salt = saltIndex !== -1 ? Fr.fromHexString(cliArgs[saltIndex + 1]) : Fr.random();
 
 // ── Environment ───────────────────────────────────────────────────────
-const nodeUrl = process.env.AZTEC_NODE_URL || "https://rpc.testnet.aztec-labs.com";
+const nodeUrl = process.env.AZTEC_NODE_URL || "https://v5.testnet.rpc.aztec-labs.com";
 const l1RpcUrl = process.env.L1_RPC_URL;
 const l1PrivateKey = process.env.L1_PRIVATE_KEY;
 const bridgeAmount = process.env.BRIDGE_AMOUNT ? BigInt(process.env.BRIDGE_AMOUNT) : undefined;
@@ -107,8 +107,8 @@ const portalManager = await L1FeeJuicePortalManager.new(
 );
 console.log(`  Fee Juice token: ${portalManager.getTokenManager().tokenAddress.toString()}\n`);
 
-// FeeJuice protocol contract at canonical address 0x05
-const FEE_JUICE_ADDRESS = AztecAddress.fromBigInt(5n);
+// FeeJuice protocol contract — canonical address compacted to 0x03 in Aztec 5.0 (was 0x05)
+const FEE_JUICE_ADDRESS = AztecAddress.fromBigInt(3n);
 
 const explorerUrl = (txHash: string) => `https://testnet.aztecscan.xyz/tx-effects/${txHash}`;
 
@@ -168,7 +168,6 @@ async function bootstrapAccount(): Promise<{
   const { receipt } = await deployMethod.send({
     from: NO_FROM,
     fee: { paymentMethod: feeMethod },
-    wait: { returnReceipt: true },
   });
   console.log(`  Account deployed in block ${receipt.blockNumber}`);
   console.log(`  TX: ${explorerUrl(receipt.txHash.toString())}\n`);
@@ -188,7 +187,7 @@ async function bridgeAndClaimForFpc(wallet: EmbeddedWallet, deployerAddress: Azt
   const feeJuice = await FeeJuiceContract.at(FEE_JUICE_ADDRESS, wallet as any);
   const { receipt } = await feeJuice.methods
     .claim(fpcInstance.address, claim.claimAmount, claim.claimSecret, claim.messageLeafIndex)
-    .send({ from: deployerAddress, wait: { returnReceipt: true } });
+    .send({ from: deployerAddress });
   console.log(`  Claimed! tx fee: ${receipt.transactionFee}, block: ${receipt.blockNumber}`);
   console.log(`  TX: ${explorerUrl(receipt.txHash.toString())}\n`);
 }
@@ -214,13 +213,11 @@ if (!fundOnly) {
   if (!alreadyDeployed) {
     console.log("  Deploying SponsoredFPC (WASM proving)...");
     const startTime = Date.now();
-    const deployMethod = SponsoredFPCContract.deploy(wallet);
+    // 5.0: salt + universalDeploy move to construction-time instantiation options.
+    const deployMethod = SponsoredFPCContract.deploy(wallet, { salt, universalDeploy: true });
     console.log("  Sending deploy tx...");
     const { receipt } = await deployMethod.send({
       from: deployerAddress,
-      contractAddressSalt: salt,
-      universalDeploy: true,
-      wait: { returnReceipt: true },
     });
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`  SponsoredFPC deployed in block ${receipt.blockNumber} (${elapsed}s)`);
