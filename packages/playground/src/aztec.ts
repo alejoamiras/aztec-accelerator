@@ -414,9 +414,8 @@ export async function deployTestAccount(
   if (!state.embeddedWallet) {
     throw new Error("Embedded wallet not initialized");
   }
-  if (!state.proofsRequired && !state.registeredAddresses.length) {
-    throw new Error("Wallet not initialized — no registered addresses");
-  }
+  // (5.0) The deploy is self-paid via `from: NO_FROM`, so it no longer needs a registered sandbox
+  // sender — the only requirement is an initialized wallet (checked above) + the Sponsored FPC.
 
   const mode = state.uiMode;
   const steps: StepTiming[] = [];
