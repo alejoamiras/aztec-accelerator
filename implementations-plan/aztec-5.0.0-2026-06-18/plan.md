@@ -27,7 +27,7 @@ The already-deployed accelerator app fetches+runs arbitrary bb versions **at run
 
 ## Phases (each ends in a real validation gate)
 
-### P0 — Recon + decision resolution (no code changes)
+### P0 — Recon + decision resolution (no code changes) ✓
 The break surface is whatever the 5.0 `.d.ts` says, **not** what the changelog/brief says (two brief claims were already falsified — see ledger). In a throwaway dir **outside the repo** (min-age + lockfile untouched), capture the 4.3.1→5.0 signature diff for every imported symbol:
 - `BBLazyPrivateKernelProver` (`@aztec/bb-prover/client/lazy`) — constructor arity + `createChonkProof` sig. SDK does `super(simulator)` (`accelerator-prover.ts:94`) and the unit test spies `createChonkProof`. Codex/Opus infer 5.0 added an *optional* 2nd ctor arg (source-compatible) — **compile-verify, don't assume**.
 - `WASMSimulator`/`CircuitSimulator` (`@aztec/simulator/client`) — `new WASMSimulator()` still default-constructs (`accelerator-prover.ts:33`).
@@ -41,7 +41,7 @@ The break surface is whatever the 5.0 `.d.ts` says, **not** what the changelog/b
 
 **Validation gate:** a written signature-diff table — every imported symbol classified `none | change X`, zero "unknown"; the v5 canonical-FPC check answered; Asks resolved. Recorded in `lessons/phase-0.md`.
 
-### P1 — Mechanical bump (package.json + lockfile)
+### P1 — Mechanical bump (package.json + lockfile) ✓
 Do the bump **locally**, commit the resolved `bun.lock`, let CI run `--frozen-lockfile` only (keeps min-age protection on CI; avoids the bare-`bun install` leak in `_aztec-update.yml`/`deploy-app`).
 - `bun scripts/update-aztec-version.ts 5.0.0-rc.1` → patches sdk + playground `package.json`. **Assert zero skipped packages** (`findMissingPackages` silently leaves un-found packages at 4.3.1 — partial-bump landmine).
 - Regenerate lockfile per the chosen min-age strategy (Ask #1): wait to 06-22 (`bun install`) **or** command-scoped `bun install --minimum-release-age=0` (local only, documented in the PR body; never edit committed `bunfig.toml`).
@@ -58,7 +58,7 @@ bun run lint && bun run lint:actions
 ```
 Pass: no 4.3.1 remains; frozen install clean; update script reported zero skips.
 
-### P2 — SDK migration (`@alejoamiras/aztec-accelerator`)
+### P2 — SDK migration (`@alejoamiras/aztec-accelerator`) ✓
 Drive from the P0 table. Likely small if the prover ctor/`createChonkProof` are stable.
 - Apply each migration action; fix imports if moved.
 - **Version-handshake — corrected by audit (NOT a Rust bug):** the SDK comment `accelerator-prover.ts:382` ("the server's `is_valid_version` rejects non-alphanumeric characters") is **false** — `version_policy.rs:187-196` explicitly allows `.`/`-`/`_`, and `version_policy.rs:228-238` is a **passing test** asserting `is_valid_version("5.0.0-rc.1")==true`. So there is **no validator fix to make**; instead (a) fix the misleading comment at `accelerator-prover.ts:382`, and (b) re-aim the silent-WASM-fallback audit at the *real* fallback paths: `#classifyHealth` legacy version-mismatch (`accelerator-prover.ts:240-257`, normalized-form mismatch → `available:false` → WASM) and the 403-denial path (`:312-324`). The positive "native path was used" assertion in P4 is what actually catches a silent fallback.
