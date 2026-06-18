@@ -387,13 +387,15 @@ async function executeStep(opts: {
   };
 }
 
-/** Poll until a transaction is no longer pending. Throws on dropped or timed-out txs. */
+/** Poll until a transaction is mined. Throws on dropped, reverted, or timed-out txs. */
 async function waitForTx(txHash: TxHash): Promise<void> {
   const deadline = Date.now() + TX_TIMEOUT_MS;
   while (true) {
     const receipt = await state.node!.getTxReceipt(txHash);
     if (!receipt.isPending()) {
       if (receipt.isDropped()) throw new Error("Transaction dropped");
+      // v5: a mined tx can still have reverted in public execution — that is NOT success.
+      if (receipt.hasExecutionReverted()) throw new Error("Transaction reverted");
       return;
     }
     if (Date.now() > deadline) {
@@ -412,9 +414,8 @@ export async function deployTestAccount(
   if (!state.embeddedWallet) {
     throw new Error("Embedded wallet not initialized");
   }
-  if (!state.proofsRequired && !state.registeredAddresses.length) {
-    throw new Error("Wallet not initialized — no registered addresses");
-  }
+  // (5.0) The deploy is self-paid via `from: NO_FROM`, so it no longer needs a registered sandbox
+  // sender — the only requirement is an initialized wallet (checked above) + the Sponsored FPC.
 
   const mode = state.uiMode;
   const steps: StepTiming[] = [];
@@ -447,16 +448,19 @@ export async function deployTestAccount(
     steps.push({ step: "create account", durationMs: Date.now() - stepStart });
     log(`Account: ${accountManager.address.toString()}`);
 
+    // 5.0: a self-paid account deploy uses from: NO_FROM. DeployAccountMethod then auto-sets
+    // sendMessagesAs = the new account, so it discovers its own constructor notes. A signer `from`
+    // tags those notes as that signer instead → in-circuit "Failed to get a note". The new address
+    // is also injected into additionalScopes by DeployAccountMethod, so we no longer pass it. Fee
+    // is paid by the Sponsored FPC regardless of from.
     const sendOpts = {
-      from: state.proofsRequired ? NO_FROM : state.registeredAddresses[0],
+      from: NO_FROM,
       skipClassPublication: true,
       fee: { paymentMethod: state.feePaymentMethod! },
-      // Account constructor initializes private storage — needs its own nullifier key in scope.
-      additionalScopes: [accountManager.address],
     };
 
-    // Step 2: Simulate (captures witness gen timing)
-    // Simulate may fail with NO_FROM (first deploy on live networks)
+    // Step 2: Simulate (captures witness gen timing). Best-effort: the try/catch below keeps the
+    // flow going if sim-stat extraction throws.
     onStep("simulating deploy");
     log("Simulating deploy...");
     stepStart = Date.now();
@@ -561,7 +565,7 @@ export async function deployToken(
     });
     steps.push(tokenStep);
 
-    const address = tokenDeploy.address!.toString();
+    const address = (await tokenDeploy.getAddress()).toString();
     const totalDurationMs = Date.now() - totalStart;
     log(
       `Token deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${address}`,
@@ -616,12 +620,11 @@ export async function runTokenFlow(
       log("Deploying second account (Bob) for transfer...");
       const bobManager = await state.embeddedWallet!.createSchnorrAccount(Fr.random(), Fr.random());
       const bobDeploy = await bobManager.getDeployMethod();
-      // Account constructor initializes private storage — needs its own nullifier key in scope.
+      // from: NO_FROM → DeployAccountMethod auto-scopes the new account + sets its tag sender (5.0).
       const bobSendOpts = {
         from: NO_FROM,
         skipClassPublication: true,
         fee,
-        additionalScopes: [bobManager.address],
       };
       const { timing: bobStep, txHash: bobTxHash } = await executeStep({
         step: "deploy bob",
@@ -653,7 +656,7 @@ export async function runTokenFlow(
       onConfirming: () => onStep("confirming token deploy"),
       proveTracker,
     });
-    const token = TokenContract.at(tokenDeploy.address!, state.wallet);
+    const token = TokenContract.at(await tokenDeploy.getAddress(), state.wallet);
     steps.push(tokenStep);
     log(
       `Token deployed in ${(tokenStep.durationMs / 1000).toFixed(1)}s → ${token.address.toString()}`,

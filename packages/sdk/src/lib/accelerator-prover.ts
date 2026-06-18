@@ -378,8 +378,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   }
 
   #getAztecVersion(): string | undefined {
-    // Strip semver range prefixes (^, ~, >=) in case the dependency isn't pinned.
-    // The server's is_valid_version rejects non-alphanumeric characters.
+    // Strip leading semver range prefixes (^, ~, >=) in case the dependency isn't pinned.
+    // We only strip the LEADING non-digits: the server's is_valid_version accepts the inner
+    // `.`/`-`/`_` of a version like `5.0.0-rc.1` (see core version_policy.rs `is_valid_version`),
+    // so the prerelease suffix must be preserved for the /health version handshake.
     return (sdkPkg.dependencies as Record<string, string | undefined>)["@aztec/stdlib"]?.replace(
       /^[^0-9]*/,
       "",

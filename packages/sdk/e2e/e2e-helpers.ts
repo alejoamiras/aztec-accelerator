@@ -28,12 +28,19 @@ export async function deploySchnorrAccount(
 
   const startTime = Date.now();
   const deployMethod = await accountManager.getDeployMethod();
-  const { contract: deployedContract } = await deployMethod.send({
+  // v5: send() resolves after the tx is INCLUDED (DeployResultMined) and returns a real receipt.
+  const { contract: deployedContract, receipt } = await deployMethod.send({
     from: NO_FROM,
     skipClassPublication: true,
     fee: { paymentMethod: feePaymentMethod },
   });
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+  // Mined != succeeded: a mined tx can revert in public execution. Treating a reverted deploy as
+  // success was the prior false-green (the test only asserted `toBeDefined`). Guard it here.
+  if (receipt.hasExecutionReverted()) {
+    throw new Error(`Account deploy reverted${tag} (txHash ${receipt.txHash.toString()})`);
+  }
 
   logger.info(`Account deployed${tag}`, {
     contract: deployedContract.address?.toString(),

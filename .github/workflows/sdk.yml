@@ -100,6 +100,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     uses: ./.github/workflows/_e2e.yml
+    with:
+      # Build + run the headless accelerator on :59833 so the e2e exercises the NATIVE proving path
+      # against the local sandbox — not just the WASM fallback. This is the standing parity gate that
+      # the SDK-only release relies on (proves the deployed accelerator handles the pinned bb version).
+      build_accelerator: true
     secrets:
       SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
 

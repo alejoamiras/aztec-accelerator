@@ -86,7 +86,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20, not 10: warm-cache runs finish in ~4 min, but a cold rust-cache (notably on a manual
+    # `gh run rerun`, which does not restore the cache) does a full workspace rebuild that can
+    # exceed 10 min and time out. 20 gives a cold build headroom without masking a real hang.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/accelerator/src-tauri
