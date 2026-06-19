@@ -14,15 +14,11 @@
  *   # Skip deploy (FPC already exists), just bridge + claim more Fee Juice:
  *   bun run packages/playground/scripts/deploy-sponsored-fpc.ts --salt 0x1234... --fund-only
  *
- *   # Deploy without updating the SPONSORED_FPC_SALT GitHub secret:
- *   bun run packages/playground/scripts/deploy-sponsored-fpc.ts --no-secret
- *
  * Environment (or .env file in packages/playground/scripts/):
  *   L1_PRIVATE_KEY=0x...   Sepolia private key (for minting test FJ on L1)
  *   L1_RPC_URL=https://... Sepolia RPC endpoint
  */
 
-import { execSync } from "node:child_process";
 import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { L1FeeJuicePortalManager } from "@aztec/aztec.js/ethereum";
@@ -42,7 +38,6 @@ import { sepolia } from "viem/chains";
 // ── CLI args ──────────────────────────────────────────────────────────
 const cliArgs = process.argv.slice(2);
 const fundOnly = cliArgs.includes("--fund-only");
-const noSecret = cliArgs.includes("--no-secret");
 const saltIndex = cliArgs.indexOf("--salt");
 const salt = saltIndex !== -1 ? Fr.fromHexString(cliArgs[saltIndex + 1]) : Fr.random();
 
@@ -232,20 +227,6 @@ if (fundOnly) {
   console.log("Fund-only mode: bridging + claiming Fee Juice for FPC...\n");
   const { wallet, deployerAddress } = await bootstrapAccount();
   await bridgeAndClaimForFpc(wallet, deployerAddress);
-}
-
-// ── Set GitHub secret ─────────────────────────────────────────────────
-if (!noSecret) {
-  console.log("Setting GitHub secret...");
-  try {
-    execSync(`gh secret set SPONSORED_FPC_SALT --body "${salt.toString()}"`, { stdio: "inherit" });
-    console.log("  SPONSORED_FPC_SALT set.\n");
-  } catch {
-    console.error("  Failed. Run manually:");
-    console.error(`  gh secret set SPONSORED_FPC_SALT --body "${salt.toString()}"\n`);
-  }
-} else {
-  console.log("Skipping GitHub secret update (--no-secret).\n");
 }
 
 // ── Done ──────────────────────────────────────────────────────────────

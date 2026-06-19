@@ -18,9 +18,6 @@ on:
         required: false
         type: string
         default: "http://localhost:8080"
-    secrets:
-      SPONSORED_FPC_SALT:
-        required: false
 
 jobs:
   e2e-app:
@@ -50,7 +47,6 @@ jobs:
       - name: Run E2E tests
         env:
           AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
-          SPONSORED_FPC_SALT: ${{ !contains(inputs.aztec_node_url, 'localhost') && secrets.SPONSORED_FPC_SALT || '' }}
           TEST_SCRIPT: ${{ inputs.test_script }}
         run: bun run --cwd packages/playground "$TEST_SCRIPT"
 

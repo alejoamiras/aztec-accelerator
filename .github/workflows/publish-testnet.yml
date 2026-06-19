@@ -73,7 +73,6 @@ jobs:
       - name: Build playground
         env:
           AZTEC_NODE_URL: ${{ secrets.TESTNET_AZTEC_NODE_URL }}
-          SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
         run: bun run --cwd packages/playground build
 
       - uses: aws-actions/configure-aws-credentials@v6

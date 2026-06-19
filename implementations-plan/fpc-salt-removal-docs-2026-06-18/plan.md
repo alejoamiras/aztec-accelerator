@@ -36,7 +36,7 @@ The `--salt` CLI flag on the FPC scripts is a **separate dev tool** (deploy a *c
 
 **Validation gate:** `bun run lint && bun run test` (biome + sdk typecheck + unit) **and** `bun run --cwd packages/playground build`. Pass: all exit 0; build clean; grep shows no `process.env.SPONSORED_FPC_SALT` readers left. Layers: typecheck · lint · unit.
 
-### P2 — Remove `SPONSORED_FPC_SALT` from CI + scripts + `.env.example`
+### P2 — Remove `SPONSORED_FPC_SALT` from CI + scripts + `.env.example` ✓
 - Strip the `SPONSORED_FPC_SALT:` lines from the 8 workflows. **Asymmetric-edit hazard (codex):** in `_e2e.yml`/`_e2e-app.yml` remove BOTH the `secrets:` *input declaration* AND every caller passing `secrets.SPONSORED_FPC_SALT`, in the same change — passing a secret a called workflow no longer declares is a hard `workflow_call` error (an *unset* `${{ secrets.X }}` just renders `""`, so a leftover usage is harmless, but a leftover caller→removed-declaration is not).
 - `deploy-sponsored-fpc.ts`: remove the whole `--no-secret`/secret-set surface (`:18` doc, `:45` parse, `:238-252` block incl. `:248` log). Keep `--salt`.
 - `.env.example`: drop the `SPONSORED_FPC_SALT` line.

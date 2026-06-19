@@ -266,8 +266,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.integration == 'true'
     uses: ./.github/workflows/_e2e.yml
-    secrets:
-      SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
     with:
       build_accelerator: true
 
