@@ -15,6 +15,8 @@ npm install @alejoamiras/aztec-accelerator
 bun add @alejoamiras/aztec-accelerator
 ```
 
+> The bare install resolves npm `latest`, which tracks the last **stable** Aztec line. For the current **Aztec 5.0** line (`5.0.0-rc.x`), install the `testnet` dist-tag: `npm install @alejoamiras/aztec-accelerator@testnet`.
+
 Peer dependency: your project must already have `@aztec/aztec.js` (or the individual `@aztec/stdlib`, `@aztec/bb-prover` packages) installed.
 
 ## Quick Start
