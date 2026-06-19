@@ -200,19 +200,17 @@ export async function initializeNode(log: LogFn): Promise<void> {
 }
 
 /**
- * Derive the Sponsored FPC address and register it in the PXE.
+ * Derive the canonical Sponsored FPC address and register it in the PXE.
  * Shared by both embedded and external wallet paths.
  *
- * Uses SPONSORED_FPC_SALT env var when set (for private FPC instances on live
- * networks). Defaults to salt=0 (canonical FPC) for local sandbox.
+ * Always uses salt=0 — the canonical SponsoredFPC, deployed + funded on every
+ * network we target (local sandbox auto-deploys it; testnet has it).
  */
 export async function initializeFPC(wallet: Wallet, log: LogFn): Promise<void> {
   log("Setting up Sponsored FPC...");
-  const saltHex = process.env.SPONSORED_FPC_SALT;
-  const salt = saltHex ? Fr.fromHexString(saltHex) : new Fr(0);
   const fpcInstance = await getContractInstanceFromInstantiationParams(
     SponsoredFPCContract.artifact,
-    { salt },
+    { salt: new Fr(0) },
   );
   await wallet.registerContract(fpcInstance, SponsoredFPCContract.artifact);
   state.feePaymentMethod = new SponsoredFeePaymentMethod(fpcInstance.address);
