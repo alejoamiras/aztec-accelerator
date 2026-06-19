@@ -90,6 +90,10 @@ Cached binaries are stored in `~/.aztec-accelerator/versions/` with a retention 
 
 Old versions are evicted automatically — no manual cleanup needed.
 
+### Version Model — why an Aztec bump doesn't re-release this app
+
+Because the accelerator downloads `bb` at runtime (above), it is **decoupled from the Aztec protocol version**. When Aztec ships a new release, only the [SDK](../sdk/README.md) is republished — it carries the `@aztec/*` deps and advertises its version via the `x-aztec-version` header. The **already-installed accelerator** (desktop *and* headless) fetches and caches the matching `bb` on the next prove request; users do nothing. You cut a new accelerator release only when the accelerator's **own** code changes (server, tray, updater, or the `bb` download/verification logic) — never merely to track an `@aztec` version bump.
+
 ### bb Binary Resolution
 
 When no specific version is requested, the accelerator looks for the `bb` binary in this order:
@@ -116,7 +120,7 @@ For the headless server binary (CI/testing), set `ALLOWED_ORIGINS=origin1,origin
 
 > **For CI test acceleration only. Not for production. Not for shared or self-hosted CI runners.**
 >
-> The headless server is a build of the accelerator with no tray and no window. It exists so external Aztec dApp teams can install the accelerator on their CI runners and speed up E2E test proving (native `bb` instead of WASM). The current build still pulls Tauri in transitively (a shared-core extraction is on the 1.0.3+ roadmap), so the Linux tarball needs `libwebkit2gtk-4.1`, `libgtk-3`, and friends present on the runner; on GitHub-hosted `ubuntu-latest` they ship pre-installed.
+> The headless server is a standalone binary — no tray, no window, and (since the core extraction) **no Tauri / WebKit / GTK** in its dependency tree. It exists so external Aztec dApp teams can install the accelerator on their CI runners and speed up E2E test proving (native `bb` instead of WASM). Built from the GUI-agnostic `accelerator-core` crate, the Linux tarball has no desktop dependencies — on GitHub-hosted `ubuntu-latest` it runs out of the box.
 >
 > **Security caveats — read before deploying:**
 >
@@ -144,7 +148,7 @@ Each has a matching `.sha256` sidecar file.
 ```yaml
 - name: Install aztec-accelerator headless server
   env:
-    ACCELERATOR_VERSION: "1.0.2"
+    ACCELERATOR_VERSION: "1.0.6"
   run: |
     BASE_URL="https://github.com/alejoamiras/aztec-accelerator/releases/download/accelerator-v${ACCELERATOR_VERSION}"
     TARBALL="accelerator-server-${ACCELERATOR_VERSION}-linux-x86_64.tar.gz"
@@ -180,7 +184,7 @@ curl http://127.0.0.1:59833/health
 
 ### Source
 
-The headless server is its own Cargo crate at `packages/accelerator/server/`, separate from the desktop `src-tauri/` crate so that `tauri build` cannot pick it up and stowaway it into the desktop `.app` bundle (the root cause of the 1.0.1 auto-update breakage). It depends on `aztec-accelerator` (the desktop crate's library target) via a path dep to reuse the shared `server`, `authorization`, and `config` modules.
+The headless server is its own Cargo crate at `packages/accelerator/server/`, separate from the desktop `src-tauri/` crate so that `tauri build` cannot pick it up and stowaway it into the desktop `.app` bundle (the root cause of the 1.0.1 auto-update breakage). It depends on the GUI-agnostic **`accelerator-core`** crate (`packages/accelerator/core/`) via a path dep to reuse the shared `server`, `authorization`, `config`, `bb`, and `versions` modules — with **none** of the Tauri / WebKit dependency tree. That core extraction is what lets the headless build stay desktop-dependency-free.
 
 Build it with:
 

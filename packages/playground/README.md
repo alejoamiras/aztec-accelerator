@@ -36,9 +36,8 @@ cd packages/playground && bun run dev
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `AZTEC_NODE_URL` | Yes | Aztec node RPC endpoint |
-| `SPONSORED_FPC_SALT` | Yes | Salt for the sponsored fee payment contract |
 
-These are injected at build time via Vite.
+Injected at build time via Vite. The playground always pays fees through the **canonical salt=0 Sponsored FPC** (auto-deployed on the local sandbox; deployed + funded on v5 testnet) — no salt configuration needed.
 
 ## Testing
 
@@ -57,7 +56,7 @@ E2E tests use [Playwright](https://playwright.dev).
 bun run build   # Output: dist/
 ```
 
-Deployed to S3 + CloudFront at `playground.aztec-accelerator.dev` via the `app.yml` CI workflow on pushes to `main`.
+Deployed to S3 + CloudFront at `playground.aztec-accelerator.dev`. `app.yml` is the PR gate (lint, typecheck, unit, e2e); the live deploy is a manual `publish-testnet.yml` dispatch — pass `skip_sdk_publish=true` to ship the playground without re-publishing the SDK to npm.
 
 ## License
 

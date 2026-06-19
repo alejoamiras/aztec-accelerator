@@ -66,7 +66,6 @@ export default defineConfig(({ mode, command }) => {
   const allEnv = loadEnv(mode, process.cwd(), "");
   const env = {
     AZTEC_NODE_URL: allEnv.AZTEC_NODE_URL,
-    SPONSORED_FPC_SALT: allEnv.SPONSORED_FPC_SALT,
   };
 
   // Read @aztec/stdlib version from SDK package.json at build time
@@ -122,7 +121,6 @@ export default defineConfig(({ mode, command }) => {
     define: {
       "process.env": JSON.stringify({
         AZTEC_NODE_URL: env.AZTEC_NODE_URL,
-        SPONSORED_FPC_SALT: env.SPONSORED_FPC_SALT,
         VITE_AZTEC_SDK_VERSION: aztecSdkVersion,
       }),
     },

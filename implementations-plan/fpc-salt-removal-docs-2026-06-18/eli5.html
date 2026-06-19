@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Remove SPONSORED_FPC_SALT + refresh docs</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Remove SPONSORED_FPC_SALT + refresh docs</h1>
+  <p><code>SPONSORED_FPC_SALT</code> was a secret we used to keep one address private — the "sponsored fee payer" the playground uses so users don't pay gas. Now that the standard (salt=0) fee payer is deployed and funded publicly on the v5 testnet, hiding its address buys nothing. So we rip out the secret everywhere (it's pure dead weight now), tidy up the docs that went stale during the 5.0 work, redeploy the playground, and delete the secret.</p>
+
+  <h2>Why this tier was chosen</h2>
+  <p><strong>Light</strong> — none of the six risk dials are high. It's documentation plus removing an obsolete config value; the address it "protected" is now intentionally public. Single low-risk pass: one plan, one codex audit, ship.</p>
+
+  <h2>Phases</h2>
+  <div class="phase"><h3>P1 — Remove the secret from the code</h3><p>The playground (and an SDK test) read <code>SPONSORED_FPC_SALT</code> to pick the fee payer. Drop that — always use the standard one (salt=0). No behavior change: that's already the default when the value is empty.</p><p class="muted">Proves itself by: lint + typecheck + unit + playground build all green; no reader left.</p></div>
+  <div class="phase"><h3>P2 — Remove it from CI + scripts</h3><p>Eight GitHub workflows pass the secret around; a script sets it. Strip all of that out (keeping the unrelated <code>--salt</code> command-line flag, which deploys a custom fee payer — a real dev tool).</p><p class="muted">Proves itself by: actionlint + lint green; zero references left in <code>.github/</code> + <code>packages/</code>.</p></div>
+  <div class="phase"><h3>P3 — Refresh 5 docs</h3><p>Fix what went stale in the 5.0 work: add the key "you don't re-release the app for an Aztec bump — it downloads the prover at runtime" note; correct a wrong headless-server caveat (it no longer needs WebKit/GTK); document the SDK-publish release flow; refresh the root + playground READMEs; fix stale SDK code examples.</p><p class="muted">Proves itself by: review — each doc matches reality, no broken links, no leaked local paths.</p></div>
+  <div class="phase"><h3>P4 — Land the PR</h3><p>Branch → PR → CI green (now running fee-payer-less) → auto-merge.</p><p class="muted">Proves itself by: SDK/App/Accelerator/actionlint gates green; PR auto-merges.</p></div>
+  <div class="phase"><h3>P5 — Redeploy playground + smoke (you-ish)</h3><p>Redeploy the live playground (no SDK re-publish) and confirm in a browser that a deploy still works paying via the standard fee payer.</p><p class="muted">Proves itself by: deploy green; live bundle has no baked secret; a manual browser deploy mines.</p></div>
+  <div class="phase"><h3>P6 — Delete the secret</h3><p>Once nothing references it, delete the GitHub secret.</p><p class="muted">Proves itself by: it's gone from the secret list; next CI run still green.</p></div>
+
+  <h2>Human context</h2>
+  <p>A "sponsored FPC" pays transaction fees for users so the demo is free. Its address is fully determined by a public contract + a salt; salt=0 is the canonical one. We'd been treating that salt as a secret out of caution. But the canonical fee payer is now deployed and funded for everyone to use, so the secret protected nothing — and it was about to cause confusion (and a stale "Required" line in the docs). Removing it is simpler and more honest.</p>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li>None outstanding. Codex audit is done (<em>conditional approve</em>) — it caught a missed file (<code>.env.example</code>), corrected one doc fix (the <code>EmbeddedWallet.create</code> example is actually fine; the stale one is <code>getSchnorrAccount</code>), and flagged that "the v5 fee payer is funded" rests on this session's deploy, not the repo. All folded into the plan.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope: remove the <code>SPONSORED_FPC_SALT</code> env/secret everywhere (keep the <code>--salt</code> CLI flag), refresh the 5 docs.</li>
+      <li>Confirm tier: <code>light</code>.</li>
+      <li>Confirm validation: redeploy + manual v5 smoke (P5), delete the secret last (P6).</li>
+      <li>Approve / conditionally approve / reject.</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds (draft — finalized after approval)</h2>
+    <p>Pick one for the autonomous session. P5 (redeploy) and P6 (delete the secret) are outward/human-gated, so the seed drives P1–P4 and stops at that boundary.</p>
+    <p class="warning">Use exactly ONE per session — they don't compose.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended: /loop</h3>
+      <p class="muted">Most signal is CI runs and the deploy/secret steps are human-gated — a drive-and-watch loop that stops before the outward steps fits best.</p>
+      <pre><code>/loop 15m Drive implementations-plan/fpc-salt-removal-docs-2026-06-18 forward through P1–P4 only; never idle. Each firing: read plan.md + lessons/ (authoritative), git status + log; if a PR is open, gh pr view --json statusCheckRollup (no --watch); if CI in-flight, gh run watch up to 10m (re-run the known Playwright install-deps flake, it's not the change). No task in hand? take the next pending phase, edit → bun run lint + bun run test (touched pkgs) → commit → push. Stuck or a real decision? /codex xhigh, decide, log it. Phase green ONLY when its plan.md validation gate passes — run it, paste output, mark ✓ in plan.md, file lessons, print LESSONS_FILE=implementations-plan/fpc-salt-removal-docs-2026-06-18/lessons/phase-N.md, advance. HARD STOPS: never push to main directly, never dispatch the playground deploy (P5) or delete the secret (P6) — surface and hold. When P1–P4 ✓ and the PR is green: /code-review max --fix → commit → codex post-impl audit → address high/critical → wrap-up → STOP for human P5/P6.</code></pre>
+    </div>
+
+    <h3>Alternative: /goal</h3>
+    <pre><code>/goal Phases P1–P4 marked ✓ in implementations-plan/fpc-salt-removal-docs-2026-06-18/plan.md, each ✓ backed by its plan.md validation gate reported passing in the transcript; for each phase LESSONS_FILE=…/lessons/phase-N.md printed; no SPONSORED_FPC_SALT references remain in packages/ or .github/; the PR green and auto-merged; /code-review max --fix applied + committed; codex post-impl audit done with high/critical addressed; bun run test and bun run lint:actions exit 0. Do NOT dispatch the playground deploy (P5) or delete the secret (P6) — stop and surface for human dispatch.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>

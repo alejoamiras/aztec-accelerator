@@ -105,8 +105,6 @@ jobs:
       # against the local sandbox — not just the WASM fallback. This is the standing parity gate that
       # the SDK-only release relies on (proves the deployed accelerator handles the pinned bb version).
       build_accelerator: true
-    secrets:
-      SPONSORED_FPC_SALT: ${{ secrets.SPONSORED_FPC_SALT }}
 
   sdk-status:
     name: SDK Status

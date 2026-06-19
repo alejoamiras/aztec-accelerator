@@ -57,14 +57,11 @@ describe("AcceleratorProver", () => {
         },
       });
 
-      // Derive Sponsored FPC address and register in PXE.
-      // Uses SPONSORED_FPC_SALT when set (private FPC on live networks),
-      // defaults to salt=0 (canonical FPC for local sandbox).
-      const saltHex = process.env.SPONSORED_FPC_SALT;
-      const fpcSalt = saltHex ? Fr.fromHexString(saltHex) : new Fr(0);
+      // Derive the canonical (salt=0) Sponsored FPC address and register in PXE —
+      // deployed + funded on every network we target (sandbox auto-deploys; testnet has it).
       const fpcInstance = await getContractInstanceFromInstantiationParams(
         SponsoredFPCContract.artifact,
-        { salt: fpcSalt },
+        { salt: new Fr(0) },
       );
       await wallet.registerContract(fpcInstance, SponsoredFPCContract.artifact);
       feePaymentMethod = new SponsoredFeePaymentMethod(fpcInstance.address);
