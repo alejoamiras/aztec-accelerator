@@ -80,7 +80,7 @@ gh workflow run publish-testnet.yml -f skip_sdk_publish=true
 
 ### Pre-flight (SDK)
 
-- [ ] `bun run --cwd packages/sdk test` green (lint + typecheck + unit)
+- [ ] `bun run --cwd packages/sdk test:lint` (typecheck) + `bun run --cwd packages/sdk test:unit` green; `bun run lint` clean (biome)
 - [ ] SDK version in `packages/sdk/package.json` bumped (the rc / `testnet` line)
 - [ ] `@aztec/*` deps resolve to the intended version; `bun.lock` committed (`bun install --frozen-lockfile` passes)
 

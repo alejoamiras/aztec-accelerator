@@ -49,7 +49,7 @@ Apply the doc changes listed above. No full local paths in committed files (use 
 
 **Validation gate:** manual review — each of the 5 docs reflects current reality (salt-less, 5.0, headless slimmed, version-model note present); the playground README no longer lists `SPONSORED_FPC_SALT`; no absolute local paths; relative links resolve. (Markdown isn't lint-gated in this repo — review is the gate.) Layers: manual-review.
 
-### P4 — Land the PR
+### P4 — Land the PR ✓ (PR #366, squash `ba3aec0`)
 Branch (`chore/remove-fpc-salt` or similar) → PR → CI green → auto-merge. `main` is branch-protected (branch + PR + auto-merge; unsigned commits via `git -c commit.gpgsign=false`). The e2e now runs salt-less (salt=0 canonical) — confirm the local-sandbox e2e stays green.
 
 **Validation gate:** `sdk.yml` + `app.yml` + `accelerator.yml` + `actionlint.yml` green (incl. the salt-less e2e); PR auto-merges. Layers: lint · typecheck · unit · e2e (local sandbox). *(Known infra flake: the Playwright `install-deps` timeout — re-run the failed job, it's not the change.)*
