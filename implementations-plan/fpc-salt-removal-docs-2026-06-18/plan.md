@@ -44,7 +44,7 @@ The `--salt` CLI flag on the FPC scripts is a **separate dev tool** (deploy a *c
 
 **Validation gate:** `bun run lint:actions` (actionlint) **and** `bun run lint` (biome on the touched script). Pass: exit 0; `grep -rn SPONSORED_FPC_SALT .github packages .env.example` (excl. the prose docs handled in P3) returns nothing. Layers: lint · actionlint.
 
-### P3 — Refresh the 5 docs
+### P3 — Refresh the 5 docs ✓
 Apply the doc changes listed above. No full local paths in committed files (use `~/`/repo-relative). Verify relative links resolve. Re-verify the SDK README's 5.0 code examples against the installed `@aztec` types before committing (don't ship an example that doesn't compile).
 
 **Validation gate:** manual review — each of the 5 docs reflects current reality (salt-less, 5.0, headless slimmed, version-model note present); the playground README no longer lists `SPONSORED_FPC_SALT`; no absolute local paths; relative links resolve. (Markdown isn't lint-gated in this repo — review is the gate.) Layers: manual-review.

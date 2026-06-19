@@ -1,5 +1,14 @@
 # Release Runbook
 
+This repo ships **two independently releasable artifacts**, and most releases touch only one:
+
+| Artifact | What it is | Released by | When |
+|---|---|---|---|
+| **SDK** (`@alejoamiras/aztec-accelerator`) | npm package dApps import | `publish-testnet.yml` → `_publish-sdk.yml` | An `@aztec/*` bump, or an SDK code/feature change |
+| **Accelerator** (desktop + headless) | The native-proving app/binary | `release-accelerator.yml` (tag + GitHub release + `latest.json`) | The accelerator's **own** code changes (server, tray, updater, bb download/verify) |
+
+**Decision — SDK-only vs full accelerator release:** because the accelerator downloads `bb` at runtime, an Aztec protocol bump is almost always **SDK-only** — re-publish the SDK and you're done; installed accelerators fetch the matching `bb` on the next prove request (see [accelerator README → Version Model](../packages/accelerator/README.md#version-model--why-an-aztec-bump-doesnt-re-release-this-app)). Cut a full accelerator release **only** when the accelerator's own Rust code changed. The accelerator release is documented first below, then the [SDK publish](#releasing-the-sdk-to-npm).
+
 ## Pre-flight Checklist
 
 - [ ] All CI checks green on `main`
@@ -51,6 +60,29 @@ The release workflow already asserts all 6 expected files exist before creating 
 ### 3. Merge the version-bump PR
 
 The release workflow creates a PR bumping the source version to the next RC. Merge it promptly so `main` always reflects the next development version.
+
+## Releasing the SDK to npm
+
+The SDK publishes via `publish-testnet.yml` (manual `workflow_dispatch`), which both publishes the SDK and deploys the playground.
+
+```bash
+# Publish the SDK (runs the e2e gate first) + deploy the playground:
+gh workflow run publish-testnet.yml
+
+# Deploy the playground ONLY — skip re-publishing the SDK to npm:
+gh workflow run publish-testnet.yml -f skip_sdk_publish=true
+```
+
+- **dist-tag `testnet`, `latest:false`.** While the `@aztec/*` deps are release-candidate-labeled (`5.0.0-rc.N`), the SDK ships on the **`testnet`** dist-tag and never npm `latest` — `latest` stays on the last stable line. Consumers opt in with `npm install @alejoamiras/aztec-accelerator@testnet`.
+- The reusable `_publish-sdk.yml` runs `npm publish --provenance --access public --tag <dist_tag>` — **Sigstore build provenance** is attached via `id-token: write`. npm authentication uses the `NPM_TOKEN` secret (passed into the reusable workflow); the GitHub release it cuts is always `--latest=false` (the npm dist-tag, not the GitHub "Latest" flag, governs consumer resolution).
+- The same run deploys the playground (`deploy-app` job) unless the e2e gate failed. Use `skip_sdk_publish=true` to redeploy the playground after a docs/UI-only change without bumping npm.
+- **7-day npm min-age** still applies to the SDK's own dependencies — never override the gate in CI.
+
+### Pre-flight (SDK)
+
+- [ ] `bun run --cwd packages/sdk test` green (lint + typecheck + unit)
+- [ ] SDK version in `packages/sdk/package.json` bumped (the rc / `testnet` line)
+- [ ] `@aztec/*` deps resolve to the intended version; `bun.lock` committed (`bun install --frozen-lockfile` passes)
 
 ## Rollback Procedure
 

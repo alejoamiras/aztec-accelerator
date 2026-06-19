@@ -13,7 +13,7 @@ Native proving accelerator for Aztec transactions. Bypasses browser WASM throttl
 | Package | Description | Status |
 |---------|-------------|--------|
 | [`@alejoamiras/aztec-accelerator`](packages/sdk) | SDK — drop-in `AcceleratorProver` for dApp integration | [![npm](https://img.shields.io/npm/v/@alejoamiras/aztec-accelerator?label=npm)](https://www.npmjs.com/package/@alejoamiras/aztec-accelerator) |
-| [`packages/accelerator`](packages/accelerator) | Desktop app — macOS/Linux system tray app | [![Accelerator](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml) |
+| [`packages/accelerator`](packages/accelerator) | Desktop tray app (macOS/Linux) + headless server for CI test acceleration | [![Accelerator](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml) |
 | [`packages/playground`](packages/playground) | [Live demo](https://playground.aztec-accelerator.dev) — WASM vs accelerated comparison | [![App](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/app.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/app.yml) |
 | [`packages/landing`](packages/landing) | Landing page at [aztec-accelerator.dev](https://aztec-accelerator.dev) | |
 
@@ -63,6 +63,8 @@ const prover = new AcceleratorProver();
 ```
 
 See the [SDK README](packages/sdk/README.md) for full API reference.
+
+> **Aztec 5.0 / `testnet` dist-tag.** The current SDK line targets Aztec `5.0.0-rc.x` and publishes on npm's **`testnet`** dist-tag — `npm install @alejoamiras/aztec-accelerator@testnet`. The bare `@latest` stays on the last stable line. The accelerator downloads the matching `bb` binary **at runtime**, so an Aztec version bump ships **SDK-only** — already-installed accelerators need no re-release. See the [release runbook](docs/RELEASE_RUNBOOK.md).
 
 ### For users (Desktop App)
 

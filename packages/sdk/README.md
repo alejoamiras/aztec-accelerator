@@ -22,13 +22,11 @@ Peer dependency: your project must already have `@aztec/aztec.js` (or the indivi
 ```typescript
 import { AcceleratorProver } from "@alejoamiras/aztec-accelerator";
 
+// Zero-config — auto-detects the accelerator, falls back to WASM.
 const prover = new AcceleratorProver();
-
-// Use as the prover when creating a wallet or sending transactions
-const wallet = await getSchnorrAccount(pxe, secretKey, signingKey, Fr.ZERO, prover).getWallet();
 ```
 
-That's it. If the user has the [Aztec Accelerator](https://github.com/alejoamiras/aztec-accelerator/releases) desktop app running, proving happens natively at full speed. If not, it falls back to in-browser WASM proving automatically.
+Inject `prover` into your wallet through the PXE `proverOrOptions` option — see [Embedded Wallet](#embedded-wallet-browser-dapps) below. Every transaction then proves natively when the [Aztec Accelerator](https://github.com/alejoamiras/aztec-accelerator/releases) desktop app is running, and falls back to in-browser WASM automatically. No other code changes.
 
 ### Embedded Wallet (Browser dApps)
 
