@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Audit — aztec-accelerator (2026-06-09)</title>
+<style>
+  :root{
+    --bg:#fff; --fg:#1a1a1a; --muted:#666; --hairline:#e3e3e3; --surface:#fafafa;
+    --code:#f3f3f3; --link:#0366d6;
+    --high:#b3261e; --high-bg:#fde8e6; --med:#9a6700; --med-bg:#fff6df; --low:#555; --low-bg:#eee;
+    --green:#1a7f37; --green-bg:#e8f5ec;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#16181c; --fg:#e6e6e6; --muted:#9aa0a6; --hairline:#2c2f36; --surface:#1d2025;
+      --code:#23262c; --link:#5aa3ff;
+      --high:#ff6b61; --high-bg:#3a1e1c; --med:#e8b84b; --med-bg:#352c14; --low:#b8b8b8; --low-bg:#262626;
+      --green:#5cc97f; --green-bg:#16301f;
+    }
+  }
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;background:var(--bg);color:var(--fg);line-height:1.6;}
+  h1{font-size:1.7rem;margin-bottom:.3rem;} h2{font-size:1.25rem;margin-top:2.4rem;border-bottom:1px solid var(--hairline);padding-bottom:.3rem;}
+  h3{font-size:1.05rem;margin:1.2rem 0 .4rem;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86rem;background:var(--code);padding:.1rem .3rem;border-radius:3px;}
+  pre{background:var(--code);padding:.8rem;border-radius:5px;overflow-x:auto;white-space:pre-wrap;font-size:.82rem;}
+  a{color:var(--link);}
+  .muted{color:var(--muted);font-size:.9rem;}
+  .strip{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0 0;}
+  .stat{border:1px solid var(--hairline);border-radius:8px;padding:.5rem .9rem;text-align:center;background:var(--surface);}
+  .stat b{display:block;font-size:1.4rem;}
+  .chip{display:inline-block;font-size:.72rem;font-weight:600;padding:.12rem .5rem;border-radius:20px;vertical-align:middle;}
+  .c-high{background:var(--high-bg);color:var(--high);} .c-med{background:var(--med-bg);color:var(--med);}
+  .c-low{background:var(--low-bg);color:var(--low);} .c-info{background:var(--low-bg);color:var(--muted);font-weight:500;}
+  .callout{border-radius:8px;padding:.9rem 1.1rem;margin:1.2rem 0;}
+  .cheap{background:var(--green-bg);border:1px solid var(--green);}
+  .pair{background:var(--med-bg);border:1px solid var(--med);}
+  .finding{background:var(--surface);border:1px solid var(--hairline);border-radius:8px;padding:1.1rem 1.2rem;margin:1.1rem 0;}
+  .fhdr{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.3rem;}
+  .fid{font-family:ui-monospace,monospace;font-weight:600;color:var(--muted);}
+  .ftitle{font-weight:600;}
+  .eli5 p{margin:.45rem 0;} .eli5 strong{color:var(--fg);}
+  details{margin-top:.6rem;border-top:1px dashed var(--hairline);padding-top:.5rem;}
+  summary{cursor:pointer;color:var(--link);font-size:.9rem;}
+  .hold li{margin:.3rem 0;}
+</style>
+</head>
+<body>
+<h1>Security Audit — aztec-accelerator</h1>
+<p class="muted">2026-06-09 · focused post-implementation pass (scheduled after <code>quality-fixes-2026-06-08</code>) · 2× Claude + Codex, adversarial · <b>posture: medium</b></p>
+
+<div class="strip">
+  <div class="stat"><b>0</b>Critical</div>
+  <div class="stat"><b>2</b>High</div>
+  <div class="stat"><b>4</b>Medium</div>
+  <div class="stat"><b>3</b>Low</div>
+</div>
+
+<p style="margin-top:1.2rem"><strong>Every finding here is pre-existing</strong> — none was introduced by the quality-fixes refactors (those were behavior-preserving; F-02 actually <em>hardened</em> origin canonicalization). The audit looked past the diff at the standing posture because this app is a localhost server that arbitrary web pages talk to, plus a self-updater. The desktop consent flow, TLS keylessness, and the auto-updater are well-built and held up under both model families. Two High issues stand out.</p>
+
+<div class="callout cheap">
+  <strong>Cheapest high-value fixes first (land these in one PR):</strong>
+  <ul>
+    <li><strong>Add a <code>Host</code>-header allowlist</strong> at server ingress (reject Host whose host ∉ localhost/127.0.0.1/[::1]). ~hours. Single-handedly defeats DNS rebinding (SEC-01) on desktop <em>and</em> headless.</li>
+    <li><strong>Restrict <code>/health</code> CORS</strong> / shrink its unauthenticated surface (SEC-05). ~hours.</li>
+    <li><strong>Size-cap the updater download</strong> before buffering (SEC-03). ~hours.</li>
+  </ul>
+</div>
+
+<div class="callout pair">
+  <strong>Ship-together theme — the origin gate:</strong> SEC-01 (no Host check + fail-open), SEC-04 (any localhost page auto-approved), and SEC-05 (<code>/health</code> open + wildcard CORS) are facets of one root cause: a browser-reachable local service trusting only <code>Origin</code> + wildcard CORS, with no <code>Host</code> binding. Treat them as one hardening workstream.
+</div>
+
+<h2>High</h2>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-high">High</span><span class="fid">SEC-01</span><span class="ftitle">Localhost origin gate is bypassable — no <code>Host</code> check + fail-open</span></div>
+  <div class="meta-line"><span class="chip c-info">found by Claude + Codex</span> <span class="chip c-info">confidence: high</span> <span class="chip c-info">CWE-350 · DNS rebinding</span> <span class="chip c-info">fix: hours · CHEAPEST</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The app runs a little web server on your own machine (port 59833) that browser pages ask to do heavy proving work. It decides who's allowed by looking at one label the browser attaches — the <code>Origin</code> — and pops up a MetaMask-style "approve this site?" prompt. But it never checks the <code>Host</code> label, and if the <code>Origin</code> label is simply <em>missing</em>, it says "yes, approved." The server-only (headless) build goes further: if you don't set an allowlist, it approves <em>everyone</em>.</p>
+    <p><strong>What an attacker would do.</strong> A malicious website uses a 30-year-old trick called "DNS rebinding": it serves its trap page on port 59833 of <code>evil.com</code>, then quietly re-points <code>evil.com</code> at <code>127.0.0.1</code>. Now the page's own follow-up request counts as "same site," so the browser sends it with <em>no Origin label</em> — and your local server, seeing no label, approves it. No popup. The attacker can now burn your CPU on their proving jobs, read the results, and make the app download arbitrary <code>bb</code> binary versions. The headless case is even simpler — any page can hit a no-allowlist server directly.</p>
+    <p><strong>The fix.</strong> Check the <code>Host</code> label and refuse anything that isn't literally <code>localhost</code>/<code>127.0.0.1</code>/<code>[::1]</code> — that one check kills the rebinding trick outright. Then stop treating a missing <code>Origin</code> as "approved" (fail closed), and make the headless build deny-by-default. The codebase already has all the pieces.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+  <p><strong>Instances:</strong> <code>core/src/server/auth.rs:30</code> (<code>None =&gt; return Ok(())</code>, pinned by test <code>prove_skips_auth_when_no_origin_header</code> at <code>server.rs:908</code>) · <code>auth.rs:18</code>+<code>prove.rs:116</code> (no Host read anywhere) · <code>server/src/main.rs:43</code> (headless <code>auth_manager: None</code> when <code>ALLOWED_ORIGINS</code> unset) · <code>server.rs:194</code> (wildcard CORS) · binds 127.0.0.1 only (<code>server.rs:186</code>).</p>
+  <p><strong>Fix:</strong> (1) Host-allowlist at ingress; (2) fail-closed on absent Origin (flip the test contract); (3) headless: unset ALLOWED_ORIGINS ⇒ deny-all-non-localhost, or explicit <code>--allow-all</code>. <strong>Cross-model nuance:</strong> Codex didn't confirm the desktop same-origin-rebinding chain ("no Origin bypass to pair with the missing Host check"); Claude traced it via same-origin-omits-Origin + the pinning test. Both agree the Host allowlist is the root fix and the headless default-open is real.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-high">High</span><span class="fid">SEC-02</span><span class="ftitle"><code>bb</code> download integrity is circular against a compromised release</span></div>
+  <div class="meta-line"><span class="chip c-info">found by Claude + Codex</span> <span class="chip c-info">confidence: high</span> <span class="chip c-info">CWE-494 · A08</span> <span class="chip c-info">fix: days</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The app downloads the <code>bb</code> proving binary from GitHub and checks it's genuine by comparing it to a checksum — but it fetches that checksum <em>from the same GitHub release it's downloading the binary from</em>. That's like verifying a £20 note against a photo of it printed by the same counterfeiter.</p>
+    <p><strong>What an attacker would do.</strong> Whoever can tamper with the GitHub release (a compromised maintainer account, or a network attacker able to intercept both GitHub endpoints) swaps in a malicious binary <em>and</em> updates the checksum to match. The app sees a "valid" checksum and runs the attacker's code on your machine. (Plain network eavesdropping is already blocked — both downloads use HTTPS — so this is specifically a supply-chain/account-compromise risk.)</p>
+    <p><strong>The fix.</strong> Verify the binary against a signature from a key <em>baked into the app itself</em>, not fetched from the network — exactly what the app's own auto-updater already does correctly with a pinned minisign key. Copy that pattern.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+  <p><strong>Instances:</strong> <code>core/src/versions/mod.rs:282-326</code> (<code>fetch_github_asset_digest</code> reads expected SHA-256 from api.github.com) · <code>downloader.rs:31,156-175</code> (verify → install → <code>chmod 0o755</code> → execute at <code>prove.rs:200</code>) · admitted TODO at <code>mod.rs:285-288</code>.</p>
+  <p><strong>Fix:</strong> offline-pinned publisher signature (minisign/cosign/TUF), independent of the download channel — mirror <code>src-tauri/src/updater.rs</code> (pinned minisign). Interim: ship a curated pinned-digest manifest rather than fetching digests at install time.</p>
+  </details>
+</div>
+
+<h2>Medium</h2>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-med">Medium</span><span class="fid">SEC-03</span><span class="ftitle">Updater buffers the whole artifact in memory before verifying (no size cap)</span></div>
+  <div class="meta-line"><span class="chip c-info">found by Codex</span> <span class="chip c-info">CWE-400</span> <span class="chip c-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When updating itself, the app downloads the new version fully into memory <em>before</em> checking its signature.</p>
+    <p><strong>What an attacker would do.</strong> A tampered update feed or compromised CDN points the app at a multi-gigabyte file; the app keeps loading it into RAM until it runs out — a crash/denial-of-service. (The signature check itself is solid, so they can't install fake code this way — only exhaust memory.)</p>
+    <p><strong>The fix.</strong> Enforce a hard size limit from the update manifest, and/or stream to a temp file on disk before verifying.</p>
+  </div>
+  <details><summary>Technical trace</summary><p><code>src-tauri/src/updater.rs:66</code> → <code>tauri-plugin-updater-2.10.1/src/updater.rs:702</code> (unbounded <code>Vec&lt;u8&gt;</code>). Availability only; signature (pinned minisign) is sound. Partly upstream-dep — cap on the app side.</p></details>
+</div>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-med">Medium</span><span class="fid">SEC-04</span><span class="ftitle">Any localhost-origin page is auto-approved (no per-app scoping)</span></div>
+  <div class="meta-line"><span class="chip c-info">found by Claude</span> <span class="chip c-info">CWE-923 · A01</span> <span class="chip c-info">fix: hours–day</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Any page served from <code>localhost</code> (any port) is approved with no prompt — the app assumes "anything local is trustworthy."</p>
+    <p><strong>What an attacker would do.</strong> A second dev server you're running, a malicious <code>npm install</code> script that opens a local port, or any tool that got a foothold on your machine gets unlimited, silent access to the prover.</p>
+    <p><strong>The fix.</strong> Scope the auto-approval to the app's own playground origin, or prompt for other localhost origins.</p>
+  </div>
+  <details><summary>Technical trace</summary><p><code>core/src/authorization.rs:213-223</code> (<code>is_auto_approved</code> matches any <code>{localhost,127.0.0.1,[::1]}:any-port</code>), via <code>is_approved</code> at <code>:230</code>.</p></details>
+</div>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-med">Medium</span><span class="fid">SEC-05</span><span class="ftitle"><code>/health</code> is unauthenticated + wildcard CORS → cross-site fingerprinting</span></div>
+  <div class="meta-line"><span class="chip c-info">found by Codex</span> <span class="chip c-info">CWE-200</span> <span class="chip c-info">fix: hours</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The <code>/health</code> endpoint answers any website, with no gate, exposing app version, cached Aztec versions, whether <code>bb</code> is present, and HTTPS status.</p>
+    <p><strong>What an attacker would do.</strong> Any site you visit silently checks "is the accelerator installed, which version?" — reconnaissance to target a version-specific exploit, plus a privacy/tracking signal.</p>
+    <p><strong>The fix.</strong> Restrict <code>/health</code> CORS to approved origins, or return only a minimal liveness response unauthenticated and gate the details.</p>
+  </div>
+  <details><summary>Technical trace</summary><p><code>core/src/server.rs:194,215</code> (wildcard CORS + full health payload).</p></details>
+</div>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-med">Medium</span><span class="fid">SEC-06</span><span class="ftitle"><code>respond_auth</code> uses origin-as-identity (no per-request token)</span></div>
+  <div class="meta-line"><span class="chip c-info">found by Claude</span> <span class="chip c-info">CWE-362</span> <span class="chip c-info">fix: day</span></div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When you click Approve/Deny, the decision is matched to a pending request <em>by origin string</em> rather than a unique request id. A malformed-origin Deny silently misses (the request just times out after 60s), and two pending requests for the same origin share one decision.</p>
+    <p><strong>What an attacker would do.</strong> Limited today — the approval command is only reachable from the local app UI (Tauri IPC). It's a design weakness to fix before any new surface exposes that path.</p>
+    <p><strong>The fix.</strong> Give each pending request a server-issued opaque id and resolve on that.</p>
+  </div>
+  <details><summary>Technical trace</summary><p><code>src-tauri/src/commands.rs:131</code> (<code>auth.resolve(&amp;origin,…)</code> on raw arg) vs canonical-keyed pending map at <code>server/auth.rs:71</code>.</p></details>
+</div>
+
+<h2>Low</h2>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-low">Low</span><span class="fid">SEC-07</span><span class="ftitle">Decompression bomb — tarball extraction is unbounded</span></div>
+  <div class="eli5"><p><strong>What it is / fix.</strong> The 64 MB download cap is on the <em>compressed</em> file; extraction has no ceiling, so a crafted archive could fill the disk. Only reachable once SEC-02's integrity check is already defeated. Cap cumulative decompressed bytes / check <code>entry.header().size()</code>.</p></div>
+  <details><summary>Technical trace</summary><p><code>core/src/versions/downloader.rs:240</code> (<code>entry.unpack</code>) vs <code>:129-149</code>.</p></details>
+</div>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-low">Low</span><span class="fid">SEC-08</span><span class="ftitle">Legacy <code>ca.key</code> cleanup is best-effort (fails open)</span></div>
+  <div class="eli5"><p><strong>What it is / fix.</strong> On upgraded installs, if deleting the old on-disk CA key fails, the app logs and proceeds — leaving a readable "mint any cert" key plus its trusted anchor. Verify the key is gone / retry / surface to the user; consider failing closed for Safari HTTPS until removed. Found by both models.</p></div>
+  <details><summary>Technical trace</summary><p><code>src-tauri/src/certs.rs:181-198</code>, called <code>main.rs:418/422</code>.</p></details>
+</div>
+
+<div class="finding">
+  <div class="fhdr"><span class="chip c-low">Low</span><span class="fid">SEC-09</span><span class="ftitle">Cert rotation verifies the CA anchor but not that the leaf chains to it</span></div>
+  <div class="eli5"><p><strong>What it is / fix.</strong> Rotation checks the new CA is trusted but not that the new leaf chains to it, and swaps three files non-atomically — a crash mid-swap could leave a mismatch unnoticed until expiry. Add a leaf-against-anchor verify before swap; use an atomic staging-dir swap.</p></div>
+  <details><summary>Technical trace</summary><p><code>src-tauri/src/certs.rs:298-327</code> (<code>verify-cert -c ca.pem.new</code> only); <code>swap_into</code> 3 renames at <code>:71-76</code>.</p></details>
+</div>
+
+<h2>Cross-cutting observations</h2>
+<h3>1 · The local server trusts network-position + <code>Origin</code>, never <code>Host</code></h3>
+<p>SEC-01/04/05 are one theme: a browser-reachable local service needs a <code>Host</code> allowlist and per-origin consent as defense-in-depth, not <code>Origin</code>-only + wildcard CORS. The <code>Host</code> check (SEC-01) is the single highest-leverage change.</p>
+<h3>2 · Two "trust the network for integrity" instances, opposite maturity</h3>
+<p>The auto-updater does it right (pinned minisign, HTTPS, downgrade-prevention — confirmed by both models). The <code>bb</code> downloader does it wrong (SEC-02). The fix is literally to copy the updater's pattern.</p>
+<h3>3 · A recurring fail-open habit</h3>
+<p>Absent <code>Origin</code> → approve; <code>ca.key</code> delete fails → proceed; headless no-allowlist → open. A consistent fail-closed posture on security-critical paths closes SEC-01 and SEC-08 together.</p>
+
+<h2>Defenses that hold</h2>
+<ul class="hold">
+  <li><strong>Desktop present-<code>Origin</code> auth</strong>: canonicalizes (the F-02 work), rejects malformed/null-ish, checks approval before buffering the body.</li>
+  <li><strong>TLS generation</strong>: CA key in-memory only (dropped + <code>zeroize</code>), constrained to localhost, cert/key written atomically with owner-only perms — tests pin the key is never written.</li>
+  <li><strong>Auto-update</strong>: HTTPS feed + pinned minisign key + downgrade-prevention.</li>
+  <li><strong>Network MITM</strong> on the <code>bb</code> download is blocked (HTTPS both hops); the residual is supply-chain compromise (SEC-02), not passive eavesdropping.</li>
+</ul>
+
+<p class="muted" style="margin-top:2.5rem"><a href="report.md">Engineering report (report.md)</a> · raw agent outputs: <a href="raw/origin-auth-claude.md">origin-auth</a> · <a href="raw/crypto-supply-claude.md">crypto-supply</a> · <a href="raw/full-surface-codex.md">codex</a></p>
+</body>
+</html>
