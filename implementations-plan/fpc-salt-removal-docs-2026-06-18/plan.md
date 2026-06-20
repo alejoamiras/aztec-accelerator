@@ -54,12 +54,12 @@ Branch (`chore/remove-fpc-salt` or similar) → PR → CI green → auto-merge. 
 
 **Validation gate:** `sdk.yml` + `app.yml` + `accelerator.yml` + `actionlint.yml` green (incl. the salt-less e2e); PR auto-merges. Layers: lint · typecheck · unit · e2e (local sandbox). *(Known infra flake: the Playwright `install-deps` timeout — re-run the failed job, it's not the change.)*
 
-### P5 — Re-deploy the playground to v5 + smoke
+### P5 — Re-deploy the playground to v5 + smoke ✓ (run `27845607437`; live browser smoke passed 2026-06-20)
 Dispatch `publish-testnet.yml --ref main -f skip_sdk_publish=true` (from merged, salt-less main). The build no longer bakes `SPONSORED_FPC_SALT`; the playground resolves the canonical salt=0 FPC.
 
 **Validation gate:** `deploy-app` green; `curl` the live bundle and confirm **no `SPONSORED_FPC_SALT` baked** and the v5 host present; **manual browser smoke** at `playground.aztec-accelerator.dev` — a deploy proves+mines paying via the canonical FPC. Layers: e2e-live-network (manual). *(Human step — needs a browser click-through.)*
 
-### P6 — Delete the repo secret
+### P6 — Delete the repo secret ✓ (deleted 2026-06-20; `gh secret list` shows only `TESTNET_AZTEC_NODE_URL`)
 After P4 merged + P5 confirmed (no workflow references `secrets.SPONSORED_FPC_SALT`): `gh secret delete SPONSORED_FPC_SALT`.
 
 **Validation gate:** `gh secret list` no longer shows `SPONSORED_FPC_SALT`; the next CI run on `main` is green (no missing-secret reference errors — there are none to reference). Layers: manual + CI.
