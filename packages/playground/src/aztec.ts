@@ -153,7 +153,7 @@ async function clearIndexedDB(): Promise<void> {
  * `keyval-store`; wallet/PXE data uses `pxe-`/`wallet-` prefixed DBs (cleared separately above).
  * Bump CRS_CACHE_VERSION whenever `@aztec/bb.js` changes the CRS format.
  */
-const CRS_CACHE_VERSION = "5.0.0-rc.1";
+const CRS_CACHE_VERSION = "5.0.0-rc.2";
 async function bustStaleCrsCacheOnce(log: LogFn): Promise<void> {
   if (typeof indexedDB === "undefined" || typeof localStorage === "undefined") return;
   const KEY = "bb-crs-cache-version";

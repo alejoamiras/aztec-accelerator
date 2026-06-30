@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — Aztec rc.2 bump + SDK release</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    .flag { background: #fdecea; border-left: 3px solid #d33; padding: 0.75rem 1rem; margin: 1rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Aztec <code>rc.1 → rc.2</code> bump + SDK release</h1>
+  <p>Aztec's testnet upgraded to <strong>5.0.0-rc.2</strong> today. This plan moves our SDK and playground onto rc.2, re-publishes the SDK to npm (on the <code>testnet</code> tag, never <code>latest</code>), and keeps the live playground working — including the one thing that almost slipped through: <strong>the sponsored "free gas" contract has to be re-deployed</strong> on testnet because rc.2 changed its code (and therefore its address).</p>
+
+  <h2>Why <code>mid</code> was chosen</h2>
+  <p>At first glance this is a one-line dependency bump (you guessed "no breaking changes"). The rubric scored 0 high-risk dimensions up front — so <code>mid</code> looked slightly heavy. But the dual audit earned its keep: it found a real <strong>migration-cost</strong> hit (the fee contract's address moves, so the testnet deployment we funded last time is now orphaned) and a gap where our test <em>looked</em> like it proved production-safety but didn't. <code>mid</code> (two independent reviewers + a fresh final pass) was the right call.</p>
+
+  <div class="flag">
+    <strong>The headline finding.</strong> Your "no breaking changes" is right about our TypeScript code (it compiles clean) — but the <em>sponsored fee contract</em> was recompiled in rc.2, which shifts its on-chain address. The playground derives that address and pays gas through it; if we don't re-deploy + re-fund it at the new address on testnet, <strong>the live playground's transactions fail</strong>. The plan now makes that a required step.
+  </div>
+
+  <h2>Phases</h2>
+  <div class="phase">
+    <h3>P1: Bump the versions + regenerate the lockfile</h3>
+    <p>Change every <code>@aztec/*</code> version from <code>rc.1</code> to <code>rc.2</code> (24 lines across two files), bump a one-line "cache version" that prevents a known in-browser crash when the proving format changes, and regenerate the lockfile. rc.2 is ~1 day old and the repo blocks installing anything under 7 days old (a supply-chain safety gate) — so we override that gate <strong>locally only</strong> (never in CI), then double-check the lockfile didn't quietly pull in any other brand-new packages.</p>
+    <p class="muted">Proves itself by: both installs succeed, the type-checker + linter + unit tests + playground build all pass, and the lockfile diff shows only Aztec version changes.</p>
+  </div>
+  <div class="phase">
+    <h3>P2: Land the bump (with the real proving tests) and auto-merge</h3>
+    <p>Open a PR. CI runs the SDK end-to-end test with the accelerator serving the <em>native</em> rc.2 proving binary — proving the prove/serialize/proof format still works. We <strong>also</strong> add the missing piece: a test that actually <em>downloads</em> the rc.2 binary and checks its signature, because that's the path real installed users take (their app shipped with an older binary and fetches rc.2 on demand) — the normal test skips that path.</p>
+    <p class="muted">Proves itself by: all CI gates green (native rc.2 e2e asserts it used the fast path, not the fallback) + the download-and-verify test passes; PR auto-merges.</p>
+  </div>
+  <div class="phase">
+    <h3>P3: Re-deploy the fee contract, publish the SDK, redeploy + smoke the playground</h3>
+    <p>First, re-deploy and re-fund the rc.2 sponsored-fee contract on testnet (a small Ethereum/Sepolia bridge transaction with the disposable wallet — same flow as last time). Then publish the SDK to npm on the <code>testnet</code> tag and redeploy the playground. Finally, a human opens the live playground and runs a real transaction to confirm fees are paid through the new contract. <strong>This whole phase is outward-facing</strong> (real money on L1, an npm publish, a live deploy) so it's dispatched by you, not automatically.</p>
+    <p class="muted">Proves itself by: the rc.2 fee contract is live on testnet, npm shows <code>testnet → rc.2</code> (and <code>latest</code> still 4.x), the live bundle is on rc.2, and a browser smoke transaction succeeds.</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p><strong>SDK-only model.</strong> The installed accelerator app downloads the matching proving binary at runtime, so a version bump normally ships as <em>just</em> an SDK re-publish — no new app release. We verified the app's proving code is byte-identical to the deployed 1.0.6, so that still holds here.</p>
+  <p><strong>Why re-deploy the fee contract.</strong> On Aztec, a contract's address is derived from its compiled code. rc.2 recompiled the sponsored-fee contract, so the "same" contract now lives at a different address. The one we funded during the rc.1 work is now unreachable from rc.2 — hence the re-deploy.</p>
+
+  <h2>Open questions (your call)</h2>
+  <ul>
+    <li><strong>Override the 7-day install gate now, or wait ~7 days?</strong> Recommended: now (Approach A). Testnet is already on rc.2; waiting likely breaks the live playground in the meantime, and the override is local-only on official Aztec packages. Both auditors agreed waiting (B) is the weaker option.</li>
+    <li><strong>OK with the expanded scope?</strong> The original ask was "bump + republish"; the audit added "re-deploy + re-fund the testnet fee contract" (a real L1 transaction). Confirm the disposable Sepolia wallet still has funds, or that you'll top it up.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope — including the <strong>added P3 fee-contract re-deploy</strong> (L1 Sepolia tx).</li>
+      <li>Confirm tier <code>mid</code> (or override).</li>
+      <li>Confirm the validation plan: P1 typecheck/lint/unit, P2 native-bb-rc.2 e2e + download-verify, P3 live testnet smoke.</li>
+      <li>Decide Approach <strong>A (track-now)</strong> vs B (wait 7 days).</li>
+      <li><code>/harden</code>: skipped (already confirmed).</li>
+      <li>Approve / conditionally approve / reject.</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds (draft — finalized after approval)</h2>
+    <p>One drives the autonomous session. Both stop before P3 (the outward-facing release), which you dispatch — same as the last bump.</p>
+    <p class="warning">Use exactly ONE per session. They don't compose — setting one replaces the other.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended: /loop (matches how you ran the last bump — CI waits + a human-gated release tail)</h3>
+      <pre><code>/loop 15m Drive implementations-plan/aztec-5.0.0-rc.2-2026-06-30 through P1–P2 ONLY; never idle. Each firing: read plan.md + lessons/ (authoritative), git status + log; if a PR is open, gh pr view --json statusCheckRollup (no --watch); if CI in-flight, gh run watch up to 10m (re-run the known Playwright install-deps flake). No task in hand? take the next pending step → edit → bun install --minimum-release-age=0 then bun install --frozen-lockfile (both must pass) → bun run lint + bun run --cwd packages/sdk test:lint + bun run --cwd packages/playground build + bun run test → for P2 also run ACCELERATOR_DOWNLOAD_TEST=1 AZTEC_BB_VERSION=5.0.0-rc.2 cargo test download_and_verify (from packages/accelerator/core) → commit (stage by path, never git add -A) → push. Stuck or a real decision? /codex xhigh, decide, log it. Phase green ONLY when its plan.md validation gate passes — run it, paste output, mark ✓ in plan.md, file lessons, print LESSONS_FILE=…/lessons/phase-N.md, advance. HARD STOPS: never push to main, never publish the SDK, never deploy the playground, never run the testnet FPC redeploy or any L1 tx (all P3 — surface and hold). When P1–P2 ✓ and the PR is green: /code-review max --fix → commit → codex post-impl audit → address high/critical → wrap-up → STOP for human P3.</code></pre>
+    </div>
+
+    <h3>Alternative: /goal (completion is transcript-observable through P2)</h3>
+    <pre><code>/goal Phases P1–P2 marked ✓ in implementations-plan/aztec-5.0.0-rc.2-2026-06-30/plan.md, each ✓ backed by its plan.md validation gate reported passing in the transcript (incl. the rc.2 download_and_verify test for P2); for each phase LESSONS_FILE=…/lessons/phase-N.md printed; the bump PR green and auto-merged; /code-review max --fix applied + committed; codex post-impl audit done with high/critical addressed; bun run test + bun run lint exit 0. Do NOT publish the SDK, redeploy the playground, or run the testnet FPC redeploy / any L1 tx (P3) — stop and surface for human dispatch.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="./lessons/">Lessons logs</a> · <a href="audit-codex.md">Codex audit</a> · <a href="audit-fable.md">Fable audit</a></p>
+</body>
+</html>
