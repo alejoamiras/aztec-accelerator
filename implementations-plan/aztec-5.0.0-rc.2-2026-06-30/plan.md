@@ -92,5 +92,9 @@ Conditions (1) correct e2e-proves-deployed-binary overstatement + add runtime-do
 ## Post-implementation hardening
 Skipped (user-confirmed). Ledger flags two future-hardening items (NPM_TOKEN→OIDC; Windows bb checksum) for a later pass, not this bump.
 
-## Seeds
-See `eli5.html` (finalized post-approval).
+## Seeds (finalized post-approval — drive ALL phases P1–P3, no stop; user lifted the P3 hold)
+**Recommended `/loop`:**
+```
+/loop 15m Drive implementations-plan/aztec-5.0.0-rc.2-2026-06-30 to FULL completion (P1–P3); never idle. Each firing: read plan.md + lessons/; git status + log; PR open → gh pr view --json statusCheckRollup (no --watch); CI in-flight → gh run watch up to 10m (re-run the Playwright install-deps flake). No task? take the next plan.md step. P3 (after bump merges): (a) Sepolia wallet L1_PRIVATE_KEY funded? else SURFACE AND HOLD; (b) derive rc.2 salt=0 FPC, if node.getContract undefined on v5 testnet run `bun run packages/playground/scripts/deploy-sponsored-fpc.ts --salt 0x0` (--salt 0x0 MANDATORY); (c) dispatch publish-testnet.yml --ref main (NO skip_sdk_publish); (d) verify npm dist-tags + live bundle 5.0.0-rc.2 + FPC funded; (e) smoke the rc.2 fee path. Stuck? /codex xhigh, log it. Phase green = its plan.md gate passes → mark ✓, file lessons, print LESSONS_FILE=…, advance. 5× fail → reassess w/ codex. All ✓ → /code-review max --fix → codex post-impl audit → address high/critical → wrap-up → stop. HARD LIMITS: never push to main (branch+PR+auto-merge); never print the L1 key; never expand scope; Sepolia-empty is the only hold.
+```
+**Alternative `/goal`:** see chat / eli5.html (P1–P3 all ✓ + published + FPC deployed+funded + playground smoked + reviews clean; never push main; never print the L1 key; Sepolia-empty → hold).

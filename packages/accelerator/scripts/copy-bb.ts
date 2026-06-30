@@ -63,6 +63,10 @@ export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
   // 4.3.1→5.0.0-rc.1 lockfile bump makes resolveAztecBb() key on 5.0.0-rc.1; the Windows Prebuild
   // Smoke CI gate independently re-fetches + verifies this hash.
   "5.0.0-rc.1": "7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd",
+  // @aztec/bb.js 5.0.0-rc.2 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.0-rc.2
+  // release (5.5 MB gzip, bb.exe only). Required by the rc.1→rc.2 lockfile bump so the Windows
+  // Prebuild/Build Smoke gates can re-fetch + verify; without it resolveWindowsBbChecksum throws.
+  "5.0.0-rc.2": "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
 };
 
 export function windowsBbReleaseTag(version: string): string {
