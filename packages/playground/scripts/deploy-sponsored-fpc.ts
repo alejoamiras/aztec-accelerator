@@ -25,6 +25,7 @@ import { L1FeeJuicePortalManager } from "@aztec/aztec.js/ethereum";
 import { FeeJuicePaymentMethodWithClaim } from "@aztec/aztec.js/fee";
 import { Fr } from "@aztec/aztec.js/fields";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import { createLogger } from "@aztec/foundation/log";
 import { FeeJuiceContract } from "@aztec/noir-contracts.js/FeeJuice";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
@@ -103,7 +104,7 @@ const portalManager = await L1FeeJuicePortalManager.new(
 console.log(`  Fee Juice token: ${portalManager.getTokenManager().tokenAddress.toString()}\n`);
 
 // FeeJuice protocol contract — canonical address compacted to 0x03 in Aztec 5.0 (was 0x05)
-const FEE_JUICE_ADDRESS = AztecAddress.fromBigInt(3n);
+const FEE_JUICE_ADDRESS = AztecAddress.fromBigIntUnsafe(3n);
 
 const explorerUrl = (txHash: string) => `https://testnet.aztecscan.xyz/tx-effects/${txHash}`;
 
@@ -140,7 +141,7 @@ async function bootstrapAccount(): Promise<{
     ephemeral: true,
     pxe: {
       proverEnabled: true,
-      proverOrOptions: new WASMSimulator(),
+      proverOrOptions: new BBLazyPrivateKernelProver(new WASMSimulator()),
     },
   });
   const accountManager = await wallet.createSchnorrAccount(Fr.random(), Fr.random());

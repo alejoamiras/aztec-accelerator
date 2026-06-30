@@ -21,6 +21,7 @@ import { L1FeeJuicePortalManager } from "@aztec/aztec.js/ethereum";
 import { FeeJuicePaymentMethodWithClaim } from "@aztec/aztec.js/fee";
 import { Fr } from "@aztec/aztec.js/fields";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import { createLogger } from "@aztec/foundation/log";
 import { FeeJuiceContract } from "@aztec/noir-contracts.js/FeeJuice";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
@@ -210,7 +211,7 @@ console.log(`  Bridged ${claim.claimAmount} wei to FPC, leaf: ${claim.messageLea
 console.log("Step 3: Bootstrapping ephemeral L2 account...");
 
 // FeeJuice protocol contract — canonical address compacted to 0x03 in Aztec 5.0 (was 0x05)
-const FEE_JUICE_ADDRESS = AztecAddress.fromBigInt(3n);
+const FEE_JUICE_ADDRESS = AztecAddress.fromBigIntUnsafe(3n);
 
 const explorerUrl = (txHash: string) => `https://testnet.aztecscan.xyz/tx-effects/${txHash}`;
 
@@ -238,7 +239,7 @@ const wallet = await EW.create(node, {
   ephemeral: true,
   pxe: {
     proverEnabled: true,
-    proverOrOptions: new WASMSimulator(),
+    proverOrOptions: new BBLazyPrivateKernelProver(new WASMSimulator()),
   },
 });
 const accountManager = await wallet.createSchnorrAccount(Fr.random(), Fr.random());
