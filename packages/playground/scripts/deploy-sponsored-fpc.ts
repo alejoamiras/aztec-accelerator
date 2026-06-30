@@ -98,7 +98,8 @@ const boostedL1Client = new Proxy(l1Client, {
 });
 const portalManager = await L1FeeJuicePortalManager.new(
   node,
-  boostedL1Client as typeof l1Client,
+  // http() transport vs the FallbackTransport ExtendedViemWalletClient is typed for — runtime-compatible.
+  boostedL1Client as unknown as Parameters<typeof L1FeeJuicePortalManager.new>[1],
   logger,
 );
 console.log(`  Fee Juice token: ${portalManager.getTokenManager().tokenAddress.toString()}\n`);
@@ -141,6 +142,7 @@ async function bootstrapAccount(): Promise<{
     ephemeral: true,
     pxe: {
       proverEnabled: true,
+      // WASM proving (no accelerator in a script): the lazy BB prover loads bb.js on first use — same prover the SDK AcceleratorProver extends.
       proverOrOptions: new BBLazyPrivateKernelProver(new WASMSimulator()),
     },
   });

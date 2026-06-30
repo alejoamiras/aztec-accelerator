@@ -85,7 +85,7 @@ Cached binaries are stored in `~/.aztec-accelerator/versions/` with a retention 
 |------|---------|------|
 | Nightly | `5.0.0-nightly.20260309` | 2 |
 | Devnet | `5.0.0-devnet.20260309` | 3 |
-| Testnet | `5.0.0-rc.1` | 5 |
+| Testnet | `5.0.0-rc.2` | 5 |
 | Mainnet | `5.0.0` | all |
 
 Old versions are evicted automatically — no manual cleanup needed.

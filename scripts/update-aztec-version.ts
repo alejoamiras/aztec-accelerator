@@ -64,6 +64,39 @@ async function findMissingPackages(version: string, packageFiles: string[]): Pro
   return missing;
 }
 
+const CRS_FILE = "packages/playground/src/aztec.ts";
+const COPY_BB_FILE = "packages/accelerator/scripts/copy-bb.ts";
+
+/** Bump CRS_CACHE_VERSION so returning playground visitors re-download the CRS if bb.js changed its format. */
+async function updateCrsCacheVersion(version: string): Promise<boolean> {
+  const original = await Bun.file(CRS_FILE).text();
+  const updated = original.replace(/(const CRS_CACHE_VERSION\s*=\s*")[^"]*(")/, `$1${version}$2`);
+  if (updated === original) return false;
+  await Bun.write(CRS_FILE, updated);
+  return true;
+}
+
+/** Fetch + pin the Windows bb.exe SHA-256 (the Windows Prebuild/Build Smoke gates verify it). Best-effort. */
+async function pinWindowsBbChecksum(version: string): Promise<string> {
+  const original = await Bun.file(COPY_BB_FILE).text();
+  if (original.includes(`"${version}":`)) return `Windows bb checksum: already pinned for ${version}.`;
+  const url = `https://github.com/AztecProtocol/aztec-packages/releases/download/v${version}/barretenberg-amd64-windows.tar.gz`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return `Windows bb checksum: fetch failed (HTTP ${res.status}) — pin "${version}" in ${COPY_BB_FILE} manually.`;
+    const digest = await crypto.subtle.digest("SHA-256", await res.arrayBuffer());
+    const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const marker = "};\n\nexport function resolveWindowsBbChecksum";
+    const idx = original.indexOf(marker);
+    const entry = `  // @aztec/bb.js ${version} — sha256 of barretenberg-amd64-windows.tar.gz from the v${version} release (auto-pinned).\n  "${version}": "${sha}",\n`;
+    if (idx === -1) return `Windows bb checksum for ${version} = ${sha} — couldn't auto-insert; add it to ${COPY_BB_FILE} manually.`;
+    await Bun.write(COPY_BB_FILE, original.slice(0, idx) + entry + original.slice(idx));
+    return `Windows bb checksum: pinned ${version} = ${sha.slice(0, 12)}… in ${COPY_BB_FILE}.`;
+  } catch (err) {
+    return `Windows bb checksum: ${(err as Error).message} — pin "${version}" manually.`;
+  }
+}
+
 async function main() {
   const newVersion = process.argv[2];
 
@@ -98,12 +131,30 @@ async function main() {
     }
   }
 
-  if (updatedFiles === 0) {
-    console.log("All files already at target version. No changes needed.");
+  // Companion bumps an @aztec version change also requires (lessons from the 5.0.0-rc.2 bump):
+  const crsBumped = await updateCrsCacheVersion(newVersion);
+  if (crsBumped) console.log(`Bumped CRS_CACHE_VERSION → ${newVersion} in ${CRS_FILE}.`);
+  console.log(await pinWindowsBbChecksum(newVersion));
+
+  if (updatedFiles === 0 && !crsBumped) {
+    console.log("\nAll files already at target version. No changes needed.");
   } else {
-    console.log(`\nDone. Updated ${updatedFiles} file(s) to ${newVersion}.`);
-    console.log("Run 'bun install' to regenerate the lockfile.");
+    console.log(`\nDone. Updated ${updatedFiles} package.json file(s) to ${newVersion}.`);
   }
+
+  console.log("\nNext steps:");
+  console.log(
+    "  1. bun install   (add --minimum-release-age=0 ONLY if the version is <7 days old — local lockfile regen, never CI)",
+  );
+  console.log(
+    "  2. bun run --cwd packages/playground typecheck:scripts   (catch @aztec API breaks in the deploy/fund scripts)",
+  );
+  console.log(
+    "  3. ⚠️  Aztec artifacts may have recompiled → the salt=0 SponsoredFPC address can MOVE. Derive + redeploy on testnet if so:",
+  );
+  console.log(
+    "       bun run packages/playground/scripts/deploy-sponsored-fpc.ts --salt 0x0   (--salt 0x0 mandatory; the script defaults to random)",
+  );
 }
 
 if (import.meta.main) {
