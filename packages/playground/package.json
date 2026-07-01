@@ -14,7 +14,8 @@
     "test:e2e:local-network": "bunx playwright test --project=local-network --workers=1",
     "test:e2e:production-smoke": "bash scripts/test-production-smoke.sh",
     "test:e2e:smoke": "bunx playwright test --project=smoke --workers=1",
-    "test:unit": "bun test"
+    "test:unit": "bun test",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "dependencies": {
     "@alejoamiras/aztec-accelerator": "workspace:*",

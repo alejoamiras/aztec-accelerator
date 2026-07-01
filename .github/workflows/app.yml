@@ -57,6 +57,10 @@ jobs:
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - run: bun run lint
+      # Typecheck the FPC deploy/fund scripts (not covered by `vite build`, which only checks src).
+      # Catches @aztec API breaks in scripts/ at compile time — e.g. the rc.2 AztecAddress.fromBigInt
+      # removal that slipped through to runtime during the 5.0.0-rc.2 bump.
+      - run: bun run --cwd packages/playground typecheck:scripts
 
   unit-tests:
     name: Unit Tests

@@ -83,7 +83,11 @@ const fpcInstance = await getContractInstanceFromInstantiationParams(
 // ── Get L1 contract addresses from Aztec node ───────────────────────
 const nodeInfo = await node.getNodeInfo();
 
-const portalManager = await L1FeeJuicePortalManager.new(node, l1Client, logger);
+const portalManager = await L1FeeJuicePortalManager.new(
+  node,
+  l1Client as unknown as Parameters<typeof L1FeeJuicePortalManager.new>[1],
+  logger,
+);
 const tokenManager = portalManager.getTokenManager();
 
 console.log("\n  Batch Fund SponsoredFPC");
@@ -239,6 +243,7 @@ const wallet = await EW.create(node, {
   ephemeral: true,
   pxe: {
     proverEnabled: true,
+    // WASM proving (no accelerator in a script): the lazy BB prover loads bb.js on first use — same prover the SDK AcceleratorProver extends.
     proverOrOptions: new BBLazyPrivateKernelProver(new WASMSimulator()),
   },
 });
