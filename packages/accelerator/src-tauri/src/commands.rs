@@ -44,16 +44,7 @@ pub fn get_autostart_enabled(app: tauri::AppHandle) -> bool {
 
 #[tauri::command]
 pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    if enabled {
-        manager.enable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::enable_crash_recovery();
-    } else {
-        manager.disable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::disable_crash_recovery();
-    }
-    Ok(())
+    set_autostart_inner(&app, enabled)
 }
 
 #[tauri::command]
@@ -158,6 +149,16 @@ pub async fn enable_https(
     config: tauri::State<'_, ConfigState>,
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
+    enable_https_inner(&config, &shared_state)
+}
+
+/// The shared enable-HTTPS routine, callable outside a Tauri command (the onboarding wizard reuses
+/// it). Generate certs → install browser trust → save config → start HTTPS. Errors iff trust landed
+/// in zero stores (R3), so the wizard can render HTTPS as failed-with-Retry.
+fn enable_https_inner(
+    config: &ConfigState,
+    shared_state: &crate::server::AppState,
+) -> Result<(), String> {
     use crate::certs;
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
@@ -174,19 +175,31 @@ pub async fn enable_https(
 
     certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
 
-    // Save config
-    {
-        mutate_config(&config, |cfg| cfg.https_enabled = true)?;
-    }
+    mutate_config(config, |cfg| cfg.https_enabled = true)?;
 
     // Start HTTPS server with the full shared state (includes auth, config, popup callback)
     let tls_config =
         certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
     // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping it
     // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
-    crate::server::spawn_https((**shared_state).clone(), tls_config);
+    crate::server::spawn_https(shared_state.clone(), tls_config);
 
-    tracing::info!("HTTPS enabled via Settings");
+    tracing::info!("HTTPS enabled");
+    Ok(())
+}
+
+/// Shared autostart toggle (used by the Settings toggle + the onboarding wizard). Enables/disables
+/// the OS autostart entry and the paired crash-recovery mechanism.
+fn set_autostart_inner(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())?;
+        crate::crash_recovery::enable_crash_recovery();
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+        crate::crash_recovery::disable_crash_recovery();
+    }
     Ok(())
 }
 
@@ -216,6 +229,95 @@ pub fn remove_https_trust(config: tauri::State<'_, ConfigState>) -> Result<(), S
         removed = report.stores.len(),
         "Removed CA trust via Settings"
     );
+    Ok(())
+}
+
+// ── First-run onboarding wizard ──
+
+/// Prefill state for the onboarding wizard. `https_default` is ALWAYS `true` — the HTTPS toggle is
+/// pre-checked for everyone, including upgraders who never had it, to move the whole installed base
+/// onto the encrypted path (A9 / plan §2.1). Autostart + auto-update reflect current state so the
+/// wizard shows an upgrader their real settings.
+#[derive(serde::Serialize)]
+pub struct OnboardingState {
+    pub platform: String,
+    pub https_default: bool,
+    pub autostart_enabled: bool,
+    pub auto_update: Option<bool>,
+    pub trust_status: crate::trust::TrustReport,
+}
+
+#[tauri::command]
+pub fn get_onboarding_state(
+    app: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+) -> OnboardingState {
+    use tauri_plugin_autostart::ManagerExt;
+    let auto_update = config.read().auto_update;
+    OnboardingState {
+        platform: std::env::consts::OS.to_string(),
+        https_default: true,
+        autostart_enabled: app.autolaunch().is_enabled().unwrap_or(false),
+        auto_update,
+        trust_status: crate::trust::trust_status(&crate::certs::live_ca_cert_path()),
+    }
+}
+
+/// Per-action result of the wizard's "Start". Each action runs INDEPENDENTLY — a failure in one
+/// (e.g. the cert install) does not abort the others. `Result<(),String>` serializes as
+/// `{"Ok":null}` / `{"Err":"…"}` for the frontend to render per-row ✓/✗.
+#[derive(serde::Serialize)]
+pub struct OnboardingResult {
+    pub https: Result<(), String>,
+    pub autostart: Result<(), String>,
+    pub auto_update: Result<(), String>,
+    /// Whether the once-per-version onboarding marker was set (true iff every requested action ok).
+    pub completed: bool,
+}
+
+/// Execute the wizard's choices. Each runs independently; the onboarding marker is set ONLY when all
+/// requested actions succeed (marker discipline, R4). A failed HTTPS leaves the marker unset so the
+/// wizard returns next launch — unless the user explicitly dismisses via [`dismiss_onboarding`].
+#[tauri::command]
+pub async fn complete_onboarding(
+    app: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
+    https: bool,
+    autostart: bool,
+    auto_update: bool,
+) -> Result<OnboardingResult, String> {
+    let https_res = if https {
+        enable_https_inner(&config, &shared_state)
+    } else {
+        Ok(())
+    };
+    let autostart_res = set_autostart_inner(&app, autostart);
+    let auto_update_res = mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update));
+
+    let all_ok = https_res.is_ok() && autostart_res.is_ok() && auto_update_res.is_ok();
+    let completed = all_ok
+        && mutate_config(&config, |cfg| {
+            cfg.onboarding_version = crate::config::ONBOARDING_VERSION
+        })
+        .is_ok();
+
+    Ok(OnboardingResult {
+        https: https_res,
+        autostart: autostart_res,
+        auto_update: auto_update_res,
+        completed,
+    })
+}
+
+/// Mark onboarding complete without (further) action — the explicit "Continue without HTTPS" (after a
+/// failed cert install) and "Skip for now" paths (R4). The ONLY unconditional marker set.
+#[tauri::command]
+pub fn dismiss_onboarding(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    mutate_config(&config, |cfg| {
+        cfg.onboarding_version = crate::config::ONBOARDING_VERSION
+    })?;
+    tracing::info!("Onboarding dismissed (marker set)");
     Ok(())
 }
 

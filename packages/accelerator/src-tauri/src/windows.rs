@@ -70,6 +70,23 @@ pub fn open_settings_window(app: &AppHandle) {
     );
 }
 
+/// Open or focus the first-run onboarding wizard (shown once on first launch, and re-openable via the
+/// Settings "Run setup again" action). Single-card layout — see `onboarding.html`.
+pub fn show_onboarding_window(app: &AppHandle) {
+    open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "onboarding",
+            url: "onboarding.html".to_string(),
+            title: "Welcome to Aztec Accelerator",
+            width: 520.0,
+            height: 600.0,
+            always_on_top: false,
+            focus_if_open: true,
+        },
+    );
+}
+
 /// Show the authorization popup for an unknown origin.
 /// Spawns a 60s timeout that auto-denies if the user doesn't respond.
 /// If the user closes the window without responding, the timeout will still

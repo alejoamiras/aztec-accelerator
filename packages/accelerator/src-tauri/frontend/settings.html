@@ -54,6 +54,10 @@
       </div>
       <div class="speed-description" id="speed-desc"></div>
     </div>
+    <div class="row">
+      <span>Setup</span>
+      <button type="button" id="run-setup" class="link-button">Run setup again</button>
+    </div>
   </div>
 
   <script>
@@ -159,6 +163,11 @@
     wireToggle("https", (checked) => ({
       cmd: checked ? "enable_https" : "disable_https",
     }));
+
+    // "Run setup again" — reopen the first-run onboarding wizard.
+    document.getElementById("run-setup").addEventListener("click", () => {
+      invoke("open_onboarding").catch((err) => console.error("open_onboarding failed:", err));
+    });
 
     // Speed slider
     const speedSlider = document.getElementById("speed");

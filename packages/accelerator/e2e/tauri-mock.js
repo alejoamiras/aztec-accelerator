@@ -33,6 +33,26 @@ const defaults = {
   respond_update_prompt: () => null,
   enable_https: () => null,
   disable_https: () => null,
+  get_trust_status: () => ({
+    stores: [{ store: "macOS Keychain", installed: true, detail: null }],
+  }),
+  remove_https_trust: () => null,
+  get_onboarding_state: () => ({
+    platform: "macos",
+    https_default: true,
+    autostart_enabled: false,
+    auto_update: null,
+    trust_status: { stores: [] },
+  }),
+  // Default: everything succeeds and the marker is set.
+  complete_onboarding: () => ({
+    https: { Ok: null },
+    autostart: { Ok: null },
+    auto_update: { Ok: null },
+    completed: true,
+  }),
+  dismiss_onboarding: () => null,
+  open_onboarding: () => null,
 };
 
 window.__TAURI_MOCK__ = {
@@ -61,5 +81,14 @@ window.__TAURI__ = {
   event: {
     listen: async () => () => {},
     emit: async () => {},
+  },
+  // Minimal window API for pages that close themselves (onboarding wizard). Records close() calls so
+  // specs can assert the window was dismissed.
+  window: {
+    getCurrentWindow: () => ({
+      close: async () => {
+        window.__TAURI_MOCK__.calls.push({ cmd: "__window.close", callIndex: 1 });
+      },
+    }),
   },
 };

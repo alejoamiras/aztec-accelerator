@@ -20,6 +20,11 @@
 - ✅ **Real cert-trust integration test RAN LOCALLY** (certutil installed): `cargo test --test trust_linux -- --ignored` → generate CA+leaf → install into real NSS db in throwaway $HOME → is_ca_trusted true → **leaf chain-validates through the name-constrained anchor** (`certutil -V -u V` — closes I5/R9/M-3, proves NSS accepts + honors the anchor) → remove → untrusted.
 - ✅ actionlint, biome, cargo fmt, `bun run test` aggregate.
 
+## PUSH BLOCKER (needs user action)
+Phase 3 commit `6a5e1f4` modifies `.github/workflows/accelerator.yml` (the new cert-trust job). `git push` is rejected: the gh OAuth token scopes are `repo, read:org, gist, admin:public_key` — **no `workflow` scope**. Origin is stuck at Phase 2 (`0b6f17a`). Phases 4 and 6 also touch workflows, so this blocks all further pushes + CI.
+
+**Unblock (30s, user):** `gh auth refresh -s workflow` (device-code flow — open the URL, enter the code). Then `git push` works for all pending + future phases. I did NOT run it (AFK hard limit: no one-off auth flows / credential changes). Continuing to implement + commit locally in the meantime; a single push after scope-grant lands everything.
+
 ## Notable
 - `macos.rs` is `#[cfg(target_os="macos")]` → NOT compiled on ubuntu CI (clippy/test run on ubuntu). First real compile = the macOS cert-trust CI leg (Phase 4) + release builds. Reviewed against the `imp::` interface by hand. Pre-existing gap (old macOS trust code had it too).
 - Windows enable_https returns the stub error until Phase 4 — expected; the row is hidden there so users can't hit it.

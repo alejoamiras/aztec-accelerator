@@ -150,6 +150,12 @@ fn reset_https_enabled(state: &AppState) {
     }
 }
 
+/// Settings "Run setup again" — reopen the onboarding wizard on demand.
+#[tauri::command]
+fn open_onboarding(app: tauri::AppHandle) {
+    windows::show_onboarding_window(&app);
+}
+
 // ── Auto-update ──────────────────────────────────────────────────────────
 
 /// Whether the background update poller should run.
@@ -486,6 +492,10 @@ fn main() {
             commands::disable_https,
             commands::get_trust_status,
             commands::remove_https_trust,
+            commands::get_onboarding_state,
+            commands::complete_onboarding,
+            commands::dismiss_onboarding,
+            open_onboarding,
             commands::set_auto_update,
             commands::respond_update_prompt,
         ])
@@ -554,6 +564,16 @@ fn main() {
                 tracing::warn!("bb binary not found at startup");
                 let _ = status_for_diagnostics.set_text("Warning: bb not found");
                 let _ = tray_for_diagnostics.set_tooltip(Some("Warning: bb not found"));
+            }
+
+            // ── First-run onboarding wizard ──
+            // Shown once when the config's onboarding_version is behind — new installs AND existing
+            // upgraders (whose config lacks the marker → 0). Gated off for webdriver builds, which
+            // bootstrap the Settings window as their browsing context (the wizard E2E drives it
+            // explicitly instead of relying on auto-show, so the existing specs stay unaffected).
+            #[cfg(not(feature = "webdriver"))]
+            if config_state.read().onboarding_version < config::ONBOARDING_VERSION {
+                windows::show_onboarding_window(app.handle());
             }
 
             // ── WebDriver: open Settings window so WebDriver has a browsing context ──

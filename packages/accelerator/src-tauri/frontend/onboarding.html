@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Aztec Accelerator</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      .wiz { padding: 20px 22px; }
+      .wiz h1 { font-size: 1.2rem; margin: 4px 0 2px; }
+      .wiz .sub { color: var(--muted, #6b7280); font-size: 0.9rem; margin: 0 0 14px; }
+      .opt { display: flex; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line, #e3e6ea); }
+      .opt:first-of-type { border-top: none; }
+      .opt .ic { width: 24px; text-align: center; font-size: 1.05rem; }
+      .opt .meta { flex: 1; }
+      .opt .name { font-weight: 600; font-size: 0.96rem; }
+      .opt .desc { color: var(--muted, #6b7280); font-size: 0.83rem; margin-top: 3px; }
+      .opt .warn { color: #b45309; }
+      .opt .result { font-size: 0.83rem; margin-top: 4px; display: none; }
+      .opt .result.ok { color: #178a4e; }
+      .opt .result.err { color: #c0392b; }
+      .cta { display: flex; gap: 10px; margin-top: 18px; }
+      .cta button { border: none; border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.92rem; font-weight: 600; cursor: pointer; }
+      .cta .primary { flex: 1; background: #f0a020; color: #231a06; }
+      .cta .ghost { background: transparent; border: 1px solid var(--line, #e3e6ea); color: var(--muted, #6b7280); }
+      .retry { display: none; margin-top: 6px; background: transparent; border: 1px solid var(--line, #e3e6ea); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; cursor: pointer; }
+      .foot { color: var(--muted, #6b7280); font-size: 0.76rem; margin-top: 12px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div class="wiz">
+      <h1>Let's get you set up</h1>
+      <p class="sub">Three quick choices. You can change any of these later in Settings.</p>
+
+      <div class="opt">
+        <div class="ic">🔒</div>
+        <div class="meta">
+          <div class="name">Encrypted Connection (HTTPS)</div>
+          <div class="desc" id="https-desc">Lets your browser talk to the accelerator over an encrypted channel — and is required for Safari.</div>
+          <div class="desc warn" id="https-warn"></div>
+          <div class="result" id="https-result"></div>
+          <button type="button" class="retry" id="https-retry">Retry</button>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="opt-https" role="switch" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="opt">
+        <div class="ic">🚀</div>
+        <div class="meta">
+          <div class="name">Start on Login</div>
+          <div class="desc">Runs quietly in your menu bar so proving is instant — no manual launch.</div>
+          <div class="result" id="autostart-result"></div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="opt-autostart" role="switch" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="opt">
+        <div class="ic">⬆️</div>
+        <div class="meta">
+          <div class="name">Auto-Update</div>
+          <div class="desc">Installs signed updates in the background so you always have the latest proving speed and fixes.</div>
+          <div class="result" id="auto-update-result"></div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="opt-auto-update" role="switch" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="cta">
+        <button type="button" class="primary" id="start">Start</button>
+        <button type="button" class="ghost" id="skip">Skip for now</button>
+      </div>
+      <div class="foot">Encryption protects the channel between your browser and this app on your own machine.</div>
+    </div>
+
+    <script src="tauri-bridge.js"></script>
+    <script>
+      const { getCurrentWindow } = window.__TAURI__.window;
+
+      // Per-OS copy for the HTTPS certificate step (the wizard's one consequential action).
+      const HTTPS_WARN = {
+        macos: "⚠ Installs a local certificate — macOS will ask for your password once.",
+        windows: "⚠ Installs a local certificate into your browsers when you click Start.",
+        linux: "⚠ Installs a certificate into your browsers — no separate prompt will appear.",
+      };
+
+      async function load() {
+        try {
+          const state = await invoke("get_onboarding_state");
+          document.getElementById("opt-https").checked = state.https_default;
+          document.getElementById("opt-autostart").checked = state.autostart_enabled;
+          document.getElementById("opt-auto-update").checked = state.auto_update !== false;
+          document.getElementById("https-warn").textContent =
+            HTTPS_WARN[state.platform] || HTTPS_WARN.linux;
+        } catch (err) {
+          console.error("get_onboarding_state failed:", err);
+        }
+      }
+
+      function showResult(id, ok, msg) {
+        const el = document.getElementById(id);
+        el.textContent = msg;
+        el.className = `result ${ok ? "ok" : "err"}`;
+        el.style.display = "block";
+      }
+
+      async function runStart() {
+        const https = document.getElementById("opt-https").checked;
+        const autostart = document.getElementById("opt-autostart").checked;
+        const autoUpdate = document.getElementById("opt-auto-update").checked;
+
+        const res = await invoke("complete_onboarding", { https, autostart, autoUpdate });
+
+        // Render per-row outcomes. Result<(),String> serializes as {Ok:null} | {Err:"..."}.
+        const asOk = (r) => r && "Ok" in r;
+        if (https) showResult("https-result", asOk(res.https), asOk(res.https) ? "Encrypted connection enabled" : `Failed: ${res.https.Err}`);
+        showResult("autostart-result", asOk(res.autostart), asOk(res.autostart) ? "On" : `Failed: ${res.autostart.Err}`);
+        showResult("auto-update-result", asOk(res.auto_update), asOk(res.auto_update) ? "On" : `Failed: ${res.auto_update.Err}`);
+
+        if (res.completed) {
+          await getCurrentWindow().close();
+          return;
+        }
+        // Partial failure (HTTPS is the only step that can fail here): let the user Retry or continue.
+        if (https && !asOk(res.https)) {
+          document.getElementById("opt-https").checked = false;
+          document.getElementById("https-retry").style.display = "inline-block";
+          const skip = document.getElementById("skip");
+          skip.textContent = "Continue without HTTPS";
+        }
+      }
+
+      wireButton("start", { disableAlso: "skip", loadingText: "Setting up…", onClick: runStart });
+      wireButton("skip", {
+        onClick: async () => {
+          await invoke("dismiss_onboarding");
+          await getCurrentWindow().close();
+        },
+      });
+      document.getElementById("https-retry").addEventListener("click", () => {
+        document.getElementById("opt-https").checked = true;
+        document.getElementById("https-retry").style.display = "none";
+        document.getElementById("start").disabled = false;
+        document.getElementById("skip").disabled = false;
+      });
+
+      load();
+    </script>
+  </body>
+</html>
