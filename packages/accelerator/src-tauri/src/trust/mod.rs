@@ -27,10 +27,15 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
 
-// Windows becomes real in Phase 4; every other target (incl. Windows for now) uses the stub.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows as imp;
+
+// Any other target (none shipped) falls back to the not-supported stub.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod stub;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 use stub as imp;
 
 /// One trust store's install/query result. Surfaced honestly in the UI — a store we could not write

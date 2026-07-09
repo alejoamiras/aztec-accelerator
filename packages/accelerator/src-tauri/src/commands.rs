@@ -321,6 +321,35 @@ pub fn dismiss_onboarding(config: tauri::State<'_, ConfigState>) -> Result<(), S
     Ok(())
 }
 
+// ── Certificate renewal (macOS/Windows renewal consent window — §7) ──
+
+/// "Renew now" from the renewal consent window: rotate the cert identity (raises the OS trust dialog
+/// with context, unlike a surprise background prompt). Records the prompt time for throttling.
+#[tauri::command]
+pub fn renew_cert(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
+    let _ = mutate_config(&config, |cfg| {
+        cfg.last_rotation_prompt_at = Some(now_unix_secs());
+    });
+    tracing::info!("Certificate renewed via consent window");
+    Ok(())
+}
+
+/// Record that the renewal window was shown/declined (throttles re-prompting).
+#[tauri::command]
+pub fn record_renewal_prompt(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    mutate_config(&config, |cfg| {
+        cfg.last_rotation_prompt_at = Some(now_unix_secs());
+    })
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Toggle auto-update preference from Settings.
 #[tauri::command]
 pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> Result<(), String> {

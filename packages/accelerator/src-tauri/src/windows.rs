@@ -87,6 +87,24 @@ pub fn show_onboarding_window(app: &AppHandle) {
     );
 }
 
+/// Show the certificate-renewal consent window (macOS/Windows, §7). Replaces a surprise background OS
+/// trust prompt with an explained, user-initiated one when the leaf is within the pre-expiry window.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn show_renewal_window(app: &AppHandle) {
+    open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "renewal",
+            url: "renewal.html".to_string(),
+            title: "Certificate Renewal",
+            width: 420.0,
+            height: 260.0,
+            always_on_top: false,
+            focus_if_open: true,
+        },
+    );
+}
+
 /// Show the authorization popup for an unknown origin.
 /// Spawns a 60s timeout that auto-denies if the user doesn't respond.
 /// If the user closes the window without responding, the timeout will still

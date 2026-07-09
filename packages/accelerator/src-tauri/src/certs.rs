@@ -292,7 +292,9 @@ pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Sen
 const ROTATE_BEFORE_DAYS: i64 = 30;
 
 /// Rotate the cert identity if the served leaf is within the pre-expiry window (≤30 days). Delegates
-/// to `rotate()`, which is safe + non-silent.
+/// to `rotate()`, which is safe + non-silent. Used for the **silent** background rotation on Linux
+/// (user NSS needs no prompt); macOS/Windows instead surface a renewal consent window (see
+/// [`leaf_is_expiring`] + the `renew_cert` command).
 pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match leaf_cert_days_remaining() {
         Ok(days) if days > ROTATE_BEFORE_DAYS => {
@@ -302,6 +304,19 @@ pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + S
         Ok(days) => tracing::info!(days_remaining = days, "Leaf cert expiring soon — rotating"),
         Err(e) => tracing::warn!("Could not check leaf cert expiry: {e}; rotating"),
     }
+    rotate()
+}
+
+/// Whether the served leaf is within the pre-expiry rotation window (≤30 days). Drives the
+/// macOS/Windows renewal consent window (§7) — a `true` here means the app should offer "Renew now"
+/// rather than silently raising the OS trust dialog from a background thread.
+pub fn leaf_is_expiring() -> bool {
+    matches!(leaf_cert_days_remaining(), Ok(days) if days <= ROTATE_BEFORE_DAYS)
+}
+
+/// Public entry to rotate the cert identity now (the renewal window's "Renew now" button). Raises the
+/// OS trust dialog with context (the user asked for it), unlike a surprise background prompt.
+pub fn rotate_now() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     rotate()
 }
 

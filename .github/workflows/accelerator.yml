@@ -107,11 +107,27 @@ jobs:
       - run: cargo test --manifest-path ../core/Cargo.toml
 
   cert-trust:
-    name: Cert Trust (linux)
+    name: Cert Trust (${{ matrix.platform }})
     needs: changes
     if: needs.changes.outputs.desktop == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            test: trust_linux
+            rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            platform: windows
+            test: trust_windows
+            rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+          - runner: macos-latest
+            platform: macos
+            test: trust_macos
+            rust-cache-key: accelerator-desktop-aarch64-apple-darwin
     defaults:
       run:
         working-directory: packages/accelerator/src-tauri
@@ -119,15 +135,19 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-accelerator
         with:
-          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-cache-key: ${{ matrix.rust-cache-key }}
           rust-workspaces: |
             packages/accelerator/src-tauri -> target
             packages/accelerator/core -> target
           rust-components: ""
-      # Real NSS install/verify/chain-validate/remove drives certutil against a throwaway $HOME NSS db.
+      # Linux drives certutil against a throwaway $HOME NSS db (install/verify/chain-validate/remove).
       - name: Install libnss3-tools (certutil)
+        if: matrix.platform == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libnss3-tools
-      - run: cargo test --test trust_linux -- --ignored --nocapture
+      # Real trust-store test per OS. Windows: CurrentUser Root add/verify/remove (spike I3 — expected
+      # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
+      # interactive auth — spike I7, covered by the manual runbook, NOT here).
+      - run: cargo test --test ${{ matrix.test }} -- --ignored --nocapture
 
   lint:
     name: Lint

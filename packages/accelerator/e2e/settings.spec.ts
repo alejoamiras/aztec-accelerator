@@ -188,7 +188,7 @@ test("https row visible on Linux (NSS trust backend)", async ({ page }) => {
   await expect(page.locator("#https-row")).toBeVisible();
 });
 
-test("https row hidden on Windows (trust backend lands in a later phase)", async ({ page }) => {
+test("https row visible on Windows (CurrentUser Root trust backend)", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
       platform: "windows",
@@ -197,7 +197,7 @@ test("https row hidden on Windows (trust backend lands in a later phase)", async
   });
   await page.goto("/settings.html");
 
-  await expect(page.locator("#https-row")).not.toBeVisible();
+  await expect(page.locator("#https-row")).toBeVisible();
 });
 
 test("https toggle calls enable/disable commands", async ({ page }) => {

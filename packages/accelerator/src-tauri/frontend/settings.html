@@ -112,9 +112,9 @@
       document.getElementById("autostart").checked = autostart;
       document.getElementById("auto-update").checked = config.auto_update === true;
 
-      // HTTPS row: macOS + Linux have trust backends (Keychain / user NSS). Windows lands in a later
-      // phase — its row stays hidden until then.
-      if (sysInfo.platform === "macos" || sysInfo.platform === "linux") {
+      // HTTPS row: all three desktop OSes now have a trust backend (Keychain / user NSS /
+      // CurrentUser Root).
+      if (["macos", "linux", "windows"].includes(sysInfo.platform)) {
         document.getElementById("https-row").style.display = "";
         document.getElementById("https").checked = config.https_enabled;
       }

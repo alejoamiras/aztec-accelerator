@@ -53,6 +53,8 @@ const defaults = {
   }),
   dismiss_onboarding: () => null,
   open_onboarding: () => null,
+  renew_cert: () => null,
+  record_renewal_prompt: () => null,
 };
 
 window.__TAURI_MOCK__ = {

@@ -128,9 +128,10 @@ fn try_start_https(state: &AppState) {
 
     aztec_accelerator::server::spawn_https(state.clone(), tls_config);
 
-    // Pre-expiry auto-renewal runs OFF the startup path (a background thread) so the macOS trust
-    // prompt can never block/hang launch. The running server keeps its already-loaded config; a
-    // rotated set takes effect on the next launch.
+    // Pre-expiry renewal (§7). Linux: SILENT background rotation — user NSS needs no prompt, and this
+    // runs off the startup path so nothing blocks launch. macOS/Windows: NOT here — the setup closure
+    // surfaces a renewal *consent window* instead of a surprise background OS trust prompt.
+    #[cfg(target_os = "linux")]
     std::thread::spawn(|| {
         if let Err(e) = certs::regenerate_leaf_if_expiring() {
             tracing::warn!("Background leaf renewal: {e}");
@@ -496,6 +497,8 @@ fn main() {
             commands::complete_onboarding,
             commands::dismiss_onboarding,
             open_onboarding,
+            commands::renew_cert,
+            commands::record_renewal_prompt,
             commands::set_auto_update,
             commands::respond_update_prompt,
         ])
@@ -574,6 +577,17 @@ fn main() {
             #[cfg(not(feature = "webdriver"))]
             if config_state.read().onboarding_version < config::ONBOARDING_VERSION {
                 windows::show_onboarding_window(app.handle());
+            }
+
+            // ── Certificate renewal consent (macOS/Windows, §7) ──
+            // When the leaf is within the pre-expiry window, offer renewal via a consent window rather
+            // than a silent background OS trust prompt (Linux rotates silently in try_start_https).
+            #[cfg(all(any(target_os = "macos", target_os = "windows"), not(feature = "webdriver")))]
+            {
+                let cfg = config::load();
+                if cfg.https_enabled && certs::certs_exist() && certs::leaf_is_expiring() {
+                    windows::show_renewal_window(app.handle());
+                }
             }
 
             // ── WebDriver: open Settings window so WebDriver has a browsing context ──

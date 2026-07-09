@@ -49,11 +49,17 @@ jobs:
           echo "Resolved: version=$INPUT_VERSION  is_prerelease=$IS_PRERELEASE"
 
   e2e-webdriver:
-    name: Pre-release E2E Gate
+    name: Pre-release E2E Gate (${{ matrix.runner }})
     needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        # The onboarding wizard is a release-blocking cross-OS flow, so the pre-release WebDriver gate
+        # now runs on all three desktop OSes, not macOS only (audit / codex catch).
+        runner: [macos-latest, ubuntu-latest, windows-latest]
     uses: ./.github/workflows/_e2e-webdriver.yml
     with:
-      runner: macos-latest
+      runner: ${{ matrix.runner }}
       mode: release
 
   # COST-CONTROL ONLY — not the safety guarantee. The gate runs in PARALLEL with
