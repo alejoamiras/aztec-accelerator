@@ -106,6 +106,29 @@ jobs:
       # accelerator-core's own unit tests (113) — not exercised by `cargo test` in src-tauri.
       - run: cargo test --manifest-path ../core/Cargo.toml
 
+  cert-trust:
+    name: Cert Trust (linux)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/accelerator/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-workspaces: |
+            packages/accelerator/src-tauri -> target
+            packages/accelerator/core -> target
+          rust-components: ""
+      # Real NSS install/verify/chain-validate/remove drives certutil against a throwaway $HOME NSS db.
+      - name: Install libnss3-tools (certutil)
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
+      - run: cargo test --test trust_linux -- --ignored --nocapture
+
   lint:
     name: Lint
     needs: changes
@@ -423,6 +446,7 @@ jobs:
         changes,
         clippy,
         test,
+        cert-trust,
         lint,
         smoke,
         release-smoke,
@@ -437,7 +461,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.cert-trust.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

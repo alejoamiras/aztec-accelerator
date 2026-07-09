@@ -37,7 +37,8 @@
     ],
     "linux": {
       "deb": {
-        "desktopTemplate": "main.desktop"
+        "desktopTemplate": "main.desktop",
+        "depends": ["libnss3-tools"]
       }
     },
     "macOS": {

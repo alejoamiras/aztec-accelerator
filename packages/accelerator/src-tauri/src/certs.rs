@@ -57,10 +57,8 @@ impl CertPaths {
         self.ca_cert.exists() && self.leaf_cert.exists() && self.leaf_key.exists()
     }
 
-    /// Best-effort remove all three (used to discard a failed staging).
-    /// Only the macOS trust-failure path discards a staged set, so this is
-    /// macOS-only — gating it keeps Linux/Windows clippy `-D warnings` clean.
-    #[cfg(target_os = "macos")]
+    /// Best-effort remove all three (used to discard a failed staging on any platform whose trust
+    /// install rejected the new anchor).
     fn remove(&self) {
         let _ = std::fs::remove_file(&self.ca_cert);
         let _ = std::fs::remove_file(&self.leaf_cert);
@@ -310,10 +308,11 @@ pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + S
 /// Rotate the whole cert identity. The previous CA's key was discarded (never on disk), so we cannot
 /// re-sign under it — we generate a FRESH keyless CA + leaf.
 ///
-/// **Fail-closed + non-silent:** the new set is STAGED (`*.new`), then (macOS) trusted + verified
-/// BEFORE it replaces the live certs. A cancelled/failed trust prompt discards the staging and leaves
-/// the old, still-valid certs serving — no outage, never an untrusted cert. Sequence:
-/// stage → add-new-anchor (prompt) → verify → atomic swap → remove-old-anchor (by SHA-1).
+/// **Fail-closed + non-silent:** the new set is STAGED (`*.new`), then trusted + verified BEFORE it
+/// replaces the live certs. A cancelled/failed trust discards the staging and leaves the old,
+/// still-valid certs serving — no outage, never an untrusted cert. Per-OS trust lives in
+/// [`crate::trust`]; the old anchor is removed after the swap by its captured identity (macOS SHA-1 /
+/// Linux nickname — D4).
 fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = certs_dir();
     std::fs::create_dir_all(&dir)?;
@@ -321,128 +320,54 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     write_new_cert_set(&staged)?;
 
-    // Capture the OLD anchor's SHA-1 before touching the keychain, for removal after the swap.
-    #[cfg(target_os = "macos")]
-    let old_sha1 = ca_keychain_sha1();
+    // Capture the OLD anchor's identity before installing the new one, for removal after the swap.
+    let old_anchor = crate::trust::current_anchor(&CertPaths::live().ca_cert);
 
-    // macOS: trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
-    #[cfg(target_os = "macos")]
-    if add_trusted_cert(&staged.ca_cert).is_err() || !verify_cert_trusted(&staged.ca_cert) {
+    // Trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
+    if let Err(e) = crate::trust::trust_new_anchor(&staged.ca_cert) {
         staged.remove();
-        return Err("new CA cert could not be trusted — kept the existing certs".into());
+        return Err(
+            format!("new CA cert could not be trusted — kept the existing certs: {e}").into(),
+        );
     }
 
     // Atomic swap: the new set replaces the live certs. Trust is content-keyed, so rename keeps it.
     staged.swap_into(&CertPaths::live())?;
 
     // Remove the OLD anchor now that the NEW one is live + trusted (no keyless-anchor accumulation).
-    #[cfg(target_os = "macos")]
-    if let Some(sha1) = old_sha1 {
-        remove_trusted_cert_by_sha1(&sha1);
-    }
+    crate::trust::remove_anchor(old_anchor);
 
     tracing::info!("Rotated cert identity (fresh keyless CA + leaf); trust re-installed");
     Ok(())
 }
 
-// ── macOS trust management ──
+// ── Trust management (delegates to the per-OS `crate::trust` backend) ──
 
-// ── macOS trust management ──
-
-#[cfg(target_os = "macos")]
-fn login_keychain() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/Keychains/login.keychain-db")
-}
-
-/// Add a cert as a trusted root in the macOS login Keychain (prompts the user). Used for both the
-/// initial Safari-enable and rotation (the new keyless CA anchor). Trust is keyed to the cert's
-/// content, so a later atomic rename of the file does not invalidate it.
-#[cfg(target_os = "macos")]
-fn add_trusted_cert(
-    cert_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let output = std::process::Command::new("security")
-        .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
-        .arg(login_keychain())
-        .arg(cert_path)
-        .output()?;
-    if output.status.success() {
-        tracing::info!("CA certificate installed in macOS login Keychain");
+/// Install the live CA cert (`ca.pem`) as a trusted root in the platform's browser stores. `Err` iff
+/// no store accepted it (the message carries the first store's failure detail — e.g. certutil missing).
+pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let report = crate::trust::install_ca_trust(&CertPaths::live().ca_cert);
+    if report.any_installed() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(%stderr, "Failed to install CA trust");
-        Err(format!("security add-trusted-cert failed: {stderr}").into())
+        let detail = report
+            .stores
+            .iter()
+            .find_map(|s| s.detail.clone())
+            .unwrap_or_else(|| "certificate trust could not be installed".to_string());
+        Err(detail.into())
     }
 }
 
-/// Whether the given cert verifies as trusted.
-#[cfg(target_os = "macos")]
-fn verify_cert_trusted(cert_path: &std::path::Path) -> bool {
-    cert_path.exists()
-        && std::process::Command::new("security")
-            .args(["verify-cert", "-c"])
-            .arg(cert_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-}
-
-/// SHA-1 of the currently-installed "Aztec Accelerator Local CA" anchor (if any) — captured before
-/// rotation so the OLD anchor can be removed after the NEW one is installed (keyless anchors must not
-/// accumulate). Returns the first match.
-#[cfg(target_os = "macos")]
-fn ca_keychain_sha1() -> Option<String> {
-    let output = std::process::Command::new("security")
-        .args(["find-certificate", "-Z", "-c", "Aztec Accelerator Local CA"])
-        .arg(login_keychain())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("SHA-1 hash:"))
-        .map(|h| h.trim().to_string())
-}
-
-/// Best-effort removal of a trusted cert by SHA-1 (the old anchor, after rotation swapped in the new).
-#[cfg(target_os = "macos")]
-fn remove_trusted_cert_by_sha1(sha1: &str) {
-    match std::process::Command::new("security")
-        .args(["delete-certificate", "-Z", sha1])
-        .arg(login_keychain())
-        .output()
-    {
-        Ok(o) if o.status.success() => tracing::info!(sha1, "Removed old CA anchor after rotation"),
-        Ok(o) => {
-            tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr), "Could not remove old CA anchor (left in keychain)")
-        }
-        Err(e) => tracing::warn!(error = %e, "Could not run delete-certificate for the old anchor"),
-    }
-}
-
-/// Install the live CA cert (`ca.pem`) as a trusted root. Public entry for the initial Safari-enable.
-#[cfg(target_os = "macos")]
-pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    add_trusted_cert(&CertPaths::live().ca_cert)
-}
-
-/// Whether the live CA cert is still trusted in the macOS Keychain.
-#[cfg(target_os = "macos")]
+/// Whether the live CA cert is trusted in at least one platform store.
 pub fn is_ca_trusted() -> bool {
-    verify_cert_trusted(&CertPaths::live().ca_cert)
+    crate::trust::is_ca_trusted(&CertPaths::live().ca_cert)
 }
 
-// Non-macOS stubs — trust management is macOS-only.
-#[cfg(not(target_os = "macos"))]
-pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    Err("CA trust installation is only supported on macOS".into())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn is_ca_trusted() -> bool {
-    false
+/// The live CA cert path — so callers (Settings "remove trust", the uninstall CLI) can hand it to the
+/// trust backend without reaching into `CertPaths`.
+pub fn live_ca_cert_path() -> PathBuf {
+    CertPaths::live().ca_cert
 }
 
 #[cfg(test)]

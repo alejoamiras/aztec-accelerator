@@ -148,13 +148,11 @@ pub fn sanitize_window_label(key: &str) -> String {
     hex::encode(&hash[..6])
 }
 
-/// Enable the encrypted (HTTPS) connection: generate certs, install trust, save config, start HTTPS.
-/// The macOS Keychain trust prompt (native password dialog) is triggered by `security add-trusted-cert`.
-///
-/// Phase 1: still macOS-only internally (the cross-OS Linux/Windows trust backends land in later
-/// phases). The command is registered on every platform so the frontend can call it uniformly; the
-/// non-macOS stub returns a clear error until its backend exists.
-#[cfg(target_os = "macos")]
+/// Enable the encrypted (HTTPS) connection: generate certs, install browser trust, save config, start
+/// HTTPS. Cross-platform via [`crate::trust`] — macOS raises the Keychain password dialog, Linux
+/// installs into user NSS stores silently, Windows lands in a later phase (its trust backend errors
+/// until then). Succeeds iff trust landed in ≥1 store (`install_ca_trust` errors otherwise), so on
+/// Linux a missing `certutil` surfaces as an enable failure the wizard can show with a Retry (R3).
 #[tauri::command]
 pub async fn enable_https(
     config: tauri::State<'_, ConfigState>,
@@ -166,7 +164,8 @@ pub async fn enable_https(
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
     // HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
     // the condition the startup gate closes. Fail closed: if the legacy key cannot be removed, refuse
-    // to enable (surfaced to the Settings UI). HTTP is unaffected.
+    // to enable (surfaced to the Settings UI). HTTP is unaffected. (No-op on installs that never had
+    // an on-disk CA key, i.e. every non-macOS install.)
     certs::migrate_legacy_ca_key().map_err(|e| {
         format!("Legacy CA key could not be removed; refusing to enable HTTPS: {e}")
     })?;
@@ -191,8 +190,9 @@ pub async fn enable_https(
     Ok(())
 }
 
-/// Disable the encrypted (HTTPS) connection: save config. HTTPS stops on next restart.
-#[cfg(target_os = "macos")]
+/// Disable the encrypted (HTTPS) connection: save config off. HTTPS stops on next restart. Trust
+/// anchors are left in place (removing them is the separate [`remove_https_trust`] action, so a
+/// re-enable doesn't re-prompt — D5/A4).
 #[tauri::command]
 pub fn disable_https(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
     mutate_config(&config, |cfg| cfg.https_enabled = false)?;
@@ -200,18 +200,23 @@ pub fn disable_https(config: tauri::State<'_, ConfigState>) -> Result<(), String
     Ok(())
 }
 
-/// Stub for non-macOS platforms (cross-OS trust backends land in later phases).
-#[cfg(not(target_os = "macos"))]
+/// Per-store browser-trust status for the local CA (drives the honest Settings/wizard status list).
 #[tauri::command]
-pub async fn enable_https() -> Result<(), String> {
-    Err("Encrypted connection is not yet available on this platform".to_string())
+pub fn get_trust_status() -> crate::trust::TrustReport {
+    crate::trust::trust_status(&crate::certs::live_ca_cert_path())
 }
 
-/// Stub for non-macOS platforms (cross-OS trust backends land in later phases).
-#[cfg(not(target_os = "macos"))]
+/// Explicitly remove the local CA from every browser trust store (the "Remove certificate trust"
+/// Settings action — D5). Also flips HTTPS off so the app stops presenting a now-untrusted cert.
 #[tauri::command]
-pub fn disable_https() -> Result<(), String> {
-    Err("Encrypted connection is not yet available on this platform".to_string())
+pub fn remove_https_trust(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    let report = crate::trust::remove_ca_trust(&crate::certs::live_ca_cert_path());
+    mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    tracing::info!(
+        removed = report.stores.len(),
+        "Removed CA trust via Settings"
+    );
+    Ok(())
 }
 
 /// Toggle auto-update preference from Settings.

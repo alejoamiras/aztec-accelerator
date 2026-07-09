@@ -176,11 +176,22 @@ test("https row visible on macOS", async ({ page }) => {
   await expect(page.locator("#https-row")).toBeVisible();
 });
 
-test("https row hidden on Linux", async ({ page }) => {
-  // Phase 1: the HTTPS row is still macOS-only (Linux/Windows land the trust backend later).
+test("https row visible on Linux (NSS trust backend)", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
       platform: "linux",
+      cpu_count: 8,
+    }));
+  });
+  await page.goto("/settings.html");
+
+  await expect(page.locator("#https-row")).toBeVisible();
+});
+
+test("https row hidden on Windows (trust backend lands in a later phase)", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
+      platform: "windows",
       cpu_count: 8,
     }));
   });

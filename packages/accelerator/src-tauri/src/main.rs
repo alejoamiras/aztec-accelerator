@@ -90,7 +90,17 @@ fn try_start_https(state: &AppState) {
     let cfg = config::load();
     // q7e3-F-01: the pre-load gate is now a tested pure classifier; the load-failure reset stays below
     // (it depends on load_rustls_config's Result, not on these three booleans).
-    match classify_launch_https(cfg.https_enabled, certs::certs_exist, certs::is_ca_trusted) {
+    //
+    // Linux (plan R3): trust is inherently per-browser/partial, and a bound-but-untrusted loopback
+    // listener is harmless — browsers fast-fail the HTTPS probe and the SDK falls back to HTTP. So
+    // serve whenever certs are valid, decoupled from trust (which the *wizard* still checks). macOS
+    // and Windows keep the verify-trust gate (they'd otherwise present an untrusted cert with a real
+    // dialog behind it).
+    #[cfg(target_os = "linux")]
+    let ca_trusted = || true;
+    #[cfg(not(target_os = "linux"))]
+    let ca_trusted = certs::is_ca_trusted;
+    match classify_launch_https(cfg.https_enabled, certs::certs_exist, ca_trusted) {
         LaunchHttpsGate::Disabled => return,
         LaunchHttpsGate::MissingCertsReset => {
             tracing::warn!("HTTPS enabled but certs missing/invalid — resetting config");
@@ -380,6 +390,25 @@ fn build_desktop_state(
 }
 
 fn main() {
+    // `--remove-ca-trust`: remove the local CA from every browser trust store, then exit WITHOUT
+    // starting the GUI. Used by scripted cleanup and the Windows NSIS uninstaller (Phase 6). Runs
+    // before anything else so it never spins up a tray/server.
+    if std::env::args().any(|a| a == "--remove-ca-trust") {
+        let report = aztec_accelerator::trust::remove_ca_trust(&certs::live_ca_cert_path());
+        for s in &report.stores {
+            println!(
+                "{}: {}",
+                s.store,
+                if s.installed {
+                    "still trusted"
+                } else {
+                    "removed / absent"
+                }
+            );
+        }
+        return;
+    }
+
     // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
     // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -455,6 +484,8 @@ fn main() {
             commands::respond_auth,
             commands::enable_https,
             commands::disable_https,
+            commands::get_trust_status,
+            commands::remove_https_trust,
             commands::set_auto_update,
             commands::respond_update_prompt,
         ])
