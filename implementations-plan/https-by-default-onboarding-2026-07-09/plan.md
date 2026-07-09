@@ -66,7 +66,7 @@ Rejected: driving preference off the `/health` `https_port` advertisement instea
 - Tests: old-key JSON loads `https_enabled:true`; roundtrip writes only the new key; missing marker→0; **both-keys duplicate-field edge** → serde duplicate-field error → defaults — this **matches the existing malformed-config policy** (`config.rs:100-108`), not new added safety; the app can't self-produce that state (save fully rewrites the file), only hand-edits reach it — documented + tested.
 - **Gate:** `bun run test` + `cd packages/accelerator/src-tauri && cargo test && cargo clippy --all-targets -- -D warnings` + same for `../core` + `bun run --cwd packages/accelerator test:e2e:ui`. Pass: all green; migration tests present; `grep -rn safari_support packages/` returns only docs (fixed P7). Layers: biome, clippy, Rust unit, TS unit, Playwright.
 
-### Phase 2 — SDK https-preferred probe + `httpsOnly`
+### Phase 2 — SDK https-preferred probe + `httpsOnly` — ✅ DONE (local gate green: SDK 53 unit + typecheck + full bun run test; SDK E2E → CI)
 Rewrite `AcceleratorTransport.probeHealth` per §4 (no new deps); add `httpsOnly` to constructor/`configure`; thread through `accelerator-prover.ts` (no `commitStatus` change). Tests (extend the fetch-stub pattern at `accelerator-transport.test.ts:115-151`): https wins when both fulfill; instant-reject https → http with **asserted wall-clock < grace**; stalled https + ok http → http after grace; `httpsOnly` never touches the http URL (URL spy); both-fail retry preserved. Update SDK README + skill.
 - **Gate:** `bun run test` + `bun run --cwd packages/sdk test:unit`. Pass: existing + new probe tests green; `public-contract.test.ts` updated deliberately if surface grew. Layers: biome, tsc, TS unit.
 

@@ -164,8 +164,30 @@ If the user denies your site at step 3 (or authorization times out), the SDK emi
 
 | Protocol | Port | Use Case |
 |----------|------|----------|
-| HTTP | 59833 | Chrome, Firefox (default) |
-| HTTPS | 59834 | Safari (requires accelerator HTTPS mode) |
+| HTTP | 59833 | Chrome, Firefox (fallback / when HTTPS isn't trusted) |
+| HTTPS | 59834 | Preferred when the accelerator's certificate is trusted; required for Safari |
+
+### Protocol preference (HTTP vs HTTPS)
+
+The SDK probes both endpoints in parallel and **prefers HTTPS when it's healthy** — a `/health` that
+responds `200` with a parseable body. Concretely:
+
+- If HTTPS answers healthy, it wins (encrypted channel) — even if HTTP answered first.
+- If HTTPS is absent or its certificate isn't trusted in this browser, its probe fails fast and
+  **HTTP wins with no added latency** (the common Chrome/Firefox path is unchanged).
+- A HTTPS endpoint that answers non-`2xx` or with a malformed body does **not** win over a healthy
+  HTTP endpoint (guards against another process answering on the HTTPS port).
+- Safari blocks HTTP-from-HTTPS, so HTTPS is the only responder there.
+
+The pinned protocol also drives the subsequent `/prove` request.
+
+**Strict mode (`httpsOnly`).** dApps that require an encrypted, authenticated channel can force it:
+the SDK then probes and POSTs over HTTPS **only**, never constructing an `http://` URL and never
+falling back — an unreachable/untrusted HTTPS accelerator simply reports offline (→ WASM fallback).
+
+```typescript
+const prover = new AcceleratorProver({ accelerator: { httpsOnly: true } });
+```
 
 ### Environment Variables
 
@@ -173,6 +195,7 @@ If the user denies your site at step 3 (or authorization times out), the SDK emi
 |----------|---------|-------------|
 | `AZTEC_ACCELERATOR_PORT` | `59833` | Override the HTTP port |
 | `AZTEC_ACCELERATOR_HTTPS_PORT` | `59834` | Override the HTTPS port |
+| `AZTEC_ACCELERATOR_HTTPS_ONLY` | `false` | `1`/`true` → strict HTTPS-only transport (no HTTP fallback) |
 
 ### Programmatic Configuration
 
