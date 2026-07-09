@@ -242,21 +242,38 @@ On the first update, you'll see a prompt:
 
 With auto-update enabled, new versions are downloaded and installed in the background — the app restarts seamlessly. You can change this anytime in Settings.
 
-### Safari Support (macOS only)
+### Encrypted Connection (HTTPS)
 
-Safari blocks mixed content — an HTTPS page cannot `fetch()` from `http://127.0.0.1`. Chrome and Firefox exempt localhost, but Safari does not.
+HTTPS between your browser and the accelerator is **default-on** on macOS, Linux, and Windows,
+consented through the first-run onboarding wizard (you can opt out). Safari *requires* it (it blocks
+plain HTTP from an HTTPS page); Chrome/Firefox/Edge use it when the local certificate is trusted and
+otherwise fall back to HTTP with no added latency. The SDK probes both ports and prefers HTTPS when
+healthy (see the SDK README).
 
-To enable, toggle **Safari Support** in the Settings window. macOS will prompt for your password once to trust the certificate.
+Enable/disable anytime via the **Encrypted Connection (HTTPS)** toggle in Settings, or re-run the
+wizard from Settings → "Run setup again".
 
-The SDK automatically probes both HTTP (59833) and HTTPS (59834) in parallel via `Promise.any`. Chrome/Firefox use HTTP (faster), Safari uses HTTPS.
+**Consent per OS** (installing the certificate):
+- **macOS** — a password dialog (login Keychain).
+- **Windows** — happens when you click Start in the wizard; no separate dialog is guaranteed.
+- **Linux** — happens on Start; there is no OS dialog. Installs into your user NSS databases
+  (`~/.pki/nssdb` for Chrome/Chromium/Brave/Edge, and each Firefox profile) via `certutil` — no root.
+  The `.deb` depends on `libnss3-tools`; restart Firefox after enabling. Sandboxed snap/flatpak
+  Chromium keeps a private store the app can't reach (shown as such).
 
-**What it installs:** A local Certificate Authority (`Aztec Accelerator Local CA`) with Name Constraints limiting it to `127.0.0.1`, `::1`, and `localhost` only. The CA is installed in your macOS login Keychain.
+**What it installs:** A local Certificate Authority (`Aztec Accelerator Local CA`), **keyless** (its
+signing key is generated in memory, signs one `localhost` leaf, then is discarded — never written to
+disk, so the trusted anchor can mint nothing) and Name-Constrained to `127.0.0.1`, `::1`, and
+`localhost` only.
 
-**To remove:** Open **Keychain Access**, search for "Aztec Accelerator Local CA", delete it, then disable Safari Support in Settings.
+**To remove:** Settings → **Remove certificate trust** (all OSes). On Windows the uninstaller also
+removes it; on macOS you can alternatively delete it from Keychain Access; on Linux you can run
+`aztec-accelerator --remove-ca-trust`.
 
 **Certificate details:**
-- CA: ECDSA P-256, 10-year validity, Name Constraints (localhost only)
+- CA: ECDSA P-256, 10-year validity, keyless, Name Constraints (localhost only)
 - Leaf: ECDSA P-256, 824-day validity (one day under Apple's inclusive 825-day TLS cap), auto-renewed
+  (silently on Linux; via a renewal consent window on macOS/Windows)
 - Storage: `~/.aztec-accelerator/certs/`
 
 ## Version Compatibility
