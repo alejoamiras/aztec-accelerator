@@ -37,6 +37,10 @@
         <span class="slider"></span>
       </label>
     </div>
+    <div id="remove-trust-row" class="row" style="display:none">
+      <span>Certificate</span>
+      <button type="button" id="remove-trust" class="link-button">Remove certificate trust</button>
+    </div>
     <div class="speed-section">
       <div class="speed-header">
         <span>Proving Speed</span>
@@ -117,6 +121,7 @@
       if (["macos", "linux", "windows"].includes(sysInfo.platform)) {
         document.getElementById("https-row").style.display = "";
         document.getElementById("https").checked = config.https_enabled;
+        document.getElementById("remove-trust-row").style.display = "";
       }
 
       const idx = speedToIndex(config.speed || "full");
@@ -167,6 +172,14 @@
     // "Run setup again" — reopen the first-run onboarding wizard.
     document.getElementById("run-setup").addEventListener("click", () => {
       invoke("open_onboarding").catch((err) => console.error("open_onboarding failed:", err));
+    });
+
+    // "Remove certificate trust" (D5) — remove the local CA from all browser stores + turn HTTPS off.
+    wireButton("remove-trust", {
+      onClick: async () => {
+        await invoke("remove_https_trust");
+        document.getElementById("https").checked = false;
+      },
     });
 
     // Speed slider

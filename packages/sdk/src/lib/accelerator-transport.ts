@@ -171,7 +171,16 @@ export class AcceleratorTransport {
     if (!response.ok) return false;
     try {
       const body: unknown = await response.clone().json();
-      return typeof body === "object" && body !== null;
+      // Must be a JSON *object* — `typeof [] === "object"` too, so exclude arrays explicitly.
+      if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+      // Require a recognizable `/health` shape so a foreign 200-JSON responder squatting the fixed
+      // HTTPS port can't trivially masquerade as the accelerator and steal the pin. (A deliberate
+      // same-user attacker who mimics the schema is already past the SEC-04 line — dApps that need a
+      // hard guarantee should set `httpsOnly`.)
+      const b = body as Record<string, unknown>;
+      return (
+        "status" in b || "api_version" in b || "aztec_version" in b || "available_versions" in b
+      );
     } catch {
       return false;
     }

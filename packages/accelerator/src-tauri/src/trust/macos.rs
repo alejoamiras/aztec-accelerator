@@ -101,10 +101,14 @@ pub fn status(ca_cert: &Path) -> TrustReport {
 }
 
 pub fn remove(ca_cert: &Path) -> TrustReport {
-    // Uninstall deletes by SHA-1 (macOS keeps its existing hash-based removal; only one anchor
-    // remains post-rotation).
-    if let Some(sha1) = keychain_sha1() {
-        delete_by_sha1(&sha1);
+    // Remove ALL our anchors by CN — the live one AND any left by prior rotations (post-impl review).
+    // Loop deleting the first CN match until none remain (bounded — a handful at most). `find` returns
+    // the first; each delete removes exactly it.
+    for _ in 0..16 {
+        match keychain_sha1() {
+            Some(sha1) => delete_by_sha1(&sha1),
+            None => break,
+        }
     }
     let still = verify_cert_trusted(ca_cert);
     TrustReport {

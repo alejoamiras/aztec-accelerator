@@ -171,6 +171,17 @@ fn enable_https_inner(
         format!("Legacy CA key could not be removed; refusing to enable HTTPS: {e}")
     })?;
 
+    // Already set up? Skip the (re-)install and its OS prompt entirely (post-impl review). An upgrader
+    // whose migrated config already has HTTPS trusted — launch already generated certs, installed
+    // trust, and spawned the listener — clicks the wizard's pre-checked "Start"; without this guard
+    // that would pop a fresh macOS Keychain password dialog to "install" an already-trusted cert and
+    // fire a redundant spawn_https that just fails to bind the already-bound port.
+    if certs::certs_exist() && certs::is_ca_trusted() {
+        mutate_config(config, |cfg| cfg.https_enabled = true)?;
+        tracing::info!("HTTPS already enabled + trusted — no re-install");
+        return Ok(());
+    }
+
     certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
 
     certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
@@ -213,12 +224,6 @@ pub fn disable_https(config: tauri::State<'_, ConfigState>) -> Result<(), String
     Ok(())
 }
 
-/// Per-store browser-trust status for the local CA (drives the honest Settings/wizard status list).
-#[tauri::command]
-pub fn get_trust_status() -> crate::trust::TrustReport {
-    crate::trust::trust_status(&crate::certs::live_ca_cert_path())
-}
-
 /// Explicitly remove the local CA from every browser trust store (the "Remove certificate trust"
 /// Settings action — D5). Also flips HTTPS off so the app stops presenting a now-untrusted cert.
 #[tauri::command]
@@ -244,7 +249,6 @@ pub struct OnboardingState {
     pub https_default: bool,
     pub autostart_enabled: bool,
     pub auto_update: Option<bool>,
-    pub trust_status: crate::trust::TrustReport,
 }
 
 #[tauri::command]
@@ -253,13 +257,14 @@ pub fn get_onboarding_state(
     config: tauri::State<'_, ConfigState>,
 ) -> OnboardingState {
     use tauri_plugin_autostart::ManagerExt;
+    // Deliberately does NOT compute trust_status — the wizard UI never reads it, and it would run
+    // blocking certutil/security subprocesses on every wizard open for nothing (post-impl review).
     let auto_update = config.read().auto_update;
     OnboardingState {
         platform: std::env::consts::OS.to_string(),
         https_default: true,
         autostart_enabled: app.autolaunch().is_enabled().unwrap_or(false),
         auto_update,
-        trust_status: crate::trust::trust_status(&crate::certs::live_ca_cert_path()),
     }
 }
 
@@ -325,8 +330,10 @@ pub fn dismiss_onboarding(config: tauri::State<'_, ConfigState>) -> Result<(), S
 
 /// "Renew now" from the renewal consent window: rotate the cert identity (raises the OS trust dialog
 /// with context, unlike a surprise background prompt). Records the prompt time for throttling.
+/// `async` (like `enable_https`/`complete_onboarding`) so the blocking subprocess + modal OS dialog
+/// don't freeze the webview event loop / the "Renewing…" spinner (post-impl review).
 #[tauri::command]
-pub fn renew_cert(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+pub async fn renew_cert(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
     crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
     let _ = mutate_config(&config, |cfg| {
         cfg.last_rotation_prompt_at = Some(now_unix_secs());

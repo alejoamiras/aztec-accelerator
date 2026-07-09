@@ -43,7 +43,8 @@ impl CertPaths {
         }
     }
 
-    /// The staged set (`*.new`) under `dir`, written + (macOS) trusted before the atomic swap.
+    /// The staged set (`*.new`) under `dir`, written + trusted (per-OS via [`crate::trust`]) before the
+    /// atomic swap.
     fn staged(dir: &std::path::Path) -> Self {
         Self {
             ca_cert: dir.join("ca.pem.new"),
@@ -129,7 +130,9 @@ fn leaf_params(
 /// triggers regeneration instead of being skipped forever. Note: `ca.key` is intentionally NOT
 /// required — it is never written.
 pub fn certs_exist() -> bool {
-    CertPaths::live().exists() && leaf_cert_days_remaining().map(|d| d > 0).unwrap_or(false)
+    // Check the raw seconds-remaining, NOT days: `days > 0` truncates a leaf with <24h left to 0 and
+    // would wrongly report a still-valid cert as unusable (post-impl review). `> 0` on seconds is exact.
+    CertPaths::live().exists() && leaf_secs_remaining().map(|s| s > 0).unwrap_or(false)
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
@@ -272,10 +275,9 @@ pub fn load_rustls_config(
 
 /// Approximate days remaining on the leaf certificate.
 /// Uses file modification time as a proxy for creation date.
-/// Parse the leaf certificate's notAfter field and return days until expiry.
-/// Uses the actual X.509 certificate, not file mtime (which can be wrong if
-/// the file is copied, restored from backup, or touched).
-pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+/// Seconds until the live leaf's notAfter (negative if already expired). Parsed from the actual X.509
+/// certificate (not file mtime, which can be wrong after copy/restore/touch).
+fn leaf_secs_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     let pem_bytes = std::fs::read(CertPaths::live().leaf_cert)?;
     let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_bytes)?;
     let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)?;
@@ -284,7 +286,13 @@ pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Sen
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    Ok((not_after - now) / 86400)
+    Ok(not_after - now)
+}
+
+/// Days until the live leaf expires (floor of the seconds-based value). For logging + the rotation
+/// window; validity checks use [`leaf_secs_remaining`] directly to avoid the sub-day truncation.
+pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(leaf_secs_remaining()? / 86400)
 }
 
 /// Rotate ~30 days before the leaf expires — while the old leaf still serves, leaving a window to

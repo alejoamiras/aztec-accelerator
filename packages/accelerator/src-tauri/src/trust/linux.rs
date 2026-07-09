@@ -12,13 +12,17 @@ use std::process::Command;
 /// PATH-resolved binary if it is absolute AND neither it nor its parent dir is group/world-writable
 /// — a planted `certutil` in a writable PATH dir must not win (plan §8 / codex S2). `None` ⇒ absent.
 fn certutil_bin() -> Option<PathBuf> {
+    // Even the known locations get the writability guard — `/usr/local/bin` is group/other-writable on
+    // some setups, and accepting a planted binary there would be the ACE this guard exists to prevent
+    // (post-impl review). A rejected path just falls through; if none qualifies, HTTPS degrades with a
+    // "certutil not found" hint rather than executing an attacker binary.
     for p in [
         "/usr/bin/certutil",
         "/bin/certutil",
         "/usr/local/bin/certutil",
     ] {
         let pb = PathBuf::from(p);
-        if pb.is_file() {
+        if pb.is_file() && !is_writable_by_nonowner(&pb) {
             return Some(pb);
         }
     }
@@ -278,6 +282,32 @@ fn delete_from_store(bin: &Path, store: &NssStore, nick: &str) {
     );
 }
 
+/// The `aztec-accelerator-ca-*` nickname prefix all our anchors share.
+const NICK_PREFIX: &str = "aztec-accelerator-ca-";
+
+/// List every one of OUR anchor nicknames currently in a store. `certutil -L` prints one row per
+/// cert as `<nickname>  <trust-flags>`; the nickname is the leading whitespace-delimited token. We
+/// keep only tokens starting with our distinctive prefix, so this can't misfire on foreign certs.
+fn our_nicks_in_store(bin: &Path, store: &NssStore) -> Vec<String> {
+    let Ok(out) = run_certutil(bin, &["-L".as_ref(), "-d".as_ref(), store.sql().as_ref()]) else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|tok| tok.starts_with(NICK_PREFIX))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Delete ALL of our anchors from a store (the live one AND any left by prior rotations, each under a
+/// different content-hash nickname — post-impl review: remove/uninstall must clear them all).
+fn delete_all_ours(bin: &Path, store: &NssStore) {
+    for nick in our_nicks_in_store(bin, store) {
+        delete_from_store(bin, store, &nick);
+    }
+}
+
 /// The extra informational row disclaiming coverage we can't verify (audit M-2): sandboxed
 /// snap/flatpak Chromium may keep its own confined NSS DB we don't reach.
 fn sandbox_disclaimer() -> StoreStatus {
@@ -361,6 +391,7 @@ pub fn remove(ca_cert: &Path) -> TrustReport {
     let Some(bin) = certutil_bin() else {
         return missing_certutil_report();
     };
+    // Remove ALL our anchors (live + any left by prior rotations), not just the live nickname.
     let (Some(nick), Some(home)) = (nickname_for(ca_cert), dirs::home_dir()) else {
         return TrustReport::default();
     };
@@ -368,8 +399,9 @@ pub fn remove(ca_cert: &Path) -> TrustReport {
         .iter()
         .filter(|s| s.dir.join("cert9.db").exists())
         .map(|store| {
-            delete_from_store(&bin, store, &nick);
+            delete_all_ours(&bin, store);
             StoreStatus {
+                // `installed` reports whether the LIVE anchor is still present after the sweep.
                 store: store.label.clone(),
                 installed: is_in_store(&bin, store, &nick),
                 detail: None,

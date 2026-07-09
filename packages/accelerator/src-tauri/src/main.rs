@@ -491,7 +491,6 @@ fn main() {
             commands::respond_auth,
             commands::enable_https,
             commands::disable_https,
-            commands::get_trust_status,
             commands::remove_https_trust,
             commands::get_onboarding_state,
             commands::complete_onboarding,
