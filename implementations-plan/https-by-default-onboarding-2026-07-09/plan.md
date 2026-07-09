@@ -60,7 +60,7 @@ Rejected: driving preference off the `/health` `https_port` advertisement instea
 
 ## 5. Phases
 
-### Phase 1 — Config migration + rename plumbing (no behavior change beyond naming)
+### Phase 1 — Config migration + rename plumbing (no behavior change beyond naming) — ✅ DONE (commit 18f34a1; local gate green, Playwright layer → CI)
 `https_enabled` (alias `safari_support`), `onboarding_version`, `last_rotation_prompt_at`, serial-bookkeeping for rotation/uninstall (see D4). Mechanical rename across `main.rs` (`classify_launch_https`, `reset_safari_support`→`reset_https_enabled`), `commands.rs` (commands registered on all OSes; non-macOS internals still return a clear error this phase), `core/src/server/tests.rs`, `settings.html` (id/copy; row stays macOS-only until P4), `e2e/tauri-mock.js:18-24`, `e2e/settings.spec.ts`, `e2e-webdriver/helpers.ts:15`, `invoke_handler` (`main.rs`).
 - **Note (audit L-1):** the `#[serde(alias)]` does all the migration work; a `CONFIG_VERSION` 1→2 bump is **decorative** (nothing reads `config_version`; no version-gated migration exists) — bump only if we simultaneously add version-gated logic, else leave it and say so.
 - Tests: old-key JSON loads `https_enabled:true`; roundtrip writes only the new key; missing marker→0; **both-keys duplicate-field edge** → serde duplicate-field error → defaults — this **matches the existing malformed-config policy** (`config.rs:100-108`), not new added safety; the app can't self-produce that state (save fully rewrites the file), only hand-edits reach it — documented + tested.
