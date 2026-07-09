@@ -138,6 +138,10 @@ Safari blocks HTTP fetch from HTTPS pages (mixed-content). The SDK handles this 
 
 No code changes needed in the dApp — the SDK handles protocol negotiation.
 
+## Chrome Local Network Access (Chrome 142+)
+
+Chrome 142+ gates requests from public sites to loopback behind a permission prompt (Chrome 145+ uses a dedicated `loopback-network` permission). If the user blocks it, the SDK's probe fails and proving falls back to WASM (`fallback` phase) — indistinguishable from the accelerator not running. When a user reports "accelerator installed but not detected" on Chrome, have them check the Local Network Access permission in the address bar's site settings. HTTPS mode does not bypass the prompt. Pages served from `localhost` (local dev) are same-address-space and unaffected.
+
 ## Error handling
 
 The SDK is designed to be fail-safe:

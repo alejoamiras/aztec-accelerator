@@ -38,6 +38,14 @@ The app uses GTK via WebKitGTK. Tray icon support depends on the compositor:
 - KDE Plasma: works out of the box
 - Sway/wlroots: requires `waybar` or similar with tray support
 
+## Browser Notes
+
+### Chrome Local Network Access (Chrome 142+)
+
+Chrome 142 (October 2025) began gating requests from public websites to loopback addresses behind a user permission prompt (Local Network Access); Chrome 145 splits it into `local-network` and `loopback-network` permissions. A dApp probing the accelerator from a public origin triggers the prompt on first use. If the user blocks it, the SDK sees the accelerator as offline and falls back to WASM proving — re-allowing requires resetting the permission in Chrome's site settings. The prompt is keyed on the destination address space, not the scheme: the accelerator's HTTPS mode does not exempt it.
+
+Firefox and Safari have no equivalent gate as of mid-2026. Requests from `localhost`-served pages (local dev) are same-address-space and do not trigger the prompt.
+
 ## Security Model
 
 ### Localhost Authorization

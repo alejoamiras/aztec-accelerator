@@ -256,7 +256,7 @@ The SDK automatically probes both HTTP (59833) and HTTPS (59834) in parallel via
 
 **Certificate details:**
 - CA: ECDSA P-256, 10-year validity, Name Constraints (localhost only)
-- Leaf: ECDSA P-256, 825-day validity (Apple TLS maximum), auto-renewed
+- Leaf: ECDSA P-256, 824-day validity (one day under Apple's inclusive 825-day TLS cap), auto-renewed
 - Storage: `~/.aztec-accelerator/certs/`
 
 ## Version Compatibility
