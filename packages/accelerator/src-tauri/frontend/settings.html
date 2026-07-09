@@ -30,10 +30,10 @@
         <span class="slider"></span>
       </label>
     </div>
-    <div id="safari-row" class="row" style="display:none">
-      <span id="safari-label">Safari Support</span>
+    <div id="https-row" class="row" style="display:none">
+      <span id="https-label">Encrypted Connection (HTTPS)</span>
       <label class="toggle">
-        <input type="checkbox" id="safari" role="switch" aria-labelledby="safari-label" />
+        <input type="checkbox" id="https" role="switch" aria-labelledby="https-label" />
         <span class="slider"></span>
       </label>
     </div>
@@ -109,8 +109,8 @@
       document.getElementById("auto-update").checked = config.auto_update === true;
 
       if (sysInfo.platform === "macos") {
-        document.getElementById("safari-row").style.display = "";
-        document.getElementById("safari").checked = config.safari_support;
+        document.getElementById("https-row").style.display = "";
+        document.getElementById("https").checked = config.https_enabled;
       }
 
       const idx = speedToIndex(config.speed || "full");
@@ -154,8 +154,8 @@
     // Toggles — all use wireToggle from tauri-bridge.js
     wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
     wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
-    wireToggle("safari", (checked) => ({
-      cmd: checked ? "enable_safari_support" : "disable_safari_support",
+    wireToggle("https", (checked) => ({
+      cmd: checked ? "enable_https" : "disable_https",
     }));
 
     // Speed slider

@@ -52,9 +52,9 @@ fn open_in_browser(target: &impl AsRef<Path>) {
 /// reset-vs-skip asymmetry (the audit's most-fragile point) is unit-testable with zero mocks.
 #[derive(Debug, PartialEq, Eq)]
 enum LaunchHttpsGate {
-    /// Safari Support is off — do nothing.
+    /// HTTPS is off — do nothing.
     Disabled,
-    /// Enabled but certs are missing/invalid — reset `safari_support` so the user re-enables.
+    /// Enabled but certs are missing/invalid — reset `https_enabled` so the user re-enables.
     MissingCertsReset,
     /// Certs present but the CA isn't trusted in the Keychain — skip WITHOUT reset (keep the opt-in).
     UntrustedSkip,
@@ -63,15 +63,15 @@ enum LaunchHttpsGate {
 }
 
 /// Classify the launch HTTPS gate. `certs_exist` and `ca_trusted` are thunks so the original
-/// short-circuit holds exactly: `certs_exist` is not evaluated unless `safari_support`, and
+/// short-circuit holds exactly: `certs_exist` is not evaluated unless `https_enabled`, and
 /// `ca_trusted` not unless `certs_exist` too. Trust is only ever VERIFIED at launch (the thunk wraps
 /// `is_ca_trusted`), never installed — launch must never raise the macOS Keychain prompt.
 fn classify_launch_https(
-    safari_support: bool,
+    https_enabled: bool,
     certs_exist: impl FnOnce() -> bool,
     ca_trusted: impl FnOnce() -> bool,
 ) -> LaunchHttpsGate {
-    if !safari_support {
+    if !https_enabled {
         LaunchHttpsGate::Disabled
     } else if !certs_exist() {
         LaunchHttpsGate::MissingCertsReset
@@ -90,11 +90,11 @@ fn try_start_https(state: &AppState) {
     let cfg = config::load();
     // q7e3-F-01: the pre-load gate is now a tested pure classifier; the load-failure reset stays below
     // (it depends on load_rustls_config's Result, not on these three booleans).
-    match classify_launch_https(cfg.safari_support, certs::certs_exist, certs::is_ca_trusted) {
+    match classify_launch_https(cfg.https_enabled, certs::certs_exist, certs::is_ca_trusted) {
         LaunchHttpsGate::Disabled => return,
         LaunchHttpsGate::MissingCertsReset => {
-            tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
-            reset_safari_support(state);
+            tracing::warn!("HTTPS enabled but certs missing/invalid — resetting config");
+            reset_https_enabled(state);
             return;
         }
         LaunchHttpsGate::UntrustedSkip => {
@@ -108,10 +108,10 @@ fn try_start_https(state: &AppState) {
         Ok(c) => c,
         Err(e) => {
             // A broken/mismatched cert set (e.g. a crash mid-rotation leaving a new leaf with the old
-            // key) must NOT silently wedge HTTPS. Reset Safari Support so the user re-enables and a
+            // key) must NOT silently wedge HTTPS. Reset https_enabled so the user re-enables and a
             // fresh, matched, trusted set is generated, instead of HTTPS being dead every launch.
-            tracing::warn!("Failed to load TLS config ({e}) — resetting Safari Support to recover");
-            reset_safari_support(state);
+            tracing::warn!("Failed to load TLS config ({e}) — resetting https_enabled to recover");
+            reset_https_enabled(state);
             return;
         }
     };
@@ -128,13 +128,13 @@ fn try_start_https(state: &AppState) {
     });
 }
 
-/// Disable Safari Support in config (certs missing/invalid/untrusted) so the user can re-enable to
+/// Disable HTTPS in config (certs missing/invalid/untrusted) so the user can re-enable to
 /// regenerate a fresh, trusted cert set.
-fn reset_safari_support(state: &AppState) {
+fn reset_https_enabled(state: &AppState) {
     if let Some(ref cfg_lock) = state.config {
         // q7e3-F-13: shared core helper; swallow the save error (best-effort reset, unchanged policy).
         let _ = config::lock_mutate_save(cfg_lock, |cfg| {
-            cfg.safari_support = false;
+            cfg.https_enabled = false;
             true
         });
     }
@@ -453,8 +453,8 @@ fn main() {
             commands::get_system_info,
             commands::get_verified_info,
             commands::respond_auth,
-            commands::enable_safari_support,
-            commands::disable_safari_support,
+            commands::enable_https,
+            commands::disable_https,
             commands::set_auto_update,
             commands::respond_update_prompt,
         ])
@@ -501,15 +501,15 @@ fn main() {
             // ── HTTPS startup ──
             // One-time migration: delete any legacy on-disk CA private key (older installs) — it was
             // a readable mint-any-cert primitive. SEC-08 fail-closed: if it CANNOT be removed, do NOT
-            // bring up Safari HTTPS — a live HTTPS server next to a readable mint-any-cert key + its
+            // bring up HTTPS — a live HTTPS server next to a readable mint-any-cert key + its
             // still-trusted anchor is the exposure we're closing. HTTP is unaffected. Idempotent.
             match certs::migrate_legacy_ca_key() {
                 Ok(()) => try_start_https(&state),
                 Err(e) => tracing::error!(error = %e,
-                    "SECURITY: legacy ca.key could not be removed — Safari HTTPS NOT started (HTTP unaffected)"),
+                    "SECURITY: legacy ca.key could not be removed — HTTPS NOT started (HTTP unaffected)"),
             }
 
-            // Manage the shared state for Tauri commands (e.g. enable_safari_support). It shares the
+            // Manage the shared state for Tauri commands (e.g. enable_https). It shares the
             // Arc'd https_bound flag with the HTTP server's state, so start_https flipping it after a
             // successful bind is visible to /health (no separate https_port propagation needed). (Q7)
             app.manage::<SharedAppState>(Arc::new(state.clone()));
@@ -587,8 +587,8 @@ mod tests {
         assert_eq!(
             classify_launch_https(
                 false,
-                || panic!("certs_exist must not be checked when safari is off"),
-                || panic!("trust must not be checked when safari is off"),
+                || panic!("certs_exist must not be checked when https is off"),
+                || panic!("trust must not be checked when https is off"),
             ),
             LaunchHttpsGate::Disabled
         );

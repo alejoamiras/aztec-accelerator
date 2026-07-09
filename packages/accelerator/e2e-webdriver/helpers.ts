@@ -12,7 +12,7 @@ export function readConfig(): Record<string, unknown> {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
   } catch {
-    return { config_version: 1, safari_support: false, approved_origins: [], speed: "full" };
+    return { config_version: 1, https_enabled: false, approved_origins: [], speed: "full" };
   }
 }
 

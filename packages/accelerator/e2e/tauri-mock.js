@@ -17,9 +17,10 @@ const handlers = {};
 const defaults = {
   get_config: () => ({
     config_version: 1,
-    safari_support: false,
+    https_enabled: false,
     approved_origins: ["https://example.com"],
     speed: "full",
+    onboarding_version: 1,
     // auto_update intentionally omitted — matches Rust None serialization
   }),
   get_autostart_enabled: () => false,
@@ -30,8 +31,8 @@ const defaults = {
   remove_approved_origin: () => null,
   respond_auth: () => null,
   respond_update_prompt: () => null,
-  enable_safari_support: () => null,
-  disable_safari_support: () => null,
+  enable_https: () => null,
+  disable_https: () => null,
 };
 
 window.__TAURI_MOCK__ = {

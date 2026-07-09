@@ -96,7 +96,7 @@ pub struct HeadlessState {
     /// `true` once `start_https` has actually bound the HTTPS listener. Shared (Arc'd atomic) across
     /// the HTTP + HTTPS servers so `/health` advertises `https_port` from the REAL bind state — not
     /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
-    /// (HTTPS skipped, but `safari_support` config stays on). (Q7)
+    /// (HTTPS skipped, but `https_enabled` config stays on). (Q7)
     pub https_bound: Arc<AtomicBool>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
@@ -294,9 +294,9 @@ async fn health(
     });
 
     // Advertise https_port only when the HTTPS listener actually bound (set by start_https after a
-    // successful bind), NOT when the config merely requests Safari support. Keying off the config flag
+    // successful bind), NOT when the config merely requests HTTPS. Keying off the config flag
     // would point the SDK at a dead port on the untrusted-CA startup path (HTTPS skipped, config still
-    // on). The shared Arc'd flag also reflects a runtime enable_safari_support without a restart. (Q7)
+    // on). The shared Arc'd flag also reflects a runtime enable_https without a restart. (Q7)
     if state.https_bound.load(Ordering::Relaxed) {
         body["https_port"] = json!(HTTPS_PORT);
     }

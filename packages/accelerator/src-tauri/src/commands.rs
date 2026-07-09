@@ -148,11 +148,15 @@ pub fn sanitize_window_label(key: &str) -> String {
     hex::encode(&hash[..6])
 }
 
-/// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
+/// Enable the encrypted (HTTPS) connection: generate certs, install trust, save config, start HTTPS.
 /// The macOS Keychain trust prompt (native password dialog) is triggered by `security add-trusted-cert`.
+///
+/// Phase 1: still macOS-only internally (the cross-OS Linux/Windows trust backends land in later
+/// phases). The command is registered on every platform so the frontend can call it uniformly; the
+/// non-macOS stub returns a clear error until its backend exists.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub async fn enable_safari_support(
+pub async fn enable_https(
     config: tauri::State<'_, ConfigState>,
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
@@ -160,11 +164,11 @@ pub async fn enable_safari_support(
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
-    // Safari HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
+    // HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
     // the condition the startup gate closes. Fail closed: if the legacy key cannot be removed, refuse
     // to enable (surfaced to the Settings UI). HTTP is unaffected.
     certs::migrate_legacy_ca_key().map_err(|e| {
-        format!("Legacy CA key could not be removed; refusing to enable Safari HTTPS: {e}")
+        format!("Legacy CA key could not be removed; refusing to enable HTTPS: {e}")
     })?;
 
     certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
@@ -173,7 +177,7 @@ pub async fn enable_safari_support(
 
     // Save config
     {
-        mutate_config(&config, |cfg| cfg.safari_support = true)?;
+        mutate_config(&config, |cfg| cfg.https_enabled = true)?;
     }
 
     // Start HTTPS server with the full shared state (includes auth, config, popup callback)
@@ -183,31 +187,31 @@ pub async fn enable_safari_support(
     // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
     crate::server::spawn_https((**shared_state).clone(), tls_config);
 
-    tracing::info!("Safari Support enabled via Settings");
+    tracing::info!("HTTPS enabled via Settings");
     Ok(())
 }
 
-/// Disable Safari Support: save config. HTTPS stops on next restart.
+/// Disable the encrypted (HTTPS) connection: save config. HTTPS stops on next restart.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
-    mutate_config(&config, |cfg| cfg.safari_support = false)?;
-    tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
+pub fn disable_https(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    tracing::info!("HTTPS disabled via Settings (HTTPS stops on next restart)");
     Ok(())
 }
 
-/// Stub for non-macOS platforms.
+/// Stub for non-macOS platforms (cross-OS trust backends land in later phases).
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub async fn enable_safari_support() -> Result<(), String> {
-    Err("Safari Support is only available on macOS".to_string())
+pub async fn enable_https() -> Result<(), String> {
+    Err("Encrypted connection is not yet available on this platform".to_string())
 }
 
-/// Stub for non-macOS platforms.
+/// Stub for non-macOS platforms (cross-OS trust backends land in later phases).
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub fn disable_safari_support() -> Result<(), String> {
-    Err("Safari Support is only available on macOS".to_string())
+pub fn disable_https() -> Result<(), String> {
+    Err("Encrypted connection is not yet available on this platform".to_string())
 }
 
 /// Toggle auto-update preference from Settings.
