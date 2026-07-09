@@ -262,3 +262,38 @@ VERDICT: conditional approve (conditions: D4 uses computed SHA-1, Linux trust fa
 No High/Critical issue survived for me. Phase ordering is basically coherent; P2 can ship first because HTTPS remains health-gated and `httpsOnly` is opt-in. The only sequencing cleanup is to avoid splitting NSIS hook ownership ambiguously between P4 and P6.
 
 VERDICT: conditional approve (conditions: fix R6/D4 to Windows-serial/Linux-nickname, make Windows uninstall serial bookkeeping explicit, and add/downgrade the name-constraint enforcement claim)
+---
+
+# Post-impl codex audit (session 019f48c9) — dispositions
+
+Verdict-equivalent: 3 High, 3 Med, 2 Low, + CI-spike notes. All addressed:
+
+- **High — rotate() serves old leaf after removing old anchor** → FIXED. The running TlsAcceptor
+  isn't reloaded (rotation takes effect next launch), so removing the old anchor broke the
+  still-served old leaf. Now rotate() does NOT remove the old anchor; both stay trusted. The stale one
+  is keyless + loopback-name-constrained (harmless), ≤1 accrues per ~2-year rotation; "Remove
+  certificate trust" + the uninstaller clear all by CN. (certs.rs)
+- **High — profiles.ini path traversal** → FIXED. Canonicalize each candidate profile dir (resolves
+  symlinks + `..`) and require it under canonical $HOME before handing to certutil. (trust/linux.rs)
+- **High — Windows certutil via SystemRoot env (taint-redirectable)** → FIXED. Prefer the hardcoded
+  `C:\Windows\System32\certutil.exe` when present (defeats env-taint on standard installs); SystemRoot
+  fallback only for non-standard roots. (GetSystemDirectoryW deferred — needs windows-sys, against D3.)
+- **Med — onboarding buttons stuck disabled on partial failure** → FIXED. Re-enable Start + Skip
+  explicitly in the partial-failure branch (wireButton only re-enables on throw). (onboarding.html)
+- **Med — Linux PATH hardening ignores owner-writable / /usr/local/bin unchecked** → ACCEPTED. Primary
+  resolution is hardcoded system paths (/usr/bin, /bin, /usr/local/bin — root-owned on normal systems);
+  the `which` fallback rejects group/world-writable (the cross-user threat). Same-user is already past
+  SEC-04. Tightening the hardcoded list risks breaking staff-group-writable /usr/local. Defensible.
+- **Med — disable_https doesn't remove trust (vs A4)** → INTENTIONAL (D5). Disable stops serving;
+  trust removal is the separate explicit "Remove certificate trust" action, so a re-enable doesn't
+  re-prompt every toggle. Documented tension between A4 and D5; chose D5.
+- **Low — renewal throttle field never read** → FIXED. main.rs now suppresses the renewal window if
+  `last_rotation_prompt_at` is within 20h (so "Later" persists across quick restarts; still reappears
+  on later launches per §7).
+- **Low — httpsOnly builds an http URL string** → FIXED. httpUrl is now only constructed in the
+  non-strict branch. (accelerator-transport.ts)
+- **CI-spike — Windows delstore-by-serial not exercised; updater trust-survives-update assertion**
+  → CI follow-ups (unpushable + untestable locally). The $UpdateMode guard is the actual R1 fix.
+
+Re-validated after fixes: Linux 24 lib + 7 main + real NSS integration test pass, clippy -D clean;
+Windows target clippy -D clean; SDK 53 pass; biome/fmt clean.

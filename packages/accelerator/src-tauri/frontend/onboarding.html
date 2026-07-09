@@ -129,12 +129,18 @@
           return;
         }
         // Partial failure (HTTPS is the only step that can fail here): let the user Retry or continue.
+        // wireButton only re-enables buttons when onClick THROWS; complete_onboarding resolves
+        // normally with {completed:false}, so re-enable Start + Skip explicitly (else the user is stuck).
         if (https && !asOk(res.https)) {
           document.getElementById("opt-https").checked = false;
           document.getElementById("https-retry").style.display = "inline-block";
           const skip = document.getElementById("skip");
           skip.textContent = "Continue without HTTPS";
         }
+        const start = document.getElementById("start");
+        start.disabled = false;
+        start.textContent = "Start";
+        document.getElementById("skip").disabled = false;
       }
 
       wireButton("start", { disableAlso: "skip", loadingText: "Setting up…", onClick: runStart });

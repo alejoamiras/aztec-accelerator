@@ -153,33 +153,51 @@ fn discover_stores(home: &Path) -> Vec<NssStore> {
         create_if_absent: true,
     }];
 
+    // Canonical $HOME to bound every candidate profile dir under it (post-impl codex High / S3):
+    // profiles.ini is user-owned but attacker-influenceable, so an absolute path, a `../` escape, or a
+    // symlinked profile dir must NOT let certutil operate outside the user's home. `canonicalize`
+    // resolves symlinks + `..`; we then require the result to live under canonical $HOME.
+    let home_canon = home.canonicalize().ok();
+
     for root in firefox_roots(home) {
         let ini = root.join("profiles.ini");
         let Ok(content) = std::fs::read_to_string(&ini) else {
             continue;
         };
         for prof in parse_profiles_ini(&content) {
-            let dir = if prof.relative {
+            let raw_dir = if prof.relative {
                 root.join(&prof.path)
             } else {
                 PathBuf::from(&prof.path)
             };
             // Only touch an existing, initialized profile (has cert9.db). Never fabricate one.
-            if dir.join("cert9.db").exists() {
-                let label = format!(
-                    "Firefox ({})",
-                    if prof.name.is_empty() {
-                        prof.path.clone()
-                    } else {
-                        prof.name.clone()
-                    }
-                );
-                stores.push(NssStore {
-                    label,
-                    dir,
-                    create_if_absent: false,
-                });
+            if !raw_dir.join("cert9.db").exists() {
+                continue;
             }
+            // Canonicalize (resolves symlinks + `..`) and require the result under canonical $HOME.
+            let Ok(dir) = raw_dir.canonicalize() else {
+                continue;
+            };
+            match &home_canon {
+                Some(h) if dir.starts_with(h) => {}
+                _ => {
+                    tracing::warn!(path = %dir.display(), "Skipping Firefox profile outside $HOME");
+                    continue;
+                }
+            }
+            let label = format!(
+                "Firefox ({})",
+                if prof.name.is_empty() {
+                    prof.path.clone()
+                } else {
+                    prof.name.clone()
+                }
+            );
+            stores.push(NssStore {
+                label,
+                dir,
+                create_if_absent: false,
+            });
         }
     }
     stores

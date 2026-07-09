@@ -137,7 +137,6 @@ export class AcceleratorTransport {
    * (no `http://` URL is constructed); an unreachable HTTPS ⇒ rejects ⇒ caller maps to `offline`.
    */
   async probeHealth(): Promise<ProbeResult> {
-    const httpUrl = `http://${this.#host}:${this.#port}/health`;
     const httpsUrl = `https://${this.#host}:${this.#httpsPort}/health`;
 
     const fire = (url: string, protocol: AcceleratorProtocol): Promise<ProbeResult> =>
@@ -145,11 +144,12 @@ export class AcceleratorTransport {
         (response) => ({ response, protocol }),
       );
 
-    const probe = () =>
-      this.#httpsOnly
-        ? // Strict: never construct an http URL, never fall back to http.
-          fire(httpsUrl, "https")
-        : this.#probePreferHttps(fire(httpsUrl, "https"), fire(httpUrl, "http"));
+    const probe = () => {
+      // Strict mode: probe HTTPS ONLY — never even *construct* an http URL (contract compliance).
+      if (this.#httpsOnly) return fire(httpsUrl, "https");
+      const httpUrl = `http://${this.#host}:${this.#port}/health`;
+      return this.#probePreferHttps(fire(httpsUrl, "https"), fire(httpUrl, "http"));
+    };
 
     try {
       return await probe();

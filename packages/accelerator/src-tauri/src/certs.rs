@@ -326,17 +326,22 @@ pub fn rotate_now() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// **Fail-closed + non-silent:** the new set is STAGED (`*.new`), then trusted + verified BEFORE it
 /// replaces the live certs. A cancelled/failed trust discards the staging and leaves the old,
 /// still-valid certs serving — no outage, never an untrusted cert. Per-OS trust lives in
-/// [`crate::trust`]; the old anchor is removed after the swap by its captured identity (macOS SHA-1 /
-/// Linux nickname — D4).
+/// [`crate::trust`].
+///
+/// **The OLD anchor is deliberately NOT removed here** (post-impl codex High). Rotation runs while
+/// the HTTPS listener is already serving the OLD leaf from an in-memory `TlsAcceptor` that is not
+/// reloaded — the rotated set only takes effect on the NEXT launch. Removing the old anchor now would
+/// leave the still-served old leaf with no trusted anchor, breaking HTTPS until restart. So both
+/// anchors stay trusted. The old anchor is **keyless** (can sign nothing) and **name-constrained to
+/// loopback**, so a stale one is harmless; at most one accrues per rotation (~every 2 years — the
+/// 824-day leaf minus the 30-day window), so lifetime accumulation is a handful. "Remove certificate
+/// trust" (Settings) and the uninstaller clear them all by CN.
 fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = certs_dir();
     std::fs::create_dir_all(&dir)?;
     let staged = CertPaths::staged(&dir);
 
     write_new_cert_set(&staged)?;
-
-    // Capture the OLD anchor's identity before installing the new one, for removal after the swap.
-    let old_anchor = crate::trust::current_anchor(&CertPaths::live().ca_cert);
 
     // Trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
     if let Err(e) = crate::trust::trust_new_anchor(&staged.ca_cert) {
@@ -349,10 +354,9 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Atomic swap: the new set replaces the live certs. Trust is content-keyed, so rename keeps it.
     staged.swap_into(&CertPaths::live())?;
 
-    // Remove the OLD anchor now that the NEW one is live + trusted (no keyless-anchor accumulation).
-    crate::trust::remove_anchor(old_anchor);
-
-    tracing::info!("Rotated cert identity (fresh keyless CA + leaf); trust re-installed");
+    tracing::info!(
+        "Rotated cert identity (fresh keyless CA + leaf); new anchor trusted, takes effect next launch"
+    );
     Ok(())
 }
 

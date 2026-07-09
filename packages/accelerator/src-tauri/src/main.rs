@@ -582,10 +582,24 @@ fn main() {
             // ── Certificate renewal consent (macOS/Windows, §7) ──
             // When the leaf is within the pre-expiry window, offer renewal via a consent window rather
             // than a silent background OS trust prompt (Linux rotates silently in try_start_https).
+            // Throttled by `last_rotation_prompt_at` so clicking "Later" suppresses the re-prompt for a
+            // day even across quick restarts (it still reappears on later launches until expiry).
             #[cfg(all(any(target_os = "macos", target_os = "windows"), not(feature = "webdriver")))]
             {
+                const RENEWAL_THROTTLE_SECS: i64 = 20 * 3600;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 let cfg = config::load();
-                if cfg.https_enabled && certs::certs_exist() && certs::leaf_is_expiring() {
+                let recently_prompted = cfg
+                    .last_rotation_prompt_at
+                    .is_some_and(|t| now.saturating_sub(t) < RENEWAL_THROTTLE_SECS);
+                if cfg.https_enabled
+                    && !recently_prompted
+                    && certs::certs_exist()
+                    && certs::leaf_is_expiring()
+                {
                     windows::show_renewal_window(app.handle());
                 }
             }

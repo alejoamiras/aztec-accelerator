@@ -22,10 +22,16 @@ const STORE: &str = "Windows CurrentUser Root";
 const CA_CN: &str = "Aztec Accelerator Local CA";
 
 /// Absolute path to `certutil.exe` — never a bare-name PATH lookup (a planted `certutil` earlier on
-/// PATH must not win). Uses `SystemRoot`/`windir` with a hardcoded `C:\Windows` fallback, matching the
-/// existing `crash_recovery::schtasks_exe` precedent (avoids a `windows-sys`/FFI dependency for
-/// `GetSystemDirectoryW`; codex's preferred API is noted as a possible future hardening).
+/// PATH must not win). **Prefers the hardcoded `C:\Windows\System32\certutil.exe`** when it exists, so
+/// a tainted `SystemRoot`/`windir` environment can't redirect this privileged trust operation on a
+/// standard install (post-impl codex High). Only falls back to the env-derived path for the rare
+/// non-standard Windows root where `C:\Windows` isn't it. (`GetSystemDirectoryW` would be the fully
+/// robust API but needs a `windows-sys`/FFI dep — deliberately avoided per D3's zero-new-dep choice.)
 fn certutil_exe() -> PathBuf {
+    let hardcoded = PathBuf::from("C:\\Windows\\System32\\certutil.exe");
+    if hardcoded.is_file() {
+        return hardcoded;
+    }
     let system_root = std::env::var("SystemRoot")
         .or_else(|_| std::env::var("windir"))
         .unwrap_or_else(|_| "C:\\Windows".to_string());
