@@ -114,15 +114,44 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// permit. Chunked/underreported requests are still bounded by `to_bytes` — this is a cheap
 /// fast-path, never the sole limit.
 fn reject_declared_oversize(headers: &axum::http::HeaderMap) -> Result<(), ProveError> {
-    if let Some(len) = headers
-        .get(axum::http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        if len > MAX_BODY_SIZE {
-            return Err(ProveError::PayloadTooLarge(format!(
-                "declared Content-Length {len} exceeds {MAX_BODY_SIZE}"
-            )));
+    // Inspect EVERY Content-Length value, and each comma-separated element within it (HTTP/2 and
+    // some proxies emit a duplicate-but-consistent list). Parse as u64 so a value that would
+    // overflow usize on 32-bit targets can't wrap below the cap; reject if any element exceeds the
+    // cap or is malformed. Cheap pre-permit fast-path — the to_bytes limit remains authoritative.
+    let mut seen: Option<u64> = None;
+    for value in headers.get_all(axum::http::header::CONTENT_LENGTH) {
+        let Ok(s) = value.to_str() else {
+            return Err(ProveError::PayloadTooLarge(
+                "non-ASCII Content-Length".to_string(),
+            ));
+        };
+        for part in s.split(',') {
+            let part = part.trim();
+            // RFC 7230 §3.3.2: a Content-Length is `1*DIGIT`. Reject empty/partial/non-digit
+            // elements (a permissive skip let `""`, `","`, `1,`, `,1` slip past); parse as u64 so
+            // an over-long value can't wrap below the cap.
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ProveError::PayloadTooLarge(format!(
+                    "malformed Content-Length {part:?}"
+                )));
+            }
+            let len: u64 = part.parse().map_err(|_| {
+                ProveError::PayloadTooLarge(format!("unparsable Content-Length {part:?}"))
+            })?;
+            if len > MAX_BODY_SIZE as u64 {
+                return Err(ProveError::PayloadTooLarge(format!(
+                    "declared Content-Length {len} exceeds {MAX_BODY_SIZE}"
+                )));
+            }
+            // RFC 7230 §3.3.2: multiple Content-Length values must all agree.
+            match seen {
+                Some(prev) if prev != len => {
+                    return Err(ProveError::PayloadTooLarge(format!(
+                        "conflicting Content-Length values {prev} and {len}"
+                    )));
+                }
+                _ => seen = Some(len),
+            }
         }
     }
     Ok(())
@@ -160,6 +189,16 @@ async fn acquire_and_read_body(
     Ok((permit, body))
 }
 
+/// F-009: try to enter the bounded set of in-flight + waiting authorized `/prove` requests.
+/// Non-blocking: if the cap (`MAX_INFLIGHT_PROVE` permits) is full, shed immediately with 429
+/// (`ProveQueueFull`) rather than queueing. The returned guard must be held for the whole request
+/// so it is released (RAII) on every exit path. Testable seam.
+fn try_enter(waiters: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, ProveError> {
+    waiters
+        .try_acquire_owned()
+        .map_err(|_| ProveError::ProveQueueFull)
+}
+
 pub(crate) async fn prove(
     State(state): State<AppState>,
     request: Request,
@@ -171,7 +210,12 @@ pub(crate) async fn prove(
     let (parts, raw_body) = request.into_parts();
     authorize_origin(&state, &parts.headers).await?;
 
-    // F-009: turn away an honestly-declared oversize body before taking the permit.
+    // F-009: cap total in-flight + waiting authorized /prove requests. Held (RAII) for the whole
+    // request; a burst beyond MAX_INFLIGHT_PROVE is shed immediately with 429 instead of queueing
+    // behind slow uploaders and stacking fresh per-request read timeouts.
+    let _inflight = try_enter(state.prove_waiters.clone())?;
+
+    // F-009: turn away an honestly-declared oversize body before taking the prove permit.
     reject_declared_oversize(&parts.headers)?;
 
     // F-009: acquire the single prove permit BEFORE buffering the body, so concurrent requests
@@ -306,6 +350,62 @@ mod tests {
         // At/under the cap and absent are allowed (still bounded later by to_bytes).
         assert!(reject_declared_oversize(&content_length(&MAX_BODY_SIZE.to_string())).is_ok());
         assert!(reject_declared_oversize(&HeaderMap::new()).is_ok());
+        // Comma-list (HTTP/2 duplicate) with an oversize element must NOT slip past.
+        assert!(matches!(
+            reject_declared_oversize(&content_length(&format!("{0}, {0}", MAX_BODY_SIZE + 1))),
+            Err(ProveError::PayloadTooLarge(_))
+        ));
+        // Malformed / empty / partial values are rejected, not silently ignored.
+        for bad in ["not-a-number", "", ",", "1,", ",1", "1 2"] {
+            assert!(
+                matches!(
+                    reject_declared_oversize(&content_length(bad)),
+                    Err(ProveError::PayloadTooLarge(_))
+                ),
+                "must reject malformed Content-Length {bad:?}"
+            );
+        }
+        // Conflicting comma-list values (RFC 7230 §3.3.2) are rejected even when each is under cap.
+        assert!(matches!(
+            reject_declared_oversize(&content_length("10, 20")),
+            Err(ProveError::PayloadTooLarge(_))
+        ));
+        // Agreeing duplicates under the cap are fine.
+        assert!(reject_declared_oversize(&content_length("10, 10")).is_ok());
+    }
+
+    #[test]
+    fn waiter_cap_sheds_excess_with_queue_full() {
+        // F-009: fill the cap; the next entry is shed with ProveQueueFull; a slot frees on drop.
+        let waiters = Arc::new(Semaphore::new(2));
+        let g1 = try_enter(waiters.clone()).expect("slot 1");
+        let _g2 = try_enter(waiters.clone()).expect("slot 2");
+        assert!(matches!(
+            try_enter(waiters.clone()),
+            Err(ProveError::ProveQueueFull)
+        ));
+        drop(g1);
+        assert!(try_enter(waiters.clone()).is_ok(), "slot freed on drop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn body_not_read_until_permit_available() {
+        // F-009 ordering: with zero prove permits, even a READY body must not be returned — the
+        // permit gates the read (proves permit-before-body, not merely that the guard is live).
+        let sem = Arc::new(Semaphore::new(0));
+        let fut = acquire_and_read_body(
+            sem,
+            Body::from(Bytes::from_static(b"ready")),
+            1024,
+            Duration::from_secs(30),
+        );
+        tokio::pin!(fut);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(60), &mut fut)
+                .await
+                .is_err(),
+            "acquire_and_read_body must not resolve without a prove permit"
+        );
     }
 
     #[tokio::test]

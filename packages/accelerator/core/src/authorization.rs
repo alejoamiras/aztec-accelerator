@@ -280,7 +280,10 @@ impl AuthorizationManager {
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-            .is_some_and(|h| matches!(h.trim_end_matches('.'), "localhost" | "127.0.0.1" | "[::1]"))
+            // No trailing-dot trim: F-011 makes `canonicalize_origin` reject dotted hosts, so a
+            // CanonicalOrigin never carries one. Matching the exact host keeps this consistent for
+            // any direct caller too (a dotted `localhost.` is NOT auto-approved).
+            .is_some_and(|h| matches!(h.as_str(), "localhost" | "127.0.0.1" | "[::1]"))
     }
 
     /// Returns true if the origin is approved: in the persisted allowlist, OR — only when

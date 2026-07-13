@@ -70,19 +70,53 @@ fn home_dir_fallback() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
-/// Create the per-prove temp workspace. On Unix the directory is created `0o700` (owner-only)
-/// at the creation syscall — never write-then-chmod — so the private witness never has a
-/// world-traversable window (F-003). `tempfile::tempdir()` alone applies no mode and inherits
-/// the umask default (typically `0o755`). Windows relies on inherited temp-dir ACLs.
+/// Per-user private base for prove workspaces: `<data-local>/aztec-accelerator/prove-tmp`, created
+/// owner-only. Using our OWN per-user directory (not the shared OS temp) keeps the witness off a
+/// world-readable / shared `$TMPDIR`/`%TEMP%` and out of a non-sticky temp parent where an
+/// attacker could replace an ancestor between creation and use (F-003 hardening). `None` if no
+/// data-local dir is resolvable (caller falls back to OS temp).
+fn prove_tmp_parent() -> Option<PathBuf> {
+    let base = dirs::data_local_dir()?
+        .join("aztec-accelerator")
+        .join("prove-tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&base)
+            .ok()?;
+        // Tighten even if it pre-existed with a looser mode.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).ok()?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&base).ok()?; // %LOCALAPPDATA% is already per-user on Windows
+    Some(base)
+}
+
+/// Create the per-prove temp workspace under the per-user private base (see `prove_tmp_parent`).
+/// On Unix the directory is created `0o700` (owner-only) at the creation syscall — never
+/// write-then-chmod — so the private witness never has a world-traversable window (F-003).
+/// `tempfile::tempdir()` alone applies no mode and inherits the umask default (typically `0o755`).
+/// Falls back to the OS temp dir (still `0o700` on Unix) only if no per-user dir is resolvable.
 fn create_prove_tempdir() -> std::io::Result<tempfile::TempDir> {
     let mut builder = tempfile::Builder::new();
-    builder.prefix("aztec-accelerator-prove-");
+    builder.prefix("prove-");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
-    builder.tempdir()
+    match prove_tmp_parent() {
+        Some(parent) => builder.tempdir_in(parent),
+        None => {
+            tracing::warn!(
+                "No per-user data dir for a private prove workspace; using OS temp (0o700 on Unix)"
+            );
+            builder.tempdir()
+        }
+    }
 }
 
 /// Write the proving witness (private ZK inputs) with mode `0o600` supplied to the creation
