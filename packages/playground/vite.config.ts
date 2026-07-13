@@ -61,8 +61,14 @@ function bbWorkerPlugin(): Plugin {
 
         if (req.url.includes(".vite/deps")) {
           const basename = req.url.split("?")[0].split("/").pop();
-          const realPath = basename && workerFiles[basename];
-          if (realPath) req.url = `/@fs/${realPath}`;
+          // Object.hasOwn: don't let basenames like "constructor" hit Object.prototype.
+          // Note the generic "worker.js" key would also claim any OTHER optimized dep
+          // spawning `new URL('./worker.js', import.meta.url)` — log so a mis-redirect
+          // is visible instead of silently serving the wrong worker.
+          if (basename && Object.hasOwn(workerFiles, basename)) {
+            server.config.logger.info(`[bb-worker-redirect] ${req.url} → ${workerFiles[basename]}`);
+            req.url = `/@fs/${workerFiles[basename]}`;
+          }
         }
         next();
       });
@@ -84,11 +90,15 @@ function sqliteWasmAssetsPlugin(): Plugin {
     name: "sqlite3mc-unhashed-assets",
     apply: "build",
     generateBundle() {
+      // Resolve through @aztec/kv-store's own require chain (like bbWorkerPlugin does for
+      // bb.js) so the emitted bytes always match the copy the bundled glue JS came from,
+      // even if hoisting ever leaves two @aztec/sqlite3mc-wasm versions in the tree.
+      const kvRequire = createRequire(require.resolve("@aztec/kv-store/sqlite-opfs"));
       for (const file of ["sqlite3.wasm", "sqlite3-opfs-async-proxy.js"]) {
         this.emitFile({
           type: "asset",
           fileName: `assets/${file}`,
-          source: readFileSync(require.resolve(`@aztec/sqlite3mc-wasm/vendor/jswasm/${file}`)),
+          source: readFileSync(kvRequire.resolve(`@aztec/sqlite3mc-wasm/vendor/jswasm/${file}`)),
         });
       }
     },
@@ -129,19 +139,11 @@ export default defineConfig(({ mode, command }) => {
                 path: require.resolve("msgpackr/index-no-eval"),
               }));
               build.onResolve({ filter: /^#ordered-binary$/ }, () => {
+                // kvEntry is .../dest/sqlite-opfs/index.js — resolve relative to it
+                // (platform-safe; substring-slicing the path breaks on Windows separators).
                 const kvEntry = require.resolve("@aztec/kv-store/sqlite-opfs");
-                const kvRoot = kvEntry.slice(
-                  0,
-                  kvEntry.indexOf("@aztec/kv-store/") + "@aztec/kv-store/".length,
-                );
                 return {
-                  path: resolve(
-                    kvRoot,
-                    "dest",
-                    "sqlite-opfs",
-                    "internal",
-                    "ordered-binary-browser.js",
-                  ),
+                  path: resolve(kvEntry, "..", "internal", "ordered-binary-browser.js"),
                 };
               });
             },

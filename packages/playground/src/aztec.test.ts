@@ -50,6 +50,17 @@ describe("checkAztecNode", () => {
   });
 });
 
+// Real-node integration check: mocks missed the 5.0.0 GET-/status-405 change that broke
+// the deployed playground — this closes that loop against an actual node when one is
+// configured (AZTEC_NODE_URL=https://... bun test src/aztec.test.ts).
+describe.skipIf(!process.env.AZTEC_NODE_URL)("checkAztecNode (live node)", () => {
+  test("real node answers the node_getNodeInfo probe", async () => {
+    const result = await checkAztecNode();
+    expect(result.reachable).toBe(true);
+    expect(result.nodeVersion).toBeDefined();
+  });
+});
+
 // ── checkAccelerator ──
 describe("checkAccelerator", () => {
   test("returns true when health check succeeds", async () => {

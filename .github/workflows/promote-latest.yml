@@ -16,7 +16,9 @@ on:
         required: true
         type: string
 
-# Shared with _publish-sdk.yml: npm mutations queue, never cancel.
+# Shared with _publish-sdk.yml: an in-flight npm mutation is never canceled. Caveat
+# (GitHub semantics): at most ONE run waits per group — a newer dispatch replaces a
+# still-queued run; confirm your run started after dispatching.
 concurrency:
   group: publish-npm
   cancel-in-progress: false
