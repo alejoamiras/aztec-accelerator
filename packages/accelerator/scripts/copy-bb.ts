@@ -67,6 +67,10 @@ export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
   // release (5.5 MB gzip, bb.exe only). Required by the rc.1→rc.2 lockfile bump so the Windows
   // Prebuild/Build Smoke gates can re-fetch + verify; without it resolveWindowsBbChecksum throws.
   "5.0.0-rc.2": "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
+  // @aztec/bb.js 5.0.0 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.0 stable
+  // release; matches the GitHub release asset digest. The Windows Prebuild/Build Smoke gates
+  // independently re-fetch + verify.
+  "5.0.0": "ec58f1d0c0b7392475e5a6477dcde0717bf64563963030d416151a534ca13e96",
 };
 
 export function windowsBbReleaseTag(version: string): string {

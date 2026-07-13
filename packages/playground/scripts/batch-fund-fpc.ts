@@ -19,7 +19,7 @@ import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { L1FeeJuicePortalManager } from "@aztec/aztec.js/ethereum";
 import { FeeJuicePaymentMethodWithClaim } from "@aztec/aztec.js/fee";
-import { Fr } from "@aztec/aztec.js/fields";
+import { Fq, Fr } from "@aztec/aztec.js/fields";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
 import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import { createLogger } from "@aztec/foundation/log";
@@ -247,7 +247,7 @@ const wallet = await EW.create(node, {
     proverOrOptions: new BBLazyPrivateKernelProver(new WASMSimulator()),
   },
 });
-const accountManager = await wallet.createSchnorrAccount(Fr.random(), Fr.random());
+const accountManager = await wallet.createSchnorrAccount(Fr.random(), Fr.random(), Fq.random());
 const deployerAddress = accountManager.address;
 console.log(`  Deployer: ${deployerAddress.toString()}`);
 

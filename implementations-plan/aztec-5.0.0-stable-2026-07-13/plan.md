@@ -37,7 +37,7 @@ Same everything, but hold ONLY the `latest` promotion until 2026-07-20 (5.0.0's 
 
 ## Phases
 
-### P1 — Bump + migrate + typecheck-enablement + lockfile (local min-age override)
+### P1 ✓ — Bump + migrate + typecheck-enablement + lockfile (local min-age override) — gate passed 2026-07-13
 
 - `bun run aztec:update 5.0.0` — post-#372 "full recipe": rewrites all 24 pins (11 sdk + 13 playground), auto-bumps `CRS_CACHE_VERSION`, auto-pins the Windows bb 5.0.0 checksum (soft-fails with instructions), prints the FPC reminder. **Zero-skip gate** (both auditors; all 13 distinct `@aztec` packages verified published at 5.0.0, so skips = a red flag): tool output reports zero skips AND `grep -rn '"@aztec/' packages/*/package.json` shows every pin exactly `5.0.0`.
 - **Migrate all 5 `createSchnorrAccount` sites** (+ `Fq` imports per file, incl. `e2e-helpers.ts`): `aztec.ts:473`, `:649`, `e2e-helpers.ts:25`, `deploy-sponsored-fpc.ts:149`, `batch-fund-fpc.ts:250`. Checkable: `grep -rn createSchnorrAccount packages | grep -v node_modules` shows every call passing a signing key.
@@ -47,7 +47,7 @@ Same everything, but hold ONLY the `latest` promotion until 2026-07-20 (5.0.0's 
 - **Lock-diff scrutiny (concrete, per fable S3):** diff `bun.lock`; only `@aztec/*` versions may change; for each new/changed non-`@aztec` entry run `npm view <pkg>@<ver> time --json` and flag anything published after **2026-07-06**. **CI-parity:** `bun install --frozen-lockfile` exits 0.
 - Fix any additional tsc-surfaced breaks (log in lessons; `packages/sdk/MIGRATION.md` entry only if the SDK's own API is forced to change — not expected).
 
-**Validation gate:** override-install then frozen-install both exit 0; zero skips + all pins `5.0.0`; lock-diff clean (with the `npm view time` check on any stranger); `bun run test` exit 0 (lint + typecheck now incl. playground src + unit); `bun run --cwd packages/playground build` exit 0; `bun run --cwd packages/playground typecheck:scripts` exit 0; `bun run --cwd packages/playground test:e2e` (Playwright mocked, 28 tests) green; `CRS_CACHE_VERSION` reads `5.0.0`; signing-key grep clean. Layers: lint · typecheck (sdk + playground src + scripts) · unit · UI-mock e2e.
+**Validation gate:** override-install then frozen-install both exit 0; zero skips + all pins `5.0.0`; lock-diff clean (with the `npm view time` check on any stranger); `bun run test` exit 0 (lint + typecheck now incl. playground src + unit); `bun run --cwd packages/playground build` exit 0; `bun run --cwd packages/playground typecheck:scripts` exit 0; `bun run --cwd packages/playground test:e2e` (Playwright mocked project — 8 tests; the repo's "28 Playwright tests" counts all projects) green; `CRS_CACHE_VERSION` reads `5.0.0`; signing-key grep clean. Layers: lint · typecheck (sdk + playground src + scripts) · unit · UI-mock e2e. **RESULT: all green (see lessons/phase-1.md — includes the kv-store/Vite dev-server fix that P3b's smoke depends on).**
 
 ### P2 — Promotion workflow + publish hardening + land the PR: native-bb-5.0.0 e2e + runtime-download gate
 
