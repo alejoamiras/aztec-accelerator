@@ -111,7 +111,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.desktop == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    # 30, not 20: a cold Windows Rust build (this leg has its own cache key) can run ~15-18 min before
+    # the fast read-only trust test even starts.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
