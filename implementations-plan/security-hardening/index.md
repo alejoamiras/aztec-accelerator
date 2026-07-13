@@ -5,8 +5,8 @@ Loop source-of-truth. Status: PENDING · IN-PROGRESS · DONE · BLOCKED. Pick th
 | # | Cluster / branch | Findings | Tier | Deps | Status | PR | Notes |
 |---|---|---|---|---|---|---|---|
 | C0 | `sechard/ci-integration-gates` | (bootstrap) | light | — | DONE | #377 | gates now run on PRs into security-hardening; 3/4 dispatch green, actionlint dispatch failed on a PRE-EXISTING `shellcheck infra/*.sh` glob bug (no `.sh` in infra/; only bites on dispatch, skips on real PRs) → fold fix into C3 |
-| C1 | `sechard/workflow-input-hardening` | F-006 | light | C0 | PENDING | — | validate `dist_tag` + env-quote before token steps |
-| C2 | `sechard/core-request-safety` | F-003, F-009, F-011 | mid | C0 | IN-PROGRESS | #379 | perms-at-creation; permit-before-body+30s timeout + waiter-cap(429); reject trailing-dot. Post-impl audit R1 CHANGES→5 folded; R2 waiter-cap+dotted RESOLVED, #3/#5 folded, #2-Windows-DACL DEFERRED + crash-leftover ACCEPTED (see lessons/phase-C2.md). Pending CI+merge |
+| C1 | `sechard/workflow-input-hardening` | F-006 | light | C0 | IN-PROGRESS | — | validate `dist_tag` + env-quote before token steps. GATE 1 /blueprint light in progress |
+| C2 | `sechard/core-request-safety` | F-003, F-009, F-011 | mid | C0 | DONE | #379 | MERGED e4e791b. perms-at-creation; permit-before-body+30s timeout + waiter-cap(429); reject trailing-dot. Post-impl audit R1 CHANGES→5 folded; R2 waiter-cap+dotted RESOLVED, #3/#5 folded, #2-Windows-DACL DEFERRED + crash-leftover ACCEPTED (lessons/phase-C2.md). Note: blueprint GATE waived for this retrofit cluster per user direction; C1+ blueprint-first |
 | C3 | `sechard/action-pinning` | F-015 | mid | C0 | PENDING | — | SHA-pin all `uses:` incl GitHub-owned; pin actionlint dl; kill mutable bun/rust; **+ fix `shellcheck infra/*.sh` glob (nullglob/guard) discovered in C0** |
 | C4 | `sechard/updater-rollback` | F-004 | deep | C0 | PENDING | — | signed manifest envelope in latest.json + monotonic floor |
 | C5 | `sechard/infra-deploy-authz` | F-005 | deep | C0 | PENDING | — | 4 scoped roles; landing `--delete` exclude; drop `chore/*` OIDC; human applies |
