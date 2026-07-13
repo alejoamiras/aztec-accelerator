@@ -37,6 +37,21 @@ jobs:
       id-token: write # needed for --provenance (Sigstore attestation)
       contents: write
     steps:
+      # F-006: reject a malformed dist_tag BEFORE checkout or any token-bearing step. Job perms
+      # (id-token/contents: write) and checkout-persisted git credentials are live from step 1, so
+      # validation must come first. Whole-string bash match (not grep, which would pass a multiline
+      # value with one valid line); must start with a lowercase letter, so no leading '-' (npm
+      # option/argument injection) and no semver-like tag. Read via env, never interpolated into shell.
+      - name: Validate dist_tag
+        env:
+          DIST_TAG: ${{ inputs.dist_tag }}
+          LC_ALL: C
+        run: |
+          if [[ ! "$DIST_TAG" =~ ^[a-z][a-z0-9._-]*$ ]]; then
+            echo "::error::Invalid dist_tag '$DIST_TAG' (must match ^[a-z][a-z0-9._-]*\$)"
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -76,17 +91,21 @@ jobs:
 
       - name: Determine SDK publish version
         id: sdk-version
+        env:
+          AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
         run: |
-          VERSION=$(bun scripts/get-sdk-publish-version.ts "${{ steps.aztec-version.outputs.version }}")
+          VERSION=$(bun scripts/get-sdk-publish-version.ts "$AZTEC_VERSION")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "SDK publish version: $VERSION"
 
       - name: Set SDK version and fix exports for npm
         working-directory: packages/sdk
+        env:
+          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
         run: |
           node -e "
             const p = require('./package.json');
-            p.version = '${{ steps.sdk-version.outputs.version }}';
+            p.version = process.env.SDK_VERSION;
             p.main = './dist/index.js';
             p.types = './dist/index.d.ts';
             p.exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } };
@@ -98,32 +117,37 @@ jobs:
         working-directory: packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public --tag ${{ inputs.dist_tag }} --workspaces=false
+          DIST_TAG: ${{ inputs.dist_tag }}
+        # --tag="$DIST_TAG" (=-form + quoted): DIST_TAG is validated + inert shell data, and the
+        # =-form stops a value from being parsed as a separate npm option.
+        run: npm publish --provenance --access public --tag="$DIST_TAG" --workspaces=false
 
       - name: Also tag as 'latest' on npm
         if: inputs.latest && inputs.dist_tag != 'latest'
         working-directory: packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${{ steps.sdk-version.outputs.version }}" latest
+          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
+        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${SDK_VERSION}" latest
 
       - name: Create git tag and GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
+          AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
+          DIST_TAG: ${{ inputs.dist_tag }}
         run: |
-          VERSION="${{ steps.sdk-version.outputs.version }}"
-          AZTEC_VERSION="${{ steps.aztec-version.outputs.version }}"
-          TAG="@alejoamiras/aztec-accelerator@${VERSION}"
+          TAG="@alejoamiras/aztec-accelerator@${SDK_VERSION}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "$TAG" || true
           git push origin "$TAG" || true
 
-          if [ "$VERSION" = "$AZTEC_VERSION" ]; then
-            NOTES="Aligned with Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
+          if [ "$SDK_VERSION" = "$AZTEC_VERSION" ]; then
+            NOTES="Aligned with Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
           else
-            NOTES="SDK revision for Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
+            NOTES="SDK revision for Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
           fi
 
           # ALWAYS --latest=false: `inputs.latest` governs the npm dist-tag only. The repo's GitHub
