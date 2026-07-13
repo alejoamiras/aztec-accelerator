@@ -70,6 +70,31 @@ function bbWorkerPlugin(): Plugin {
   };
 }
 
+/**
+ * Vite plugin: emit UNHASHED copies of @aztec/sqlite3mc-wasm's runtime assets.
+ *
+ * The emscripten loader inside sqlite3mc resolves `sqlite3.wasm` (and the OPFS
+ * async-proxy script) through a dynamic `locateFile` fallback that bundlers can't
+ * rewrite — at runtime that becomes a bare `/assets/sqlite3.wasm` request. Without
+ * these copies the SPA fallback answers with index.html and WebAssembly.compile
+ * dies on the MIME type (caught by the production-build smoke).
+ */
+function sqliteWasmAssetsPlugin(): Plugin {
+  return {
+    name: "sqlite3mc-unhashed-assets",
+    apply: "build",
+    generateBundle() {
+      for (const file of ["sqlite3.wasm", "sqlite3-opfs-async-proxy.js"]) {
+        this.emitFile({
+          type: "asset",
+          fileName: `assets/${file}`,
+          source: readFileSync(require.resolve(`@aztec/sqlite3mc-wasm/vendor/jswasm/${file}`)),
+        });
+      }
+    },
+  };
+}
+
 export default defineConfig(({ mode, command }) => {
   const allEnv = loadEnv(mode, process.cwd(), "");
   const env = {
@@ -87,6 +112,7 @@ export default defineConfig(({ mode, command }) => {
         globals: { Buffer: true },
       }),
       bbWorkerPlugin(),
+      sqliteWasmAssetsPlugin(),
     ],
     optimizeDeps: {
       exclude: ["@aztec/noir-acvm_js", "@aztec/noir-noirc_abi"],

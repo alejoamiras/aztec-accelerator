@@ -23,31 +23,23 @@ afterEach(() => {
 });
 
 // ── checkAztecNode ──
+// Health check is the node_getNodeInfo JSON-RPC POST (5.0.0 nodes 405 a plain GET /status).
 describe("checkAztecNode", () => {
-  test("returns reachable when status responds 200", async () => {
-    let callCount = 0;
-    setFetchMock(() => {
-      callCount++;
-      if (callCount === 1) return Promise.resolve(new Response("OK", { status: 200 }));
-      // RPC call for node version
-      return Promise.resolve(
-        new Response(JSON.stringify({ result: { nodeVersion: "4.1.0-rc.2" } }), { status: 200 }),
-      );
-    });
-    expect(await checkAztecNode()).toEqual({ reachable: true, nodeVersion: "4.1.0-rc.2" });
+  test("returns reachable with version when the RPC responds", async () => {
+    setFetchMock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ result: { nodeVersion: "5.0.0" } }), { status: 200 }),
+      ),
+    );
+    expect(await checkAztecNode()).toEqual({ reachable: true, nodeVersion: "5.0.0" });
   });
 
-  test("returns reachable without version when RPC fails", async () => {
-    let callCount = 0;
-    setFetchMock(() => {
-      callCount++;
-      if (callCount === 1) return Promise.resolve(new Response("OK", { status: 200 }));
-      return Promise.reject(new Error("rpc failed"));
-    });
+  test("returns reachable without version when the RPC responds without a result", async () => {
+    setFetchMock(() => Promise.resolve(new Response(JSON.stringify({}), { status: 200 })));
     expect(await checkAztecNode()).toEqual({ reachable: true });
   });
 
-  test("returns not reachable when status responds 500", async () => {
+  test("returns not reachable when the RPC responds 500", async () => {
     setFetchMock(() => Promise.resolve(new Response("", { status: 500 })));
     expect(await checkAztecNode()).toEqual({ reachable: false });
   });

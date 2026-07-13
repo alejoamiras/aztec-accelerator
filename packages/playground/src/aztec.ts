@@ -98,29 +98,18 @@ export async function checkAccelerator(): Promise<boolean> {
 }
 
 export async function checkAztecNode(): Promise<{ reachable: boolean; nodeVersion?: string }> {
+  // Probe via JSON-RPC: 5.0.0 nodes reject a plain GET /status with 405, so the
+  // node_getNodeInfo POST (which we needed for the version anyway) is the health check.
   try {
-    const res = await fetch(`${AZTEC_NODE_URL}/status`, {
+    const rpc = await fetch(AZTEC_NODE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "node_getNodeInfo", params: [], id: 1 }),
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return { reachable: false };
-
-    // Try to get the node version via JSON-RPC
-    try {
-      const rpc = await fetch(AZTEC_NODE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "node_getNodeInfo", params: [], id: 1 }),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (rpc.ok) {
-        const data = await rpc.json();
-        return { reachable: true, nodeVersion: data.result?.nodeVersion };
-      }
-    } catch {
-      // RPC failed but /status was ok — node is reachable but version unknown
-    }
-
-    return { reachable: true };
+    if (!rpc.ok) return { reachable: false };
+    const data = await rpc.json();
+    return { reachable: true, nodeVersion: data.result?.nodeVersion };
   } catch {
     return { reachable: false };
   }
