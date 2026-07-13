@@ -41,14 +41,18 @@ jobs:
       # (id-token/contents: write) and checkout-persisted git credentials are live from step 1, so
       # validation must come first. Whole-string bash match (not grep, which would pass a multiline
       # value with one valid line); must start with a lowercase letter, so no leading '-' (npm
-      # option/argument injection) and no semver-like tag. Read via env, never interpolated into shell.
+      # option/argument injection) and no leading digit. Read via env, never interpolated into shell.
+      # (A still-invalid tag like a semver range that slips the regex fails later at npm — not an injection.)
       - name: Validate dist_tag
         env:
           DIST_TAG: ${{ inputs.dist_tag }}
           LC_ALL: C
         run: |
           if [[ ! "$DIST_TAG" =~ ^[a-z][a-z0-9._-]*$ ]]; then
-            echo "::error::Invalid dist_tag '$DIST_TAG' (must match ^[a-z][a-z0-9._-]*\$)"
+            # Do NOT echo the rejected value: a malformed multiline dist_tag could otherwise inject
+            # ::workflow-commands:: into the log stream. The value is already masked/available to the
+            # operator via the dispatch inputs.
+            echo "::error::Invalid dist_tag (must match ^[a-z][a-z0-9._-]*\$)"
             exit 1
           fi
 
