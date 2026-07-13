@@ -1,18 +1,19 @@
 //! Windows trust backend — the CurrentUser `Root` store via `certutil.exe` (absolute System32 path).
 //!
 //! Design (plan D3/D4, codex/audit): `certutil.exe` is a system binary (zero new Rust deps; the
-//! established shell-out-by-absolute-path pattern, cf. `crash_recovery::schtasks_exe`). We lean ONLY
-//! on exit codes (`-verifystore` non-zero if absent — locale-independent) and, for identity-specific
-//! deletes during rotation, the cert's **serial number** parsed from the PEM with the already-present
-//! `x509-parser` (never scraping localized stdout). Uninstall deletes by **CN** (only our anchor
-//! remains post-rotation, and the NSIS hook has no `x509-parser` at uninstall time).
+//! established shell-out-by-absolute-path pattern, cf. `crash_recovery::schtasks_exe`). Everything is
+//! exit-code-driven (locale-independent), never stdout-scraping.
 //!
-//! No GUI dialog is guaranteed for `-addstore Root` (it may be silent) — so the wizard's Start click
-//! is the consent ceremony, NOT a Windows prompt (audit R8).
+//! Presence/trust (`install` verify, `status`, `is_ca_trusted`, `remove`) is matched by **CN**
+//! (`-store`/`-delstore Root "Aztec Accelerator Local CA"`) — the store holds no foreign cert with our
+//! CN, so a CN match is unambiguous, and this keeps the common paths independent of certutil's exact
+//! serial-string format. The **serial** (parsed from the PEM via `x509-parser`) is used ONLY where CN
+//! is ambiguous: rotation's delete-the-OLD-anchor (old + new briefly share the CN — D4). That serial
+//! path is exercised by the manual release runbook, not headless CI.
 //!
-//! NOTE (build): this module is `#[cfg(target_os = "windows")]`, so it is first compiled on the
-//! Windows CI leg. The exact serial-string format `certutil` accepts for `-delstore` is confirmed by
-//! the Phase-4 `trust_windows` CI spike; the arg construction here is the candidate under test.
+//! Consent: `certutil -user -addstore Root` raises the Windows root-CA trust dialog (that IS the
+//! user's consent), so the CI integration test seeds non-interactively via PowerShell
+//! `Import-Certificate` and exercises verify/remove instead (P4 spike I3; see `tests/trust_windows.rs`).
 
 use super::{AnchorRef, StoreStatus, TrustReport};
 use std::path::{Path, PathBuf};
@@ -59,23 +60,28 @@ fn add_store(ca_cert: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Verify our anchor is present in the store by serial (exit code only — locale-independent).
-fn verify_by_serial(serial: &str) -> bool {
+/// Is OUR anchor present in the store, matched by CN (exit code only — locale-independent). The Root
+/// store means trusted, so presence == trusted. Uses CN (not serial) so the common paths don't depend
+/// on the exact certutil serial-string format; the store is empty of foreign "Aztec Accelerator Local
+/// CA" certs, so a CN match is unambiguous for the "is it there" question.
+fn is_present_by_cn() -> bool {
     Command::new(certutil_exe())
-        .args(["-user", "-verifystore", "Root", serial])
+        .args(["-user", "-store", "Root", CA_CN])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
+/// Delete the OLD anchor SPECIFICALLY, by serial — used only during rotation, where old + new share
+/// the CN so delete-by-CN would nuke the new one too (D4). This is the one place the serial-string
+/// format matters; it's exercised by the manual release runbook, not headless CI.
 fn delete_by_serial(serial: &str) {
     let _ = Command::new(certutil_exe())
         .args(["-user", "-delstore", "Root", serial])
         .output();
 }
 
-/// Uninstall path: delete by CN (removes every anchor named `CA_CN` — only ours, and post-rotation
-/// only one remains). Used by remove() + the `--remove-ca-trust` CLI the NSIS uninstaller calls.
+/// Delete every anchor named `CA_CN` (uninstall / Settings "Remove trust"). No dialog on delete.
 fn delete_by_cn() {
     let _ = Command::new(certutil_exe())
         .args(["-user", "-delstore", "Root", CA_CN])
@@ -83,10 +89,7 @@ fn delete_by_cn() {
 }
 
 pub fn install(ca_cert: &Path) -> TrustReport {
-    let ok = add_store(ca_cert)
-        && cert_serial(ca_cert)
-            .map(|s| verify_by_serial(&s))
-            .unwrap_or(false);
+    let ok = add_store(ca_cert) && is_present_by_cn();
     let status = if ok {
         StoreStatus::ok(STORE)
     } else {
@@ -100,29 +103,23 @@ pub fn install(ca_cert: &Path) -> TrustReport {
     }
 }
 
-pub fn status(ca_cert: &Path) -> TrustReport {
-    let installed = cert_serial(ca_cert)
-        .map(|s| verify_by_serial(&s))
-        .unwrap_or(false);
+pub fn status(_ca_cert: &Path) -> TrustReport {
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed,
+            installed: is_present_by_cn(),
             detail: None,
         }],
     }
 }
 
-pub fn remove(ca_cert: &Path) -> TrustReport {
-    // Uninstall: delete by CN (covers a lingering pre-rotation anchor too).
+pub fn remove(_ca_cert: &Path) -> TrustReport {
+    // Uninstall: delete ALL our anchors by CN (covers rotation leftovers too).
     delete_by_cn();
-    let still = cert_serial(ca_cert)
-        .map(|s| verify_by_serial(&s))
-        .unwrap_or(false);
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: still,
+            installed: is_present_by_cn(),
             detail: None,
         }],
     }
@@ -138,9 +135,11 @@ pub fn trust_new_anchor(staged_ca: &Path) -> Result<(), String> {
     if !add_store(staged_ca) {
         return Err("certutil -addstore failed for the new anchor".into());
     }
-    match cert_serial(staged_ca) {
-        Some(s) if verify_by_serial(&s) => Ok(()),
-        _ => Err("new anchor not verifiable in CurrentUser Root after add".into()),
+    // Just-added anchor is present (by CN — the new one is among the matches).
+    if is_present_by_cn() {
+        Ok(())
+    } else {
+        Err("new anchor not present in CurrentUser Root after add".into())
     }
 }
 
