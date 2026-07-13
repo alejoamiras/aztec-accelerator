@@ -1,32 +1,40 @@
 name: _Publish SDK (reusable)
 
+# npm `latest` NEVER moves through this workflow's direct dispatch: the dispatch inputs
+# deliberately omit `latest` and constrain `dist_tag` to a non-latest choice list, and the
+# guard step below hard-fails on anything else (both trigger paths). Promotion is a separate,
+# smoke-gated, tag-only step: promote-latest.yml.
 on:
   workflow_dispatch:
     inputs:
       dist_tag:
-        description: "npm dist-tag (e.g. testnet, nightlies)"
+        description: "npm dist-tag"
         required: true
-        type: string
+        type: choice
+        options:
+          - testnet
+          - nightlies
         default: testnet
-      latest:
-        description: "Also set this version as npm 'latest' and mark GitHub release as --latest"
-        required: false
-        type: boolean
-        default: false
   workflow_call:
     inputs:
       dist_tag:
-        description: "npm dist-tag (e.g. testnet, nightlies)"
+        description: "npm dist-tag (testnet or nightlies — guarded below)"
         required: true
         type: string
       latest:
-        description: "Also set this version as npm 'latest' and mark GitHub release as --latest"
+        description: "Also dist-tag this version as npm 'latest' (callers only; releases stay --latest=false)"
         required: false
         type: boolean
         default: false
     secrets:
       NPM_TOKEN:
         required: true
+
+# Shared with promote-latest.yml: npm mutations queue, never cancel — a canceled
+# in-flight run can strand an irreversible npm publish half-done.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -37,6 +45,15 @@ jobs:
       id-token: write # needed for --provenance (Sigstore attestation)
       contents: write
     steps:
+      - name: Guard dist_tag (npm 'latest' moves only via promote-latest.yml)
+        env:
+          DIST_TAG: ${{ inputs.dist_tag }}
+        run: |
+          case "$DIST_TAG" in
+            testnet|nightlies) echo "dist_tag=$DIST_TAG ok" ;;
+            *) echo "::error::dist_tag '$DIST_TAG' is not allowed here"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -76,17 +93,21 @@ jobs:
 
       - name: Determine SDK publish version
         id: sdk-version
+        env:
+          AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
         run: |
-          VERSION=$(bun scripts/get-sdk-publish-version.ts "${{ steps.aztec-version.outputs.version }}")
+          VERSION=$(bun scripts/get-sdk-publish-version.ts "$AZTEC_VERSION")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "SDK publish version: $VERSION"
 
       - name: Set SDK version and fix exports for npm
         working-directory: packages/sdk
+        env:
+          VERSION: ${{ steps.sdk-version.outputs.version }}
         run: |
           node -e "
             const p = require('./package.json');
-            p.version = '${{ steps.sdk-version.outputs.version }}';
+            p.version = process.env.VERSION;
             p.main = './dist/index.js';
             p.types = './dist/index.d.ts';
             p.exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } };
@@ -94,25 +115,31 @@ jobs:
             require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
           "
 
+      # If this step fails AFTER npm accepted the publish, never blind-redispatch: check
+      # `npm view @alejoamiras/aztec-accelerator versions` first — a redispatch mints a
+      # `-revision.N` version by design (get-sdk-publish-version.ts).
       - name: Publish to npm
         working-directory: packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public --tag ${{ inputs.dist_tag }} --workspaces=false
+          DIST_TAG: ${{ inputs.dist_tag }}
+        run: npm publish --provenance --access public --tag "$DIST_TAG" --workspaces=false
 
       - name: Also tag as 'latest' on npm
         if: inputs.latest && inputs.dist_tag != 'latest'
         working-directory: packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${{ steps.sdk-version.outputs.version }}" latest
+          VERSION: ${{ steps.sdk-version.outputs.version }}
+        run: npm dist-tag add "@alejoamiras/aztec-accelerator@$VERSION" latest
 
       - name: Create git tag and GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.sdk-version.outputs.version }}
+          AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
+          DIST_TAG: ${{ inputs.dist_tag }}
         run: |
-          VERSION="${{ steps.sdk-version.outputs.version }}"
-          AZTEC_VERSION="${{ steps.aztec-version.outputs.version }}"
           TAG="@alejoamiras/aztec-accelerator@${VERSION}"
 
           git config user.name "github-actions[bot]"
@@ -121,9 +148,9 @@ jobs:
           git push origin "$TAG" || true
 
           if [ "$VERSION" = "$AZTEC_VERSION" ]; then
-            NOTES="Aligned with Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
+            NOTES="Aligned with Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
           else
-            NOTES="SDK revision for Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
+            NOTES="SDK revision for Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
           fi
 
           # ALWAYS --latest=false: `inputs.latest` governs the npm dist-tag only. The repo's GitHub

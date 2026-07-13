@@ -9,9 +9,13 @@ on:
         type: boolean
         default: false
 
+# Queue, never cancel: a canceled in-flight run can strand an irreversible npm publish
+# half-done. If publish-sdk fails AFTER its npm publish step, never blind-redispatch —
+# check `npm view @alejoamiras/aztec-accelerator versions` first; a redispatch mints a
+# `-revision.N` version by design.
 concurrency:
   group: publish-testnet
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   id-token: write
@@ -40,11 +44,15 @@ jobs:
     uses: ./.github/workflows/_e2e.yml
     with:
       ref: ${{ github.sha }}
+      # Publish-time gate exercises the NATIVE bb path (asserts `transmit`), not just the
+      # WASM fallback — the artifact being published deserves the same proof as the PR gate.
+      build_accelerator: true
 
   publish-sdk:
     needs: [changes, e2e]
-    # Skip when deploying the playground only. latest:false — while @aztec deps are rc-labeled the
-    # SDK ships on the `testnet` dist-tag, never npm `latest` (which stays on the last stable line).
+    # Skip when deploying the playground only. latest:false — the SDK publishes on the
+    # `testnet` dist-tag; npm `latest` moves ONLY via promote-latest.yml, after the live
+    # acceptance smoke.
     if: (needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch') && inputs.skip_sdk_publish != true
     uses: ./.github/workflows/_publish-sdk.yml
     with:
