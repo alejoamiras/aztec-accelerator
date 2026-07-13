@@ -15,7 +15,7 @@
     "test:e2e:production-smoke": "bash scripts/test-production-smoke.sh",
     "test:e2e:smoke": "bunx playwright test --project=smoke --workers=1",
     "test:unit": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.e2e.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "dependencies": {

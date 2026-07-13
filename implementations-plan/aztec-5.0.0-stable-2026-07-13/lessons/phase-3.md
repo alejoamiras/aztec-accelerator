@@ -37,9 +37,16 @@ Tooling gotcha: scripts must run from inside `packages/playground` — a copy un
 2. **Production-only sqlite3 wasm 404 (would have broken EVERY real user of the deployed 5.0.0 playground):** the emscripten loader inside `@aztec/sqlite3mc-wasm` resolves `sqlite3.wasm` via a dynamic `locateFile` fallback that bundlers can't rewrite → at runtime the worker requests bare `/assets/sqlite3.wasm` (unhashed); rollup only emits the hashed asset; the SPA fallback answers with index.html → `WebAssembly.compile` MIME error → wallet init dead in production builds. Fix: a tiny build plugin emits UNHASHED copies of `sqlite3.wasm` + `sqlite3-opfs-async-proxy.js` alongside the hashed ones. **Repro fortune:** another agent's 5.0.0 sandbox was listening on :8080 and `vite preview` inherits `server.proxy` — so the local production smoke ran a REAL wallet init (read-only use of their node; no teardown, per run-isolation). Without that accident, the bug would only have surfaced at the post-deploy acceptance smoke.
 3. Also hit the classic squash-then-continue DIRTY conflict on the follow-up PR (branch continued past #376's squash-merge) → rebased `--onto origin/main`, force-pushed own branch. And a `git add -A` had swept Playwright-MCP session artifacts into the fix commit → removed + `.playwright-mcp/` gitignored.
 
-## Pending
-- (b) pre-publish dev:testnet transfer smoke (gates the publish)
-- (c) publish-testnet dispatch (post-merge, autonomous per Ask 1)
-- (d) registry-artifact install test + released-1.0.6 native smoke + Safari + WASM
-- (e) promote-latest dispatch (same-day per Ask 3)
-- Delete `scripts/.env` at P3 completion.
+## (c)–(e) Publish → acceptance → promote — ✅ ALL GREEN (2026-07-13 ~21:20 UTC)
+
+- **(c) Publish dispatch**: run `29285158631` at `main=507efd9d…` (recorded; nothing else queued — only unrelated open PRs #375/#374). All jobs green (incl. the new publish-time native-bb e2e via `build_accelerator: true`). SDK published as clean **`5.0.0`** on `testnet`; GitHub release `--latest=false` preserved.
+- **(d) Acceptance**:
+  - Live bundle bakes `5.0.0`, HTTP 200; SDK 5.0.0 / node 5.0.0 matched; CRS-version guard fired on first visit (evicted the rc.2 CRS).
+  - **Registry-artifact test PASS**: fresh temp project, `npm i @alejoamiras/aztec-accelerator@5.0.0`, import OK, `AcceleratorProver` constructs (publish-time exports mutation sound).
+  - **Released-1.0.6 native smoke PASS** (the production path end-to-end): app launched from /Applications (cache had rc.2 but NO 5.0.0) → live playground detected it → prove triggered **runtime download + digest-verify of bb 5.0.0** (health `available_versions` gained "5.0.0") → native prove → account deployed on testnet in 32.6s incl. the download (tx `0x13d741…849c34`). Gotcha: Playwright's fresh Chromium needed `context.grantPermissions(["local-network-access"])` — the Chrome 142+ LNA prompt (documented in #373) blocks the localhost probe in automation.
+  - **WASM pass on live site**: 16.4s deploy (tx `0x109ef2…547b78`).
+  - **Safari pass (owner-verified): PASS + deploy verified.**
+- **(e) Promote**: `promote-latest.yml` dispatched with `version=5.0.0` → dist-tags now **`latest: 5.0.0`, `testnet: 5.0.0`** (nightlies untouched).
+- `scripts/.env` + `.env.local` **deleted** at completion, per plan.
+
+LESSONS_FILE=implementations-plan/aztec-5.0.0-stable-2026-07-13/lessons/phase-3.md

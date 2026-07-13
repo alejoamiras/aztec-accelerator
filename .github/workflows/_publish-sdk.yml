@@ -21,17 +21,14 @@ on:
         description: "npm dist-tag (testnet or nightlies — guarded below)"
         required: true
         type: string
-      latest:
-        description: "Also dist-tag this version as npm 'latest' (callers only; releases stay --latest=false)"
-        required: false
-        type: boolean
-        default: false
     secrets:
       NPM_TOKEN:
         required: true
 
-# Shared with promote-latest.yml: npm mutations queue, never cancel — a canceled
-# in-flight run can strand an irreversible npm publish half-done.
+# Shared with promote-latest.yml: an in-flight npm mutation is never canceled (a canceled
+# half-done publish strands irreversible state). Caveat (GitHub semantics): at most ONE
+# run waits per group — a newer dispatch replaces a still-queued run; confirm your run
+# started after dispatching.
 concurrency:
   group: publish-npm
   cancel-in-progress: false
@@ -124,14 +121,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DIST_TAG: ${{ inputs.dist_tag }}
         run: npm publish --provenance --access public --tag "$DIST_TAG" --workspaces=false
-
-      - name: Also tag as 'latest' on npm
-        if: inputs.latest && inputs.dist_tag != 'latest'
-        working-directory: packages/sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ steps.sdk-version.outputs.version }}
-        run: npm dist-tag add "@alejoamiras/aztec-accelerator@$VERSION" latest
 
       - name: Create git tag and GitHub release
         env:
