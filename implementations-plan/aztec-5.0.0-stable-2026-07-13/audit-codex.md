@@ -75,3 +75,29 @@ Most revisions now hold, and I accept the funding pushback: testnet FJ has no me
 
 conditional approve (with conditions: prevent direct dispatch from setting or injecting `dist_tag=latest` via a strict non-latest allowlist and env indirection)
 *Post-audit note (main agent): the residual dist_tag=latest bypass condition + the .env LOW are folded into plan.md P2/P3a; codex accepted the testnet-FJ exposure pushback. Final verdict on record: conditional approve, all conditions folded.*
+
+---
+
+# Codex post-implementation audit (mid, xhigh, read-only) — `conditional approve`, all conditions executed
+
+Session: 019f5d81-5c90-7691-a4d5-74c5b8d98cf2 — 2026-07-13, post-ship. Audited the implementation layer + the 40-agent code-review cleanup commit as distinct artifacts, plus the two skipped-finding rationales (both judged sound — reachability 'stronger than stated').
+
+The cleanup commit is technically sound except for two release-control gaps.
+
+- **[HIGH — implementation layer] Nightlies can still cancel an irreversible publish.** `publish-nightlies.yml:6-8` has `cancel-in-progress: true` and calls `_publish-sdk.yml` at `:38-45`. A new nightly dispatch can therefore cancel the entire caller—including an active reusable publish—despite `_publish-sdk.yml:28-34` claiming mutations are never canceled. This can strand npm state between publish and tag/release. [GitHub confirms running workflows are canceled under this setting.](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency) Hotfix before another nightly: use `cancel-in-progress: false`; preferably enable the supported multi-run queue.
+
+- **[MEDIUM — cleanup verification] The new TypeScript graphs are not enforced by App CI.** `packages/playground/package.json:18` runs all three graphs, but `.github/workflows/app.yml:59-63` runs only Biome and `typecheck:scripts`. Add `bun run --cwd packages/playground typecheck`. I independently parsed/typechecked commit `14f1f2e`: zero diagnostics and every tracked playground TS file is included—so there is no current silent exclusion, only a future regression gap.
+
+Cleanup checks otherwise pass:
+
+- Removing `workflow_call.latest` breaks no caller; testnet and nightlies pass only `dist_tag`.
+- `inputs.skip_sdk_publish != true` is correct because dispatch Boolean inputs remain Booleans. [GitHub inputs reference.](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#inputs-context)
+- S3 ordering is correct: sync → unconditional asset re-upload with `no-cache` → invalidation (`publish-testnet.yml:98-115`). After merge, run a playground-only deployment; merging alone does not update live S3 metadata.
+- KV-resolution, Windows path resolution, and `Object.hasOwn` introduce no regression.
+
+Both skipped rationales are sound:
+
+- Reachability: stronger than stated—`initializeNode()` immediately calls the exact same `getNodeInfo()` method (`packages/playground/src/aztec.ts:172-178`), so a fallback probe would not make initialization viable.
+- CRS derivation: safe as follow-up because the bump tool already rewrites the literal (`scripts/update-aztec-version.ts:70-76,134-136`). Derivation remains worthwhile maintenance work, not a 5.0.0 hotfix.
+
+**Verdict:** conditional approve (with conditions: disable cancellation in `publish-nightlies.yml`, wire the full playground typecheck into App CI, and perform a playground-only redeploy after merge to activate the cache headers)
