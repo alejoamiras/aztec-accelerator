@@ -1,9 +1,0 @@
-[    1994ms] [WARNING] Module "tty" has been externalized for browser compatibility. Cannot access "tty.isatty" in client code. See https://vite.dev/guide/troubleshooting.html#module-externalized-for-browser-compatibility for more details. @ http://localhost:5273/node_modules/.vite/deps/chunk-WRAW7VHE.js?v=d3dec5ac:27
-[    2315ms] [ERROR] Failed to load resource: the server responded with a status of 405 (Method Not Allowed) @ http://localhost:5273/aztec/status:0
-[    2316ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:59833/health:0
-[    2316ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ https://127.0.0.1:59834/health:0
-[   86695ms] [LOG] [vite] server connection lost. Polling for restart... @ http://localhost:5273/@vite/client:866
-[   96033ms] [WARNING] Module "tty" has been externalized for browser compatibility. Cannot access "tty.isatty" in client code. See https://vite.dev/guide/troubleshooting.html#module-externalized-for-browser-compatibility for more details. @ http://localhost:5273/node_modules/.vite/deps/chunk-WRAW7VHE.js?v=d3dec5ac:27
-[   96370ms] [ERROR] Failed to load resource: the server responded with a status of 405 (Method Not Allowed) @ http://localhost:5273/aztec/status:0
-[   96371ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:59833/health:0
-[   96371ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ https://127.0.0.1:59834/health:0
