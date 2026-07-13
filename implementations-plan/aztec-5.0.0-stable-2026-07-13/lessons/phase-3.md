@@ -31,6 +31,12 @@ Tooling gotcha: scripts must run from inside `packages/playground` — a copy un
 - **Token flow: 88.5s total** — Bob deploy 26.4s (tx `0x0d21b9…313792`), TokenContract deploy 19.3s (`0x153766…9668b6`, tx `0x102e9c…2564c8`), mint 1000 ACEL to private 18.6s (tx `0x2e5b78…2e08e52d`), **private transfer 500 ACEL Alice→Bob 19.4s** (tx `0x0e784e…fd937d9`) — the note-tagging/discovery surface the changelog changed — and **balances verified Alice 500 / Bob 500**.
 - Expected noise only: accelerator health-probe connection-refusals (no accelerator running), "SDK unknown" version-mismatch warn (dev mode doesn't bake VITE_AZTEC_SDK_VERSION).
 
+## PR #378 CI round: two more REAL finds (the gates keep earning their keep)
+
+1. **Mocked-suite contract drift (my own miss):** I ran the Playwright mocked gate BEFORE making the /status→RPC fix, then didn't re-run it — CI caught it. The specs stubbed GET `/aztec/status`; rewritten to stub the `node_getNodeInfo` POST (health probe fulfilled, all other RPCs 500 so wallet init fails gracefully). Lesson: any source change after a gate run invalidates the gate — re-run before push, no exceptions.
+2. **Production-only sqlite3 wasm 404 (would have broken EVERY real user of the deployed 5.0.0 playground):** the emscripten loader inside `@aztec/sqlite3mc-wasm` resolves `sqlite3.wasm` via a dynamic `locateFile` fallback that bundlers can't rewrite → at runtime the worker requests bare `/assets/sqlite3.wasm` (unhashed); rollup only emits the hashed asset; the SPA fallback answers with index.html → `WebAssembly.compile` MIME error → wallet init dead in production builds. Fix: a tiny build plugin emits UNHASHED copies of `sqlite3.wasm` + `sqlite3-opfs-async-proxy.js` alongside the hashed ones. **Repro fortune:** another agent's 5.0.0 sandbox was listening on :8080 and `vite preview` inherits `server.proxy` — so the local production smoke ran a REAL wallet init (read-only use of their node; no teardown, per run-isolation). Without that accident, the bug would only have surfaced at the post-deploy acceptance smoke.
+3. Also hit the classic squash-then-continue DIRTY conflict on the follow-up PR (branch continued past #376's squash-merge) → rebased `--onto origin/main`, force-pushed own branch. And a `git add -A` had swept Playwright-MCP session artifacts into the fix commit → removed + `.playwright-mcp/` gitignored.
+
 ## Pending
 - (b) pre-publish dev:testnet transfer smoke (gates the publish)
 - (c) publish-testnet dispatch (post-merge, autonomous per Ask 1)
