@@ -322,8 +322,14 @@ async fn health(
 pub(crate) enum ProveError {
     InvalidVersion(String),
     PayloadTooLarge(String),
+    /// F-009: the request body did not finish arriving within the read timeout while holding
+    /// the single prove permit (slowloris / stalled upload). Distinct from PayloadTooLarge.
+    BodyReadTimeout,
     ServiceUnavailable,
-    DownloadFailed { version: String, detail: String },
+    DownloadFailed {
+        version: String,
+        detail: String,
+    },
     ProveFailed(String),
     InvalidOrigin,
     OriginDenied(String),
@@ -344,6 +350,11 @@ impl IntoResponse for ProveError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
                 format!("Body too large or unreadable: {e}"),
+            ),
+            ProveError::BodyReadTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "body_read_timeout",
+                "Timed out while reading request body".to_string(),
             ),
             ProveError::ServiceUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,

@@ -5,10 +5,15 @@
 //! version, then run the proof and return base64 + an `x-prove-duration-ms` header. Extracted
 //! from server.rs (Q2).
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use serde_json::json;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{bb, versions};
 
@@ -98,6 +103,63 @@ pub(crate) fn compute_threads(state: &AppState) -> Option<usize> {
 
 const MAX_BODY_SIZE: usize = 50 * 1024 * 1024; // 50MB
 
+/// F-009: absolute deadline for buffering the request body while holding the single prove
+/// permit. Bounds a slowloris/stalled uploader before the permit is released. 30s is generous
+/// for 50MB over loopback (~1.7 MiB/s); it is a whole-body deadline, not an idle timeout, so
+/// drip-feeding cannot extend it.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reject an honestly-declared oversize body BEFORE acquiring the prove permit, so a client
+/// advertising `Content-Length > MAX_BODY_SIZE` is turned away without occupying the single
+/// permit. Chunked/underreported requests are still bounded by `to_bytes` — this is a cheap
+/// fast-path, never the sole limit.
+fn reject_declared_oversize(headers: &axum::http::HeaderMap) -> Result<(), ProveError> {
+    if let Some(len) = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if len > MAX_BODY_SIZE {
+            return Err(ProveError::PayloadTooLarge(format!(
+                "declared Content-Length {len} exceeds {MAX_BODY_SIZE}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// F-009: acquire the single prove permit, THEN buffer the body (under the size cap + an
+/// absolute read timeout). Returns the owned permit alongside the bytes so the caller holds it
+/// for the whole prove; the permit is released by RAII on every exit path (timeout, size error,
+/// disconnect, cancellation, panic, success). Testable seam.
+async fn acquire_and_read_body(
+    semaphore: Arc<Semaphore>,
+    raw_body: Body,
+    max_body_size: usize,
+    read_timeout: Duration,
+) -> Result<(OwnedSemaphorePermit, Bytes), ProveError> {
+    let permit = semaphore
+        .acquire_owned()
+        .await
+        .map_err(|_| ProveError::ServiceUnavailable)?;
+
+    let body = tokio::time::timeout(read_timeout, axum::body::to_bytes(raw_body, max_body_size))
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                timeout_secs = read_timeout.as_secs(),
+                "Timed out reading /prove request body"
+            );
+            ProveError::BodyReadTimeout
+        })?
+        .map_err(|e| {
+            tracing::warn!("Failed to read request body: {e}");
+            ProveError::PayloadTooLarge(e.to_string())
+        })?;
+
+    Ok((permit, body))
+}
+
 pub(crate) async fn prove(
     State(state): State<AppState>,
     request: Request,
@@ -109,20 +171,21 @@ pub(crate) async fn prove(
     let (parts, raw_body) = request.into_parts();
     authorize_origin(&state, &parts.headers).await?;
 
-    let body = axum::body::to_bytes(raw_body, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| {
-            tracing::warn!("Failed to read request body: {e}");
-            ProveError::PayloadTooLarge(e.to_string())
-        })?;
-    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
+    // F-009: turn away an honestly-declared oversize body before taking the permit.
+    reject_declared_oversize(&parts.headers)?;
 
-    // Limit to one concurrent prove — bb already uses all cores.
-    let _permit = state
-        .prove_semaphore
-        .acquire()
-        .await
-        .map_err(|_| ProveError::ServiceUnavailable)?;
+    // F-009: acquire the single prove permit BEFORE buffering the body, so concurrent requests
+    // can't each pin a 50MB buffer ahead of the concurrency gate (memory DoS), and read the body
+    // under an absolute timeout so a stalled uploader can't hold the only permit indefinitely.
+    // `_permit` is held for the whole prove and released by RAII on every exit path.
+    let (_permit, body) = acquire_and_read_body(
+        state.prove_semaphore.clone(),
+        raw_body,
+        MAX_BODY_SIZE,
+        BODY_READ_TIMEOUT,
+    )
+    .await?;
+    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
     let requested_version = parts
         .headers
@@ -220,4 +283,79 @@ pub(crate) async fn prove(
     );
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header::CONTENT_LENGTH, HeaderMap};
+
+    fn content_length(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(CONTENT_LENGTH, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn declared_oversize_rejected_before_permit() {
+        // F-009: an honestly-declared oversize Content-Length is turned away up front.
+        assert!(matches!(
+            reject_declared_oversize(&content_length(&(MAX_BODY_SIZE + 1).to_string())),
+            Err(ProveError::PayloadTooLarge(_))
+        ));
+        // At/under the cap and absent are allowed (still bounded later by to_bytes).
+        assert!(reject_declared_oversize(&content_length(&MAX_BODY_SIZE.to_string())).is_ok());
+        assert!(reject_declared_oversize(&HeaderMap::new()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn permit_acquired_before_body_and_released_on_drop() {
+        let sem = Arc::new(Semaphore::new(1));
+        let (permit, body) = acquire_and_read_body(
+            sem.clone(),
+            Body::from(Bytes::from_static(b"hello")),
+            1024,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("happy path");
+        assert_eq!(&body[..], &b"hello"[..]);
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "permit held across the whole prove"
+        );
+        drop(permit);
+        assert_eq!(sem.available_permits(), 1, "permit released on drop");
+    }
+
+    #[tokio::test]
+    async fn oversized_body_errs_and_releases_permit() {
+        let sem = Arc::new(Semaphore::new(1));
+        let res = acquire_and_read_body(
+            sem.clone(),
+            Body::from(vec![0u8; 10]),
+            4, // tiny cap to force the length error deterministically
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(matches!(res, Err(ProveError::PayloadTooLarge(_))));
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "permit released after size error"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_body_times_out_and_releases_permit() {
+        let sem = Arc::new(Semaphore::new(1));
+        // A body whose stream never yields → to_bytes never completes → the read timeout fires.
+        // Under start_paused the virtual clock auto-advances to the only pending timer.
+        let body =
+            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+        let res = acquire_and_read_body(sem.clone(), body, 1024, Duration::from_secs(30)).await;
+        assert!(matches!(res, Err(ProveError::BodyReadTimeout)));
+        assert_eq!(sem.available_permits(), 1, "permit released after timeout");
+    }
 }

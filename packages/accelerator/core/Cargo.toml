@@ -40,3 +40,4 @@ uuid = { version = "1.20.0", features = ["v4"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
 serial_test = "3"
+futures-util = "0.3" # stalled/error body streams for the F-009 /prove read-timeout tests
