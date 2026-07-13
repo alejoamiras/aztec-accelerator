@@ -79,13 +79,23 @@ Protocol: fresh 32-byte nonce; domain-separated context `aztec-accelerator/incum
 
 ### /goal
 ```
-GOAL: Land fixes for the 2026-07-09 security audit on `security-hardening` (cut from latest origin/main), one blueprinted cluster-branch at a time, each merged into security-hardening ONLY after local tests AND CI are both green.
+GOAL: Land the 2026-07-09 security-audit fixes on `security-hardening` (off latest origin/main), one cluster at a time. For EVERY cluster you MUST complete these gates IN ORDER — no exceptions, no shortcuts:
+
+  GATE 1 — BLUEPRINT FIRST (mandatory). Invoke the `/blueprint <tier>` SKILL (tier from the ledger: light|mid|deep) BEFORE writing ANY implementation code. A Codex design consult is NOT a blueprint and is NOT a substitute. The /blueprint run must: home into the cluster worktree, ask clarifying questions, produce the per-cluster plan.md + eli5.html, define the validation gate, and run the TIER'S AUDIT (light=codex; mid=codex+fable; deep=3 plans + double audit). Fold the audit before any code.
+  GATE 2 — IMPLEMENT strictly per the approved blueprint; tests inline.
+  GATE 3 — POST-IMPLEMENTATION AUDIT. Run a Codex `-m gpt-5.6-sol -c model_reasoning_effort=xhigh` audit on the ACTUAL diff (not the pre-code design). Fold findings.
+  GATE 4 — VALIDATE locally (cluster's real commands: cargo fmt+clippy -D warnings+test / bun test+lint / tofu fmt+validate / lint:actions).
+  GATE 5 — CI GREEN. Push, open a PR into security-hardening, watch CI, fix until green.
+  GATE 6 — MERGE into security-hardening ONLY when GATES 1–5 are all satisfied (blueprint audit clean AND post-impl audit clean AND local AND CI green). Update the ledger row to DONE with the PR + audit links.
+
+If you catch yourself writing implementation code and GATE 1 has not run for that cluster, STOP and blueprint first.
+
 SCOPE: fix F-002,F-003,F-004,F-005,F-006,F-007,F-008,F-009,F-010,F-011,F-012,F-014,F-015,F-016. NEVER touch F-001 (owned elsewhere) or F-013 (accepted).
-RULES: (1) /blueprint each cluster at the ledger tier BEFORE coding, in its own worktree+branch off latest security-hardening. (2) Consult Codex `-m gpt-5.6-sol -c model_reasoning_effort=xhigh` on every non-trivial decision; discuss trade-offs before committing. (3) NEVER merge into security-hardening without local AND CI green on the cluster PR. (4) GUI-less VPS: rely on CI for macOS/Windows/Tauri-GUI; never fake-pass. (5) Infra/ruleset: commit + validate only; NEVER tofu apply / gh api ruleset apply — human steps. (6) No secret creation/rotation, no force-push/history-rewrite on security-hardening or main. (7) Update implementations-plan/security-hardening/index.md after each cluster. (8) Cut each branch AFTER the prior merges (sequential).
-DONE: C0–C10 merged into security-hardening via local+CI-green PRs; C11/F-002 landed or explicitly BLOCKED on F-001; final status + human-gated runbook posted.
+HARD RULES: GUI-less VPS ⇒ rely on CI for macOS/Windows/Tauri-GUI, never fake-pass. Infra/ruleset ⇒ commit + validate only; NEVER `tofu apply` / `gh api` ruleset apply (human steps). No secret creation/rotation; no force-push/history-rewrite on security-hardening or main. Cut each branch AFTER the prior merges (sequential — no stacked branches over shared files).
+DONE: every in-scope cluster blueprinted → implemented → post-impl-audited → local+CI green → merged; C11/F-002 landed or explicitly BLOCKED on F-001; human-gated runbook posted.
 ```
 
 ### /loop
 ```
-/loop Work the security-hardening campaign one cluster at a time. Each iteration: (1) read implementations-plan/security-hardening/index.md; pick the next PENDING cluster whose deps are met — if none, STOP + report. (2) `agent-worktree new <slug>` off latest security-hardening; /blueprint <tier> its findings. (3) Consult Codex gpt-5.6-sol xhigh on design; implement per the plan's non-negotiable details, tests inline. (4) Validate locally (cluster's applicable commands). (5) Push branch; open a draft PR INTO security-hardening; `gh pr checks --watch`; fix until green (dispatch workflows if a base-branch trigger is missing). (6) Only when local AND CI green: mark ready, merge the PR into security-hardening, set the ledger row DONE with PR link + lessons note. (7) Consult Codex on any ambiguity. Never merge on red. Continue.
+/loop Work the security-hardening campaign one cluster at a time, honoring the 6 GATES in /goal. Each iteration: (1) read implementations-plan/security-hardening/index.md; pick the next PENDING cluster whose deps are met — if none, STOP + report. (2) GATE 1: cut a worktree+branch off latest security-hardening and invoke `/blueprint <tier>` for the cluster's findings — clarifying Qs → per-cluster plan.md + eli5.html → tier audit (light=codex; mid=codex+fable; deep=3 plans + double audit) → fold. DO NOT write implementation code before this completes. (3) GATE 2: implement per the approved blueprint, tests inline. (4) GATE 3: run the post-impl Codex `-m gpt-5.6-sol -c model_reasoning_effort=xhigh` audit on the diff; fold findings. (5) GATE 4: validate locally. (6) GATE 5: push, open PR into security-hardening, `gh pr checks --watch`, fix until green. (7) GATE 6: merge ONLY when both audits + local + CI are clean; set the ledger row DONE with PR + audit links. Never merge on red or un-blueprinted. Continue.
 ```
