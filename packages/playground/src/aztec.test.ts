@@ -4,6 +4,11 @@ import { checkAccelerator, checkAztecNode, setUiMode, state } from "./aztec";
 // ── fetch mocking ──
 const originalFetch = globalThis.fetch;
 
+// Bun's `typeof fetch` includes `preconnect`, which the test doubles don't need.
+function setFetchMock(impl: () => Promise<Response>): void {
+  globalThis.fetch = mock(impl) as unknown as typeof fetch;
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   // Reset state
@@ -21,7 +26,7 @@ afterEach(() => {
 describe("checkAztecNode", () => {
   test("returns reachable when status responds 200", async () => {
     let callCount = 0;
-    globalThis.fetch = mock(() => {
+    setFetchMock(() => {
       callCount++;
       if (callCount === 1) return Promise.resolve(new Response("OK", { status: 200 }));
       // RPC call for node version
@@ -34,7 +39,7 @@ describe("checkAztecNode", () => {
 
   test("returns reachable without version when RPC fails", async () => {
     let callCount = 0;
-    globalThis.fetch = mock(() => {
+    setFetchMock(() => {
       callCount++;
       if (callCount === 1) return Promise.resolve(new Response("OK", { status: 200 }));
       return Promise.reject(new Error("rpc failed"));
@@ -43,12 +48,12 @@ describe("checkAztecNode", () => {
   });
 
   test("returns not reachable when status responds 500", async () => {
-    globalThis.fetch = mock(() => Promise.resolve(new Response("", { status: 500 })));
+    setFetchMock(() => Promise.resolve(new Response("", { status: 500 })));
     expect(await checkAztecNode()).toEqual({ reachable: false });
   });
 
   test("returns not reachable when fetch throws", async () => {
-    globalThis.fetch = mock(() => Promise.reject(new Error("network error")));
+    setFetchMock(() => Promise.reject(new Error("network error")));
     expect(await checkAztecNode()).toEqual({ reachable: false });
   });
 });
@@ -56,14 +61,14 @@ describe("checkAztecNode", () => {
 // ── checkAccelerator ──
 describe("checkAccelerator", () => {
   test("returns true when health check succeeds", async () => {
-    globalThis.fetch = mock(() =>
+    setFetchMock(() =>
       Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 })),
     );
     expect(await checkAccelerator()).toBe(true);
   });
 
   test("returns false when fetch throws", async () => {
-    globalThis.fetch = mock(() => Promise.reject(new Error("connection refused")));
+    setFetchMock(() => Promise.reject(new Error("connection refused")));
     expect(await checkAccelerator()).toBe(false);
   });
 });
@@ -76,7 +81,7 @@ describe("setUiMode", () => {
   });
 
   test("sets uiMode to accelerated", () => {
-    state.uiMode = "local";
+    setUiMode("local");
     setUiMode("accelerated");
     expect(state.uiMode).toBe("accelerated");
   });

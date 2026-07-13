@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — aztec-5.0.0-stable-2026-07-13</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    .verdicts { background: #f0fff4; padding: 1rem 1.25rem; border-left: 3px solid #22863a; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Aztec 5.0.0 stable bump + SDK release</h1>
+  <p>Aztec shipped its final <strong>5.0.0</strong> release this morning, and the test network is already running it. This plan updates our code to 5.0.0, fixes the handful of things the update genuinely breaks, re-deploys the fee-sponsor contract whose address moved (again), publishes our SDK to npm, and — for the first time — makes it the <em>default</em> version people get when they install our package. The desktop accelerator app does <strong>not</strong> need a new release: it downloads the proving engine at runtime, and we re-verified its code hasn't changed since the version people already have.</p>
+
+  <h2>Why this tier was chosen</h2>
+  <p><code>mid</code> — third time running this exact kind of bump (low novelty), but it couples to lots of things outside our control (npm packages hours old, a live test network, a contract deployment) and involves an irreversible npm publish. Rubric: 1 HIGH (external coupling), several MODERATEs. The dual audit earned its keep: the first codex pass <em>rejected</em> the draft and both auditors caught real problems (see "What the audits changed").</p>
+
+  <h2>Phases</h2>
+  <div class="phase">
+    <h3>Phase 1: Update the packages + fix what breaks</h3>
+    <p>Run the bump tool (it updates all 24 version pins, plus two safety values automatically). Fix the one real code break: account creation now <em>requires</em> a signing key — <strong>5 places</strong> in our code pass only 2 of 3 arguments (the draft said 3 places; both auditors caught the 2 missed ones in our deployment scripts). Switch the playground's wallet to in-memory storage — the new version changed how browsers store wallet data in a way that breaks our error recovery and locks out second tabs; since the playground creates throwaway accounts anyway, keeping nothing on disk sidesteps all of it. Also: wire up a type-checker for the playground's source code, which — surprise — nothing was actually checking. Finally, refresh the dependency lockfile using a one-time local bypass of our 7-day new-package quarantine (same documented exception as the last two bumps), then verify nothing unexpected snuck into the lockfile.</p>
+    <p class="muted">Proves itself by: install + frozen-install both clean; every pin exactly 5.0.0; lint, type-checks (now including the playground), unit tests, playground build, and the 28 UI mock tests all green.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 2: Publishing safety rails + land the change</h3>
+    <p>Add a tiny new workflow whose only job is pointing npm's "default version" label at an already-published version (it never publishes anything — that separation is what lets us promote only after real-world testing). Harden the publish workflow: don't let a queued run cancel a half-finished publish, run the <em>full</em> native proving test at publish time (previously it only tested the slow fallback path), and close a back-door input on the reusable publish workflow that could have flipped the npm default with no testing at all (the final audit's catch). Then open the PR and let CI prove the important thing: a real transaction proves via the native engine on a 5.0.0 network ("transmit", not "fallback"), plus a local test that downloads and integrity-checks the 5.0.0 proving engine exactly the way the deployed app will.</p>
+    <p class="muted">Proves itself by: workflow linting green; all four CI pipelines green including the native-proving e2e; the download+checksum test passes; PR auto-merges.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 3: Deploy the fee contract → test → publish → test → promote</h3>
+    <p>First, re-deploy the fee-sponsor contract on the test network (its compiled code changed, so its address moved off the funded one) — with careful pre-checks so a network hiccup can't trick us into a wrong deployment, using a throwaway wallet that only needs a little Sepolia ETH for gas. Then a <strong>pre-publish smoke test</strong> in a real browser against the live network — deploy an account and send a token transfer (this exercises the one behavioral change no automated test can see: how recipients discover private messages). Only if that passes: publish the SDK to npm's <code>testnet</code> tag and deploy the playground. Then the <strong>acceptance smoke</strong>: the already-released desktop app (which will genuinely download the new proving engine at runtime — the one path nothing else tests end-to-end), plus a Safari pass. Only after all of that: flip npm's default to 5.0.0, on the day you choose (open question 3).</p>
+    <p class="muted">Proves itself by: fee contract deployed + funded on the live network; pre-publish transfer smoke green BEFORE publishing; npm tags correct; live site on 5.0.0; released-app + Safari + WASM smokes green.</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p><strong>Why no desktop app release?</strong> The installed app doesn't bundle the proving engine — it downloads whichever version a website asks for, verifying its checksum. We re-checked that the app's entire core hasn't changed a byte since the released version, and Phase 2's tests prove the released behavior works with 5.0.0. If those tests failed, the plan stops and escalates to a full app release.</p>
+  <p><strong>Why does a contract need re-deploying?</strong> On Aztec, a contract's address is derived from its compiled code. Aztec recompiled the fee-sponsor contract for 5.0.0, so "the same contract" now lives at a new address, which starts out empty and unfunded. Same thing happened on the previous bump. Anyone can drain a public fee sponsor by design — that's what it's for — so we fund it modestly and consciously.</p>
+  <p><strong>Why the quarantine bypass?</strong> We normally refuse to install npm packages younger than 7 days (supply-chain protection). 5.0.0 is hours old. The bypass is a single local command, never committed, never in CI — and we hand-audit the lockfile diff afterward, checking the publish date of anything unexpected. This is the third time using this documented exception.</p>
+  <p><strong>What's the "latest" flip about?</strong> Until now our npm package's default install pointed at an old 4.x version (which can't even talk to the current network). Promoting 5.0.0 to the default is the highest-visibility pointer we own, so the plan makes it a separate, test-gated, deliberately-timed step — with an honest note that if 5.0.0 turned out bad, there's no good version to roll back to; recovery would be publishing a fix forward.</p>
+
+  <h2>What the audits changed</h2>
+  <p>Codex round 1 <strong>rejected</strong> the draft; the independent Fable audit said <strong>conditional approve</strong> with 5 conditions. Every finding was re-verified against the code and folded (or explicitly rejected with reasons in the decision ledger): 5 breakage sites not 3; the playground's source code was type-checked by nothing; the wallet-storage change silently broke our error recovery (fixed by going in-memory); publish and promote had to be separate steps; the publish workflow could cancel itself mid-publish; the pre-publish transfer smoke was missing; the rollback story was wishful thinking. A <em>fresh</em> final codex session then attacked the consolidated plan and caught four more (a back-door workflow path that could flip the npm default ungated; the published package itself never being install-tested; a funding "proof" that didn't actually exist; an internal contradiction in the new promote workflow) — all folded, and on resume it gave <strong>conditional approve</strong> with its last condition (the back-door's second input) also folded. One question the auditors <em>disagreed</em> on is left for you (open question 3).</p>
+
+  <div class="verdicts">
+    <h2>Audit verdicts</h2>
+    <ul>
+      <li><strong>Codex round 1</strong> (fresh session, xhigh): <code>reject</code> → all 7 blockers folded or scope-rejected with reasons.</li>
+      <li><strong>Fable</strong> (independent context): <code>conditional approve</code> → all 5 conditions folded.</li>
+      <li><strong>Final fresh-context codex pass</strong>: <code>reject</code> → 4 findings folded → resumed: <code>conditional approve</code> → final condition folded. <strong>Verdict on record: conditional approve, all conditions folded.</strong></li>
+    </ul>
+  </div>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li><strong>1. Who presses the publish buttons?</strong> Your standing rule says stable releases are cut jointly. Should the two dispatch steps (publish, and later the default-flip) wait for you, or does approving this plan authorize the agent to run them? Default if unsaid: it stops and waits at both.</li>
+    <li><strong>2. The throwaway Sepolia wallet</strong> needs a little ETH for gas to fund the fee contract. Confirm it's funded, or that you'll fund it when Phase 3 starts.</li>
+    <li><strong>3. When to flip npm's default to 5.0.0?</strong> The auditors split. <em>Same-day</em> (after all smokes): today's default is already broken against the live network, and everyone on the testnet tag gets the new version immediately anyway. <em>Wait until July 20</em>: gives the hours-old upstream release a 7-day soak — the same philosophy as our install quarantine — at the cost of the default staying broken a week longer. Everything else ships now either way.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope: SDK-only (no desktop app release unless tests force it); playground goes in-memory; the new promote-latest workflow; publish-workflow hardening.</li>
+      <li>Confirm tier <code>mid</code> (rubric above).</li>
+      <li>Confirm the validation plan: fast checks every phase; native-proving e2e + download test gate the merge; two-stage manual smoke (pre-publish + acceptance, incl. released app + Safari) gates publish and promotion.</li>
+      <li>Answer open questions 1–3 (or accept the defaults: hold at both dispatches; you fund the wallet; question 3 has no default — auditors split).</li>
+      <li>Confirm: no <code>/harden</code> pass scheduled (no new trust boundary — same call as the last two bumps).</li>
+      <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds (FINAL — plan approved 2026-07-13: autonomous dispatches, 1000 FJ funding, same-day smoke-gated latest)</h2>
+    <p>Two options for the autonomous implementation session. <code>/goal</code> survives <code>claude --resume</code> and is the official primitive for "work until the condition holds"; recurring <code>/loop</code> tasks fire on their interval until they expire after 7 days. The session must run <em>inside this plan's worktree</em> (<code>agent-worktree resume aztec-5.0.0-stable-2026-07-13</code>).</p>
+    <p class="warning">Use exactly ONE per session. They don't compose — setting one replaces the other.</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /loop 15m</h3>
+      <p class="muted">Chosen because Phase 3's key signals (workflow dispatches, manual browser smokes, a possible funding hold) are not reliably transcript-observable — an interval loop keeps driving and re-checking regardless.</p>
+      <pre><code>/loop 15m Drive implementations-plan/aztec-5.0.0-stable-2026-07-13 to completion (P1–P3); never idle. Each firing: read plan.md + lessons/; git status + log; PR open → gh pr view --json statusCheckRollup (no --watch); CI in-flight → gh run watch up to 10m (re-run the Playwright install-deps flake). No task? take the next plan.md step; after each meaningful edit run bun run lint + the touched package's tests. P1: aztec:update 5.0.0 (ZERO skips + grep all pins 5.0.0) → migrate all FIVE createSchnorrAccount sites + Fq imports (aztec.ts:473,:649, e2e-helpers.ts:25, deploy-sponsored-fpc.ts:149, batch-fund-fpc.ts:250) → EmbeddedWallet ephemeral:true (verify wallet-DB coverage) + fix comments aztec.ts:153+:238 → playground typecheck enablement (tsconfig + script + root wiring) → ONE local `bun install --minimum-release-age=0` (never bunfig/CI) → lock-diff scrutiny (npm view &lt;pkg&gt;@&lt;ver&gt; time for strangers, flag post-2026-07-06) → frozen-install proof → full P1 gate. P2: promote-latest.yml (tag-only; allowlist X.Y.Z OR X.Y.Z-revision.N; inputs via env: indirection) + _publish-sdk.yml dispatch hardening (remove `latest` from dispatch inputs; dist_tag → type:choice [testnet,nightlies]; env indirection; reject-latest guard on BOTH trigger paths) + shared non-cancelling `publish-npm` concurrency group across npm-mutating workflows + publish-testnet.yml hardening (cancel-in-progress:false, build_accelerator:true on its e2e, partial-publish rule comment, stale-comment refresh) → lint:actions → PR → CI (sdk.yml transmit assert) → local ACCELERATOR_DOWNLOAD_TEST=1 AZTEC_BB_VERSION=5.0.0 cargo test download_and_verify_bb (from packages/accelerator/core) → auto-merge. P3: (a) fail-closed pre-flight (nodeVersion 5.0.0, chainId 11155111, getContract logged, RPC-error ≠ absent) → Sepolia wallet needs gas ETH (empty → SURFACE AND HOLD) → key via gitignored scripts/.env ONLY (never inline — shell history; DELETE scripts/.env at P3 completion) → deploy-sponsored-fpc.ts --salt 0x0 (MANDATORY flag) with BRIDGE_AMOUNT=1000 FJ (rc.2 parity, APPROVED) → post-claim: query the FPC FeeJuice balance explicitly + record in lessons; top-up via batch-fund-fpc.ts --salt 0x0 --amount &lt;explicit&gt; if needed; (b) PRE-PUBLISH SMOKE: dev:testnet manual deploy+transfer vs the new FPC (WASM min) — MUST PASS BEFORE ANY PUBLISH — report result; (c) dispatch publish-testnet.yml --ref main immediately post-merge, nothing queued, record merge SHA (AUTONOMOUS — approved Ask 1); (d) verify npm testnet tag + live bundle 5.0.0 → registry-artifact test: fresh temp dir, npm i @alejoamiras/aztec-accelerator@&lt;version&gt;, import public API + construct AcceleratorProver → acceptance smoke: released-1.0.6 native path (REQUIRED) + Safari pass + WASM — report; (e) once (d) fully green, SAME DAY, dispatch promote-latest.yml with the exact verified version (AUTONOMOUS — approved Asks 1+3). Stuck or trade-off? /codex xhigh, log the consult in lessons. Phase green = its plan.md gate passes → mark ✓ in plan.md, file lessons/phase-N.md, print LESSONS_FILE=…, advance. 5× same-step fail → stop, reassess with codex. All ✓ → /code-review max --fix → commit fixes separately → codex post-impl audit (net diff + code-review summary + adversarial ask) → address high/critical → wrap-up report → stop. HARD LIMITS: never push main; never print the L1 key (scripts/.env only, deleted at P3 end); never expand scope; the ONLY holds = empty Sepolia wallet, a failed gate, or the accelerator-interface escalation.</code></pre>
+    </div>
+
+    <h3>Alternative: /goal</h3>
+    <pre><code>/goal All P1–P3 phases marked ✓ in implementations-plan/aztec-5.0.0-stable-2026-07-13/plan.md (per-phase headers in the file), each ✓ backed by its validation gate reported passing in the transcript; LESSONS_FILE=implementations-plan/aztec-5.0.0-stable-2026-07-13/lessons/phase-N.md printed per phase; pre-publish transfer smoke reported passing BEFORE the publish dispatch; npm dist-tags show testnet = latest = the 5.0.0-derived version in the transcript (both dispatches autonomous per approved Asks 1+3, same-day smoke-gated); 5.0.0 salt=0 FPC getContract defined on v5 testnet with post-claim balance recorded; registry-artifact install+import test passing; released-1.0.6 native smoke + Safari + WASM reported passing; /code-review max --fix applied+committed; codex post-impl audit high/critical addressed; bun run test and bun run lint:actions exit 0 in the transcript. Constraints: never push main; never print the L1 key (scripts/.env only, deleted at P3 end); BRIDGE_AMOUNT=1000 FJ; holds only for empty Sepolia wallet, failed gates, or accelerator-interface escalation.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="audit-codex.md">Codex audit</a> · <a href="audit-fable.md">Fable audit</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>

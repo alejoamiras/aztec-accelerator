@@ -8,7 +8,7 @@ import { NO_FROM } from "@aztec/aztec.js/account";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import { NO_WAIT } from "@aztec/aztec.js/contracts";
 import { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee";
-import { Fr } from "@aztec/aztec.js/fields";
+import { Fq, Fr } from "@aztec/aztec.js/fields";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
 import type { TxHash } from "@aztec/aztec.js/tx";
 import type { Wallet } from "@aztec/aztec.js/wallet";
@@ -126,6 +126,9 @@ export async function checkAztecNode(): Promise<{ reachable: boolean; nodeVersio
   }
 }
 
+// Legacy cleanup: pre-5.0 wallets persisted PXE/wallet state in IndexedDB. The 5.0 wallet is
+// ephemeral (in-memory, see doInitializeWallet), so this only evicts residue left by earlier
+// visits — it is NOT the recovery path for current wallet state.
 async function clearIndexedDB(): Promise<void> {
   const dbs = await indexedDB.databases();
   const aztecPrefixes = ["pxe-", "pxe_data_", "wallet-", "wallet_data_", "aztec-"];
@@ -150,10 +153,11 @@ async function clearIndexedDB(): Promise<void> {
  * but those keys aren't busted — so a returning visitor's stale blob (wrong bytes-per-point) gets
  * fed to `SrsInitSrs` → "invalid points_buf size … got 128". Clear the CRS store once per bb
  * version so a fresh, correctly-formatted CRS is downloaded. Only the bb.js CRS lives in
- * `keyval-store`; wallet/PXE data uses `pxe-`/`wallet-` prefixed DBs (cleared separately above).
- * Bump CRS_CACHE_VERSION whenever `@aztec/bb.js` changes the CRS format.
+ * `keyval-store`; current wallet/PXE state is in-memory (ephemeral) — the prefixed-DB clear
+ * above only evicts pre-5.0 residue. Bump CRS_CACHE_VERSION whenever `@aztec/bb.js` changes
+ * the CRS format.
  */
-const CRS_CACHE_VERSION = "5.0.0-rc.2";
+const CRS_CACHE_VERSION = "5.0.0";
 async function bustStaleCrsCacheOnce(log: LogFn): Promise<void> {
   if (typeof indexedDB === "undefined" || typeof localStorage === "undefined") return;
   const KEY = "bb-crs-cache-version";
@@ -221,7 +225,11 @@ async function doInitializeWallet(log: LogFn): Promise<boolean> {
   await initializeNode(log);
 
   log("Creating wallet (may take a moment)...");
+  // ephemeral: the playground creates throwaway accounts per session, so persistence buys
+  // nothing — and 5.0's persistent browser store (SQLite-OPFS) holds an origin-wide exclusive
+  // lock (second tab fails to init) that in-memory stores sidestep entirely.
   state.embeddedWallet = await EmbeddedWallet.create(state.node!, {
+    ephemeral: true,
     pxe: {
       proverEnabled: state.proofsRequired,
       proverOrOptions: state.prover!,
@@ -235,7 +243,8 @@ async function doInitializeWallet(log: LogFn): Promise<boolean> {
 
   if (!state.proofsRequired) {
     log("Registering sandbox accounts...");
-    // Register accounts serially to avoid IndexedDB TransactionInactiveError.
+    // Register accounts serially: one wallet store, deterministic ordering (historically this
+    // also dodged an IndexedDB TransactionInactiveError; the 5.0 store is in-memory).
     const testAccounts = await getInitialTestAccountsData();
     state.registeredAddresses = [];
     for (const account of testAccounts) {
@@ -470,7 +479,13 @@ export async function deployTestAccount(
 
     const secret = Fr.random();
     const salt = Fr.random();
-    const accountManager = await state.embeddedWallet!.createSchnorrAccount(secret, salt);
+    // 5.0: the signing key is required and is the account's root of ownership.
+    const signingKey = Fq.random();
+    const accountManager = await state.embeddedWallet!.createSchnorrAccount(
+      secret,
+      salt,
+      signingKey,
+    );
     const deployMethod = await accountManager.getDeployMethod();
 
     steps.push({ step: "create account", durationMs: Date.now() - stepStart });
@@ -646,7 +661,11 @@ export async function runTokenFlow(
     } else {
       onStep("deploying bob account");
       log("Deploying second account (Bob) for transfer...");
-      const bobManager = await state.embeddedWallet!.createSchnorrAccount(Fr.random(), Fr.random());
+      const bobManager = await state.embeddedWallet!.createSchnorrAccount(
+        Fr.random(),
+        Fr.random(),
+        Fq.random(),
+      );
       const bobDeploy = await bobManager.getDeployMethod();
       // from: NO_FROM → DeployAccountMethod auto-scopes the new account + sets its tag sender (5.0).
       const bobSendOpts = {

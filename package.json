@@ -24,7 +24,7 @@
     "test": "bun run lint && bun run test:typecheck && bun run test:unit",
     "test:all": "bun run test && bun run test:e2e",
     "test:e2e": "bun run --cwd packages/sdk test:e2e",
-    "test:typecheck": "bun run --cwd packages/sdk test:lint",
+    "test:typecheck": "bun run --cwd packages/sdk test:lint && bun run --cwd packages/playground typecheck && bun run --cwd packages/playground typecheck:scripts",
     "test:unit": "bun run --cwd packages/sdk test:unit && bun run --cwd packages/playground test:unit && bun run --cwd packages/accelerator test:unit"
   },
   "lint-staged": {
