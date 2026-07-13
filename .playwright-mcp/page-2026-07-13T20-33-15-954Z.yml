@@ -1,0 +1,65 @@
+- generic [ref=f1e2]:
+  - banner [ref=f1e3]:
+    - generic [ref=f1e4]:
+      - link [ref=f1e5] [cursor=pointer]:
+        - /url: https://aztec-accelerator.dev
+      - heading "Aztec Accelerator" [level=1] [ref=f1e9]
+      - text: Playground
+      - link "GitHub" [ref=f1e10] [cursor=pointer]:
+        - /url: https://github.com/alejoamiras/aztec-accelerator
+  - generic [ref=f1e13]:
+    - complementary [ref=f1e14]:
+      - region "Service status" [ref=f1e15]:
+        - generic [ref=f1e16]: services
+        - generic [ref=f1e17]:
+          - generic [ref=f1e18]: Aztec Node
+          - generic [ref=f1e19]: localhost:8080
+          - generic [ref=f1e20]: Accelerator checking...
+          - link "Get the app →" [ref=f1e21] [cursor=pointer]:
+            - /url: https://aztec-accelerator.dev
+          - generic [ref=f1e22]: Wallet not initialized
+          - generic [ref=f1e23]:
+            - generic [ref=f1e24]: SDK
+            - generic [ref=f1e25]: Node
+      - generic [ref=f1e26]:
+        - generic [ref=f1e27]: proving mode
+        - generic [ref=f1e29]:
+          - button "WASM slow" [ref=f1e30]
+          - button "Accelerated fastest" [ref=f1e31]
+      - generic [ref=f1e32]:
+        - generic [ref=f1e33]: actions
+        - generic [ref=f1e34]:
+          - button "Deploy Test Account" [disabled] [ref=f1e35]
+          - button "Run Token Flow" [disabled] [ref=f1e36]
+    - main [ref=f1e37]:
+      - generic [ref=f1e38]:
+        - generic [ref=f1e39]:
+          - text: ◆
+          - generic [ref=f1e40]:
+            - text: Your proofs are running in-browser.
+            - link "Get the Accelerator" [ref=f1e41] [cursor=pointer]:
+              - /url: https://aztec-accelerator.dev
+            - text: to prove at full native speed.
+          - button "Dismiss" [ref=f1e42]: ×
+        - generic [ref=f1e43]: proving
+        - generic [ref=f1e45]:
+          - generic [ref=f1e46]: results
+          - generic [ref=f1e48]:
+            - generic [ref=f1e49]:
+              - generic [ref=f1e50]: WASM
+              - generic [ref=f1e51]: —
+            - generic [ref=f1e52]:
+              - generic [ref=f1e53]: Accelerated (native)
+              - generic [ref=f1e54]: —
+        - region "Activity log" [ref=f1e55]:
+          - generic [ref=f1e56]:
+            - text: log 0 entries
+            - button "Export" [ref=f1e57]
+          - log
+      - region "Activity log" [ref=f1e58]:
+        - generic [ref=f1e59]: log
+        - generic [ref=f1e60]: Initializing...
+  - contentinfo [ref=f1e61]:
+    - text: made with ♥ by
+    - link "alejo" [ref=f1e62] [cursor=pointer]:
+      - /url: https://github.com/alejoamiras/aztec-accelerator
