@@ -400,6 +400,15 @@ mod tests {
     }
 
     #[test]
+    fn de_origins_drops_trailing_dot_without_migrating() {
+        // F-011: a persisted dotted origin is DROPPED on load — never silently rewritten to its
+        // undotted (approved) form, so it cannot inherit the undotted origin's grant.
+        let loaded = de_origins(r#"["https://ok.example","https://bad.example."]"#);
+        assert_eq!(loaded, vec![co("https://ok.example")]);
+        assert!(!loaded.contains(&co("https://bad.example")));
+    }
+
+    #[test]
     fn de_origins_preserves_order() {
         assert_eq!(
             de_origins(r#"["https://b.com","https://a.com"]"#),

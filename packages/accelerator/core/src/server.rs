@@ -30,6 +30,12 @@ mod prove;
 const PORT: u16 = 59833;
 pub const HTTPS_PORT: u16 = 59834;
 
+/// F-009: cap on concurrently in-flight + waiting authorized `/prove` requests (one holds the
+/// prove permit; the rest wait to buffer their body). Bounds the total queue so a burst of slow
+/// uploaders can't stack fresh per-request read timeouts and starve a legitimate request for
+/// minutes — excess authorized requests are shed immediately with 429 instead of queueing.
+pub(crate) const MAX_INFLIGHT_PROVE: usize = 8;
+
 /// Fallback Aztec bb version reported by `/health` + used as the proving default when no version is
 /// injected via `HeadlessState.bundled_version`. Core is `build.rs`-free, so this replaces the old
 /// `env!("AZTEC_BB_VERSION")` (which only existed via src-tauri/build.rs). Consumers inject the real
@@ -102,6 +108,10 @@ pub struct HeadlessState {
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
     pub prove_semaphore: Arc<Semaphore>,
+    /// F-009: bounds total in-flight + waiting authorized `/prove` requests (`MAX_INFLIGHT_PROVE`).
+    /// Acquired (try, non-blocking) right after origin auth and held for the whole request, so a
+    /// burst of slow uploaders is shed with 429 rather than stacking per-request read timeouts.
+    pub prove_waiters: Arc<Semaphore>,
 }
 
 /// Full app state: the headless `core` plus the optional GUI callbacks. `Deref`s to `core`, so the
@@ -133,6 +143,7 @@ impl Default for HeadlessState {
             config: None,
             auth_manager: None,
             prove_semaphore: Arc::new(Semaphore::new(1)),
+            prove_waiters: Arc::new(Semaphore::new(MAX_INFLIGHT_PROVE)),
         }
     }
 }
@@ -154,6 +165,7 @@ impl HeadlessState {
             config,
             auth_manager,
             prove_semaphore: Arc::new(Semaphore::new(1)),
+            prove_waiters: Arc::new(Semaphore::new(MAX_INFLIGHT_PROVE)),
         }
     }
 }
@@ -322,12 +334,21 @@ async fn health(
 pub(crate) enum ProveError {
     InvalidVersion(String),
     PayloadTooLarge(String),
+    /// F-009: the request body did not finish arriving within the read timeout while holding
+    /// the single prove permit (slowloris / stalled upload). Distinct from PayloadTooLarge.
+    BodyReadTimeout,
     ServiceUnavailable,
-    DownloadFailed { version: String, detail: String },
+    DownloadFailed {
+        version: String,
+        detail: String,
+    },
     ProveFailed(String),
     InvalidOrigin,
     OriginDenied(String),
     TooManyRequests,
+    /// F-009: the authorized-`/prove` waiter cap (`MAX_INFLIGHT_PROVE`) is full — shed with 429
+    /// rather than queueing behind slow uploaders. Distinct from `TooManyRequests` (auth backlog).
+    ProveQueueFull,
     AuthorizationTimeout,
     AuthorizationCancelled,
 }
@@ -344,6 +365,11 @@ impl IntoResponse for ProveError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
                 format!("Body too large or unreadable: {e}"),
+            ),
+            ProveError::BodyReadTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "body_read_timeout",
+                "Timed out while reading request body".to_string(),
             ),
             ProveError::ServiceUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -370,6 +396,11 @@ impl IntoResponse for ProveError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_requests",
                 "Too many pending authorization requests".to_string(),
+            ),
+            ProveError::ProveQueueFull => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "prove_queue_full",
+                "Too many concurrent proving requests; retry shortly".to_string(),
             ),
             ProveError::AuthorizationTimeout => (
                 StatusCode::FORBIDDEN,

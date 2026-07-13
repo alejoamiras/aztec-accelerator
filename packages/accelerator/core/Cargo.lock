@@ -10,6 +10,7 @@ dependencies = [
  "base64",
  "dirs",
  "flate2",
+ "futures-util",
  "hex",
  "http",
  "parking_lot",

@@ -31,13 +31,19 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
         return None;
     }
 
+    let host = url.host_str()?;
+    // F-011: reject trailing-dot origins (e.g. `https://example.com.`) instead of silently
+    // collapsing them into the undotted origin. The browser treats the dotted FQDN as a
+    // DISTINCT origin, so it must earn its own approval rather than inherit the undotted
+    // site's grant (and its verified badge). Host-header normalization (server/host.rs) is a
+    // separate transport-level policy and is intentionally left unchanged.
+    if host.is_empty() || host.ends_with('.') {
+        return None;
+    }
+
     match url.scheme() {
         "http" | "https" | "ws" | "wss" => {
-            let host = url.host_str()?.to_ascii_lowercase();
-            let host = host.trim_end_matches('.');
-            if host.is_empty() {
-                return None;
-            }
+            let host = host.to_ascii_lowercase();
             Some(match url.port() {
                 Some(p) => format!("{}://{}:{}", url.scheme(), host, p),
                 None => format!("{}://{}", url.scheme(), host),
@@ -47,10 +53,7 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
             if url.port().is_some() {
                 return None;
             }
-            let id = url.host_str()?.to_ascii_lowercase();
-            if id.is_empty() {
-                return None;
-            }
+            let id = host.to_ascii_lowercase();
             Some(format!("{scheme}://{id}"))
         }
         _ => None,
@@ -277,7 +280,10 @@ impl AuthorizationManager {
             .ok()
             .filter(|u| matches!(u.scheme(), "http" | "https"))
             .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-            .is_some_and(|h| matches!(h.trim_end_matches('.'), "localhost" | "127.0.0.1" | "[::1]"))
+            // No trailing-dot trim: F-011 makes `canonicalize_origin` reject dotted hosts, so a
+            // CanonicalOrigin never carries one. Matching the exact host keeps this consistent for
+            // any direct caller too (a dotted `localhost.` is NOT auto-approved).
+            .is_some_and(|h| matches!(h.as_str(), "localhost" | "127.0.0.1" | "[::1]"))
     }
 
     /// Returns true if the origin is approved: in the persisted allowlist, OR — only when
@@ -458,9 +464,26 @@ mod tests {
     }
 
     #[test]
-    fn canon_trailing_dot_stripped() {
+    fn canon_trailing_dot_rejected() {
+        // F-011: a trailing-dot origin is a DISTINCT browser origin and must NOT be canonicalized
+        // into (and thereby inherit the approval of) the undotted form — it is rejected outright,
+        // across schemes and with/without an explicit port.
+        for input in [
+            "https://nulo.sh.",
+            "https://nulo.sh.:443",
+            "http://localhost.:5173",
+            "wss://example.com.",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop.",
+        ] {
+            assert_eq!(
+                canonicalize_origin(input),
+                None,
+                "trailing-dot origin must be rejected, not collapsed: {input}"
+            );
+        }
+        // Sanity: the undotted forms still canonicalize normally.
         assert_eq!(
-            canonicalize_origin("https://nulo.sh."),
+            canonicalize_origin("https://nulo.sh"),
             Some("https://nulo.sh".to_string()),
         );
     }

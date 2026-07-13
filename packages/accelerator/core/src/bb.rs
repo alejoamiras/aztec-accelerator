@@ -70,6 +70,71 @@ fn home_dir_fallback() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
+/// Per-user private base for prove workspaces: `<data-local>/aztec-accelerator/prove-tmp`, created
+/// owner-only. Using our OWN per-user directory (not the shared OS temp) keeps the witness off a
+/// world-readable / shared `$TMPDIR`/`%TEMP%` and out of a non-sticky temp parent where an
+/// attacker could replace an ancestor between creation and use (F-003 hardening). `None` if no
+/// data-local dir is resolvable (caller falls back to OS temp).
+fn prove_tmp_parent() -> Option<PathBuf> {
+    let base = dirs::data_local_dir()?
+        .join("aztec-accelerator")
+        .join("prove-tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&base)
+            .ok()?;
+        // Tighten even if it pre-existed with a looser mode.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).ok()?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&base).ok()?; // %LOCALAPPDATA% is already per-user on Windows
+    Some(base)
+}
+
+/// Create the per-prove temp workspace under the per-user private base (see `prove_tmp_parent`).
+/// On Unix the directory is created `0o700` (owner-only) at the creation syscall — never
+/// write-then-chmod — so the private witness never has a world-traversable window (F-003).
+/// `tempfile::tempdir()` alone applies no mode and inherits the umask default (typically `0o755`).
+/// Falls back to the OS temp dir (still `0o700` on Unix) only if no per-user dir is resolvable.
+fn create_prove_tempdir() -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("prove-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    match prove_tmp_parent() {
+        Some(parent) => builder.tempdir_in(parent),
+        None => {
+            tracing::warn!(
+                "No per-user data dir for a private prove workspace; using OS temp (0o700 on Unix)"
+            );
+            builder.tempdir()
+        }
+    }
+}
+
+/// Write the proving witness (private ZK inputs) with mode `0o600` supplied to the creation
+/// syscall (F-003) — no write-then-chmod window. `create_new(true)` fails closed if the path
+/// already exists (defends against a pre-planted file/symlink in the workspace).
+fn write_witness(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)
+}
+
 /// Run `bb prove` on the given IVC inputs (msgpack bytes) and return the proof
 /// with a 4-byte BE field-count header suitable for `ChonkProofWithPublicInputs.fromBuffer()`.
 ///
@@ -83,11 +148,11 @@ pub async fn prove(
     let bb_path =
         find_bb(version).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-    let tmp_dir = tempfile::tempdir()?;
+    let tmp_dir = create_prove_tempdir()?;
     let input_path = tmp_dir.path().join("ivc-inputs.msgpack");
     let output_dir = tmp_dir.path().join("output");
     std::fs::create_dir_all(&output_dir)?;
-    std::fs::write(&input_path, ivc_inputs)?;
+    write_witness(&input_path, ivc_inputs)?;
 
     tracing::info!(
         version = version.map_or("bundled", |v| v.as_str()),
@@ -175,6 +240,32 @@ fn truncate_stderr(stderr: &str) -> String {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// F-003: the per-prove workspace dir is created `0o700` and the witness file `0o600` — at
+    /// the creation syscall, so no other local user can read the private witness while proving.
+    #[cfg(unix)]
+    #[test]
+    fn prove_workspace_and_witness_have_private_modes() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = create_prove_tempdir().unwrap();
+        let witness = dir.path().join("ivc-inputs.msgpack");
+        write_witness(&witness, b"secret-witness-bytes").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().mode() & 0o777,
+            0o700,
+            "prove workspace dir must be owner-only"
+        );
+        assert_eq!(
+            std::fs::metadata(&witness).unwrap().mode() & 0o777,
+            0o600,
+            "witness file must be owner-only"
+        );
+
+        // create_new fails closed on a pre-existing path (no silent overwrite of a planted file).
+        assert!(write_witness(&witness, b"again").is_err());
+    }
 
     #[test]
     fn truncate_stderr_cuts_at_char_boundary_without_panic() {

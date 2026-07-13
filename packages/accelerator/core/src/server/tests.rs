@@ -1134,3 +1134,34 @@ async fn invalid_host_reply_stays_application_json_without_message() {
         "invalid_host must NOT carry a message field (minimal host-guard reply)"
     );
 }
+
+#[tokio::test]
+async fn prove_sheds_with_429_when_waiter_cap_full() {
+    // F-009 (handler-level): with the in-flight/waiting cap already full (prove_waiters exhausted),
+    // an authorized /prove request is shed IMMEDIATELY with 429 prove_queue_full — it never queues
+    // behind slow uploaders. Complements the try_enter unit test with end-to-end handler wiring.
+    let state = AppState {
+        core: std::sync::Arc::new(HeadlessState {
+            prove_waiters: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+            ..HeadlessState::default()
+        }),
+        ..AppState::default()
+    };
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("host", "127.0.0.1:59833")
+                .uri("/prove")
+                .body(Body::from("witness"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "prove_queue_full");
+}
