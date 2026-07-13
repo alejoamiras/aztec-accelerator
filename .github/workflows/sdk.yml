@@ -3,7 +3,7 @@ name: SDK
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main]
+    branches: [main, security-hardening]
 
 # Cancel a superseded in-flight run when a new commit is pushed to the same PR.
 concurrency:
