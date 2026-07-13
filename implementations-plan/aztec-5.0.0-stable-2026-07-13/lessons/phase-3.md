@@ -24,6 +24,13 @@ Tooling gotcha: scripts must run from inside `packages/playground` — a copy un
 - Fix: `checkAztecNode` now probes via the `node_getNodeInfo` JSON-RPC POST it already used for the version (single round-trip); the 4 unit tests rewritten to the new contract. Follow-up PR after #376 (which had already auto-merged).
 - Dev-server env gotchas: vite's `loadEnv` did NOT see inline process-env in this setup — `AZTEC_NODE_URL` had to go into a gitignored `packages/playground/.env.local`. Also the root `node_modules/.bin/vite` resolves to a hoisted **vite 8.0.1** (the version this repo blocks) — always spawn `packages/playground/node_modules/.bin/vite` (7.3.1). Port 5273 claimed in `~/.agents/ports.md`.
 
+## (b) Pre-publish smoke — ✅ FULL PASS (2026-07-13 ~20:43 UTC, dev:testnet + WASM path, driven via Playwright MCP)
+
+- Node check via the fixed RPC probe: "Aztec node version: 5.0.0" ✓; wallet created in ~2s (**ephemeral store init/sync cost: negligible** — the plan's inference confirmed); FPC `0x0628…3fe1` registered ✓.
+- Account deploy: 19.5s (create 0.5 / simulate 4.2 / prove+send 14.8) → tx `0x194576…34d82d`, fee sponsored by the new FPC.
+- **Token flow: 88.5s total** — Bob deploy 26.4s (tx `0x0d21b9…313792`), TokenContract deploy 19.3s (`0x153766…9668b6`, tx `0x102e9c…2564c8`), mint 1000 ACEL to private 18.6s (tx `0x2e5b78…2e08e52d`), **private transfer 500 ACEL Alice→Bob 19.4s** (tx `0x0e784e…fd937d9`) — the note-tagging/discovery surface the changelog changed — and **balances verified Alice 500 / Bob 500**.
+- Expected noise only: accelerator health-probe connection-refusals (no accelerator running), "SDK unknown" version-mismatch warn (dev mode doesn't bake VITE_AZTEC_SDK_VERSION).
+
 ## Pending
 - (b) pre-publish dev:testnet transfer smoke (gates the publish)
 - (c) publish-testnet dispatch (post-merge, autonomous per Ask 1)
