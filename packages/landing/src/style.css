@@ -59,6 +59,63 @@ img, svg {
   padding: 0 1.5rem;
 }
 
+/* ── Pre-release banner ──────────────────────────────────────────── */
+.prerelease-banner {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  padding: 0.55rem 1rem;
+  background: rgba(11, 10, 6, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(255, 179, 71, 0.3);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  text-align: center;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.prerelease-banner-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ffb347;
+  box-shadow: 0 0 10px rgba(255, 179, 71, 0.45);
+  animation: prerelease-pulse 2.4s ease-out infinite;
+}
+
+.prerelease-banner-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0 0.7rem;
+  margin: 0;
+}
+
+.prerelease-banner-text strong {
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  color: #ffb347;
+}
+
+.prerelease-banner-sep {
+  opacity: 0.35;
+}
+
+@keyframes prerelease-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.6); opacity: 0.55; }
+}
+
 /* ── Nav ──────────────────────────────────────────────────────────── */
 .nav {
   display: flex;
