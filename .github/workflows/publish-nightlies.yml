@@ -3,9 +3,11 @@ name: Publish Nightlies
 on:
   workflow_dispatch:
 
+# Never cancel an in-flight run: this workflow calls _publish-sdk.yml, and canceling a
+# half-done npm publish strands irreversible state (published but untagged/unreleased).
 concurrency:
   group: publish-nightlies
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   id-token: write
