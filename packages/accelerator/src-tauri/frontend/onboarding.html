@@ -94,9 +94,10 @@
       async function load() {
         try {
           const state = await invoke("get_onboarding_state");
-          document.getElementById("opt-https").checked = state.https_default;
-          document.getElementById("opt-autostart").checked = state.autostart_enabled;
-          document.getElementById("opt-auto-update").checked = state.auto_update !== false;
+          // All three toggles default to the recommended YES (the HTML `checked` attributes) — HTTPS
+          // is pre-checked for everyone incl. upgraders (A9/§2.1), and Start-on-Login + Auto-Update
+          // are the recommended defaults. We only set the per-OS certificate copy here; the user can
+          // uncheck anything before Start.
           document.getElementById("https-warn").textContent =
             HTTPS_WARN[state.platform] || HTTPS_WARN.linux;
         } catch (err) {

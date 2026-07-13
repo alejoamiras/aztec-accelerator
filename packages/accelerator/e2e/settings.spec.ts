@@ -92,7 +92,8 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
   await expect(page.getByText("https://example.com")).toBeVisible();
 
   // Click Remove
-  await page.getByRole("button", { name: "Remove" }).click();
+  // `exact` so this matches only the origin-list "Remove", not the "Remove certificate trust" button.
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
 
   // Should call remove_approved_origin then reload settings
   const removeCalls = await callsFor(page, "remove_approved_origin");

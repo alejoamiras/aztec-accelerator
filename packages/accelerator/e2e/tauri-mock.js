@@ -40,9 +40,6 @@ const defaults = {
   get_onboarding_state: () => ({
     platform: "macos",
     https_default: true,
-    autostart_enabled: false,
-    auto_update: null,
-    trust_status: { stores: [] },
   }),
   // Default: everything succeeds and the marker is set.
   complete_onboarding: () => ({

@@ -246,25 +246,20 @@ pub fn remove_https_trust(config: tauri::State<'_, ConfigState>) -> Result<(), S
 #[derive(serde::Serialize)]
 pub struct OnboardingState {
     pub platform: String,
+    /// HTTPS is pre-checked for everyone incl. upgraders (A9/§2.1). Start-on-Login + Auto-Update
+    /// default to the recommended YES in the wizard UI (not reflected here — the wizard is a
+    /// "recommended setup", and computing OS/config state for the toggle defaults would only let an
+    /// upgrader's prior opt-out silently re-enable on Start).
     pub https_default: bool,
-    pub autostart_enabled: bool,
-    pub auto_update: Option<bool>,
 }
 
 #[tauri::command]
-pub fn get_onboarding_state(
-    app: tauri::AppHandle,
-    config: tauri::State<'_, ConfigState>,
-) -> OnboardingState {
-    use tauri_plugin_autostart::ManagerExt;
-    // Deliberately does NOT compute trust_status — the wizard UI never reads it, and it would run
-    // blocking certutil/security subprocesses on every wizard open for nothing (post-impl review).
-    let auto_update = config.read().auto_update;
+pub fn get_onboarding_state() -> OnboardingState {
+    // Intentionally cheap + side-effect-free: the per-OS certificate copy is chosen from `platform`;
+    // no autostart/config/trust probing (the wizard defaults all toggles to YES).
     OnboardingState {
         platform: std::env::consts::OS.to_string(),
         https_default: true,
-        autostart_enabled: app.autolaunch().is_enabled().unwrap_or(false),
-        auto_update,
     }
 }
 
