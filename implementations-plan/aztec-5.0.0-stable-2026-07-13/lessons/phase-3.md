@@ -50,3 +50,10 @@ Tooling gotcha: scripts must run from inside `packages/playground` — a copy un
 - `scripts/.env` + `.env.local` **deleted** at completion, per plan.
 
 LESSONS_FILE=implementations-plan/aztec-5.0.0-stable-2026-07-13/lessons/phase-3.md
+
+## Post-impl close-out (2026-07-13 ~22:30 UTC)
+
+- PRs #382 (12 of 15 review findings) + #383 (codex post-impl conditions) merged, all CI green.
+- Codex condition 3 executed: playground-only redeploy dispatched → live `/assets/sqlite3.wasm` verified serving `200` + `application/wasm` + `cache-control: no-cache`.
+- Final proofs on merged main: `bun run test` exit 0 (3-graph typecheck included), `bun run lint:actions` exit 0.
+- Follow-ups filed in the plan ledger: CRS_CACHE_VERSION derivation (bump-tool ripple), deploy-sponsored-fpc fail-open getContract, NPM_TOKEN→OIDC trusted publisher.
