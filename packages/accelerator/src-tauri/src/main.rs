@@ -503,34 +503,6 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // F-012 TEMP diagnostic: log which frontend assets the resolver can actually see, to pinpoint
-            // the CI "asset not found: settings.html" (removed once the embed issue is fixed).
-            #[cfg(feature = "webdriver")]
-            {
-                let r = app.asset_resolver();
-                // `iter()` enumerates the EMBEDDED assets only (no dev disk fallback), so a 0 count means
-                // codegen embedded nothing (dev_url injected) while `get()` still works via disk.
-                let embed_count = r.iter().count();
-                let cfg = app.config();
-                tracing::error!(
-                    embed_count,
-                    dev_url = ?cfg.build.dev_url,
-                    frontend_dist = ?cfg.build.frontend_dist,
-                    "F-012 embed state"
-                );
-                let r = app.asset_resolver();
-                for k in [
-                    "settings.html",
-                    "authorize.html",
-                    "update-prompt.html",
-                    "style.css",
-                    "assets/settings.js",
-                    "index.html",
-                ] {
-                    tracing::error!(key = k, found = r.get(k.to_string()).is_some(), "F-012 asset probe");
-                }
-            }
-
             let bundled_version = env!("AZTEC_BB_VERSION").to_string();
 
             let status = MenuItemBuilder::with_id("status", "Status: Idle")
