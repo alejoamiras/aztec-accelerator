@@ -6,15 +6,33 @@ The Tauri desktop frontend trust boundary is weak: `withGlobalTauri: true` (`tau
 `update-prompt.html:24`) run INLINE `<script>` blocks; `tauri-bridge.js:9` = `window.__TAURI__.core`; a
 single `capabilities/default.json` grants all windows the same set; `build.rs` is bare.
 
-## CRITICAL reframing (both legs independently verified — the load-bearing finding)
+## CRITICAL reframing (both legs verified + SOURCE-CONFIRMED — the load-bearing finding)
 There are NO Rust caller-label checks today, AND `default.json` grants NONE of the 12 custom app commands —
 yet they all work (WebDriver passes). ⇒ **Tauri v2 does NOT gate app-local commands by default**: every
 window (incl. an `auth-*` popup) can already invoke EVERY command (`enable_safari_support`,
 `remove_approved_origin`, `respond_update_prompt`). THAT ungated command surface IS the trust-boundary hole —
-NOT closed by CSP or `withGlobalTauri`. The master's "keep the Rust caller-label checks as DiD" assumes
-checks that don't exist ⇒ this plan ADDS them as PRIMARY enforcement; the per-window capability split +
-`build.rs` command declaration is the Tauri-native complementary layer, and a cross-window-denial WebDriver
-test is THE proof F-012 is fixed (it fails loudly only if the boundary is actually open).
+NOT closed by CSP or `withGlobalTauri`. So this plan ADDS Rust caller-label checks as a primary layer AND
+declares the app ACL manifest so the per-window capability split becomes REAL enforcement.
+
+**SOURCE-CONFIRMED (tauri 2.11.0, the exact locked version — see lessons/phase-C10.md §1):** the invoke path
+`tauri/src/webview/mod.rs:1819-1848` only enforces the ACL when `plugin_command || has_app_acl_manifest`.
+`has_app_acl_manifest` is false today (bare `tauri_build::build()`), so app-local commands skip the ACL
+entirely — that IS why they all work ungranted. Declaring `AppManifest::commands(&COMMANDS)` sets
+`has_app_acl=true`, after which an app command whose calling window has no granting capability →
+`resolve_access` returns `None` (`ipc/authority.rs:439-471`, per-window glob match) → the path REJECTS with
+"Command … not allowed by ACL". **⇒ D5's capability layer is genuine enforcement, not theater** (this was the
+plan's highest-uncertainty inference — now resolved from source). D6 (Rust caller-label) is real
+belt-and-suspenders and additionally binds request_id↔label, which the ACL cannot express. The cross-window
+denial WebDriver test is THE proof F-012 is fixed (fails loudly only if the boundary is actually open).
+
+**NEW IMPLEMENTATION RISK (from the source read — MUST honor in P3):** `has_app_acl` is ALL-OR-NOTHING. The
+instant the manifest is declared, EVERY app-local command becomes ACL-gated for EVERY window, so the
+per-window capability files must COMPLETELY cover the real production (window,command) usage matrix — miss one
+grant and that flow silently breaks at runtime. The static set-equality test checks TOTALS, not per-window
+assignment; the real guard is the EXISTING positive-flow specs (settings/auth-flow/update), which go red if a
+window can't invoke a command it needs. **P3's gate MUST run the full positive WebDriver suite, not just the
+new negative test.** Build the usage matrix explicitly before writing grants (settings→9 cmds, auth-*→
+get_verified_info+respond_auth, update-prompt→respond_update_prompt; verified per window in lessons §1).
 
 ## Decision ledger (reconciled across the 3 legs)
 - **D1 — withGlobalTauri:false via Bun.build ESM bundles** (both legs; reject Vite/esbuild/the undocumented
@@ -49,11 +67,14 @@ test is THE proof F-012 is fixed (it fails loudly only if the boundary is actual
   (window/event core the popup may need to close itself/emit); codex drops it. DEFAULT: retain `core:default`
   per-window unless the WebDriver run proves it unused; drop the plugin grants (`autostart:*` except where
   the settings toggle needs `autostart:allow-disable`/`allow-is-enabled`; `process:default`). Verify empirically.
-- **D8 — WebDriver mode (OPEN → default: keep `tauri dev`):** codex proposes `built-debug`
-  (`tauri build --debug --no-bundle`) for a real-build gate; fable keeps `tauri dev` (which already runs the
-  real webview + `beforeDevCommand` builds the bundles). DEFAULT: keep `tauri dev` (lighter CI change); the
-  double audit decides whether `built-debug` is worth the workflow churn. The `windows-build` job already
-  does a real `tauri build`.
+- **D8 — WebDriver mode: RESOLVED (source-confirmed) — keep `mode: dev`.** codex proposed `built-debug`
+  (`tauri build --debug --no-bundle`) fearing dev-mode relaxes CSP/ACL; that fear is unfounded here.
+  SOURCE (lessons §3): `tauri-utils config.rs:2897` — *"If `dev_csp` is not specified, this value [`csp`] is
+  also injected on dev."* We set only `csp` (leave `devCsp` UNSET) → the strict CSP applies under `tauri dev`.
+  `tauri.conf.json` has no `devUrl`/`beforeDevCommand` (static `frontendDist`), so `set_csp` + nonce
+  augmentation run in dev, and capabilities are compile-time (enforced identically dev/release). The PR gate
+  (`accelerator.yml:355`) runs `mode: dev`; the release gate (`release-accelerator.yml:85`) runs the real
+  release binary as a backstop. ⇒ `built-debug` is unnecessary churn; keep `mode: dev`.
 
 ## Validation (CI-authoritative; GUI-less VPS ⇒ HARD RULE)
 - **Static** `scripts/tauri-trust-boundary.test.ts` (`bun test scripts/`): withGlobalTauri:false; exact CSP
@@ -110,16 +131,25 @@ test is THE proof F-012 is fixed (it fails loudly only if the boundary is actual
   registers 12 commands, none read a caller label; `default.json` grants none of them yet all work;
   `build.rs` bare; `@tauri-apps/api` NOT a dep; Bun 1.3.14 toolchain; CI has desktop-ui (Playwright mock,
   no CSP) + e2e-webdriver (real webview, 3 OS) + windows-build (real `tauri build`).
+### Facts — SOURCE-CONFIRMED this pass (tauri 2.11.0 / tauri-utils 2.9.2, the locked versions; lessons §1-3)
+- `AppManifest::commands()` FLIPS app-local commands to ACL-gated (default-deny per window): the invoke path
+  enforces the ACL only when `plugin_command || has_app_acl_manifest` (`webview/mod.rs:1819-1848`);
+  `has_app_acl` is false today → ungated → all 12 work; declaring the manifest sets it true → ungranted
+  (window,command) → `resolve_access`==None (`authority.rs:439-471`) → REJECT. Was the crux inference; now Fact.
+- Tauri augments `script-src`/`style-src` with a per-load nonce for its own bootstrap (+ build-time hashes,
+  which vanish once inline is removed) — gated on `dangerous_disable_asset_csp_modification` (default false).
+  ⇒ `script-src 'self'` works and we must NOT disable csp modification (`manager/mod.rs:53-150`).
+- `csp` is injected on dev when `devCsp` is unset (`config.rs:2897`) → the `mode: dev` PR gate enforces the
+  real CSP. `app.security.capabilities` and `freeze_prototype` are real config fields (`config.rs:2954,2910`).
 ### Inferences (verify in impl — highest-uncertainty first)
-- `AppManifest::commands()` makes ungranted windows DENIED (not just grantable) — the crux; mitigated by
-  the Rust label layer + the "rejected by either" negative test; verify vs regenerated acl-manifests.json.
 - Generated perm ids = `allow-<kebab-command>`; adjust to what the first `cargo build` emits.
-- Tauri auto-augments script-src (nonce) + connect-src (ipc/http://ipc.localhost) → `'self'`/ipc work.
+- Tauri augments connect-src with the ipc origin (`ipc:`/`http://ipc.localhost`) so IPC works with our
+  connect-src; confirm empirically (the nonce/script path is proven; the connect-src augment is inferred).
 - `@tauri-apps/api/core` invoke delegates to `window.__TAURI_INTERNALS__.invoke` (mock target).
 - capability `windows:["auth-*"]` glob matches every `auth-<hash>`; verify via the WebDriver popup test.
 ### Asks (open reconciliation — decided by defaults above; double audit may override)
 - A1 (D7): retain `core:default` per-window (vs drop) — default RETAIN, tighten if WebDriver proves unused.
-- A2 (D8): `tauri dev` (vs `built-debug`) WebDriver mode — default `tauri dev`.
+- A2 (D8): RESOLVED from source — keep `mode: dev` (csp injected on dev when devCsp unset); no longer open.
 - A3: `freezePrototype:true` extra DiD — optional.
 - A4: `style-src 'self'` vs an `unsafe-inline` fallback if WebKitGTK styling breaks — default `'self'`.
 
