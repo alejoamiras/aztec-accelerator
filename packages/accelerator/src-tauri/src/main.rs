@@ -502,6 +502,24 @@ fn main() {
             // Hide from Dock — tray-only app
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // F-012 TEMP diagnostic: log which frontend assets the resolver can actually see, to pinpoint
+            // the CI "asset not found: settings.html" (removed once the embed issue is fixed).
+            #[cfg(feature = "webdriver")]
+            {
+                let r = app.asset_resolver();
+                for k in [
+                    "settings.html",
+                    "authorize.html",
+                    "update-prompt.html",
+                    "style.css",
+                    "assets/settings.js",
+                    "index.html",
+                ] {
+                    tracing::error!(key = k, found = r.get(k.to_string()).is_some(), "F-012 asset probe");
+                }
+            }
+
             let bundled_version = env!("AZTEC_BB_VERSION").to_string();
 
             let status = MenuItemBuilder::with_id("status", "Status: Idle")
