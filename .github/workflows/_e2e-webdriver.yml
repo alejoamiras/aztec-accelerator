@@ -65,6 +65,16 @@ jobs:
         working-directory: packages/accelerator/src-tauri
         run: cargo build --release --features webdriver
 
+      # ── Build (dev — plain `cargo build`, run DIRECTLY, no `tauri dev`. F-012 ROOT CAUSE: `tauri dev`
+      #    injects a dev-server devUrl (e.g. http://127.0.0.1:1430), which makes tauri-codegen embed an EMPTY
+      #    asset set (context.rs: `dev && dev_url.is_some()`), so the webview's tauri:// protocol 404s every
+      #    asset. A plain `cargo build` has dev_url=None → codegen embeds frontendDist fully → tauri:// works.
+      #    setup-accelerator already built the frontend bundles the build.rs guard needs. ──
+      - name: Build app (dev)
+        if: inputs.mode == 'dev'
+        working-directory: packages/accelerator/src-tauri
+        run: cargo build --features webdriver
+
       # ── Build (built-debug — F-012/D8: a real `tauri build` enables tauri's custom-protocol feature, so
       #    the webdriver run exercises the SHIPPED asset/CSP path that `tauri dev` and raw `cargo build` skip.
       #    Runs from packages/accelerator so tauri's beforeBuildCommand (bun run frontend:build) fires. ──
@@ -80,7 +90,8 @@ jobs:
           case "${{ inputs.mode }}" in
             release)     APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE" ;;
             built-debug) APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;;
-            *)           APP_CMD="bunx tauri dev --no-watch --features webdriver" ;;
+            *)           APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;; # dev: built above
+
           esac
           $APP_CMD > /tmp/tauri.log 2>&1 &
           echo "TAURI_PID=$!" >> "$GITHUB_ENV"
