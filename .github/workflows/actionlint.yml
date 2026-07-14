@@ -45,21 +45,24 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        id: actionlint-cache
-        with:
-          path: ./actionlint
-          key: actionlint-v1.7.11-${{ runner.os }}
-      - name: Download actionlint
-        if: steps.actionlint-cache.outputs.cache-hit != 'true'
-        id: get_actionlint
-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.11/scripts/download-actionlint.bash)
+      # F-015: download a PINNED actionlint release and verify its SHA-256 instead of piping a
+      # moving `download-actionlint.bash` into bash. No binary cache (a poisoned cache would be a
+      # trusted executable); the ~2 MB download each run is negligible. The prior setup was also
+      # mislabeled — the v1.7.11 installer defaults to actionlint 1.7.10 while the cache key said
+      # 1.7.11. Pinned to 1.7.12 (matches the local lint gate).
+      - name: Download + verify actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o actionlint.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
         shell: bash
       - name: Run actionlint
-        run: |
-          ACTIONLINT="${{ steps.get_actionlint.outputs.executable }}"
-          [ -z "$ACTIONLINT" ] && ACTIONLINT="./actionlint"
-          "$ACTIONLINT" -color
+        run: ./actionlint -color
         shell: bash
 
   shellcheck:
@@ -71,7 +74,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Run shellcheck
-        run: shellcheck infra/*.sh
+        # F-015/C0: `shellcheck infra/*.sh` errors when the glob matches nothing (no infra scripts
+        # today), which fails the job on workflow_dispatch. `find … | xargs -0r` is empty-safe AND
+        # recursive — matching the `infra/**/*.sh` paths-filter so a nested script can't trigger the
+        # job yet silently skip linting. `xargs -0r` propagates shellcheck's real exit code (the old
+        # `&& … || echo` form would have masked a genuine failure as success).
+        run: find infra -type f -name '*.sh' -print0 | xargs -0r shellcheck
 
   tofu:
     name: Lint OpenTofu
