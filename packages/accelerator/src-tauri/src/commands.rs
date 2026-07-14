@@ -49,6 +49,21 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
     if enabled {
+        // F-010: refuse autostart entirely if this executable's path could inject into ANY OS launcher
+        // serializer (systemd unit / .desktop / plist / Run-key) — BEFORE invoking the plugin (which would
+        // otherwise serialize the unsafe path itself). Fail closed: leave a clean disabled state + surface
+        // the refusal to the UI. (The webview cannot bypass this by calling the raw plugin enable — the
+        // `autostart:allow-enable` capability grant is removed; only this gated command can enable.)
+        let exe =
+            std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
+        if !crate::crash_recovery::autostart_path_is_safe(&exe) {
+            let _ = manager.disable();
+            crate::crash_recovery::disable_crash_recovery();
+            return Err(
+                "Executable path is unsafe for autostart (control/newline/non-UTF-8); refusing to enable."
+                    .to_string(),
+            );
+        }
         manager.enable().map_err(|e| e.to_string())?;
         crate::crash_recovery::enable_crash_recovery();
     } else {

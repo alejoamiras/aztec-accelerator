@@ -127,6 +127,44 @@ fn macos_plist_path() -> std::path::PathBuf {
         .join(format!("{APP_NAME}.plist"))
 }
 
+/// F-010: conservative cross-platform preflight for enabling autostart. Rejects a path whose bytes could
+/// INJECT into any OS launcher serializer (systemd unit / `.desktop` / plist XML / Windows Run-key): a
+/// non-absolute path, non-UTF-8 (systemd rejects it; the plugin serializes it lossily), or any control /
+/// newline / DEL byte (the injection vector for line/element-based unit + plist formats). Platform-specific
+/// NON-injection formatting quirks in the third-party `auto-launch` crate (e.g. space-splitting in a raw
+/// `.desktop` `Exec=` / Run-key) are a documented ROBUSTNESS residual, not a same-process injection we can
+/// close without patching that crate. `set_autostart` calls this BEFORE invoking the plugin, refusing (and
+/// disabling) rather than letting an unsafe path be serialized.
+pub fn autostart_path_is_safe(exe: &std::path::Path) -> bool {
+    match exe.to_str() {
+        None => false, // non-UTF-8
+        Some(s) => exe.is_absolute() && !s.bytes().any(|b| b < 0x20 || b == 0x7f),
+    }
+}
+
+/// F-010: serialize an absolute executable path into a safe systemd `ExecStart` value, or `None` if the
+/// path is not representable. systemd's `string_is_safe` REJECTS a decoded executable containing controls,
+/// `\`, `"`, `'`, or a glob introducer (`*`/`?`/`[`), and requires valid UTF-8 — those are not escapable, so
+/// we fail closed. The returned value uses the `:` prefix (disables systemd `$`-environment expansion) INSIDE
+/// the quoted first token, and doubles `%` (systemd specifier). No `\`/`"` escaping is needed because they
+/// are rejected. Result form: `":/path/with %% doubled"`.
+#[cfg(target_os = "linux")]
+fn systemd_exec_start(exe: &std::path::Path) -> Option<String> {
+    let s = exe.to_str()?; // None ⇒ non-UTF-8
+    if !exe.is_absolute() || s.ends_with('/') {
+        return None; // must be an absolute file path, not a directory shape
+    }
+    if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None; // controls / newline / DEL
+    }
+    if s.chars()
+        .any(|c| matches!(c, '\\' | '"' | '\'' | '*' | '?' | '['))
+    {
+        return None; // systemd `string_is_safe` forbids these in the executable path
+    }
+    Some(format!("\":{}\"", s.replace('%', "%%")))
+}
+
 /// Create and enable a systemd user service with `Restart=on-failure`.
 /// Call this after `manager.enable()`.
 #[cfg(target_os = "linux")]
@@ -152,6 +190,20 @@ fn enable_impl() {
         return;
     }
 
+    // F-010: build a systemd-escaped ExecStart. An unsafe path (systemd would reject or it could inject
+    // a directive) fails CLOSED — remove any stale unit and bail rather than write a corrupt/injected one.
+    let exec_start = match systemd_exec_start(&exe) {
+        Some(v) => v,
+        None => {
+            tracing::warn!(
+                "Executable path is not representable as a safe systemd ExecStart; \
+                 skipping crash-recovery unit and removing any stale one"
+            );
+            disable_impl();
+            return;
+        }
+    };
+
     let service_path = service_dir.join(format!("{SYSTEMD_NAME}.service"));
     let service_content = format!(
         "[Unit]\n\
@@ -160,14 +212,13 @@ fn enable_impl() {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart=\"{exe}\"\n\
+         ExecStart={exec_start}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          StartLimitBurst=5\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        exe = exe.display()
     );
 
     if let Err(e) = std::fs::write(&service_path, &service_content) {
@@ -401,6 +452,69 @@ fn xml_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    /// F-010: reproduce systemd's ExecStart decode (unquote → strip `:` prefix → specifier-expand `%%`→`%`)
+    /// to prove the serializer round-trips exactly to the intended path — i.e. no injection, exact argv0.
+    #[cfg(target_os = "linux")]
+    fn decode_systemd_exec_start(value: &str) -> String {
+        // Our serializer always emits `":<...>"` — one double-quoted token.
+        let inner = value
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .expect("quoted token");
+        let after_prefix = inner.strip_prefix(':').expect(": prefix"); // strip the exec prefix
+        after_prefix.replace("%%", "%") // specifier expansion (only %% appears)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_exec_start_serializes_and_round_trips() {
+        // Plain path.
+        let v = super::systemd_exec_start(Path::new("/usr/bin/aztec-accelerator")).unwrap();
+        assert_eq!(v, "\":/usr/bin/aztec-accelerator\"");
+        assert_eq!(decode_systemd_exec_start(&v), "/usr/bin/aztec-accelerator");
+        // A `%`, a space, and a `$` all survive as literals (— `%` doubled, `:` disables `$` expansion).
+        let v = super::systemd_exec_start(Path::new("/opt/my app/100% $HOME/bb")).unwrap();
+        assert_eq!(v, "\":/opt/my app/100%% $HOME/bb\"");
+        assert_eq!(decode_systemd_exec_start(&v), "/opt/my app/100% $HOME/bb");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_exec_start_rejects_unrepresentable_paths() {
+        for bad in [
+            "relative/bb",                 // not absolute
+            "/dir/",                       // directory shape
+            "/x/\nExecStartPre=/bin/evil", // newline injection
+            "/x/\tbb",                     // control
+            "/x/a\"b",                     // quote (systemd rejects)
+            "/x/a\\b",                     // backslash
+            "/x/a'b",                      // single quote
+            "/x/a*b",                      // glob
+            "/x/a?b",
+            "/x/a[b",
+        ] {
+            assert!(
+                super::systemd_exec_start(Path::new(bad)).is_none(),
+                "should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn autostart_preflight_rejects_injection_and_accepts_normal_paths() {
+        assert!(super::autostart_path_is_safe(Path::new(
+            "/usr/bin/aztec-accelerator"
+        )));
+        assert!(super::autostart_path_is_safe(Path::new(
+            "/opt/my app/aztec"
+        ))); // space is fine (formatting)
+        assert!(!super::autostart_path_is_safe(Path::new("relative/bb"))); // not absolute
+        assert!(!super::autostart_path_is_safe(Path::new("/x/\nInject"))); // newline
+        assert!(!super::autostart_path_is_safe(Path::new("/x/\u{7f}bb"))); // DEL
+    }
+
     #[test]
     #[cfg(target_os = "windows")]
     fn task_xml_uses_repeating_trigger_and_escapes_exe() {
