@@ -66,9 +66,13 @@ fn acquire_updater_lock() -> Option<std::fs::File> {
 /// Record that THIS build launched successfully by advancing the monotonic version floor to the
 /// running version (F-004 Layer B). Called once, after the app has proven it actually runs (see the
 /// launch tracker in main.rs) — so a build that boots but immediately wedges never ratchets the floor
-/// and can't lock itself in as the new minimum. Runs under the updater lock (best-effort) so it can't
-/// interleave with a concurrent install; the underlying commit is monotonic and fail-safe (refuses to
-/// overwrite a corrupt floor) even without the lock.
+/// and can't lock itself in as the new minimum.
+///
+/// The updater lock is REQUIRED, not best-effort (audit H2): committing the floor without it can race a
+/// concurrent installer — the installer re-checks the floor before `install()`, so a commit that lands
+/// between that check and the install would let the installer write a version below the just-advanced
+/// floor. If the lock is held by another instance's transaction, defer the commit (the next launch
+/// retries) rather than commit unlocked.
 pub fn commit_launch_floor() {
     let Some(path) = updater_state_path() else {
         tracing::warn!("cannot resolve updater-state path; skipping floor commit");
@@ -81,7 +85,12 @@ pub fn commit_launch_floor() {
             return;
         }
     };
-    let _guard = acquire_updater_lock();
+    let Some(_guard) = acquire_updater_lock() else {
+        tracing::warn!(
+            "could not acquire the updater lock; deferring the floor commit to avoid racing a concurrent install"
+        );
+        return;
+    };
     match updater_state::commit_successful_launch(&path, &current) {
         Ok(()) => tracing::info!(version = %current, "Version floor committed for this launch"),
         Err(e) => tracing::warn!("Floor commit skipped: {e}"),
@@ -109,6 +118,31 @@ impl VerifiedUpdate {
     pub fn version(&self) -> &Version {
         &self.version
     }
+}
+
+/// F-004 Layer B, fail-closed. Returns `Ok(())` iff `candidate` may be installed given the persisted
+/// state and the running version. Every arm — updater-state path resolution, state load, the
+/// running-below-floor check, and candidate-allowed (which itself rejects a `Corrupt` state) — fails
+/// CLOSED (Err) on any problem. Shared by the check-time gate ([`verify_and_gate`]) and the install-time
+/// re-check ([`perform_update`]) so the two can never diverge (audit M5). `current` is passed in so the
+/// caller parses it once and a parse failure is handled as fail-closed there.
+fn layer_b_gate(candidate: &Version, current: &Version) -> Result<(), String> {
+    let Some(path) = updater_state_path() else {
+        return Err("cannot resolve the updater-state path".to_string());
+    };
+    let state = updater_state::load_state(&path);
+    if updater_state::running_below_floor(current, &state) {
+        return Err(
+            "running build is BELOW the version floor (possible out-of-band rollback); refusing all updates"
+                .to_string(),
+        );
+    }
+    if !updater_state::candidate_allowed(candidate, current, &state) {
+        return Err(format!(
+            "candidate {candidate} is not strictly above max(current {current}, floor, pending)"
+        ));
+    }
+    Ok(())
 }
 
 /// F-004 gate: verify the signed manifest (Layer A) and enforce the monotonic version floor
@@ -143,27 +177,9 @@ fn verify_and_gate(update: tauri_plugin_updater::Update) -> Option<VerifiedUpdat
         }
     };
 
-    // Layer B — the monotonic anti-rollback floor.
-    let floor = match updater_state_path() {
-        Some(p) => updater_state::load_floor(&p),
-        None => {
-            tracing::error!("SECURITY: cannot resolve the updater-state path; refusing update");
-            return None;
-        }
-    };
-    if updater_state::running_below_floor(&current, &floor) {
-        tracing::error!(
-            current = %current,
-            "SECURITY: running build is BELOW the version floor (possible out-of-band rollback); refusing all updates"
-        );
-        return None;
-    }
-    if !updater_state::candidate_allowed(&verified.version, &current, &floor) {
-        tracing::error!(
-            candidate = %verified.version,
-            current = %current,
-            "SECURITY: update candidate is not strictly above max(current, floor); refusing (anti-rollback)"
-        );
+    // Layer B — the monotonic anti-rollback floor (shared fail-closed gate).
+    if let Err(reason) = layer_b_gate(&verified.version, &current) {
+        tracing::error!("SECURITY: {reason}; refusing update");
         return None;
     }
 
@@ -251,20 +267,25 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         None => return,
     };
 
-    // TOCTOU: the floor may have advanced since check_for_update (another instance committed a launch
-    // or installed a newer build). Re-verify Layer B under the lock, right before committing to the
-    // download — if the candidate is no longer strictly above the floor, abort.
-    if let Some(path) = updater_state_path() {
-        if let Ok(current) = Version::parse(env!("CARGO_PKG_VERSION")) {
-            let floor = updater_state::load_floor(&path);
-            if !updater_state::candidate_allowed(&version, &current, &floor) {
-                tracing::error!(
-                    candidate = %version,
-                    "SECURITY: candidate no longer above the floor at install time (raced by another instance); aborting"
-                );
-                return;
-            }
+    // Parse our own version once; a parse failure is fail-closed (can't safely gate → abort). Needed
+    // both for the install-time re-check and for recording the pending version after install.
+    let current = match Version::parse(env!("CARGO_PKG_VERSION")) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("SECURITY: own version is not SemVer ({e}); aborting install");
+            return;
         }
+    };
+
+    // TOCTOU: the floor/pending may have advanced since check_for_update (another instance committed a
+    // launch or recorded a pending install). Re-run the SAME fail-closed Layer B gate under the lock,
+    // right before committing to the download — a Corrupt/raced state now aborts the install.
+    if let Err(reason) = layer_b_gate(&version, &current) {
+        tracing::error!(
+            candidate = %version,
+            "SECURITY: {reason} at install time (raced by another instance); aborting"
+        );
+        return;
     }
 
     // SEC-03: pre-flight size cap. The plugin buffers the WHOLE artifact into memory before it
@@ -352,6 +373,20 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
 
     match update.install(bytes) {
         Ok(()) => {
+            // H1: record the just-installed version as PENDING, UNDER THE LOCK, BEFORE the restart
+            // releases it. This raises the effective floor to `version` for any instance that acquires
+            // the lock next — so a racing old instance cannot install a LOWER (still-signed) version and
+            // regress this build between now and when the restarted build commits its own floor. Kept
+            // best-effort with a SECURITY log: the install already happened, and not restarting would
+            // leave the app half-updated; the restarted build still commits its floor on healthy launch.
+            if let Some(path) = updater_state_path() {
+                if let Err(e) = updater_state::record_pending(&path, &current, &version) {
+                    tracing::error!(
+                        candidate = %version,
+                        "SECURITY: failed to record the pending version before restart ({e}); a concurrent downgrade race is briefly possible until the new build commits its floor"
+                    );
+                }
+            }
             // IgnoreNew + the exit-0-if-healthy guard absorb any brief double-launch with the
             // restarted build.
             #[cfg(target_os = "windows")]

@@ -1,17 +1,28 @@
 //! F-004 Layer B: a monotonic version floor — the rollback ratchet.
 //!
 //! Even if Layer A ([`crate::update_manifest`]) were somehow bypassed, the app must never move
-//! backwards. We persist the highest version that has ever SUCCESSFULLY RUN in a dedicated,
-//! owner-only, atomically-written state file (NOT `config.json`, whose load is deliberately
-//! fail-OPEN and would silently erase the floor on any parse glitch). An update candidate is
-//! accepted only if it is strictly greater — by SemVer PRECEDENCE (build metadata ignored) — than
-//! `max(current_running, floor)`. The floor advances only after a new build proves it runs (the
-//! caller commits post-launch), so a crashing bad update can never ratchet it. A corrupt/unreadable
-//! floor fails CLOSED (updates disabled) and is never overwritten, preserving forensic evidence.
+//! backwards. We persist, in a dedicated owner-only atomically-written state file (NOT `config.json`,
+//! whose load is deliberately fail-OPEN and would silently erase the floor on any parse glitch), two
+//! monotonic high-water marks:
 //!
-//! This module is the pure, GUI-agnostic core logic (unit-testable without the Tauri toolchain).
-//! The cross-process `flock` "updater transaction" that serialises check→install→commit across
-//! concurrent instances is applied by the desktop caller around these operations.
+//! - **`floor`** — the highest version that has ever SUCCESSFULLY RUN. Advanced only after a new build
+//!   proves it runs (the caller commits post-launch, [`commit_successful_launch`]), so a crashing bad
+//!   update can never ratchet it.
+//! - **`pending`** — the highest version an install has COMMITTED to but that has not yet proven healthy
+//!   ([`record_pending`], written under the updater lock right after a successful `install()`, before
+//!   the restart releases that lock). This closes the restart race: instance A installs `3.0.0` and
+//!   restarts (releasing the lock) before `3.0.0` can commit its floor; without `pending`, a racing
+//!   instance B would still see `floor = 1.0.0` and could install a LOWER `2.0.0`, regressing the
+//!   just-installed higher version. With `pending`, B sees the effective floor already at `3.0.0`.
+//!
+//! An update candidate is accepted only if it is strictly greater — by SemVer PRECEDENCE (build
+//! metadata ignored) — than `max(current_running, floor, pending)`. A corrupt/unreadable state fails
+//! CLOSED (updates disabled) and is never overwritten, preserving forensic evidence.
+//!
+//! This module is the pure, GUI-agnostic core logic (unit-testable without the Tauri toolchain). The
+//! cross-process `flock` "updater transaction" that serialises check→install→record→commit across
+//! concurrent instances is applied by the desktop caller around these operations; every mutating call
+//! here ([`record_pending`], [`commit_successful_launch`]) MUST run while the caller holds that lock.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -21,94 +32,170 @@ use serde::{Deserialize, Serialize};
 
 const SCHEMA: u32 = 1;
 
-/// The persisted floor. `deny_unknown_fields` so a tampered file with extra keys is rejected
-/// (→ [`FloorState::Corrupt`]) rather than silently accepted.
+/// The persisted state. `deny_unknown_fields` so a tampered file with extra keys is rejected
+/// (→ [`LoadedState::Corrupt`]) rather than silently accepted. `pending` is optional (older files and
+/// the common "nothing installing" case omit it).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FloorFile {
+struct StateFile {
     schema: u32,
     floor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<String>,
 }
 
-/// The three distinguishable load outcomes. `Corrupt` and `Missing` are NOT the same: `Missing`
-/// bootstraps (first run / pre-floor upgrade), `Corrupt` fails closed and is never overwritten.
+/// The distinguishable load outcomes. `Corrupt` and `Missing` are NOT the same: `Missing` bootstraps
+/// (first run / pre-floor upgrade), `Corrupt` fails closed and is never overwritten.
 #[derive(Debug, PartialEq, Eq)]
-pub enum FloorState {
-    /// No floor file yet — first run. Effective floor is `current_running` alone.
+pub enum LoadedState {
+    /// No state file yet — first run. Effective floor is `current_running` alone.
     Missing,
-    Valid(Version),
     /// File exists but is unreadable / not our schema / not canonical SemVer. Fail closed.
     Corrupt,
+    Valid {
+        floor: Version,
+        /// An install committed to but not yet proven healthy — part of the effective floor.
+        pending: Option<Version>,
+    },
 }
 
-/// Load the floor. IO errors other than "not found" are treated as `Corrupt` (fail closed) — a
+/// Parse a stored version string, requiring canonical round-trip so a non-canonical value can't slip
+/// the comparator.
+fn parse_canonical(s: &str) -> Option<Version> {
+    match Version::parse(s) {
+        Ok(v) if v.to_string() == s => Some(v),
+        _ => None,
+    }
+}
+
+/// Load the state. IO errors other than "not found" are treated as `Corrupt` (fail closed) — a
 /// permission or read failure on security state must not be interpreted as "no floor".
-pub fn load_floor(path: &Path) -> FloorState {
+pub fn load_state(path: &Path) -> LoadedState {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FloorState::Missing,
-        Err(_) => return FloorState::Corrupt,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LoadedState::Missing,
+        Err(_) => return LoadedState::Corrupt,
     };
-    let parsed: FloorFile = match serde_json::from_str(&contents) {
+    let parsed: StateFile = match serde_json::from_str(&contents) {
         Ok(p) => p,
-        Err(_) => return FloorState::Corrupt,
+        Err(_) => return LoadedState::Corrupt,
     };
     if parsed.schema != SCHEMA {
-        return FloorState::Corrupt;
+        return LoadedState::Corrupt;
     }
-    match Version::parse(&parsed.floor) {
-        // Require canonical round-trip so a non-canonical stored value can't slip the comparator.
-        Ok(v) if v.to_string() == parsed.floor => FloorState::Valid(v),
-        _ => FloorState::Corrupt,
+    let Some(floor) = parse_canonical(&parsed.floor) else {
+        return LoadedState::Corrupt;
+    };
+    // A present-but-unparseable `pending` is corruption, not "no pending" — fail closed.
+    let pending = match parsed.pending {
+        None => None,
+        Some(ref s) => match parse_canonical(s) {
+            Some(v) => Some(v),
+            None => return LoadedState::Corrupt,
+        },
+    };
+    LoadedState::Valid { floor, pending }
+}
+
+fn gt(a: &Version, b: &Version) -> bool {
+    a.cmp_precedence(b) == std::cmp::Ordering::Greater
+}
+
+/// The effective floor = `max(floor, pending)` by precedence. `None` for `Missing`. `Corrupt` is not
+/// representable here — callers treat it as reject.
+fn effective_floor(state: &LoadedState) -> Option<&Version> {
+    match state {
+        LoadedState::Valid { floor, pending } => match pending {
+            Some(p) if gt(p, floor) => Some(p),
+            _ => Some(floor),
+        },
+        LoadedState::Missing | LoadedState::Corrupt => None,
     }
 }
 
-/// Is `candidate` acceptable given the running version and the loaded floor? Uses SemVer
-/// PRECEDENCE (build metadata ignored, prerelease ordered correctly) and requires STRICTLY greater
-/// than both. A `Corrupt` floor rejects everything (fail closed).
-pub fn candidate_allowed(candidate: &Version, current: &Version, floor: &FloorState) -> bool {
-    let floor_v = match floor {
-        FloorState::Corrupt => return false,
-        FloorState::Missing => None,
-        FloorState::Valid(v) => Some(v),
-    };
-    let gt = |a: &Version, b: &Version| a.cmp_precedence(b) == std::cmp::Ordering::Greater;
+/// Is `candidate` acceptable given the running version and the loaded state? Uses SemVer PRECEDENCE
+/// (build metadata ignored, prerelease ordered correctly) and requires STRICTLY greater than
+/// `max(current, floor, pending)`. A `Corrupt` state rejects everything (fail closed).
+pub fn candidate_allowed(candidate: &Version, current: &Version, state: &LoadedState) -> bool {
+    if matches!(state, LoadedState::Corrupt) {
+        return false;
+    }
     if !gt(candidate, current) {
         return false;
     }
-    match floor_v {
+    match effective_floor(state) {
         Some(f) => gt(candidate, f),
         None => true,
     }
 }
 
-/// True iff the running build is BELOW the floor — a possible rollback that already happened
-/// (someone installed an older binary out of band). The caller disables updates + logs `SECURITY:`.
-pub fn running_below_floor(current: &Version, floor: &FloorState) -> bool {
-    matches!(floor, FloorState::Valid(f) if f.cmp_precedence(current) == std::cmp::Ordering::Greater)
+/// True iff the running build is BELOW the confirmed FLOOR — a rollback that already happened (someone
+/// installed an older binary out of band). Uses the confirmed `floor` ONLY, never `pending`: being
+/// below `pending` is the NORMAL state while a higher install has committed but not yet launched.
+pub fn running_below_floor(current: &Version, state: &LoadedState) -> bool {
+    matches!(state, LoadedState::Valid { floor, .. } if gt(floor, current))
 }
 
-/// Record that `current` launched successfully: advance the floor to `max(floor, current)` by
-/// precedence. Monotonic by construction — never lowers. Refuses to touch a `Corrupt` floor
-/// (returns an error so the caller keeps updates disabled and preserves the file for inspection).
-/// Atomic + owner-only write.
+/// Record that `current` (the running, therefore proven, installer) has just installed `candidate`,
+/// which is now PENDING until it proves healthy. Advances `floor` to include `current` and `pending`
+/// to include `candidate` (both monotonic by precedence). MUST be called under the updater lock, right
+/// after a successful `install()` and before the restart releases the lock — that ordering is what
+/// makes a racing instance see the higher effective floor. Refuses a `Corrupt` file.
+pub fn record_pending(path: &Path, current: &Version, candidate: &Version) -> std::io::Result<()> {
+    let (floor, pending) = match load_state(path) {
+        LoadedState::Corrupt => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "refusing to overwrite a corrupt version-floor state",
+            ));
+        }
+        LoadedState::Missing => (current.clone(), Some(candidate.clone())),
+        LoadedState::Valid { floor, pending } => {
+            let new_floor = if gt(current, &floor) {
+                current.clone()
+            } else {
+                floor
+            };
+            let new_pending = match pending {
+                Some(p) if gt(&p, candidate) => Some(p),
+                _ => Some(candidate.clone()),
+            };
+            (new_floor, new_pending)
+        }
+    };
+    write_state(path, &floor, pending.as_ref())
+}
+
+/// Record that `current` launched successfully: advance `floor` to `max(floor, current)` and clear any
+/// `pending` that has now been superseded (i.e. `pending <= current` by precedence — the pending
+/// install has launched, so it graduates into the confirmed floor). Monotonic; never lowers. Refuses a
+/// `Corrupt` file. MUST be called under the updater lock.
 pub fn commit_successful_launch(path: &Path, current: &Version) -> std::io::Result<()> {
-    match load_floor(path) {
-        FloorState::Corrupt => Err(std::io::Error::new(
+    match load_state(path) {
+        LoadedState::Corrupt => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "refusing to overwrite a corrupt version floor",
+            "refusing to overwrite a corrupt version-floor state",
         )),
-        FloorState::Valid(f) if f.cmp_precedence(current) != std::cmp::Ordering::Less => Ok(()), // already >= current
-        _ => write_floor(path, current), // Missing, or floor < current
+        LoadedState::Missing => write_state(path, current, None),
+        LoadedState::Valid { floor, pending } => {
+            let new_floor = if gt(current, &floor) {
+                current.clone()
+            } else {
+                floor
+            };
+            // Drop pending once the running version has caught up to (or passed) it.
+            let new_pending = pending.filter(|p| gt(p, current));
+            write_state(path, &new_floor, new_pending.as_ref())
+        }
     }
 }
 
-/// Atomically write the floor with owner-only perms. Strengthened over the config.rs pattern:
-/// random temp name in the SAME dir (via `tempfile`), explicit `0600`, `fsync` of the file AND the
-/// parent dir on Unix, and a chmod failure is a HARD error (not ignored).
-fn write_floor(path: &Path, v: &Version) -> std::io::Result<()> {
+/// Atomically write the state with owner-only perms: random temp name in the SAME dir (via
+/// `tempfile`), explicit `0600`, `fsync` of the file AND the parent dir on Unix, chmod/durability
+/// failures are HARD errors (not ignored — L8).
+fn write_state(path: &Path, floor: &Version, pending: Option<&Version>) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "floor path has no parent")
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "state path has no parent")
     })?;
     std::fs::create_dir_all(parent)?;
     #[cfg(unix)]
@@ -117,9 +204,10 @@ fn write_floor(path: &Path, v: &Version) -> std::io::Result<()> {
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let body = serde_json::to_vec(&FloorFile {
+    let body = serde_json::to_vec(&StateFile {
         schema: SCHEMA,
-        floor: v.to_string(),
+        floor: floor.to_string(),
+        pending: pending.map(ToString::to_string),
     })?;
 
     // Random same-dir temp (owner-only from creation), write, fsync, then atomic rename.
@@ -137,10 +225,12 @@ fn write_floor(path: &Path, v: &Version) -> std::io::Result<()> {
     tmp.persist(path)
         .map_err(|e| std::io::Error::other(e.error))?;
 
-    // fsync the directory so the rename is durable.
+    // fsync the directory so the rename is durable. Propagate failures (L8): a swallowed dir-fsync
+    // failure could let a crash restore an older/missing dir entry and lower or erase the floor.
     #[cfg(unix)]
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
+    {
+        let dir = std::fs::File::open(parent)?;
+        dir.sync_all()?;
     }
     Ok(())
 }
@@ -155,21 +245,26 @@ mod tests {
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
+    fn valid(floor: &str, pending: Option<&str>) -> LoadedState {
+        LoadedState::Valid {
+            floor: v(floor),
+            pending: pending.map(v),
+        }
+    }
 
     #[test]
     fn missing_bootstraps() {
         let d = tmp();
-        assert_eq!(load_floor(&d.path().join("s.json")), FloorState::Missing);
-        // With no floor, only `> current` matters.
+        assert_eq!(load_state(&d.path().join("s.json")), LoadedState::Missing);
         assert!(candidate_allowed(
             &v("1.1.0"),
             &v("1.0.0"),
-            &FloorState::Missing
+            &LoadedState::Missing
         ));
         assert!(!candidate_allowed(
             &v("1.0.0"),
             &v("1.0.0"),
-            &FloorState::Missing
+            &LoadedState::Missing
         ));
     }
 
@@ -178,22 +273,56 @@ mod tests {
         let d = tmp();
         let p = d.path().join("s.json");
         commit_successful_launch(&p, &v("1.0.8")).unwrap();
-        assert_eq!(load_floor(&p), FloorState::Valid(v("1.0.8")));
-        // A lower "current" never lowers the floor.
-        commit_successful_launch(&p, &v("1.0.5")).unwrap();
-        assert_eq!(load_floor(&p), FloorState::Valid(v("1.0.8")));
-        // A higher one advances it.
+        assert_eq!(load_state(&p), valid("1.0.8", None));
+        commit_successful_launch(&p, &v("1.0.5")).unwrap(); // lower never lowers
+        assert_eq!(load_state(&p), valid("1.0.8", None));
         commit_successful_launch(&p, &v("1.1.0")).unwrap();
-        assert_eq!(load_floor(&p), FloorState::Valid(v("1.1.0")));
+        assert_eq!(load_state(&p), valid("1.1.0", None));
     }
 
     #[test]
     fn floor_blocks_rollback_candidate() {
-        let f = FloorState::Valid(v("1.0.8"));
-        // candidate ≤ floor rejected even if > current (the ratchet).
+        let f = valid("1.0.8", None);
         assert!(!candidate_allowed(&v("1.0.7"), &v("1.0.6"), &f));
         assert!(!candidate_allowed(&v("1.0.8"), &v("1.0.6"), &f)); // equal to floor
         assert!(candidate_allowed(&v("1.0.9"), &v("1.0.6"), &f));
+    }
+
+    #[test]
+    fn pending_blocks_lower_candidate_before_commit() {
+        // H1 restart race: A installed 3.0.0 (recorded pending), floor still 1.0.0. B (current 1.0.0)
+        // must NOT be allowed to install 2.0.0 — the effective floor is now 3.0.0.
+        let d = tmp();
+        let p = d.path().join("s.json");
+        commit_successful_launch(&p, &v("1.0.0")).unwrap();
+        record_pending(&p, &v("1.0.0"), &v("3.0.0")).unwrap();
+        let st = load_state(&p);
+        assert_eq!(st, valid("1.0.0", Some("3.0.0")));
+        assert!(!candidate_allowed(&v("2.0.0"), &v("1.0.0"), &st)); // regression blocked
+        assert!(candidate_allowed(&v("3.0.1"), &v("1.0.0"), &st)); // only strictly-higher allowed
+                                                                   // running below the confirmed FLOOR is false (1.0.0 == floor); pending doesn't count as floor.
+        assert!(!running_below_floor(&v("1.0.0"), &st));
+    }
+
+    #[test]
+    fn commit_promotes_pending_into_floor() {
+        let d = tmp();
+        let p = d.path().join("s.json");
+        commit_successful_launch(&p, &v("1.0.0")).unwrap();
+        record_pending(&p, &v("1.0.0"), &v("2.0.0")).unwrap();
+        assert_eq!(load_state(&p), valid("1.0.0", Some("2.0.0")));
+        // 2.0.0 launches and proves healthy → floor advances to 2.0.0, pending cleared.
+        commit_successful_launch(&p, &v("2.0.0")).unwrap();
+        assert_eq!(load_state(&p), valid("2.0.0", None));
+    }
+
+    #[test]
+    fn record_pending_is_monotonic() {
+        let d = tmp();
+        let p = d.path().join("s.json");
+        record_pending(&p, &v("1.0.0"), &v("2.0.0")).unwrap();
+        record_pending(&p, &v("1.0.0"), &v("1.5.0")).unwrap(); // lower candidate can't lower pending
+        assert_eq!(load_state(&p), valid("1.0.0", Some("2.0.0")));
     }
 
     #[test]
@@ -201,49 +330,44 @@ mod tests {
         let d = tmp();
         let p = d.path().join("s.json");
         std::fs::write(&p, b"{ not json").unwrap();
-        assert_eq!(load_floor(&p), FloorState::Corrupt);
+        assert_eq!(load_state(&p), LoadedState::Corrupt);
         assert!(!candidate_allowed(
             &v("9.9.9"),
             &v("1.0.0"),
-            &FloorState::Corrupt
+            &LoadedState::Corrupt
         ));
-        // commit must REFUSE and leave the corrupt file untouched.
         assert!(commit_successful_launch(&p, &v("2.0.0")).is_err());
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ not json");
+        assert!(record_pending(&p, &v("1.0.0"), &v("2.0.0")).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ not json"); // untouched
     }
 
     #[test]
-    fn wrong_schema_is_corrupt() {
+    fn wrong_schema_or_bad_pending_is_corrupt() {
         let d = tmp();
         let p = d.path().join("s.json");
         std::fs::write(&p, br#"{"schema":99,"floor":"1.0.0"}"#).unwrap();
-        assert_eq!(load_floor(&p), FloorState::Corrupt);
+        assert_eq!(load_state(&p), LoadedState::Corrupt);
+        std::fs::write(&p, br#"{"schema":1,"floor":"1.0.0","pending":"notver"}"#).unwrap();
+        assert_eq!(load_state(&p), LoadedState::Corrupt);
+        // Unknown field rejected.
+        std::fs::write(&p, br#"{"schema":1,"floor":"1.0.0","x":1}"#).unwrap();
+        assert_eq!(load_state(&p), LoadedState::Corrupt);
     }
 
     #[test]
     fn prerelease_and_build_metadata_precedence() {
-        let f = FloorState::Valid(v("1.0.8-rc.2"));
-        assert!(candidate_allowed(&v("1.0.8-rc.10"), &v("1.0.7"), &f)); // rc.10 > rc.2 (numeric)
+        let f = valid("1.0.8-rc.2", None);
+        assert!(candidate_allowed(&v("1.0.8-rc.10"), &v("1.0.7"), &f)); // rc.10 > rc.2 numerically
         assert!(candidate_allowed(&v("1.0.8"), &v("1.0.7"), &f)); // stable > its rc
-                                                                  // Build metadata is ignored by precedence — same precedence ⇒ NOT strictly greater ⇒ rejected.
-        let f2 = FloorState::Valid(v("1.0.8"));
-        assert!(!candidate_allowed(&v("1.0.8+build.5"), &v("1.0.0"), &f2));
+        let f2 = valid("1.0.8", None);
+        assert!(!candidate_allowed(&v("1.0.8+build.5"), &v("1.0.0"), &f2)); // build metadata ignored
     }
 
     #[test]
     fn running_below_floor_detects_rollback() {
-        assert!(running_below_floor(
-            &v("1.0.5"),
-            &FloorState::Valid(v("1.0.8"))
-        ));
-        assert!(!running_below_floor(
-            &v("1.0.8"),
-            &FloorState::Valid(v("1.0.8"))
-        ));
-        assert!(!running_below_floor(
-            &v("1.0.9"),
-            &FloorState::Valid(v("1.0.8"))
-        ));
+        assert!(running_below_floor(&v("1.0.5"), &valid("1.0.8", None)));
+        assert!(!running_below_floor(&v("1.0.8"), &valid("1.0.8", None)));
+        assert!(!running_below_floor(&v("1.0.9"), &valid("1.0.8", None)));
     }
 
     #[cfg(unix)]
