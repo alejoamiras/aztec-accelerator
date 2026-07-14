@@ -13,8 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  # F-008: the GITHUB_TOKEN needs contents:write ONLY for the `update` job's branch push. PR
+  # create/edit/close use the reusable workflow's separate GitHub App token, so no pull-requests:write
+  # here. Merge (auto opt-in) uses a distinct contents-scoped app token inside the reusable workflow.
   contents: write
-  pull-requests: write
 
 jobs:
   update:
@@ -26,5 +28,5 @@ jobs:
       dist_tag: rc
       target_branch: main
       branch_prefix: chore/aztec-stable
-      auto_merge: false
+      merge_mode: none
       version: ${{ inputs.version || '' }}

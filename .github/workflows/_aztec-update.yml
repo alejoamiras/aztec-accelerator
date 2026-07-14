@@ -20,11 +20,15 @@ on:
         required: false
         default: ""
         type: string
-      auto_merge:
-        description: "true: gh pr merge --auto --squash; false: gh pr merge --squash (immediate)"
+      merge_mode:
+        # F-008: `none` leaves the PR OPEN for human review (the safe default — a Windows @aztec bump
+        # must not auto-land an unreviewed bb.exe pin). `auto` enables `gh pr merge --auto --squash`,
+        # which still WAITS for the required checks (incl. the fail-closed Windows pin gate). The old
+        # `auto_merge: false` ran an IMMEDIATE `gh pr merge --squash` that bypassed CI entirely — removed.
+        description: "none: create/update the PR and stop (default). auto: gh pr merge --auto --squash (CI-gated)."
         required: false
-        default: true
-        type: boolean
+        default: none
+        type: string
       version:
         description: "Force specific version (leave empty for auto-detect)"
         required: false
@@ -42,6 +46,10 @@ jobs:
     name: Check for new ${{ inputs.dist_tag }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # F-008 least-privilege: reusable jobs inherit the CALLER's GITHUB_TOKEN scope unless downgraded
+    # here. This job only reads, so read-only — the token cannot merge/push even if a step tried.
+    permissions:
+      contents: read
     outputs:
       needs_update: ${{ steps.check.outputs.needs_update }}
       new_version: ${{ steps.check.outputs.new_version }}
@@ -62,6 +70,15 @@ jobs:
           INPUT_DIST_TAG: ${{ inputs.dist_tag }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
+            # F-008: validate the forced version against the strict pattern BEFORE emitting it as an
+            # output (it flows into branch names, commits, the fetch URL). A WHOLE-STRING bash `=~` match
+            # (not `grep`, which matches any single line) so a multiline value like $'5.0.0\nneeds_update=false'
+            # cannot slip an injected output record past the check. Generic error — never echo the raw value.
+            VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-(nightly\.[0-9]{8}|rc\.[0-9]+|aztecnr-rc\.[0-9]+))?$'
+            if [[ ! "$INPUT_VERSION" =~ $VERSION_RE ]]; then
+              echo "::error::Invalid forced version (rejected before use)"
+              exit 1
+            fi
             CURRENT=$(bun -e "console.log(JSON.parse(require('fs').readFileSync('packages/sdk/package.json','utf8')).devDependencies['@aztec/aztec.js'])")
             {
               echo "needs_update=true"
@@ -94,6 +111,9 @@ jobs:
     if: needs.check-update.outputs.needs_update == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Needs contents:write ONLY here — the branch push. It does NOT create/merge PRs.
+    permissions:
+      contents: write
     env:
       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
     steps:
@@ -118,6 +138,12 @@ jobs:
 
       - name: Install dependencies with new versions
         run: bun install
+
+      # F-008: after install (so resolveAztecBb() sees the NEW bb.js), report whether the live bb.js
+      # version has a reviewed Windows pin. Informational — never fetches/writes; the Windows Prebuild/
+      # Build Smoke gate is the enforcing fail-closed check on the PR.
+      - name: Report Windows bb.exe pin status
+        run: bun scripts/check-windows-bb-pin.ts
 
       - name: Commit and push
         env:
@@ -147,20 +173,25 @@ jobs:
     if: needs.update.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # F-008: read-only GITHUB_TOKEN — ALL PR create/edit/close/merge here use the scoped App tokens
+    # (create-pr token has no contents:write; the opt-in merge uses a separate contents-scoped token).
+    # So even the inherited GITHUB_TOKEN cannot merge/push on the `none` path.
+    permissions:
+      contents: read
     env:
       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
       CURRENT_VERSION: ${{ needs.check-update.outputs.current_version }}
     steps:
-      # Short-lived, repo-scoped GitHub App token instead of the long-lived PAT.
-      # Needs issues:write too — `gh pr edit --add-label` + `gh pr close --comment`
-      # below go through the issues label/comment endpoints. The token still
-      # triggers CI on the created PR (so `--auto` waits for the required checks).
+      # Short-lived, repo-scoped GitHub App token. F-008 least-privilege: this token has NO
+      # contents:write — it only creates/edits/closes PRs (pull-requests) + labels/comments (issues).
+      # It cannot merge (merge = contents:write). The `auto` path mints a SEPARATE, narrowly-scoped
+      # contents:write token below, only when explicitly opted in. `issues:write` is for
+      # `gh pr edit --add-label` + `gh pr close --comment`. The token still triggers CI on the PR.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          permission-contents: write
           permission-pull-requests: write
           permission-issues: write
 
@@ -174,14 +205,19 @@ jobs:
           NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
         run: |
           CURRENT_BRANCH="${BRANCH_PREFIX}-${NEW_VERSION}"
+          # F-008: pass branch_prefix/current-branch as jq --arg DATA, never interpolated into the jq
+          # program (a crafted prefix could otherwise rewrite the filter and select every open PR).
           gh pr list \
             --base "$TARGET_BRANCH" \
             --state open \
             --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"${BRANCH_PREFIX}-\")) | select(.headRefName != \"${CURRENT_BRANCH}\") | .number" \
+          | jq -r --arg prefix "${BRANCH_PREFIX}-" --arg current "$CURRENT_BRANCH" \
+              '.[] | select(.headRefName | startswith($prefix)) | select(.headRefName != $current) | .number' \
           | while read -r pr_num; do
               echo "Closing stale PR #$pr_num"
-              gh pr close "$pr_num" --delete-branch --comment "Superseded by ${NEW_VERSION} update."
+              # F-008 least-privilege: close WITHOUT --delete-branch (deletion needs contents:write,
+              # which this token no longer has). A stale branch is harmless; its PR is closed.
+              gh pr close "$pr_num" --comment "Superseded by ${NEW_VERSION} update."
             done
 
       - name: Create or update PR
@@ -190,7 +226,6 @@ jobs:
           BRANCH_PREFIX: ${{ inputs.branch_prefix }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
           ADD_LABEL: ${{ inputs.add_label }}
-          AUTO_MERGE: ${{ inputs.auto_merge }}
           DIST_TAG: ${{ inputs.dist_tag }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -232,9 +267,27 @@ jobs:
             gh pr edit "$PR_NUM" --add-label "$ADD_LABEL" 2>/dev/null || true
           fi
 
-          # Merge strategy: auto-merge waits for checks, immediate merges now
-          if [ "$AUTO_MERGE" = "true" ]; then
-            gh pr merge "$PR_NUM" --auto --squash --delete-branch
-          else
-            gh pr merge "$PR_NUM" --squash --delete-branch
-          fi
+          # F-008: the PR is left OPEN for review. Merge (if opted in) happens in the separate,
+          # contents:write-scoped `auto-merge` step below — never here, and never immediately.
+          echo "PR #$PR_NUM is open for review: $(gh pr view "$PR_NUM" --json url --jq .url)"
+          echo "pr_num=$PR_NUM" >> "$GITHUB_OUTPUT"
+        id: pr
+
+      # F-008: `auto` opt-in only. A SEPARATE, narrowly-scoped contents:write token (the create-pr token
+      # above has none) enables `--auto --squash`, which WAITS for the required checks — including the
+      # fail-closed Windows pin gate. `none` (the default) skips this entirely, leaving the PR open.
+      - name: Enable auto-merge (opt-in)
+        if: inputs.merge_mode == 'auto'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: merge-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Auto-merge (opt-in, CI-gated)
+        if: inputs.merge_mode == 'auto'
+        env:
+          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
+          PR_NUM: ${{ steps.pr.outputs.pr_num }}
+        run: gh pr merge "$PR_NUM" --auto --squash --delete-branch

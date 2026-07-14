@@ -53,36 +53,89 @@ export function getTargetTriple(): string {
 
 export const WINDOWS_BB_ASSET = "barretenberg-amd64-windows.tar.gz";
 
-export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
-  // @aztec/bb.js 4.2.0 — verified on windows-latest (Windows Prebuild Smoke CI gate).
-  "4.2.0": "55043d74d20afd55cb3d3c5fd690b79f9d964ba52bfebd13bcba71b74a3d0c8f",
-  // @aztec/bb.js 4.3.1 — sha256 of barretenberg-amd64-windows.tar.gz from the v4.3.1 release.
-  "4.3.1": "58294203ba658d2c6d983dc22f68f3a2280f5107e9e973570e4adb751997fd2c",
-  // @aztec/bb.js 5.0.0-rc.1 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.0-rc.1
-  // release (archive contains bb.exe only — the no-DLL canary holds). Required because the
-  // 4.3.1→5.0.0-rc.1 lockfile bump makes resolveAztecBb() key on 5.0.0-rc.1; the Windows Prebuild
-  // Smoke CI gate independently re-fetches + verifies this hash.
-  "5.0.0-rc.1": "7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd",
-  // @aztec/bb.js 5.0.0-rc.2 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.0-rc.2
-  // release (5.5 MB gzip, bb.exe only). Required by the rc.1→rc.2 lockfile bump so the Windows
-  // Prebuild/Build Smoke gates can re-fetch + verify; without it resolveWindowsBbChecksum throws.
-  "5.0.0-rc.2": "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
+/**
+ * Provenance of a Windows bb.exe pin (F-008). ONLY `manual-review` is accepted today: a maintainer
+ * downloaded the release asset, inspected the release page + tag, diffed it against the prior pinned
+ * asset, and recorded the hash by hand. It is a CHANGE-DETECTOR, not cryptographic proof against a
+ * compromised upstream publisher — AztecProtocol does not yet sign/attest bb releases (the SEC-02
+ * residual, same upstream-signing gap as F-007). `attestation` is RESERVED for when they do (to be
+ * verified via `gh attestation verify` pinning repo + signer workflow + source ref/digest); it is NOT
+ * yet accepted and currently fails closed. A recognized string is not verification.
+ */
+export type WindowsBbProvenance = "manual-review" | "attestation";
+
+export interface WindowsBbPin {
+  sha256: string;
+  provenance: WindowsBbProvenance;
+  note: string;
+}
+
+// F-008: pins are NEVER auto-generated (`update-aztec-version.ts` no longer downloads + writes a hash —
+// a twice-downloaded asset is not independent evidence). A human adds each entry after review; the
+// Windows Prebuild/Build Smoke gate re-fetches + re-verifies against the pinned sha, failing closed on a
+// missing/mismatched/unaccepted-provenance entry.
+export const WINDOWS_BB_CHECKSUMS: Record<string, WindowsBbPin> = {
+  "4.2.0": {
+    sha256: "55043d74d20afd55cb3d3c5fd690b79f9d964ba52bfebd13bcba71b74a3d0c8f",
+    provenance: "manual-review",
+    note: "Legacy pin adopted as a change-detector — CI-hashed on windows-latest, not independently verified (SEC-02).",
+  },
+  "4.3.1": {
+    sha256: "58294203ba658d2c6d983dc22f68f3a2280f5107e9e973570e4adb751997fd2c",
+    provenance: "manual-review",
+    note: "Legacy pin, change-detector only — sha256 of the v4.3.1 release asset, not independently verified.",
+  },
+  "5.0.0-rc.1": {
+    sha256: "7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd",
+    provenance: "manual-review",
+    note: "Legacy pin, change-detector only — v5.0.0-rc.1 asset (bb.exe only, no-DLL canary), not independently verified.",
+  },
+  "5.0.0-rc.2": {
+    sha256: "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
+    provenance: "manual-review",
+    note: "Legacy pin, change-detector only — v5.0.0-rc.2 asset (5.5 MB gzip, bb.exe only), not independently verified.",
+  },
 };
 
 export function windowsBbReleaseTag(version: string): string {
   return `v${version}`;
 }
 
+/**
+ * Resolve the pinned Windows bb.exe SHA-256 for a bb.js `version`. Fail-closed: a missing entry, an
+ * unaccepted provenance (only `manual-review` today — `attestation` is reserved until we implement
+ * `gh attestation verify`), or a malformed hash all throw (F-008).
+ */
 export function resolveWindowsBbChecksum(version: string): string {
-  const sha = WINDOWS_BB_CHECKSUMS[version];
-  if (!sha) {
+  const pin = WINDOWS_BB_CHECKSUMS[version];
+  if (!pin) {
     throw new Error(
       `No pinned Windows bb.exe SHA-256 for @aztec/bb.js ${version}.\n` +
-        `Download ${WINDOWS_BB_ASSET} from the v${version} aztec-packages release, ` +
-        `sha256sum it, and add the hash to WINDOWS_BB_CHECKSUMS in copy-bb.ts.`,
+        `A human must add a REVIEWED pin: download ${WINDOWS_BB_ASSET} from the v${version} ` +
+        `aztec-packages release, verify the release page + tag signature, diff it against the prior ` +
+        `pinned asset, then add a { sha256, provenance: "manual-review", note } entry to ` +
+        `WINDOWS_BB_CHECKSUMS in copy-bb.ts. (Pins are never auto-generated — F-008.)`,
     );
   }
-  return sha;
+  if (pin.provenance !== "manual-review") {
+    throw new Error(
+      `Windows bb.exe pin for ${version} has provenance "${pin.provenance}", which is not accepted yet. ` +
+        `Only "manual-review" is honored today; "attestation" requires implementing gh attestation verify (F-008).`,
+    );
+  }
+  if (!/^[0-9a-f]{64}$/.test(pin.sha256)) {
+    throw new Error(
+      `Windows bb.exe pin for ${version} has a malformed sha256: ${JSON.stringify(pin.sha256)}`,
+    );
+  }
+  // A manual-review pin MUST carry a non-empty review record (what a human checked). An empty/whitespace
+  // note means the review evidence is missing — fail closed (F-008).
+  if (typeof pin.note !== "string" || pin.note.trim().length === 0) {
+    throw new Error(
+      `Windows bb.exe pin for ${version} has an empty review note — a manual-review pin must record what was reviewed.`,
+    );
+  }
+  return pin.sha256;
 }
 
 export function assertSha256(data: Uint8Array, expected: string, label: string): void {

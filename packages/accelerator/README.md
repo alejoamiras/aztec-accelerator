@@ -114,6 +114,10 @@ Every cached `bb` is verified end-to-end. On download (both the runtime and `bun
 - **`BB_BINARY_PATH`** is a trusted, unverified operator override — the one documented exception to "nothing unverified runs" (whoever sets the process environment already controls the process).
 - Only releases that expose an asset digest (GitHub added these June 2025) are downloadable; older releases fail closed.
 
+### Windows bb.exe pin provenance (F-008)
+
+Windows has no npm `bb`, so `bb.exe` ships as a sidecar fetched from a GitHub release and pinned by SHA-256 in `scripts/copy-bb.ts` (`WINDOWS_BB_CHECKSUMS`). Pins are **never auto-generated** — auto-downloading and recording the hash is circular ("trust whatever arrived"). Each pin is a structured `{ sha256, provenance, note }`; the resolver only accepts `provenance: "manual-review"` (a human reviewed the release + recorded the hash) and fails closed on anything else. A new bb version with no pin leaves the `@aztec` bump PR **open** (`merge_mode: none`) with a red Windows gate until a human adds a reviewed pin. `manual-review` is a **change-detector**, not cryptographic proof — AztecProtocol does not yet sign/attest bb releases (the same upstream-signing gap as F-007); `attestation` provenance is reserved for when they do. See `implementations-plan/security-hardening/clusters/C7-runbook.md` for how to add a pin + the ruleset-bypass readback the fail-closed guarantee depends on.
+
 ## Site Authorization
 
 The accelerator uses a MetaMask-style approval flow. When a new website calls `/prove`, the user sees a popup asking to allow or deny access. **Localhost origins are prompted once too** (then remembered if you choose **Remember**) — the desktop app no longer silently auto-approves localhost, so a malicious local page can't quietly use the accelerator. (The headless CI server *does* auto-approve localhost — it's an operator-controlled environment; see the [Headless Server section](#headless-server-for-ci-test-acceleration).)
