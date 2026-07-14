@@ -3,7 +3,6 @@
 use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
 use aztec_accelerator::commands;
 use std::sync::Arc;
-use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 /// True iff `url` is the app's OWN local asset origin. Tauri serves the bundled frontend from
@@ -16,6 +15,7 @@ use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 /// on Linux/macOS would permit a real loopback HTTP navigation (e.g. `http://tauri.localhost:59833/?data=…`
 /// hitting a listening server) that is NOT the embedded-asset protocol. Also reject any embedded credentials
 /// or explicit port; the asset origin never has either.
+#[allow(dead_code)] // TEMP: on_navigation call removed while debugging the CI asset-load failure.
 fn is_local_asset_url(url: &Url) -> bool {
     if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
         return false;
@@ -72,11 +72,12 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> bool {
             .resizable(false)
             .center()
             .always_on_top(config.always_on_top)
-            // F-012 (codex HIGH-3): confine the webview to its own local asset origin. Block any attempt
-            // to navigate off-origin (data-exfil / phishing) and deny opening new windows/webviews — the
-            // popups never legitimately do either.
-            .on_navigation(is_local_asset_url)
-            .on_new_window(|_url, _features| NewWindowResponse::Deny)
+            // F-012 (codex HIGH-3): confine the webview to its own local asset origin + deny new windows.
+            // TEMP: removed to test whether these guards cancel the initial tauri:// asset load in CI
+            // (probe proved the embed is complete, yet the webview can't load settings.html). Re-add with
+            // a corrected matcher once the root cause is confirmed.
+            // .on_navigation(is_local_asset_url)
+            // .on_new_window(|_url, _features| NewWindowResponse::Deny)
             .build()
     {
         focus_window(&window);
