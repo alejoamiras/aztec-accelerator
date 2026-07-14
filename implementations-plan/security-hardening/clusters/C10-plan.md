@@ -115,12 +115,18 @@ if any window can't invoke a command it needs.
   - `window.__TAURI__` absent + a real settings command resolves (positive).
   - Inline `<script>`/`<style>`/`fetch('https://…')` each fire `securitypolicyviolation`; no violation on a
     normal allowed invoke; `eval` throws; remote NAVIGATION + form submission are blocked (D3b).
-  - **Cross-window denial (isolated ACL proof):** from `settings`/`auth-*`, first invoke an ALLOWED command and
-    require SUCCESS (proves the primitive+window), then a FORBIDDEN command → return explicit `{resolved,error}`
-    sentinel; FAIL if the primitive is absent or it resolves; assert the rejection reason is the DEBUG-form
-    ACL/permission denial ("...not allowed on... window/webview/URL context...", authority.rs:229 — NOT the
-    release "Command X not allowed by ACL" string, which never appears under debug_assertions); prove no state
-    changed via a follow-up allowed read from another window (canary); cleanup in `finally` (no 60s hang).
+  - **Cross-window denial (isolated ACL proof):** the negative target is a REAL, side-effecting command — pick
+    one (e.g. `remove_approved_origin`). (a) FIRST invoke that EXACT command from ITS AUTHORIZED window
+    (`settings`) with VALID args and verify its effect actually happened (proves the primitive works AND the
+    command name/args are real — a typo/nonexistent command would earn the SAME ACL denial and leave the canary
+    unchanged, a false pass; final-codex MED). (b) THEN invoke the BYTE-IDENTICAL command+args from an
+    UNAUTHORIZED window (`auth-*`) → return an explicit `{resolved,error}` sentinel; FAIL if the primitive is
+    absent or it resolves; assert the rejection reason is the DEBUG-form ACL/permission denial — match the
+    INVARIANT fields (the command name, the attacker window label, and the "not allowed"/window-context
+    wording), NOT the full URL/exact string (Rust generates the text so it's not OS-brittle, but pin only the
+    stable substrings); and verify the canary is UNCHANGED (the origin still present) so denial ≠ execution.
+    Cleanup in `finally` (no 60s hang). Invoke ONLY via the injected primitive (keyless postMessage is dropped
+    pre-ACL). Runs at the P3 gate with ZERO Rust label code (ACL isolated).
   - This ACL-isolation assertion runs at the P3 gate with ZERO Rust label code present (the only moment the ACL
     is provable alone); asserting the ACL-specific reason keeps it meaningful in ongoing CI (a label can't mask
     a broken ACL). A P3 failure here empirically FALSIFIES the central inference → fall back to labels-as-sole-

@@ -170,3 +170,16 @@ authority.rs:459 empty-selector inertness, manager/mod.rs:53 CSP nonce, lib.rs:3
 the empty app manifest, no direct Rust test callers); (c) both divergences adjudicated with source citations;
 (d) GATE 3 (mandatory post-impl codex xhigh on the ACTUAL diff) is the designed backstop that re-examines
 everything against real code. The final PLAN pass is belt-and-suspenders, not the load-bearing gate.
+
+**The LEAN final pass COMPLETED (b14l3s8mi, exit 0) → CHANGES-REQUESTED, effectively approval + 1 MEDIUM.**
+Transcript: `clusters/C10-audit-codex-final.md`. Both adjudications CONFIRMED: **D7 CORRECT** (IPC transport +
+Tauri init need no core:default; no verified popup flow needs core events/window; add back only a proven narrow
+perm); **D8 CORRECT** (Linux built-debug adequately covers the compile-time custom-protocol branch; the 3-OS dev
+matrix covers WebView/IPC platform differences; all-OS built-debug would be DiD, not a Gate-1 necessity).
+ONE MEDIUM test-design fold (FOLDED into plan validation): proving an ALLOWED command works does NOT prove the
+FORBIDDEN command NAME is real — a typo/nonexistent command earns the SAME ACL denial + leaves the canary
+unchanged (false pass). Fix: FIRST invoke the EXACT negative-target command from its AUTHORIZED window with valid
+args and verify its EFFECT (proves the name/args real), THEN the byte-identical command from the unauthorized
+window → assert rejection + unchanged canary. Match INVARIANT ACL-message fields (command name, attacker label,
+"not allowed"/window-context wording), NOT the full URL/string (Rust-generated → not OS-brittle, but pin only
+stable substrings). "No other confident HIGH/MEDIUM issue." ⇒ **GATE 1 CLOSED — plan v2 approved, implementation-ready.**
