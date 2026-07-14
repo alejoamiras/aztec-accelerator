@@ -5,13 +5,16 @@
 //! that was bolted onto the otherwise cross-platform flow (now its own `finalize_downloaded_binary`).
 //! The smaller identity/platform/layout/cache concerns stay in the `versions` module root.
 
-use super::cache_layout::{bb_binary_name, version_bb_path, versions_base_dir};
+use super::cache_layout::{
+    bb_binary_name, sha256_file, verify_cached_bb, versions_base_dir, write_bb_marker,
+};
 use super::release_metadata::{
     current_platform, download_url, fetch_github_asset_digest, http_client, sha256_hex,
 };
 use super::version_policy::AztecVersion;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
@@ -20,9 +23,10 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // against is now structurally impossible. q7e3-F-08: the path/URL sinks now take `&AztecVersion`
     // themselves; deref to `&str` only for the log/digest sites (byte-identical strings).
     let version_str: &str = version;
-    let bb_path = version_bb_path(version);
-    if bb_path.exists() {
-        tracing::info!(version = version_str, "bb already cached");
+    // F-007: skip only when the cache entry is present AND marker-verified. A missing/tampered/legacy
+    // entry falls through to a fresh verified download that atomically REPLACES it (not `exists()`).
+    if let Ok(bb_path) = verify_cached_bb(version) {
+        tracing::info!(version = version_str, "bb already cached (verified)");
         return Ok(bb_path);
     }
 
@@ -35,27 +39,16 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
         bytes = bytes.len(),
         "Download complete, verifying integrity"
     );
-    verify_digest(version_str, &bytes).await?;
+    let archive_digest = verify_digest(version_str, &bytes).await?;
 
-    // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
-    // `install_version_dir` so the cleanup/rename is unit-testable without the network).
+    // F-007: stage privately, finalize (chmod + macOS codesign), fingerprint the FINAL binary, write
+    // the marker, THEN publish fail-closed — so the live dir only ever appears with a codesigned binary
+    // + a matching marker.
     let version_dir = versions_base_dir().join(version.as_str());
-    install_version_dir(&version_dir, &bytes)?;
-
-    let final_path = version_dir.join(bb_binary_name());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    // macOS: clear quarantine xattrs + ad-hoc re-sign so Gatekeeper doesn't SIGKILL the chmod'd
-    // binary. Extracted to `finalize_downloaded_binary` (a no-op off macOS) — F-04 folds the
-    // "macOS tail bolted onto the cross-platform flow" sub-finding.
-    finalize_downloaded_binary(&final_path, &version_dir, version_str)?;
+    install_version_dir(&version_dir, &bytes, version_str, &archive_digest)?;
 
     tracing::info!(version = version_str, "bb cached successfully");
-    Ok(final_path)
+    Ok(version_dir.join(bb_binary_name()))
 }
 
 /// macOS: clear extended attributes (quarantine, provenance) and ad-hoc re-sign the binary so
@@ -150,11 +143,14 @@ async fn download_tarball(version: &AztecVersion) -> Result<Vec<u8>, Box<dyn Err
     Ok(bytes)
 }
 
-/// Verify the downloaded `bytes` against the GitHub release asset's published SHA-256 digest.
+/// Verify the downloaded `bytes` against the GitHub release asset's published SHA-256 digest, returning
+/// the verified hex (recorded as the marker's `archive_sha256` provenance field).
 /// **Fail-closed:** a missing digest (`Ok(None)`) or a fetch error is an error, not a skip — we never
-/// install unverified code. The bundled sidecar path never reaches here. Byte-identical to the
-/// pre-Q11 inline block.
-async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
+/// install unverified code. The bundled sidecar path never reaches here.
+async fn verify_digest(
+    version: &str,
+    bytes: &[u8],
+) -> Result<String, Box<dyn Error + Send + Sync>> {
     let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
     match fetch_github_asset_digest(version, &asset_name).await {
         Ok(Some(expected)) => {
@@ -166,7 +162,7 @@ async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error 
                 .into());
             }
             tracing::info!(version, digest = %actual, "Download integrity verified");
-            Ok(())
+            Ok(actual)
         }
         Ok(None) => {
             Err(format!("Cannot verify bb v{version}: no digest available from GitHub API").into())
@@ -175,41 +171,93 @@ async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error 
     }
 }
 
-/// Install an extracted bb tarball into `version_dir` via a temp dir + atomic rename.
-///
-/// Cleans up any stale partial-download temp dir, extracts into it, then removes any pre-existing
-/// `version_dir` and renames the temp dir into place — so the cache swap is atomic and a previously
-/// corrupt entry is replaced wholesale. The temp dir is a sibling named `.{name}.tmp` (derived from
-/// `version_dir`'s file name), matching the pre-Q11 inline behavior byte-for-byte.
-///
-/// Private + single-caller by design: `download_bb` passes `versions_base_dir().join(version)` where
-/// `version` came from a validated `AztecVersion`, so the `remove_dir_all` here never sees an
-/// attacker-derived path. Pinned by `install_version_dir_replaces_stale_and_extracts_atomically`.
-pub(crate) fn install_version_dir(
-    version_dir: &std::path::Path,
-    bytes: &[u8],
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+/// Monotonic sequence making each staging dir name unique within a process; combined with the PID +
+/// a nanosecond stamp it is unique across concurrent Rust/TS publishers and across crash-restart.
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A per-run-UNIQUE, dot-prefixed staging sibling: `.{name}.tmp.{pid}-{nanos}-{seq}`. Dot-prefixed +
+/// non-version-named so `list_cached_versions` never surfaces an in-flight or crash-stale stage; unique
+/// so a concurrent publisher never shares (and stomps) one stage.
+fn unique_staging_dir(version_dir: &Path) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     let name = version_dir
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or("invalid version dir (no file name)")?;
-    let tmp_dir = version_dir.with_file_name(format!(".{name}.tmp"));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    Ok(version_dir.with_file_name(format!(".{name}.tmp.{}-{nanos}-{seq}", std::process::id())))
+}
 
-    // Clean up any leftover partial download
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
+/// Stage a verified bb tarball privately, finalize it (chmod + macOS codesign), fingerprint the FINAL
+/// binary, write the integrity marker, THEN publish fail-closed into `version_dir` (F-007).
+///
+/// Ordering matters: the marker digest is taken AFTER codesign (which mutates the binary on macOS), and
+/// the marker is written BEFORE the publish rename — so the live dir only ever appears holding a
+/// codesigned `bb` + a matching marker. Publish is delete-then-rename: initial publish into an empty
+/// slot is atomic; REPLACEMENT is deliberately NOT atomic (a crash between leaves no live entry ⇒
+/// verified re-download next use). The staging dir is unique per run, so concurrent publishers never
+/// collide; a torn/last-loser publish is caught by `verify_cached_bb` on next use.
+///
+/// Private + single-caller: `download_bb` passes `versions_base_dir().join(version)` where `version`
+/// came from a validated `AztecVersion`, so the `remove_dir_all` here never sees an attacker path.
+pub(crate) fn install_version_dir(
+    version_dir: &Path,
+    bytes: &[u8],
+    version: &str,
+    archive_digest: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Some(parent) = version_dir.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    std::fs::create_dir_all(&tmp_dir)?;
+    let staging = unique_staging_dir(version_dir)?;
+    create_owner_only_dir(&staging)?;
 
-    extract_bb_from_tarball(bytes, &tmp_dir)?;
+    // Everything happens in staging; on ANY failure the whole stage is removed (never a partial live).
+    let staged = (|| -> Result<(), Box<dyn Error + Send + Sync>> {
+        extract_bb_from_tarball(bytes, &staging)?;
+        let staged_bb = staging.join(bb_binary_name());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged_bb, std::fs::Permissions::from_mode(0o755))?;
+        }
+        // macOS ad-hoc re-sign in staging (a no-op off macOS). Codesign failure removes the stage and
+        // errors — we never publish an unsignable binary.
+        finalize_downloaded_binary(&staged_bb, &staging, version)?;
 
-    // Atomic rename — replace any pre-existing cache entry wholesale
-    if version_dir.exists() {
-        std::fs::remove_dir_all(version_dir)?;
+        let binary_digest = sha256_file(&staged_bb)?;
+        write_bb_marker(&staging, version, archive_digest, &binary_digest)?;
+
+        // Fail-closed publish: drop any live entry, then rename the stage into place.
+        if version_dir.exists() {
+            std::fs::remove_dir_all(version_dir)?;
+        }
+        std::fs::rename(&staging, version_dir)?;
+        Ok(())
+    })();
+
+    if staged.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
     }
-    std::fs::rename(&tmp_dir, version_dir)?;
+    staged
+}
 
-    Ok(())
+/// Create a staging dir owner-only (`0700`) at the creation syscall on Unix — never create-then-chmod,
+/// so the in-flight binary never has a world-traversable window. `create_dir` (not `_all`) so a
+/// name collision fails closed.
+fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(dir)
+    }
 }
 
 /// Extract the `bb` binary from a gzipped tarball.
@@ -302,6 +350,7 @@ fn extract_bb_from_tarball_capped(
 
 #[cfg(test)]
 mod tests {
+    use super::super::cache_layout::version_bb_path;
     use super::*;
     use std::io::Write;
 
@@ -392,15 +441,14 @@ mod tests {
         assert!(contents.contains("echo hello"));
     }
 
-    /// Q11 atomic-rename-cleanup: `install_version_dir` extracts into a sibling temp dir then renames
-    /// it into place, replacing any stale cache entry wholesale and leaving no temp dir behind. Pins
-    /// the behavior the pre-Q11 inline block in `download_bb` had, now that it's a testable unit.
+    /// F-007 staged verified install: `install_version_dir` extracts + finalizes + writes the marker in
+    /// a unique staging dir, then publishes fail-closed — replacing any stale entry wholesale, leaving
+    /// no staging dir, and producing a marker whose `binary_sha256` matches the FINAL published binary.
     #[test]
-    fn install_version_dir_replaces_stale_and_extracts_atomically() {
+    fn install_version_dir_stages_marks_and_publishes() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
 
-        // Minimal valid tarball containing the platform bb binary name.
         let bb_content = b"#!/bin/sh\necho fake-bb\n";
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         {
@@ -415,34 +463,50 @@ mod tests {
             builder.finish().unwrap();
         }
         let tarball = encoder.finish().unwrap();
+        let archive_digest = sha256_hex(&tarball);
 
         let base = tempfile::tempdir().unwrap();
         let version_dir = base.path().join("5.0.0-test");
 
-        // Fresh install → bb present.
-        install_version_dir(&version_dir, &tarball).unwrap();
-        assert!(
-            version_dir.join(bb_binary_name()).exists(),
-            "bb extracted on fresh install"
+        // Fresh install → bb + marker present, marker binds the published binary bytes (post-finalize).
+        install_version_dir(&version_dir, &tarball, "5.0.0-test", &archive_digest).unwrap();
+        let bb = version_dir.join(bb_binary_name());
+        assert!(bb.exists(), "bb published");
+        let marker_path = version_dir.join("bb.sha256.json");
+        assert!(marker_path.exists(), "marker published");
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+        assert_eq!(
+            marker["schema"].as_str(),
+            Some("aztec-accelerator/bb-cache-marker@1")
+        );
+        assert_eq!(marker["version"].as_str(), Some("5.0.0-test"));
+        assert_eq!(
+            marker["archive_sha256"].as_str(),
+            Some(archive_digest.as_str())
+        );
+        assert_eq!(
+            marker["binary_sha256"].as_str().unwrap(),
+            sha256_file(&bb).unwrap(),
+            "marker binary digest matches the FINAL published binary (post-finalize)"
         );
 
-        // A stale cache entry (junk file) is replaced wholesale by the atomic rename.
+        // A stale cache entry (junk file) is replaced wholesale.
         std::fs::write(version_dir.join("STALE_JUNK"), b"old").unwrap();
-        install_version_dir(&version_dir, &tarball).unwrap();
-        assert!(
-            version_dir.join(bb_binary_name()).exists(),
-            "bb re-extracted after replace"
-        );
+        install_version_dir(&version_dir, &tarball, "5.0.0-test", &archive_digest).unwrap();
+        assert!(bb.exists(), "bb re-published after replace");
         assert!(
             !version_dir.join("STALE_JUNK").exists(),
-            "stale entry removed by atomic replace"
+            "stale entry removed by fail-closed replace"
         );
 
-        // No leftover temp dir after the rename.
-        assert!(
-            !version_dir.with_file_name(".5.0.0-test.tmp").exists(),
-            "temp dir cleaned up after rename"
-        );
+        // No leftover staging dir (.5.0.0-test.tmp.*) after publish.
+        let leftover = std::fs::read_dir(base.path()).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".5.0.0-test.tmp.")
+        });
+        assert!(!leftover, "staging dir cleaned up after publish");
     }
 
     #[test]
