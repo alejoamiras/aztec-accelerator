@@ -8,7 +8,11 @@ on:
         required: true
         type: string
       mode:
-        description: "'dev' or 'release'"
+        description: >-
+          'dev' (tauri dev — fast, but is_dev()==true so it never runs the shipped custom-protocol path),
+          'built-debug' (F-012/D8: `tauri build --debug` — a real custom-protocol binary that exercises the
+          production asset+CSP path), or 'release' (release binary; note raw cargo build does NOT enable
+          tauri's custom-protocol feature, so it is also is_dev()==true).
         required: false
         type: string
         default: "dev"
@@ -59,16 +63,23 @@ jobs:
         working-directory: packages/accelerator/src-tauri
         run: cargo build --release --features webdriver
 
+      # ── Build (built-debug — F-012/D8: a real `tauri build` enables tauri's custom-protocol feature, so
+      #    the webdriver run exercises the SHIPPED asset/CSP path that `tauri dev` and raw `cargo build` skip.
+      #    Runs from packages/accelerator so tauri's beforeBuildCommand (bun run frontend:build) fires. ──
+      - name: Build app (built-debug)
+        if: inputs.mode == 'built-debug'
+        run: bunx tauri build --debug --no-bundle --features webdriver
+
       # ── Launch app (single step, no platform conditionals) ──
       - name: Launch app
         run: |
           EXE=""
           [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
-          if [ "${{ inputs.mode }}" = "release" ]; then
-            APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE"
-          else
-            APP_CMD="bunx tauri dev --no-watch --features webdriver"
-          fi
+          case "${{ inputs.mode }}" in
+            release)     APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE" ;;
+            built-debug) APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;;
+            *)           APP_CMD="bunx tauri dev --no-watch --features webdriver" ;;
+          esac
           $APP_CMD > /tmp/tauri.log 2>&1 &
           echo "TAURI_PID=$!" >> "$GITHUB_ENV"
 
