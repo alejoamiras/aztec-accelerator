@@ -118,13 +118,25 @@ Getting that order wrong would make every Mac cache-hit falsely fail.</li>
 stay a cheap folder stat, never a "hash every cached binary" loop (that could read gigabytes on each poll).</li>
 </ul>
 
-<h2>Open questions (defaults chosen)</h2>
+<h2>Decisions the audits settled (defaults chosen)</h2>
 <ul>
-<li><strong>Legacy caches</strong> (downloaded before this change, no marker): default = fail-closed +
-re-download on first use. Offline machines with a legacy cache will need one online re-download.</li>
-<li><strong>Same-UID local attacker</strong> who can already write the cache can rewrite both binary <em>and</em>
-marker — this is <em>out of scope</em> for F-007 (it's a network-integrity finding; that attacker already has a
-higher privilege). Closing it needs a publisher signature or a folder ACL — noted as future work.</li>
+<li><strong>Legacy caches</strong> (no marker): fail-closed + re-download on first use. Offline machines with
+a legacy cache need one online re-download.</li>
+<li><strong>Requested version, any cache failure ⇒ hard error.</strong> Once we treat "run the bundled bb"
+as "no specific version", asking for a <em>specific</em> version and finding the cache missing/tampered
+never silently falls back to a different bb — it errors and re-downloads. Only the no-version case uses the
+bundled sidecar.</li>
+<li><strong><code>BB_BINARY_PATH</code></strong> stays a trusted operator override (whoever sets your
+process environment already owns the process) — the one documented exception to "nothing unverified runs".</li>
+<li><strong><code>download-bb.ts</code> is Unix-only</strong>; Windows bb ships as a bundled sidecar via a
+different path (<code>copy-bb.ts</code>), so this tool refuses to run on Windows.</li>
+<li><strong>Two downloaders at once</strong> (a proof-triggered download racing a manual one) each use a
+private, uniquely-named staging folder; a torn publish is caught by the run-time re-check and simply
+re-downloads. A cross-process lock is deferred — safety doesn't depend on it.</li>
+<li><strong>Same-UID local attacker</strong> who can already write the cache can rewrite both binary
+<em>and</em> marker — <em>out of scope</em> for F-007 (a network-integrity finding; that attacker is the
+<em>same</em> OS user, and a folder ACL can't stop a same-user process). Closing it needs a publisher
+signature — future work.</li>
 </ul>
 
 <h2>Seed strings</h2>

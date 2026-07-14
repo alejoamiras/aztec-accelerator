@@ -9,10 +9,12 @@ through to the sidecar/`~/.bb`/`$PATH` bb (a silent wrong-version/unverified exe
 tampered cache entry thus becomes a trusted bb that executes over the witness (`--ivc_inputs_path`).
 
 Fix = the master-plan F-007 spec: **both download paths verify the GitHub release digest, extract into a
-private staging dir, reject unsafe archive members, then atomically publish `bb` + a structured marker
+private staging dir, reject unsafe archive members, then publish (fail-closed) `bb` + a structured marker
 (archive digest + final-binary digest); the runtime rehashes the cached `bb` against the marker on every
 use; a missing/malformed/mismatched marker ⇒ fail closed + verified re-download, with NO wrong-version
-fallback.**
+fallback. Once a bundled request is normalized to `None`, `find_bb(Some(v))` is ALWAYS a non-bundled
+request, so ANY cache failure for `Some(v)` — absent OR present-but-invalid — hard-errors; the
+sidecar/`~/.bb`/`$PATH` fallthrough is reachable ONLY from `find_bb(None)`.**
 
 ## Decision ledger (audits folded)
 Dual audit (Fable conditional-approve + Codex reject) folded in r1. Final fresh-context Codex pass on r1
@@ -60,9 +62,30 @@ returned **reject** with operational gaps; ALL folded here in r2:
 - **R2-9 (shared cross-language fixture named but never created).** FOLD: Phase 1 creates a committed
   `scripts/__fixtures__/bb-cache-marker.json` + a release-metadata JSON that BOTH TS and Rust tests load
   (contract pin against drift).
-- **R2-10 (false inferences).** "one hash per prove" is wrong (resolve + find_bb = **≤2 hashes**); GitHub
-  `digest` is generated-at-upload but **not immutable unless the release uses the immutable-releases
-  feature**. Corrected in Assumptions.
+- **R2-10 (false inferences).** "one hash per prove" is wrong (resolve + find_bb = **2 on a valid hit, up
+  to 3 on mismatch-replace**); GitHub's per-upload `digest` IS immutable, but the tag→asset MAPPING is
+  mutable unless immutable-releases. Corrected in Assumptions.
+
+Final-codex r3 (confirming pass on r2) folded — all operative, no new architecture:
+- **R3-a (control-flow tightening).** Post-normalization `find_bb(Some(v))` is ALWAYS non-bundled ⇒ an
+  ABSENT cache entry must ALSO hard-Err (r2's "absent ⇒ fall through" would keep a wrong-version fallback on
+  a between-resolve-and-exec eviction or a direct `bb::prove(Some(v))`). Fallthrough is now `None`-only.
+  Update the `Some("0.99.0")` test → `None` (server/tests.rs:~1012). (Summary + Design + Phase 3.)
+- **R3-b (concurrency).** Fixed `.{version}.tmp` is shared by Rust+TS ⇒ per-run-unique `.{version}.tmp.<rand>`;
+  concurrent publish is fail-closed (verify-on-use catches a torn publish); advisory lock deferred (A7).
+  Scrub "atomic publish". (Design + Phase 2.)
+- **R3-c (TS inventory).** TS `listCachedVersions` must ALSO skip dot-prefix + invalid-version names (not
+  just require the marker), else a staged dir enters TS retention. TS retention exempts this-invocation
+  downloads. (Phase 1.)
+- **R3-d (marker/staging contract).** Canonical 64-lc-hex validation of both digests; staging `0700` +
+  marker `0600` AT-CREATION (+ mode test; Windows ACL equiv). (Design + Phase 2.)
+- **R3-e (test/CI completeness).** Add hardlink/absolute/dir/extra/wrong-platform/decompressed-cap/
+  noncanonical-marker cases; filters add `download-bb.test.ts` + `__fixtures__/**`; Windows CI runs core
+  unit tests; name both fixtures in both suites. (Phases 1/2/4.)
+DECISION: GATE 1 closes here. The design is settled (dual audit + 2 fresh final passes, converging to
+completeness nits); remaining items are spec-completeness naturally enforced by the phase gates + GATE 3
+(post-impl codex on the ACTUAL diff). Proceeding to implementation rather than a 4th planning pass (codex is
+advisory; diminishing returns vs the real-code audit at GATE 3).
 
 ## Design (folded r2)
 **Both download paths** (`downloader.rs`, `download-bb.ts`), in order:
@@ -70,32 +93,43 @@ returned **reject** with operational gaps; ALL folded here in r2:
    off `arrayBuffer()`); verify `sha256(tarball)` == the GitHub release asset's published digest (mirror
    `release_metadata.rs::fetch_github_asset_digest`; non-2xx/missing/malformed ⇒ hard error). TS validates
    the version string first (`assertValidVersion`).
-2. Extract into a PRIVATE STAGING dir (`.{version}.tmp`, 0700), accepting ONLY a single regular file named
-   `bb_binary_name()` (`bb`/`bb.exe`) — reject symlinks/hardlinks, dirs, `..`/absolute paths, extra members,
-   duplicate `bb`, wrong-platform name, and enforce compressed + decompressed size caps.
+2. Extract into a PRIVATE, per-run-UNIQUE STAGING dir (`.{version}.tmp.<rand>`, created mode `0700` at the
+   syscall on Unix / owner-only ACL on Windows — NOT `create_dir_all` then chmod), accepting ONLY a single
+   regular file named `bb_binary_name()` (`bb`/`bb.exe`) — reject symlinks/hardlinks, dirs, `..`/absolute
+   paths, extra members, duplicate `bb`, wrong-platform name, and enforce compressed + decompressed size
+   caps. Unique-per-run so concurrent Rust/TS publishers never share (and stomp) one stage.
 3. Finalize in staging: `chmod 0755`; on macOS `xattr -cr` + `codesign --force --sign -` — **codesign
    failure aborts, nothing is published**.
 4. Compute `sha256(the FINAL staged bb)` (post-codesign).
-5. Write the marker `bb.sha256.json` in staging (0600):
-   `{schema:"aztec-accelerator/bb-cache-marker@1", version, platform, archive_sha256, binary_sha256}`.
-6. PUBLISH fail-closed: if a live dir exists, `remove` it, then `rename(staging → live)`. Initial publish is
-   atomic; replacement is delete-then-rename (a crash ⇒ no live entry ⇒ verified re-download next use; a
-   leftover `.tmp` is reaped). NOT claimed as atomic replacement.
+5. Write the marker `bb.sha256.json` in staging at mode `0600`-at-creation (Windows owner-only ACL):
+   `{schema:"aztec-accelerator/bb-cache-marker@1", version, platform, archive_sha256, binary_sha256}`
+   (both digests canonical 64-lowercase-hex).
+6. PUBLISH fail-closed: if a live dir exists, `remove` it, then `rename(staging → live)`. Initial publish
+   into an empty slot is atomic; REPLACEMENT is deliberately delete-then-rename, NOT atomic (a crash ⇒ no
+   live entry ⇒ verified re-download next use; a leftover `.tmp.<rand>` is reaped). Concurrent publishers
+   who all verified the SAME digest converge to an identical valid entry; a torn/last-writer-loser publish
+   is caught by verify-on-use ⇒ re-download (fail-closed). A cross-process per-version advisory lock is
+   deferred hardening (documented) — the security property holds without it because every use re-verifies.
 
 **Runtime** (`core`):
-- `verify_cached_bb(version) -> Result<PathBuf, CacheIntegrityError>`: read the marker; reject an unknown
-  `schema`; require `version`+`platform` match; re-hash the live `bb`; require `binary_sha256` == the live
-  hash; else `Err` (+ `SECURITY:` log). One streamed hash (no whole-file load).
+- `verify_cached_bb(version) -> Result<PathBuf, CacheIntegrityError>`: read the marker (bounded); reject an
+  unknown `schema`; require `version`+`platform` match; require both digest fields be canonical
+  64-lowercase-hex; re-hash the live `bb` (one streamed hash, no whole-file load); require `binary_sha256`
+  == the live hash; else `Err` (+ `SECURITY:` log).
 - `resolve_version`: **bundled request ⇒ `version: None`**; a non-bundled request ⇒ `needs_download =
   verify_cached_bb(v).is_err()` (re-download on absent OR present-but-invalid).
-- `bb.rs::find_bb`: `BB_BINARY_PATH` stays priority-0 (scoped trusted override, A4). The version-cache
-  branch: if the entry is PRESENT, `verify_cached_bb` → Ok returns it, Err ⇒ **hard `Err`** (no
-  sidecar/`~/.bb`/`$PATH` fallthrough); if ABSENT, fall through (this is the bundled/`None` path → sidecar).
+- `bb.rs::find_bb`: `BB_BINARY_PATH` stays priority-0 (scoped trusted override, A4). For `Some(v)` (ALWAYS
+  non-bundled post-normalization): **ANY** cache outcome other than a passing `verify_cached_bb` — absent,
+  present-but-invalid, unreadable — is a **hard `Err`**; there is NO sidecar/`~/.bb`/`$PATH` fallthrough for
+  a `Some(v)`. The fallthrough chain is reachable ONLY from `find_bb(None)` (bundled/unspecified → sidecar).
 - `downloader.rs::download_bb` (+ `download-bb.ts`) skip-if-exists ONLY when `verify_cached_bb` passes;
   else proceed to the verified staged download (fail-closed replace).
-- `cache_layout.rs::list_cached_versions`: skip dot-prefixed names; require the name parse as a version AND
-  the marker EXIST (cheap stat) — NO re-hash. Feeds `/health` + tray.
-- `cleanup_old_versions`: **never evict the in-use requested version** (protected arg).
+- `cache_layout.rs::list_cached_versions` (Rust) AND `listCachedVersions` (TS): skip dot-prefixed names;
+  require the name parse as a valid version AND the marker EXIST (cheap stat) — NO re-hash. Feeds `/health`
+  + tray (Rust) and `--list`/retention (TS).
+- `cleanup_old_versions` (Rust) + TS retention: **never evict the in-use / just-downloaded version(s)**
+  (Rust: protected requested version through the `prove.rs:269` spawn; TS: exempt versions downloaded in
+  the current invocation).
 
 ## Phases
 
@@ -104,51 +138,66 @@ returned **reject** with operational gaps; ALL folded here in r2:
   `copy-bb.ts`'s `assertSha256`; add `fetchAssetDigest` (mirror `release_metadata.rs`: exact asset name,
   `sha256:` strip, non-2xx/missing ⇒ throw; optional `GITHUB_TOKEN`). Bounded streaming download (no
   `arrayBuffer()`); verify tarball digest; extract into `.{version}.tmp` accepting only a single regular
-  `bb` (size caps, no symlink/`..`); chmod; codesign (abort on failure); write the JSON marker
-  (archive+final-binary digests, schema/version/platform); fail-closed publish. Skip only when the existing
-  marker validates. Migrate `listCachedVersions` to require the marker. Create
-  `scripts/__fixtures__/bb-cache-marker.json` (+ a release-metadata JSON) for the cross-language contract.
+  `bb` (size caps, no symlink/hardlink/`..`/absolute/dir/extra-member/wrong-platform-name); chmod; codesign
+  (abort on failure); write the JSON marker (archive+final-binary digests canonical hex, schema/version/
+  platform) mode-0600-at-creation; fail-closed publish into `.{version}.tmp.<rand>`. Skip only when the
+  existing marker validates. Migrate `listCachedVersions` to skip dot-prefixed names + require a
+  valid-version name + require the marker. TS retention exempts versions downloaded in THIS invocation.
+  Create `scripts/__fixtures__/bb-cache-marker.json` + `scripts/__fixtures__/github-release-metadata.json`
+  for the cross-language contract (loaded by name in BOTH the TS and the Phase-2 Rust suites).
 - **Validation gate:** `bun test scripts/download-bb.test.ts` (root fixture test — cases below) +
   `bun run lint`. Add root `"test:scripts": "bun test scripts/"`. Layers: unit + lint.
 - **Required negative cases:** digest mismatch ⇒ throw + nothing published; non-2xx / missing-digest /
   malformed-digest / wrong-asset metadata ⇒ throw; absent/lying Content-Length over the streamed cap ⇒
-  abort; symlink `bb` / `..` member / extra member / duplicate `bb` ⇒ reject; codesign-fail ⇒ no publish
-  (mock); invalid version string ⇒ reject before any fs op; skip only on a valid marker; legacy/tampered
-  entry ⇒ re-download; marker parses against the shared fixture.
+  abort (streamed, not `arrayBuffer`); cumulative decompressed-cap exceeded ⇒ abort; symlink / hardlink /
+  absolute-path / `..` / directory / extra-member / duplicate-`bb` / wrong-platform-filename each ⇒ reject;
+  codesign-fail ⇒ no publish (mock); invalid version string ⇒ reject before any fs op; Windows ⇒ reject;
+  malformed/noncanonical/oversized marker ⇒ reject; skip only on a valid marker; legacy/tampered entry ⇒
+  re-download; a `.{version}.tmp.<rand>` staging dir is NOT listed; marker parses against the named fixture.
 
 ### Phase 2 — core: marker helpers + `downloader.rs` reorder + inventory
-- `cache_layout.rs`: `version_bb_marker_path`, `write_bb_marker` (atomic 0600), `read_bb_marker` (reject
-  unknown schema), `verify_cached_bb` (bind version+platform, streamed rehash vs `binary_sha256`; fail-closed).
-  `list_cached_versions` → skip dot-prefixed + name-parses-as-version + marker-exists.
+- `cache_layout.rs`: `version_bb_marker_path`, `write_bb_marker` (0600-at-creation), `read_bb_marker`
+  (bounded read, reject unknown schema, require canonical 64-lc-hex digests), `verify_cached_bb` (bind
+  version+platform, streamed rehash vs `binary_sha256`; fail-closed). `list_cached_versions` → skip
+  dot-prefixed + name-parses-as-version + marker-exists.
 - `downloader.rs`: `verify_digest` returns the verified hex. Reorder `download_bb`/`install_version_dir` so
-  extract→chmod→finalize/codesign→marker all happen IN `.{version}.tmp`, THEN fail-closed publish (marker is
-  post-codesign, pre-publish). `download_bb` skip gated on `verify_cached_bb`.
+  extract→chmod→finalize/codesign→marker all happen IN a per-run-UNIQUE `.{version}.tmp.<rand>` (created
+  `0700`-at-syscall on Unix), THEN fail-closed publish (marker is post-codesign, pre-publish). `download_bb`
+  skip gated on `verify_cached_bb`.
 - **Validation gate:** `cargo test --manifest-path packages/accelerator/core/Cargo.toml` (marker
-  round-trip; unknown-schema/version-mismatch/platform-mismatch rejected; verify accepts valid, rejects
-  missing+mismatch; marker computed post-finalize; publish replaces a stale entry and leaves no `.tmp`;
-  list skips `.tmp`/unmarked; loads the shared fixture) + `cargo clippy --manifest-path
-  packages/accelerator/core/Cargo.toml --all-targets -- -D warnings` + `cargo fmt --manifest-path
-  packages/accelerator/core/Cargo.toml --check`. Layers: unit + lint.
+  round-trip; unknown-schema / version-mismatch / platform-mismatch / noncanonical-hex / oversized-marker
+  rejected; verify accepts valid, rejects missing+mismatch; marker computed post-finalize; Unix staging
+  `0700` + marker `0600` at-creation mode test; publish replaces a stale entry and leaves no `.tmp.<rand>`;
+  list skips `.tmp.<rand>`/dot-prefixed/unmarked; loads `bb-cache-marker.json` +
+  `github-release-metadata.json`) + `cargo clippy --manifest-path packages/accelerator/core/Cargo.toml
+  --all-targets -- -D warnings` + `cargo fmt --manifest-path packages/accelerator/core/Cargo.toml --check`.
+  Layers: unit + lint.
 
 ### Phase 3 — core: `find_bb`/`prove.rs` fail-closed (no wrong-version fallback) + eviction exemption
-- `resolve_version`: bundled ⇒ `version: None`; else `needs_download = verify_cached_bb(v).is_err()`.
-- `bb.rs::find_bb`: present-but-invalid non-bundled version ⇒ hard `Err` (no fallthrough); absent ⇒ fall
-  through. `BB_BINARY_PATH` stays (A4).
+- `resolve_version`: bundled ⇒ `version: None`; else `needs_download = verify_cached_bb(v).is_err()`. Update
+  the existing test pinning `Some("0.99.0")` (server/tests.rs:~1012) to expect `None` for a bundled request.
+- `bb.rs::find_bb`: for `Some(v)` (always non-bundled post-normalization) ANY cache failure — absent,
+  present-but-invalid, unreadable ⇒ hard `Err`, NO sidecar/`~/.bb`/`$PATH` fallthrough. Fallthrough only for
+  `find_bb(None)`. `BB_BINARY_PATH` stays priority-0 (A4).
 - `cleanup_old_versions`/`versions_to_evict`: exempt the in-use requested version; wire the protected arg
   through the `prove.rs:269` spawn.
 - **Validation gate:** `cargo test --manifest-path packages/accelerator/core/Cargo.toml` (find_bb: valid
-  marker→cached; invalid/missing marker for a present requested version→Err NOT sidecar; absent→fall
-  through; bundled request→None→sidecar; BB_BINARY_PATH honored; resolve re-downloads on invalid; the
+  marker→cached; invalid/missing/ABSENT marker for a `Some(v)`→Err, NEVER sidecar/PATH; `find_bb(None)`→
+  sidecar chain; resolve bundled→None; BB_BINARY_PATH honored; resolve re-downloads on invalid; the
   just-downloaded requested version is NOT evicted; end-to-end legacy/tampered → one verified re-download →
   requested path; download failure → no execution) + clippy + fmt (same manifest-path). Layers: unit + integration.
 
 ### Phase 4 — CI wiring + docs
 - Root `package.json`: fold `test:scripts` into `test:unit`. `accelerator.yml`: add a `bun run test:scripts`
-  step + extend `desktop`/`integration` paths-filters with `scripts/download-bb.ts`. Confirm the
-  pinned/bundled bb versions expose a GitHub asset digest (else un-downloadable — aligns with the
-  fail-closed Rust path). Doc note (README/CLAUDE): `bb:download` verifies; legacy unmarked caches
-  re-download on first use; offline unmarked caches fail closed until an online re-download;
-  `BB_BINARY_PATH` is a trusted override.
+  step + extend `desktop`/`integration` paths-filters with `scripts/download-bb.ts`,
+  `scripts/download-bb.test.ts`, and `scripts/__fixtures__/**` (so a fixture/test-only change still trips
+  the gate). Add core unit tests (`cargo test --manifest-path packages/accelerator/core/Cargo.toml`) to the
+  Windows CI leg so the `bb.exe`/platform-binding/ACL/replacement path is exercised on Windows (app-crate
+  tests there don't cover core). Confirm the pinned/bundled bb versions expose a GitHub asset digest (else
+  un-downloadable — aligns with the fail-closed Rust path). Doc note (README/CLAUDE): `bb:download`
+  verifies; legacy unmarked caches re-download on first use; offline unmarked caches fail closed until an
+  online re-download; `BB_BINARY_PATH` is a trusted, unverified operator override (the ONE documented
+  exception to "no unverified execution").
 - **Validation gate:** `bun run lint:actions` + full `bun run test` (now incl. `test:scripts`) + full
   `cargo test --manifest-path packages/accelerator/core/Cargo.toml`. Layers: lint + unit.
 
@@ -194,10 +243,14 @@ returned **reject** with operational gaps; ALL folded here in r2:
 - Bundled version is never present in the versions cache in normal operation (ships as sidecar) ⇒
   normalizing bundled→None is behavior-preserving. Verify no path relies on `resolve_version` returning
   `Some(bundled)`.
-- GitHub release-asset `digest` = `sha256:<hex>`, generated at upload; NOT immutable unless the release uses
-  immutable-releases — mirror `release_metadata.rs` fail-closed. Old releases may lack it (Phase 4 check).
-- ≤2 streamed hashes per non-bundled prove (resolve + find_bb), each ~100-300 ms (sha2 HW) — negligible vs
-  multi-second proves; NO per-process cache. Threading a single verified path is a deferred micro-opt.
+- GitHub's per-upload `digest` = `sha256:<hex>` IS itself generated-at-upload and immutable; what remains
+  mutable (unless the release uses immutable-releases) is the tag/name→asset MAPPING via asset
+  deletion/replacement. So a release/account/CI compromise can swap the asset AND its digest (TOFU). Mirror
+  `release_metadata.rs` fail-closed. Old releases may lack a digest (Phase 4 check).
+- Hash count per non-bundled prove: TWO streamed hashes on a valid hit (resolve + find_bb), UP TO THREE on
+  a mismatch-driven replacement (`download_bb` re-verifies its skip condition), each ~100-300 ms (sha2 HW) —
+  negligible vs multi-second proves; NO per-process cache. Threading a single verified path/force-download
+  flag to remove the duplication is a deferred micro-opt.
 ### Asks (defaults chosen — flag to override)
 - A1: defense-in-depth (verify-on-download BOTH paths + runtime marker) — chosen.
 - A2: legacy/unmarked ⇒ fail-closed + verified re-download; requested non-bundled invalid ⇒ hard Err, NO
@@ -206,6 +259,9 @@ returned **reject** with operational gaps; ALL folded here in r2:
 - A4: `BB_BINARY_PATH` = trusted, unversioned dev/CI/operator override, out of F-007 scope — chosen.
 - A5: `download-bb.ts` is Unix-only (Windows bb via `copy-bb.ts` sidecar) — chosen.
 - A6: publish is fail-closed delete-then-rename (not atomic replacement); crash ⇒ re-download — chosen.
+- A7: concurrent Rust/TS publishers use per-run-unique `.{version}.tmp.<rand>` stages; a torn/last-loser
+  publish is caught by verify-on-use ⇒ re-download (fail-closed). A cross-process per-version advisory lock
+  is deferred hardening — the security property does not depend on it — chosen.
 
 ## Seeds (draft)
 - `/goal`: All C6 phases ✓ in plan.md, each backed by its gate (`bun test scripts/download-bb.test.ts` +
