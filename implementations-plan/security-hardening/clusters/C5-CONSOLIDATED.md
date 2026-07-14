@@ -38,11 +38,18 @@ Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo
   `sub=main`, so `sub` alone does NOT isolate pipelines from each other. Bind each role to its workflow.
   Codex used `token.actions.githubusercontent.com:workflow` (the workflow NAME — impersonatable by a
   rename). Main-leg used `job_workflow_ref` (the workflow FILE @ ref — immune to renames). **CHOSEN: the
-  FILE-path claim** (`token.actions.githubusercontent.com:job_workflow_ref` =
-  `repo:alejoamiras/aztec-accelerator/.github/workflows/<file>.yml@refs/heads/main`, StringEquals), it is
-  strictly stronger. IMPLEMENTATION MUST VERIFY the exact claim name AWS accepts (`job_workflow_ref` vs
-  `workflow_ref` for top-level jobs — for these top-level S3 jobs they coincide); fall back to `workflow`
-  (name) only if the file claim proves unusable, documenting the weaker residual. Residual (all variants):
+  FILE-path claim** `token.actions.githubusercontent.com:job_workflow_ref`, StringEquals, value
+  **`alejoamiras/aztec-accelerator/.github/workflows/<file>.yml@refs/heads/main`** — **NO `repo:` prefix**
+  (that prefix is for `sub` ONLY; the `repo:`-prefixed value was an ERROR caught by the double audit
+  [Fable H1] that would fail EVERY AssumeRole). `job_workflow_ref` is a CONFIRMED AWS IAM condition key
+  (AWS "Available keys for AWS OIDC federation", GitHub tab: actor, actor_id, `job_workflow_ref`,
+  repository, repository_id, repository_owner_id, `workflow`, ref, environment, enterprise_id); for these
+  top-level S3 jobs it equals the calling workflow's ref. **There is NO `workflow_ref` AWS key** — the only
+  weaker fallback is `workflow` (workflow NAME, renameable), used ONLY if the file claim proves unusable.
+  MANDATORY runbook gate: a **negative cross-role AssumeRole smoke** — from main, a scratch/other workflow
+  attempts `role-to-assume: <release ARN>` and MUST be DENIED. This is the ONLY gate that catches a wrong
+  claim value AND the "drop the claim to unblock deploys" degraded hotfix (positive smokes +
+  simulate-principal-policy never evaluate TRUST policies → they'd pass silently). Residual (all variants):
   malicious code *already merged to main* runs as the legit workflow — unstoppable by any claim; mitigated
   by main protection + F-004 client-side manifest verification.
 - **D2 — release policy scope.** Codex: exact object `landing/releases/latest.json`. main/fable:
@@ -158,29 +165,60 @@ Key points baked into the runbook:
   `playground/` prefixes.
 - `deploy-landing.yml` + `publish-testnet.yml` use `sync --delete`; release does one exact `cp`.
 - OpenTofu PR gate already exists in `actionlint.yml` (pinned 1.10.0, fmt+init-backend=false+validate).
-- release-accelerator is dispatch-only; OIDC sub stays main.
+- release-accelerator is dispatch-only; OIDC sub is `refs/heads/main` **when dispatched from main** (a
+  wrong-ref dispatch fails closed at the early main-ref assert / at AssumeRole) — the tag it creates does
+  not re-trigger. [Fable L2: reworded from the earlier unconditional "sub stays main".]
 - 4 workflows reference `secrets.AWS_ROLE_ARN` (deploy-landing, release, publish-testnet, publish-nightlies).
-- Ruleset targets main only, 0 approvals, 3 checks (integration_id 15368), no linear/force-push/deletion.
+- Ruleset targets main only, 0 approvals, 3 checks (integration_id 15368 = GitHub Actions app), no
+  linear/force-push/deletion.
 - Each S3-writing job is top-level in its own workflow file → the workflow-file claim binds per pipeline.
 ### Inferences (verify at implementation / preflight)
-- The exact AWS condition-key name for the workflow-file claim (`job_workflow_ref` vs `workflow_ref`) and
-  its value format `repo/.github/workflows/FILE@refs/heads/main` — VERIFY against AWS+GitHub docs (D1).
+- The `job_workflow_ref` claim + its value format are now RESOLVED by the double audit (Fable H1, AWS docs):
+  key `job_workflow_ref` is valid; value `alejoamiras/aztec-accelerator/.github/workflows/FILE.yml@refs/heads/main`
+  (NO `repo:` prefix); `workflow_ref` is NOT an AWS key. Still add the negative cross-role AssumeRole smoke
+  (D1) as the runtime proof.
 - The repo still uses the pre-immutable OIDC `sub` format (`ref:refs/heads/main`) — preflight `gh api
   .../actions/oidc/customization/sub`.
 - `aws s3 sync --exclude "releases/*"` protects `landing/releases/*` from `--delete` (documented CLI
-  behavior; R6 head-object confirms empirically).
-- `simulate-principal-policy` predicts runtime authz (no SCPs/permission boundaries in a solo account).
+  behavior, destination-relative for delete candidates; R6 `list-objects-v2` confirms empirically — NOT
+  head-object, the landing role has no GetObject [Fable M2]).
+- `simulate-principal-policy` predicts IDENTITY-policy authz only; it never evaluates TRUST policies/OIDC
+  claims — hence the separate negative-trust smoke (no SCPs/permission boundaries in a solo account).
 - Squash or rebase merging is enabled (required for linear history) — preflight confirms.
 ### Asks (surface at the approval gate)
-- **A1:** add a 4th required status check (`Actionlint Status`, which runs the tofu gate) so infra
-  validation gates the merge instead of being advisory? [Recommended]
-- **A2:** additionally adopt per-pipeline GitHub `environment:` scoping (defense-in-depth beyond the
-  workflow-file claim)? [Optional]
+- **A1:** add a 4th required status check (`Actionlint Status`, integration_id 15368, which runs the tofu
+  gate) so infra validation gates the merge instead of being advisory? [Recommended — audit verified it
+  reports on every PR to main, no deadlock.]
+- **A2:** additionally adopt per-pipeline GitHub `environment:` scoping (defense-in-depth)? [Optional —
+  **FOOTGUN (Fable M3): adding `environment:` changes the default `sub` to `…:environment:NAME`, which
+  BREAKS the `sub=main` trust unless the trust conditions are switched to the native AWS `environment`
+  condition key at the same time.** Not needed given the `job_workflow_ref` binding already isolates
+  pipelines.]
 - **A3:** enable hardware-key 2FA on the owner account + confirm tfstate bucket is owner-only + versioned?
   [Out of repo scope; single biggest remaining lever]
 - **A4:** confirm the brief deploy/merge freeze during the human cutover is acceptable.
-- **A5:** has a landing deploy already deleted the live `latest.json`? (preflight head-object; if missing,
-  re-run the last stable release's upload after smokes.)
+- **A5:** has a landing deploy already deleted the live `latest.json`? (preflight `list-objects-v2`; if
+  missing, re-run the last stable release's upload after smokes.)
+- **A6 (Fable M1/L3):** the user confirmed the `nightlies` BRANCH is unused (2026-07-14). Note the
+  consequence: after the trust-ref drop + legacy-secret deletion, `publish-nightlies.yml` fails closed at
+  `configure-aws-credentials`, and the live `nightly-playground.aztec-accelerator.dev` → `/playground-nightly`
+  CloudFront route (still present in `cloudfront.tf`) becomes unwritable by any role. This is an ACCEPTED
+  documented dormancy (not a silent retirement); if the nightly playground deploy path is ever revived, add
+  a 4th `playground-nightly/*` role. Confirm acceptance at the gate.
+
+## Double-audit fold (Fable — conditional approve, all 8 folded; Codex leg pending)
+- **H1 → folded** in D1 (value format corrected; `workflow_ref` removed; negative cross-role AssumeRole
+  smoke mandated in the runbook).
+- **M1/L3 → A6** above (nightly dormancy documented + accepted; publish-nightlies fail-closed noted).
+- **M2 → folded**: Phase-1 landing policy uses `StringLike s3:prefix ["landing/*"]` (not `StringEquals
+  "landing/"`); the optional Phase-2 post-sync feed assert uses `aws s3api list-objects-v2 --prefix
+  landing/releases/latest.json` (NOT head-object — the landing role has no `s3:GetObject`), or is dropped.
+- **M3 → A2** annotated (environment→sub breakage + native `environment` key).
+- **L1 → folded**: `allowed_merge_methods` is a `pull_request.parameters` field (lowercase
+  `["squash","rebase"]`), NOT a top-level ruleset field; the runbook asserts it on the fetched live ruleset.
+- **L2 → folded** in Facts (OIDC-sub wording qualified).
+- **L4 → folded**: Phase-2 scopes `id-token: write` to the `deploy-app` job **and the `_publish-sdk.yml`
+  call job** (both need it — the latter for Sigstore provenance).
 
 ## Seeds (draft — finalized post-approval)
 - **/goal (recommended):** All C5 phases ✓ in the consolidated plan, each backed by its validation gate
