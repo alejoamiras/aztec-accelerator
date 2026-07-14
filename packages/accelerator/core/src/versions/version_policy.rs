@@ -198,22 +198,38 @@ pub fn is_valid_version(version: &str) -> bool {
 /// Clean up old cached versions per the retention policy.
 /// q7e3-F-08: takes the validated `&AztecVersion` (callers parse; an unparseable bundled skips
 /// cleanup at the call site — same defensive outcome as the old internal parse-else-return).
-pub async fn cleanup_old_versions(bundled: &AztecVersion) {
+pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecVersion>) {
     // Parse the cached dir names into validated versions. An unparseable dir name is skipped — same
     // net outcome as before (the old code classified it Mainnet → retention `None` → never evicted).
     let cached: Vec<AztecVersion> = list_cached_versions()
         .iter()
         .filter_map(|s| AztecVersion::parse(s))
         .collect();
-    let to_evict = versions_to_evict(&cached, bundled);
-
-    for version in &to_evict {
+    for version in evictions(&cached, bundled, in_use) {
         let dir = versions_base_dir().join(version.as_str());
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
+}
+
+/// The versions to actually delete: the retention-policy evictions MINUS the in-use version.
+///
+/// F-007 race guard: `cleanup_old_versions` is spawned (detached) right after a download and races
+/// `bb::prove`. Without this, a freshly-downloaded old nightly (the oldest excess in its tier) could be
+/// deleted before it executes, turning the now-fail-closed `find_bb` into a spurious hard error. Keeping
+/// the in-use version one round over the limit is harmless — the next cleanup (when it is no longer in
+/// use) evicts it.
+fn evictions(
+    cached: &[AztecVersion],
+    bundled: &AztecVersion,
+    in_use: Option<&AztecVersion>,
+) -> Vec<AztecVersion> {
+    versions_to_evict(cached, bundled)
+        .into_iter()
+        .filter(|v| !in_use.is_some_and(|u| u.as_str() == v.as_str()))
+        .collect()
 }
 #[cfg(test)]
 mod tests {
@@ -376,6 +392,36 @@ mod tests {
         assert_eq!(evicted.len(), 2);
         assert!(evicted.contains(&av("5.0.0-nightly.20260301")));
         assert!(evicted.contains(&av("5.0.0-nightly.20260302")));
+    }
+
+    #[test]
+    fn evictions_exempt_the_in_use_version() {
+        // F-007: the version being proved right now must never be evicted by the cleanup that races it.
+        let cached = vec![
+            av("5.0.0-nightly.20260301"),
+            av("5.0.0-nightly.20260302"),
+            av("5.0.0-nightly.20260303"),
+            av("5.0.0-nightly.20260304"),
+        ];
+        let bundled = av("4.2.0-aztecnr-rc.2"); // not in this tier
+
+        // No protection: the two oldest are evicted (retention keeps 2).
+        let unprotected = evictions(&cached, &bundled, None);
+        assert!(unprotected.contains(&av("5.0.0-nightly.20260301")));
+        assert!(unprotected.contains(&av("5.0.0-nightly.20260302")));
+
+        // Protecting the OLDEST (the just-downloaded, in-use version): it is exempted, while the next
+        // non-protected version is still evicted.
+        let in_use = av("5.0.0-nightly.20260301");
+        let protected = evictions(&cached, &bundled, Some(&in_use));
+        assert!(
+            !protected.contains(&in_use),
+            "the in-use version must be exempted from eviction"
+        );
+        assert!(
+            protected.contains(&av("5.0.0-nightly.20260302")),
+            "a non-protected excess version is still evicted"
+        );
     }
 
     #[test]

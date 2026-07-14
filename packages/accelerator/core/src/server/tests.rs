@@ -1009,13 +1009,18 @@ fn resolve_version_flags_uncached_for_download() {
 }
 
 #[test]
-fn resolve_version_no_download_for_bundled() {
-    // The bundled version is always present → never flagged for download (no Downloading status).
+fn resolve_version_normalizes_bundled_to_none() {
+    // F-007: an explicit bundled request normalizes to `version: None` — the bundled bb ships as the
+    // sidecar (resolved via `find_bb(None)`), never the version cache. Never flagged for download, and
+    // `None` means a `Some(v)` downstream is unambiguously non-bundled (⇒ marker-verified cache only).
     let core = HeadlessState::headless("1.0.0", Some("0.99.0".to_string()), None, None);
     let state = AppState::headless(core);
     let requested = Some("0.99.0".to_string());
     let resolved = resolve_version(&state, &requested).expect("bundled resolves");
-    assert_eq!(resolved.version.as_deref(), Some("0.99.0"));
+    assert!(
+        resolved.version.is_none(),
+        "bundled request must normalize to None (sidecar path)"
+    );
     assert!(
         !resolved.needs_download,
         "bundled version must NOT download"

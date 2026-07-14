@@ -6,20 +6,25 @@ use crate::versions;
 /// Maximum time to wait for bb prove to complete before killing the process.
 const PROVE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Find the `bb` binary. When `version` is provided, the version cache is checked
-/// before the standard search chain.
+/// Find the `bb` binary. When `version` is provided, the marker-verified version cache is the ONLY
+/// acceptable source — never the standard search chain.
 ///
 /// Search order:
-/// 0. `BB_BINARY_PATH` env var — explicit override (CI, testing, custom installs)
-/// 1. Version cache (`~/.aztec-accelerator/versions/{version}/bb`) — when version specified
+/// 0. `BB_BINARY_PATH` env var — trusted, unversioned operator override (A4). The one documented
+///    exception to "no unverified execution": whoever sets the process env already owns the process.
+/// 1. Version cache (`~/.aztec-accelerator/versions/{version}/bb`) — when a version is requested.
 /// 2. Bundled sidecar (Tauri externalBin) — `binaries/bb-{target-triple}` next to the executable
 /// 3. `~/.bb/bb` — user-installed via `bbup`
 /// 4. `bb` on `$PATH`
 ///
-/// q7e3-F-08: `version` is the validated `&AztecVersion` — the cache-path lookup below is
-/// traversal-safe by construction.
+/// F-007: for a REQUESTED (non-bundled) version, the marker-verified cache entry is the ONLY acceptable
+/// source. `resolve_version` normalizes the bundled request to `None`, so a `Some(v)` here is always a
+/// genuinely non-bundled request; ANY cache failure (absent, tampered, unreadable) is a hard error —
+/// steps 2–4 would silently execute the WRONG version (or an unverified binary) over the private
+/// witness. Only `find_bb(None)` (bundled / unspecified) walks the sidecar → `~/.bb` → `$PATH` chain.
+/// q7e3-F-08: `version` is the validated `&AztecVersion` — the cache-path lookup is traversal-safe.
 pub fn find_bb(version: Option<&versions::AztecVersion>) -> Result<PathBuf, String> {
-    // 0. Explicit override via environment variable
+    // 0. Explicit override via environment variable (trusted, unversioned — A4).
     if let Ok(path) = std::env::var("BB_BINARY_PATH") {
         let explicit = PathBuf::from(&path);
         if explicit.exists() {
@@ -27,12 +32,11 @@ pub fn find_bb(version: Option<&versions::AztecVersion>) -> Result<PathBuf, Stri
         }
     }
 
-    // 1. Version cache (only when a specific version is requested)
+    // 1. Version cache — a requested non-bundled version MUST resolve to a marker-verified entry, with
+    //    NO fall-through to a different bb (F-007).
     if let Some(v) = version {
-        let cached = versions::version_bb_path(v);
-        if cached.exists() {
-            return Ok(cached);
-        }
+        return versions::verify_cached_bb(v)
+            .map_err(|e| format!("cached bb for {v} failed integrity verification: {e}"));
     }
 
     // 2. Sidecar: check next to the current executable (bb.exe on Windows)
@@ -362,13 +366,18 @@ mod tests {
     }
 
     #[test]
-    fn test_find_bb_with_version_checks_cache() {
-        // Verify that find_bb with a version doesn't panic and follows the chain
+    #[serial]
+    fn test_find_bb_with_uncached_version_is_fail_closed() {
+        // F-007: a requested (non-bundled) version with no marker-verified cache entry MUST hard-error —
+        // it never falls through to the sidecar/~/.bb/$PATH (which would run the wrong/unverified bb over
+        // the witness). `#[serial]` + clearing the env override keeps this deterministic vs the env tests.
+        std::env::remove_var("BB_BINARY_PATH");
         let version = versions::AztecVersion::parse("99.99.99-nonexistent").unwrap();
         let result = find_bb(Some(&version));
-        match result {
-            Ok(path) => assert!(path.exists()),
-            Err(msg) => assert!(msg.contains("bb binary not found")),
-        }
+        assert!(
+            result.is_err(),
+            "uncached requested version must fail closed, got {result:?}"
+        );
+        assert!(result.unwrap_err().contains("integrity verification"));
     }
 }

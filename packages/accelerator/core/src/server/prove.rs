@@ -77,9 +77,22 @@ pub(crate) fn resolve_version(
         .as_deref()
         .unwrap_or(super::DEFAULT_BB_VERSION);
 
-    let needs_download = v != bundled && !versions::version_bb_path(&version).exists();
+    // F-007: normalize an explicit bundled request to `None` — the bundled bb ships as the sidecar, never
+    // the version cache, so it resolves via `find_bb(None)`. This also makes any `Some(v)` downstream an
+    // unambiguously NON-bundled request, so `find_bb` can hard-error on a bad cache entry without a
+    // wrong-version fallback (a bundled `Some(v)` would otherwise be indistinguishable).
+    if v == bundled {
+        return Ok(ResolvedVersion {
+            version: None,
+            needs_download: false,
+        });
+    }
+
+    // Re-download when the cache entry is absent OR present-but-marker-invalid (tampered/legacy), not
+    // merely when the path is missing — `verify_cached_bb` rehashes the binary against its marker (F-007).
+    let needs_download = versions::verify_cached_bb(&version).is_err();
     if needs_download {
-        tracing::info!(version = %version, "Version not cached, will download");
+        tracing::info!(version = %version, "Version not cached (or unverified), will download");
     }
 
     Ok(ResolvedVersion {
@@ -265,6 +278,9 @@ pub(crate) async fn prove(
                     .as_deref()
                     .unwrap_or(super::DEFAULT_BB_VERSION)
                     .to_string();
+                // F-007: the version we just downloaded is about to be proved — exempt it from this
+                // cleanup so the detached eviction can't delete it out from under `bb::prove`.
+                let in_use_owned = version.as_str().to_string();
                 let on_versions_changed = state.on_versions_changed.clone();
                 tokio::spawn(async move {
                     // q7e3-F-08: the caller parses now; an unparseable bundled (defensive,
@@ -272,7 +288,8 @@ pub(crate) async fn prove(
                     // parse-else-return. The "unknown" sentinel still parses, so eviction semantics
                     // in unknown-bundled builds are unchanged (#352 stays deferred).
                     if let Some(bundled) = versions::AztecVersion::parse(&bundled_owned) {
-                        versions::cleanup_old_versions(&bundled).await;
+                        let in_use = versions::AztecVersion::parse(&in_use_owned);
+                        versions::cleanup_old_versions(&bundled, in_use.as_ref()).await;
                     }
                     if let Some(cb) = on_versions_changed {
                         cb();
