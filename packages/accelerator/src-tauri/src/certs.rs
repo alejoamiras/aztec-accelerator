@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio_rustls::rustls;
+use zeroize::Zeroizing;
 
 /// Returns `~/.aztec-accelerator/certs/`.
 pub fn certs_dir() -> PathBuf {
@@ -135,20 +136,28 @@ pub fn certs_exist() -> bool {
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
-/// The CA private key is generated in memory, signs the leaf, and is dropped at function end —
-/// **never written to disk.** Writing to caller-chosen paths lets rotation stage a new set
+/// The CA private key is generated in memory (`Zeroizing`), signs the leaf, and is dropped+scrubbed
+/// EARLY — right after signing, before the file writes (F-016) — and is **never written to disk.**
+/// Writing to caller-chosen paths lets rotation stage a new set
 /// (`*.new`) and atomically swap it in only after the new anchor is trusted.
 fn write_new_cert_set(paths: &CertPaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = OffsetDateTime::now_utc();
-    let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    // F-016: wrap the CA signing key in `Zeroizing` so rcgen scrubs its serialized-DER copy on drop (a
+    // plain drop scrubs nothing), and drop it as EARLY as possible — right after it signs the leaf, before
+    // the fallible file writes.
+    let ca_key = Zeroizing::new(KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?);
     let ca_cert = ca_params(now).self_signed(&ca_key)?;
     let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let leaf_cert = leaf_params(now)?.signed_by(&leaf_key, &ca_cert, &ca_key)?;
+    // Scrub rcgen's serialized-DER CA key now. RESIDUAL (F-016): `Zeroizing` wipes ONLY that `Vec` — the
+    // ring backend's ECDSA scalar/nonce, key-generation temporaries, swap pages, and any core dump are NOT
+    // scrubbed, so this is best-effort post-use reduction, not a guarantee the CA key is unrecoverable. The
+    // CA key is never written to disk; the leaf key is persisted at 0600 by design.
+    drop(ca_key);
 
     write_pem_file(&paths.ca_cert, &ca_cert.pem())?;
     write_pem_file(&paths.leaf_cert, &leaf_cert.pem())?;
     write_pem_file(&paths.leaf_key, &leaf_key.serialize_pem())?;
-    // `ca_key` drops here — the only copy of the CA signing key is gone.
     Ok(())
 }
 
