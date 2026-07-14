@@ -33,6 +33,12 @@ requesting origin. Issues (codex-verified):
    it is missing/mismatched. Keep `textContent` (no `innerHTML`).
 
 ## Deferred (documented follow-ups — real but beyond a light cluster; tracked in the ledger)
+- **Server-authoritative display binding** (`get_pending_auth(request_id)` returning the server-held
+  canonical origin, so the DISPLAYED origin can't disagree with the resolved request): DEFERRED. In the
+  production flow the server builds the popup URL with the same canonical origin + request id together
+  (`windows.rs:88-93`), so a realistic disagreement needs app-internal URL mutation or renderer compromise
+  (codex GATE-3 ranked this the lowest residual risk of the three deferrals). Backend command + capability.
+  [Supersedes the earlier draft that put this in Phase 1.]
 - **Focus-swap / stacked prompts** (up to 10 pending origins, each new popup centered+always-on-top+focused
   → a controlled subdomain can steal a click to a newly-focused prompt): serialize/queue the auth UI. Larger
   windowing change.

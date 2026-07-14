@@ -267,13 +267,18 @@ h2 {
 .popup-container {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
   height: calc(100vh - 40px);
   text-align: center;
   padding: 0 20px;
 }
 
 /* F-014: the content (incl. the full untruncated origin) scrolls here; the buttons footer stays OUTSIDE it
-   so Allow/Deny are always reachable inside the fixed 400×300 window no matter how long the origin is. */
+   so Allow/Deny are always reachable inside the fixed 400×300 window no matter how long the origin is.
+   `justify-content: safe center` centers when it fits but falls back to flex-start when the content
+   OVERFLOWS — otherwise centering pushes the block-START overflow (the scheme + leading labels) above the
+   scrollport where non-negative scrollTop can never reach it, hiding the very identity we must show. */
 .popup-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -282,7 +287,7 @@ h2 {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: safe center;
 }
 
 .popup-container h2 {

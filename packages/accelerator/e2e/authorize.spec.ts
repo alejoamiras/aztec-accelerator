@@ -92,17 +92,46 @@ test("remember defaults unchecked; checking 'Always allow' sends remember: true"
   });
 });
 
-test("the full origin is shown untruncated + selectable (F-014)", async ({ page }) => {
-  // A long look-alike origin must be shown in full — never truncated to hide the registrable domain.
-  const long =
-    "https://aztec-accelerator.dev.a-very-long-attacker-subdomain-that-would-overflow.evil.example";
+test("full origin untruncated + start reachable + buttons in the 400x300 window (F-014)", async ({
+  page,
+}) => {
+  // The real Tauri popup window is 400x300; a very long look-alike origin must show its FULL text AND
+  // its BEGINNING (scheme/leading labels) must be reachable — a centered overflow would hide the start.
+  await page.setViewportSize({ width: 400, height: 300 });
+  const long = `https://${"sub.".repeat(40)}trusted.example`;
   await page.goto(`/authorize.html?origin=${encodeURIComponent(long)}`);
   const origin = page.locator("#origin");
-  await expect(origin).toHaveText(long); // full text, no ellipsis
+  await expect(origin).toHaveText(long); // full text, no ellipsis/truncation
   await expect(origin).toHaveAttribute("dir", "ltr");
-  // Allow/Deny remain reachable regardless of origin length.
-  await expect(page.getByRole("button", { name: "Allow" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
+
+  // HIGH regression guard: scroll the region to the top and assert the origin's top edge is not clipped
+  // ABOVE the scrollport (centered overflow would push the scheme into unreachable negative scroll).
+  const startReachable = await page.evaluate(() => {
+    const scroll = document.querySelector(".popup-scroll");
+    const o = document.getElementById("origin");
+    if (!scroll || !o) return false;
+    scroll.scrollTop = 0;
+    return o.getBoundingClientRect().top >= scroll.getBoundingClientRect().top - 1;
+  });
+  expect(startReachable).toBe(true);
+
+  // Allow/Deny stay inside the 300px-tall window (reachable footer, not pushed off).
+  for (const name of ["Allow", "Deny"]) {
+    const box = await page.getByRole("button", { name }).boundingBox();
+    expect(box, name).not.toBeNull();
+    expect(box!.y + box!.height, name).toBeLessThanOrEqual(300);
+  }
+
+  // Bidi isolation + selectability are actually applied (defeat visual reordering; allow inspect/copy).
+  const style = await origin.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      bidi: s.unicodeBidi,
+      select: s.userSelect || (s as unknown as { webkitUserSelect: string }).webkitUserSelect,
+    };
+  });
+  expect(style.bidi).toContain("isolate");
+  expect(style.select).toBe("text");
 });
 
 test("missing origin param shows unknown", async ({ page }) => {
