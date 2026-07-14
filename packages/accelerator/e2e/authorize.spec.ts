@@ -35,12 +35,12 @@ test("allow calls respond_auth with correct args", async ({ page }) => {
   const calls = await callsFor(page, "respond_auth");
   expect(calls.length).toBe(1);
   // SEC-06: the opaque requestId from the URL is echoed back so the server resolves by id.
-  // "Remember this site" checkbox defaults to checked
+  // F-014: "Always allow this site" defaults to UNCHECKED — a plain Allow is ephemeral ("Allow once").
   expect(calls[0].args).toEqual({
     requestId: "req-abc",
     origin: "https://example.com",
     allowed: true,
-    remember: true,
+    remember: false,
   });
 });
 
@@ -51,12 +51,12 @@ test("deny calls respond_auth with correct args", async ({ page }) => {
 
   const calls = await callsFor(page, "respond_auth");
   expect(calls.length).toBe(1);
-  // "Remember this site" checkbox defaults to checked — deny still sends remember: true
+  // F-014: default-unchecked — deny sends remember: false.
   expect(calls[0].args).toEqual({
     requestId: "req-abc",
     origin: "https://example.com",
     allowed: false,
-    remember: true,
+    remember: false,
   });
 });
 
@@ -71,11 +71,16 @@ test("buttons disabled after invoke prevents double-click", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Deny" })).toBeDisabled();
 });
 
-test("uncheck remember changes allow args", async ({ page }) => {
+test("remember defaults unchecked; checking 'Always allow' sends remember: true", async ({
+  page,
+}) => {
   await page.goto("/authorize.html?origin=https%3A%2F%2Ftest.com&requestId=req-xyz");
 
-  // Uncheck "Remember this site"
-  await page.locator("#remember").uncheck();
+  // F-014: the checkbox is UNCHECKED by default (deliberate opt-in to persistent trust).
+  await expect(page.locator("#remember")).not.toBeChecked();
+
+  // Opting in ("Always allow this site") sends remember: true.
+  await page.locator("#remember").check();
   await page.getByRole("button", { name: "Allow" }).click();
 
   const calls = await callsFor(page, "respond_auth");
@@ -83,8 +88,50 @@ test("uncheck remember changes allow args", async ({ page }) => {
     requestId: "req-xyz",
     origin: "https://test.com",
     allowed: true,
-    remember: false,
+    remember: true,
   });
+});
+
+test("full origin untruncated + start reachable + buttons in the 400x300 window (F-014)", async ({
+  page,
+}) => {
+  // The real Tauri popup window is 400x300; a very long look-alike origin must show its FULL text AND
+  // its BEGINNING (scheme/leading labels) must be reachable — a centered overflow would hide the start.
+  await page.setViewportSize({ width: 400, height: 300 });
+  const long = `https://${"sub.".repeat(40)}trusted.example`;
+  await page.goto(`/authorize.html?origin=${encodeURIComponent(long)}`);
+  const origin = page.locator("#origin");
+  await expect(origin).toHaveText(long); // full text, no ellipsis/truncation
+  await expect(origin).toHaveAttribute("dir", "ltr");
+
+  // HIGH regression guard: scroll the region to the top and assert the origin's top edge is not clipped
+  // ABOVE the scrollport (centered overflow would push the scheme into unreachable negative scroll).
+  const startReachable = await page.evaluate(() => {
+    const scroll = document.querySelector(".popup-scroll");
+    const o = document.getElementById("origin");
+    if (!scroll || !o) return false;
+    scroll.scrollTop = 0;
+    return o.getBoundingClientRect().top >= scroll.getBoundingClientRect().top - 1;
+  });
+  expect(startReachable).toBe(true);
+
+  // Allow/Deny stay inside the 300px-tall window (reachable footer, not pushed off).
+  for (const name of ["Allow", "Deny"]) {
+    const box = await page.getByRole("button", { name }).boundingBox();
+    expect(box, name).not.toBeNull();
+    expect(box!.y + box!.height, name).toBeLessThanOrEqual(300);
+  }
+
+  // Bidi isolation + selectability are actually applied (defeat visual reordering; allow inspect/copy).
+  const style = await origin.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      bidi: s.unicodeBidi,
+      select: s.userSelect || (s as unknown as { webkitUserSelect: string }).webkitUserSelect,
+    };
+  });
+  expect(style.bidi).toContain("isolate");
+  expect(style.select).toBe("text");
 });
 
 test("missing origin param shows unknown", async ({ page }) => {

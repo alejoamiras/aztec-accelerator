@@ -175,7 +175,10 @@ describe("Authorization Flow", () => {
     expect(await browser.getTitle()).toBe("Authorize Site");
     expect(await originText.getText()).toBe(TEST_ORIGIN);
 
+    // F-014: "Always allow this site" defaults UNCHECKED — opt in explicitly to persist the origin.
     const remember = await browser.$("#remember");
+    expect(await remember.isSelected()).toBe(false);
+    await clickBy("#remember");
     expect(await remember.isSelected()).toBe(true);
 
     // Click Allow — use JS click on Linux (WebKitGTK elementClick returns malformed response)
@@ -229,9 +232,9 @@ describe("Authorization Flow", () => {
 
     await browser.switchToWindow(authWindowHandle!);
 
-    // Uncheck Remember via JS click
-    await clickBy("#remember");
-    // Verify it's unchecked (native isSelected works fine on Linux)
+    // F-014: Remember defaults UNCHECKED — no click needed; a plain Allow is ephemeral ("Allow once").
+    const originText = await browser.$("#origin");
+    await originText.waitForExist({ timeout: 5000 });
     const remember = await browser.$("#remember");
     expect(await remember.isSelected()).toBe(false);
 
