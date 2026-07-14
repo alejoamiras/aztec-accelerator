@@ -35,12 +35,12 @@ test("allow calls respond_auth with correct args", async ({ page }) => {
   const calls = await callsFor(page, "respond_auth");
   expect(calls.length).toBe(1);
   // SEC-06: the opaque requestId from the URL is echoed back so the server resolves by id.
-  // "Remember this site" checkbox defaults to checked
+  // F-014: "Always allow this site" defaults to UNCHECKED — a plain Allow is ephemeral ("Allow once").
   expect(calls[0].args).toEqual({
     requestId: "req-abc",
     origin: "https://example.com",
     allowed: true,
-    remember: true,
+    remember: false,
   });
 });
 
@@ -51,12 +51,12 @@ test("deny calls respond_auth with correct args", async ({ page }) => {
 
   const calls = await callsFor(page, "respond_auth");
   expect(calls.length).toBe(1);
-  // "Remember this site" checkbox defaults to checked — deny still sends remember: true
+  // F-014: default-unchecked — deny sends remember: false.
   expect(calls[0].args).toEqual({
     requestId: "req-abc",
     origin: "https://example.com",
     allowed: false,
-    remember: true,
+    remember: false,
   });
 });
 
@@ -71,11 +71,16 @@ test("buttons disabled after invoke prevents double-click", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Deny" })).toBeDisabled();
 });
 
-test("uncheck remember changes allow args", async ({ page }) => {
+test("remember defaults unchecked; checking 'Always allow' sends remember: true", async ({
+  page,
+}) => {
   await page.goto("/authorize.html?origin=https%3A%2F%2Ftest.com&requestId=req-xyz");
 
-  // Uncheck "Remember this site"
-  await page.locator("#remember").uncheck();
+  // F-014: the checkbox is UNCHECKED by default (deliberate opt-in to persistent trust).
+  await expect(page.locator("#remember")).not.toBeChecked();
+
+  // Opting in ("Always allow this site") sends remember: true.
+  await page.locator("#remember").check();
   await page.getByRole("button", { name: "Allow" }).click();
 
   const calls = await callsFor(page, "respond_auth");
@@ -83,8 +88,21 @@ test("uncheck remember changes allow args", async ({ page }) => {
     requestId: "req-xyz",
     origin: "https://test.com",
     allowed: true,
-    remember: false,
+    remember: true,
   });
+});
+
+test("the full origin is shown untruncated + selectable (F-014)", async ({ page }) => {
+  // A long look-alike origin must be shown in full — never truncated to hide the registrable domain.
+  const long =
+    "https://aztec-accelerator.dev.a-very-long-attacker-subdomain-that-would-overflow.evil.example";
+  await page.goto(`/authorize.html?origin=${encodeURIComponent(long)}`);
+  const origin = page.locator("#origin");
+  await expect(origin).toHaveText(long); // full text, no ellipsis
+  await expect(origin).toHaveAttribute("dir", "ltr");
+  // Allow/Deny remain reachable regardless of origin length.
+  await expect(page.getByRole("button", { name: "Allow" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
 });
 
 test("missing origin param shows unknown", async ({ page }) => {

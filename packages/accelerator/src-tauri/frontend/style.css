@@ -267,11 +267,22 @@ h2 {
 .popup-container {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
   height: calc(100vh - 40px);
   text-align: center;
   padding: 0 20px;
+}
+
+/* F-014: the content (incl. the full untruncated origin) scrolls here; the buttons footer stays OUTSIDE it
+   so Allow/Deny are always reachable inside the fixed 400×300 window no matter how long the origin is. */
+.popup-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 .popup-container h2 {
@@ -292,9 +303,12 @@ h2 {
 }
 
 .popup-buttons {
+  flex: 0 0 auto; /* fixed footer — always reachable, never pushed off by a long origin (F-014) */
   display: flex;
+  justify-content: center;
   gap: 10px;
   margin-top: 14px;
+  padding-bottom: 4px;
 }
 
 .btn {
@@ -368,6 +382,17 @@ h2 {
 .origin-line {
   font-family: monospace;
   font-size: 13px;
+  /* F-014: the full origin is user-selectable (the doc disables selection globally) and bidi-isolated so
+     RTL/format characters cannot visually reorder it into a look-alike. */
+  unicode-bidi: isolate;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.origin-line:focus-visible {
+  outline: 2px solid var(--accent, #4a90d9);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 
 /* Error hints — brief inline feedback on command failure */
