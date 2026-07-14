@@ -31,6 +31,8 @@ jobs:
             # affect the accelerator's Rust/app build).
             desktop:
               - 'packages/accelerator/**'
+              - 'scripts/download-bb*.ts'
+              - 'scripts/__fixtures__/**'
               - 'packages/sdk/package.json'
               - 'biome.json'
               - 'package.json'
@@ -44,6 +46,8 @@ jobs:
             # runs on SDK src changes (what `desktop` skips) AND everything else.
             integration:
               - 'packages/accelerator/**'
+              - 'scripts/download-bb*.ts'
+              - 'scripts/__fixtures__/**'
               - 'packages/sdk/src/**'
               - 'packages/sdk/package.json'
               - 'biome.json'
@@ -186,6 +190,8 @@ jobs:
       - run: bun run lint
       - name: Unit-test build scripts (copy-bb supply-chain gate)
         run: bun run --cwd packages/accelerator test:unit
+      - name: Unit-test root scripts (download-bb F-007 cache-integrity gate)
+        run: bun run test:scripts
 
   smoke:
     name: Smoke
@@ -409,6 +415,10 @@ jobs:
           rust-components: ""
       - name: Compile + unit-test the app crate on Windows
         run: cargo test
+      # accelerator-core on Windows: exercises the bb.exe name, platform binding, marker/publish, and
+      # directory-replacement paths that the app crate doesn't cover (F-007).
+      - name: Compile + unit-test accelerator-core on Windows
+        run: cargo test --manifest-path ../core/Cargo.toml
       - name: Build the Tauri app (NSIS installer)
         working-directory: packages/accelerator
         shell: bash
