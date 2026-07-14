@@ -269,6 +269,36 @@ fn spawn_update_poller(app_handle: AppHandle, config: ConfigState) {
     });
 }
 
+/// Spawn the F-004 Layer B post-launch floor tracker. Once THIS build's own accelerator server has
+/// answered `/health` as a healthy Aztec 3 consecutive times, advance the monotonic version floor to
+/// the running version. Requiring 3 healthy probes (not merely "process started") means a build that
+/// boots but immediately wedges its server never ratchets the floor — a broken/crashing update can't
+/// lock itself in as the new minimum acceptable version. The resident instance owns `:59833` (a
+/// redundant instance loses the bind and exits), so the self-probe is unambiguously ours; that is why
+/// no separate version-match on `/health` is needed. Runs once; gated off for webdriver builds.
+#[cfg(not(feature = "webdriver"))]
+fn spawn_floor_tracker() {
+    tauri::async_runtime::spawn(async move {
+        let mut consecutive = 0u32;
+        // Bounded (~2 min) so a genuinely unhealthy build never commits the floor.
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if aztec_accelerator::server::healthy_aztec_on_port().await {
+                consecutive += 1;
+                if consecutive >= 3 {
+                    aztec_accelerator::updater::commit_launch_floor();
+                    return;
+                }
+            } else {
+                consecutive = 0;
+            }
+        }
+        tracing::warn!(
+            "Launch never reached 3 consecutive healthy probes; version floor not advanced this run"
+        );
+    });
+}
+
 // ── Desktop bootstrap (q7e3-F-04) ────────────────────────────────────────
 // `.setup()` was a ~150-line Long Method closure. These phase helpers carry the capture-heavy
 // construction; the closure stays a thin, visibly-ordered sequencer because two orderings there are
@@ -543,6 +573,8 @@ fn main() {
             #[cfg(not(feature = "webdriver"))]
             if should_poll_for_updates() {
                 spawn_update_poller(app.handle().clone(), config_state.clone());
+                // F-004 Layer B: advance the monotonic version floor once this build proves it runs.
+                spawn_floor_tracker();
             }
 
             Ok(())

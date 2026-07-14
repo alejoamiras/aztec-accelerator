@@ -27,6 +27,9 @@ path = "src/main.rs"
 accelerator-core = { path = "../core" }
 # F-004: SemVer comparison for the monotonic update version floor (same crate/major the core uses).
 semver = "1"
+# F-004 B2: cross-process advisory file lock serialising the updater transaction (check→install→
+# floor-commit) across concurrent app instances. Battle-tested, stable flock primitive.
+fs2 = "0.4"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 axum = "0.8"

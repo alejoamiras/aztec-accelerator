@@ -35,6 +35,59 @@ fn updater_state_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".aztec-accelerator").join("updater-state.json"))
 }
 
+/// F-004 B2: acquire the cross-process "updater transaction" lock. Serialises check→install and the
+/// post-launch floor commit across concurrent app instances, so two processes can neither race the
+/// floor file nor install over each other. Best-effort and non-blocking: if another instance holds it,
+/// return `None` and the caller bows out (the periodic poller / next launch retries) rather than
+/// blocking the async runtime. The returned guard (the open, exclusively-locked file) releases the
+/// lock on drop — and, on the no-return `app.restart()` path, the OS releases it at process exit.
+fn acquire_updater_lock() -> Option<std::fs::File> {
+    use fs2::FileExt as _;
+    let parent = updater_state_path()?.parent()?.to_path_buf();
+    let _ = std::fs::create_dir_all(&parent);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(parent.join("updater.lock"))
+        .ok()?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Some(file),
+        Err(_) => {
+            tracing::info!(
+                "Another instance holds the updater lock; skipping this update transaction"
+            );
+            None
+        }
+    }
+}
+
+/// Record that THIS build launched successfully by advancing the monotonic version floor to the
+/// running version (F-004 Layer B). Called once, after the app has proven it actually runs (see the
+/// launch tracker in main.rs) — so a build that boots but immediately wedges never ratchets the floor
+/// and can't lock itself in as the new minimum. Runs under the updater lock (best-effort) so it can't
+/// interleave with a concurrent install; the underlying commit is monotonic and fail-safe (refuses to
+/// overwrite a corrupt floor) even without the lock.
+pub fn commit_launch_floor() {
+    let Some(path) = updater_state_path() else {
+        tracing::warn!("cannot resolve updater-state path; skipping floor commit");
+        return;
+    };
+    let current = match Version::parse(env!("CARGO_PKG_VERSION")) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("own version is not SemVer ({e}); skipping floor commit");
+            return;
+        }
+    };
+    let _guard = acquire_updater_lock();
+    match updater_state::commit_successful_launch(&path, &current) {
+        Ok(()) => tracing::info!(version = %current, "Version floor committed for this launch"),
+        Err(e) => tracing::warn!("Floor commit skipped: {e}"),
+    }
+}
+
 /// An update that has cleared BOTH F-004 layers: Layer A (the signed-manifest envelope binds the
 /// advertised version to the exact signed artifact set — [`update_manifest::verify_manifest`]) and
 /// Layer B (the candidate is strictly above `max(current, floor)` — [`updater_state`]). Its fields are
@@ -189,6 +242,30 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         signed_size,
     } = verified;
     tracing::info!(version = %version, signed_size, "Downloading verified update");
+
+    // B2: hold the cross-process updater lock across the whole download+install so no other instance
+    // can race the floor or install concurrently. If another instance is mid-update, bow out (the
+    // poller retries). Held until this fn returns / the process restarts.
+    let _txn = match acquire_updater_lock() {
+        Some(f) => f,
+        None => return,
+    };
+
+    // TOCTOU: the floor may have advanced since check_for_update (another instance committed a launch
+    // or installed a newer build). Re-verify Layer B under the lock, right before committing to the
+    // download — if the candidate is no longer strictly above the floor, abort.
+    if let Some(path) = updater_state_path() {
+        if let Ok(current) = Version::parse(env!("CARGO_PKG_VERSION")) {
+            let floor = updater_state::load_floor(&path);
+            if !updater_state::candidate_allowed(&version, &current, &floor) {
+                tracing::error!(
+                    candidate = %version,
+                    "SECURITY: candidate no longer above the floor at install time (raced by another instance); aborting"
+                );
+                return;
+            }
+        }
+    }
 
     // SEC-03: pre-flight size cap. The plugin buffers the WHOLE artifact into memory before it
     // verifies the artifact signature, and its progress callback cannot abort that loop — so a huge
