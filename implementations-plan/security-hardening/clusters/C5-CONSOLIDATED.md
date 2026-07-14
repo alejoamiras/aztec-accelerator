@@ -62,10 +62,11 @@ Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo
   `landing/releases/*`. **CHOSEN: exact object** (tightest least-privilege; the only object the release
   writes). Note in README: adding a second release-feed object requires a policy update.
 - **D3 — 4th required check (OpenTofu validate / Actionlint Status).** fable: recommend YES. codex: flags
-  its absence as a material residual in a zero-review repo but leaves it an Ask. main: didn't require.
-  **CHOSEN: surface as ASK A1** (recommend adding `Actionlint Status` — integration_id 15368, already a
-  fail-closed aggregate that runs the tofu gate — as a 4th required check so infra validation is a merge
-  gate, not advisory). User decides at the approval gate.
+  its absence as a material residual in a zero-review repo. main: didn't require. **CHOSEN: RESOLVED YES**
+  — Phase 1 requires `Actionlint Status` (integration_id 15368, a fail-closed aggregate that runs the tofu
+  gate) as the 4th required check, so infra validation gates the merge rather than being advisory. It is
+  surfaced to the user as A1 only as a **veto opportunity** (drop the one line if they disagree), NOT as an
+  undecided question.
 - **D4 — runtime cross-assumption isolation.** fable proposed GitHub `environment:`-scoped subs.
   main/codex close the same gap via a workflow claim (D1). **CHOSEN: the `workflow` NAME claim (D1) is
   primary** (no environment plumbing needed; stops the stolen-token threat); environments are an optional
@@ -231,9 +232,10 @@ Key points baked into the runbook:
   claims — hence the separate negative-trust smoke (no SCPs/permission boundaries in a solo account).
 - Squash or rebase merging is enabled (required for linear history) — preflight confirms.
 ### Asks (surface at the approval gate)
-- **A1:** add a 4th required status check (`Actionlint Status`, integration_id 15368, which runs the tofu
-  gate) so infra validation gates the merge instead of being advisory? [Recommended — audit verified it
-  reports on every PR to main, no deadlock.]
+- **A1 (RESOLVED YES — veto opportunity only):** Phase 1 requires `Actionlint Status` (integration_id
+  15368, runs the tofu gate) as a 4th required check so infra validation gates the merge. The plan's
+  position is YES (audit-verified it reports on every PR to main, no deadlock); flag here ONLY if you want
+  it dropped.
 - **A2:** additionally adopt per-pipeline GitHub `environment:` scoping (defense-in-depth)? [Optional —
   **FOOTGUN (Fable M3): adding `environment:` changes the default `sub` to `…:environment:NAME`, which
   BREAKS the `sub=main` trust unless the trust conditions are switched to the native AWS `environment`
