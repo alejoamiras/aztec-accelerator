@@ -67,5 +67,27 @@ not amendment-only sections — r2/r3 both re-checked that the operative bodies 
   + actionlint. Verified recent Aztec releases (rc.1/rc.2) expose the GitHub asset `digest` (download path
   is live for the versions users request; pre-June-2025 releases fail closed — documented).
 
+## GATE 3 — post-impl codex audit (on the real 4-commit diff)
+VERDICT: **changes-requested** (2 MEDIUM). Codex confirmed the core security properties (no CRITICAL/HIGH
+unverified-execution path): fail-closed `find_bb(Some(v))`, marker schema/version/platform binding +
+streamed rehash, codesign-before-hash ordering, staging 0700 / marker 0600, bundled→None, CI wiring all
+verified. Blockers folded:
+- **MEDIUM-1 (real):** the TS path was extract-then-inspect via system `tar -xzf` with only the COMPRESSED
+  64 MB cap — a gzip bomb / huge member could exhaust disk before `findSingleBb`, and hardlink identity is
+  lost after extraction (the claimed hardlink rejection wasn't implemented). FOLD: `gunzipSync` with a
+  cumulative `maxOutputLength` cap (verified Bun enforces it → `ERR_BUFFER_TOO_LARGE`) BEFORE extraction;
+  `findSingleBb` rejects `nlink>1`; `sha256File` streams the hash. Now mirrors the Rust `CappedReader`.
+- **MEDIUM-2:** the test gate omitted most promised negatives. FOLD: added hardlink / dir-`bb` /
+  wrong-platform / invalid-version-before-fs / corrupt-archive / mode / gzip-bomb-primitive TS tests + the
+  Rust `github-release-metadata.json` cross-language fixture test.
+- **LOW:** crash-stale `.{v}.tmp.*` stages now reaped before each install (both paths); TS stage mkdir made
+  strict/non-recursive; README "atomic" → "fail-closed delete-then-rename". The multi-instance / concurrent-
+  publisher eviction race stays fail-closed (verify-on-use catches it; advisory lock deferred, A7).
+
+**Lesson:** GATE 3 (audit on the ACTUAL diff) caught a real gap the plan-stage audits missed — the plan SAID
+tar-safety + decompression caps, but the TS *implementation* leaned on system `tar` which doesn't enforce a
+cumulative decompressed cap or expose entry types. Plan-level "reject unsafe members" is not self-executing;
+the impl must actually stream+bound. This is exactly why GATE 3 exists.
+
 ## Git pre-flight
 `origin/security-hardening` unchanged since branch point (merge-base == its HEAD) → no rebase/conflicts.
