@@ -83,5 +83,71 @@ run the full positive WebDriver suite, not just the new negative test. Build the
   `autostart:allow-is-enabled`, `process:default` (PLUGIN perms) to ALL windows — NOT the 12 custom app
   commands, which are ungated by the has_app_acl=false path above. F-004's note (no `updater:default`) stays.
 
-## Codex / Fable double-audit verdicts
-(to be appended when the background audits return)
+## Codex double-audit verdict (2026-07-14): CHANGES-REQUESTED — 3 HIGH + 5 MEDIUM
+Codex corroborated the central inference from source (tauri-build acl.rs:274/408 → has_app_manifest → webview
+invoke path) and confirmed D8 (dev enforces CSP+ACL here). Fold list (all verified against source):
+
+- **HIGH-1 — D7 → DROP (source-verified by me too).** My "default.json grants all windows the same set" is
+  FALSE: `capability.rs:162-163` — `windows`/`webviews` default to EMPTY vecs (no `["main"]` defaulting);
+  `resolve_access` (authority.rs:459-460) treats empty patterns as matching NO window. So the current
+  core:default/autostart/process grants are INERT — the frontend only calls the 12 custom commands via invoke
+  (ungated today) and never a plugin/core command from JS; auth/update windows are closed from RUST
+  (commands.rs:153,293), and core:default doesn't even include core:window:allow-close. ⇒ DROP core:default +
+  ALL plugin grants; each capability grants only its window's app commands; if a core API is later needed,
+  grant the minimal specific perm (e.g. core:window:allow-close) to the exact window after the positive suite
+  flags it. Retaining core:default would NEWLY activate a broad core API (event emit, window/webview
+  enumeration, path, image/rgba, resource close, menu/tray) — a regression, not the status quo.
+- **HIGH-2 — cross-window negative test can pass spuriously.** A bare "promise rejected" also passes when
+  __TAURI_INTERNALS__ is missing, wrong/closed window, popup times out, error swallowed (auth-flow.spec.ts:26
+  + authorize.html:48 already swallow errors), args fail to deserialize, or D6's Rust guard rejects while the
+  ACL silently failed open. FIX: (a) first invoke an ALLOWED command from the window-under-test through the
+  same primitive and require SUCCESS; (b) then the forbidden command → return explicit {resolved,error}
+  sentinel; fail if primitive absent or it resolves; (c) assert an ACL-SPECIFIC rejection message ("not
+  allowed by ACL") DISTINCT from D6's generic Rust error, so D6 can't mask a broken ACL; (d) observable canary
+  — verify no state changed; (e) cleanup in finally (no 60s hang); (f) static test asserts the EXACT per-window
+  matrix, not just union equality. Also: `show_update_prompt_window` is compiled OUT under `webdriver`
+  (windows.rs:130) → no real update-prompt WebDriver flow exists → add a controlled webdriver-only prompt
+  trigger so respond_update_prompt is positively tested from the real `update-prompt` label.
+- **HIGH-3 — CSP doesn't close off-origin exfil.** connect-src blocks fetch/XHR/WS but NOT top-level
+  navigation or form submission; CSP omits `form-action` (does NOT fall back to default-src); windows are
+  created with no on_navigation/on_new_window (windows.rs:43). On Linux CSP is `<meta>`-delivered and
+  `frame-ancestors` is IGNORED in meta CSP. FIX: add `form-action 'none'; frame-src 'none'; child-src 'none';
+  worker-src 'none'`; add Rust `on_navigation` (allow only the local asset origin) + `on_new_window` (deny);
+  WebDriver-test remote-navigation + form-submit are rejected; stop claiming CSP alone stops all exfil.
+- **MED-4 — D3 mechanism misstated (policy viable).** Correct outcome, wrong rationale: Tauri's IPC init
+  scripts are WEBVIEW INIT scripts, not page inline scripts needing a bootstrap nonce; `ipc: http://ipc.localhost`
+  are NOT auto-added to connect-src — they must be explicit (we already list them ✓); excluding 'self' from
+  connect-src is correct; external style.css works under style-src 'self'; D4 inventory is COMPLETE (1 markup
+  style, 4 CSSOM mutations, no <style>, no SVG presentation attrs; `btn.onclick=fn` from external script is NOT
+  inline-string exec). FIX: correct the rationale wording; never fall back to unsafe-inline.
+- **MED-5 — D6 helper cannot compile where placed.** `commands.rs` is in the LIBRARY crate (lib.rs:11);
+  `windows.rs` is BINARY-only (main.rs:5) → a library command can't import require_label from the binary
+  module. FIX: move labels/sanitizer/matchers/require_label into a NEW EXPORTED LIBRARY module used by both
+  commands + window creation; define the explicit 12-command→label mapping; check the GETTERS too
+  (get_config/get_autostart_enabled/get_system_info) if Rust is a complete independent layer. Codex CONFIRMED:
+  the injected Window/WebviewWindow is unspoofable (Tauri takes it from the native InvokeMessage, not JS
+  payload); deriving the expected auth label from request_id is sound; wrapping getters in Result<T,String>
+  doesn't break JS callers (no internal Rust callers).
+- **MED-6 — auth label truncates the UUID to 48 bits.** `sanitize_window_label` uses only 6 SHA-256 bytes
+  (commands.rs:158-165) — not collision-free, needlessly shrinks the UUID's margin. FIX: use `auth-{request_id}`
+  directly (UUID chars are valid Tauri label chars) or the full hash; compare the exact full label. (Touches
+  the C9 label scheme — `auth-*` glob still matches; STRENGTHENS SEC-06.)
+- **MED-7 — D8 overstates production parity.** dev DOES enforce csp+ACL here (gate not worthless), BUT the
+  "release" WebDriver lane uses raw `cargo build --release` (_e2e-webdriver.yml:56) and Tauri's `custom-protocol`
+  is a CLI-managed feature NOT enabled by raw cargo → that binary still runs Tauri's `cfg(dev)` config, so it's
+  NOT a true production-mode backstop. FIX: keep dev for the 3-OS PR matrix but STATICALLY forbid `devUrl` and
+  a weaker `devCsp`; drop the "release gate is production parity" claim; a built-debug production-mode lane is
+  optional DiD (only needed if freezePrototype/protocol parity is relied on).
+- **MED-8 — ignored bundle pipeline can embed stale/unreviewed trusted code.** Gitignored bundles are trusted
+  by script-src 'self'; a presence-only check accepts stale output; `@tauri-apps/api: "^2"` is a broad range.
+  FIX: pin an EXACT @tauri-apps/api version; review the lock diff; clean the output dir before building;
+  build.rs rejects stale/inconsistent output (not just missing); every direct Cargo CI path runs frontend:build;
+  scan emitted bundles for dynamic imports / remote URLs / eval / source-map refs.
+
+Assumptions corrections to fold: default.json does NOT grant all windows (empty selectors → no match);
+build.rs is NOT "bare" (does version + verified-sites validation; only the tauri build invocation is bare);
+"WebDriver passes" does NOT prove all 12 commands are exercised (framework source proves callability); no
+existing real update-prompt positive WebDriver flow; the release WebDriver path is not a true production build.
+
+## Fable double-audit verdict
+(to be appended when the fable/Opus leg returns)
