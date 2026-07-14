@@ -315,3 +315,19 @@ base's build config). Bundle-building is already covered: CI by setup-accelerato
 lever: the `Upload logs` step in _e2e-webdriver.yml uploads `/tmp/tauri.log` as
 `webdriver-e2e-logs-<os>-<mode>` on failure — `gh run download <run> -n <name>` shows the app's real console
 (WebKit errors go there, NOT the CI job log). GATE-3 verdict/folds were unaffected (they're all still in).
+
+### GATE 5 asset bug — DEEP DEBUG (still open; codex consult running). NOT reproducible locally (GTK needs a display).
+Eliminated: before*Command (79859c8, no fix), rust-cache poison (8bac1d2 -v2 bust, no fix). PROBE (commit
+3f4f1fd — TEMP `app.asset_resolver().get(k)` in main.rs setup(), webdriver-gated, MUST REMOVE before merge)
+proved the EMBED IS COMPLETE: settings/authorize/update-prompt.html + style.css + assets/settings.js all
+found=true (index.html=false, expected). Yet the webview's `tauri://` protocol load of the SAME asset logs
+`asset not found: settings.html` (dev) / `asset not found: index.html` (built-debug / production custom-protocol
+build). So `asset_resolver().get()` (direct API) resolves it but the WEBVIEW PROTOCOL doesn't — a
+scheme/URL-resolution issue, NOT an embed issue, and it hits ALL WebKit engines + WebView2 + the production
+built-debug path. Source-traced: probe and protocol both call the identical `manager.get_asset` (app.rs:342,
+protocol/tauri.rs:215, manager/mod.rs:384) — paradox. The built-debug `index.html` error == the signature of
+`strip_prefix("tauri://localhost").unwrap_or_default()`→`""`→get_asset("")→"index.html" (protocol/tauri.rs:95),
+implying the webview requests assets on a scheme/host ≠ `tauri://localhost`. Suspects (my app-section changes vs
+the working base): withGlobalTauri:false, the strict CSP, dropped core:default+per-window capabilities, the
+`on_navigation`/`on_new_window` guards, the `assets/` subdir + module script. Codex xhigh consulting on the
+root cause (task b3c4ptsbe; prompt scratchpad/c10-asset-debug.md). CI evidence: run 29367925348 (PR #393).
