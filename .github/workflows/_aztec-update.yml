@@ -47,13 +47,13 @@ jobs:
       new_version: ${{ steps.check.outputs.new_version }}
       current_version: ${{ steps.check.outputs.current_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.target_branch }}
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: Check ${{ inputs.dist_tag }} version
         id: check
@@ -97,15 +97,15 @@ jobs:
     env:
       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.target_branch }}
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ inputs.dist_tag }}-${{ needs.check-update.outputs.new_version }}
@@ -164,7 +164,7 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Close stale update PRs
         env:
