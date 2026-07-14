@@ -298,4 +298,20 @@ engine-specific). All 22 bun + 4 Rust tests passed under its own run. Folds:
   set_speed round-trips a real change, and the cross-window denial uses set_speed with a speed canary (a
   denied call that WOULD have changed state proves the ACL blocked execution).
 GATE-4 re-validated GREEN post-fold (fmt/clippy -D/test 24+172; 22 static; biome; actionlint).
-→ GATE 5 (push + PR into security-hardening; CI incl. built-debug lane) → GATE 6 (merge).
+
+### GATE 5 — PR #393 CI: WebDriver RED on ALL WebKit (macOS + Linux dev + Linux built-debug), fixed.
+Symptom: every WebDriver spec (incl. pre-existing smoke/settings/auth-flow) failed in its before-all with
+"Settings bootstrap window not found among 1 window(s)" — the settings window opened but its page didn't
+render (`#speed-label` absent, wrong title). desktop-ui (Playwright/Chromium, NO CSP) PASSED, so it wasn't
+the frontend JS/DOM. ROOT CAUSE (from the uploaded `/tmp/tauri.log` artifact): `ERROR tauri::manager: asset
+not found: settings.html`. i.e. Tauri's asset resolver had NO settings.html. DIAGNOSIS: I added
+`beforeDevCommand`/`beforeBuildCommand: "bun run frontend:build"` to tauri.conf.json; the working base
+(origin/security-hardening) has `build: {frontendDist: "./frontend"}` ONLY. With `beforeDevCommand` set, the
+tauri CLI's `tauri dev` changes its frontendDist asset handling (dev-server/devUrl path → codegen embeds an
+EMPTY asset set per tauri-codegen context.rs:178 `if dev && dev_url.is_some()`), so `tauri://localhost/
+settings.html` resolves to nothing. FIX: REMOVE both before*Command (single-variable revert to the working
+base's build config). Bundle-building is already covered: CI by setup-accelerator's `frontend:build` step
+(runs before every desktop cargo/tauri path); local by the build.rs missing-bundle panic hint. Debugging
+lever: the `Upload logs` step in _e2e-webdriver.yml uploads `/tmp/tauri.log` as
+`webdriver-e2e-logs-<os>-<mode>` on failure — `gh run download <run> -n <name>` shows the app's real console
+(WebKit errors go there, NOT the CI job log). GATE-3 verdict/folds were unaffected (they're all still in).
