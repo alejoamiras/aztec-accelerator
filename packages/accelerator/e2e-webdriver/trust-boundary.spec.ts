@@ -4,7 +4,9 @@
  * This is THE test that fails loudly if the boundary is actually open. It proves, against a running app:
  *  1. withGlobalTauri:false — there is no `window.__TAURI__` global back-door.
  *  2. The injected IPC primitive still works for a GRANTED command (so later rejections aren't false).
- *  3. The strict CSP blocks inline scripts, eval, and off-origin fetch (but not normal app IPC).
+ *  3. The strict CSP blocks inline scripts and off-origin fetch (but not normal app IPC). eval-blocking is
+ *     guaranteed statically (scripts/tauri-trust-boundary.test.ts asserts no `unsafe-eval`), not at runtime —
+ *     see the note in the CSP test for why WebDriver can't observe it on Chromium/WebView2.
  *  4. Cross-window ACL denial (the capability layer, isolated): the authorization popup is REJECTED when it
  *     invokes a Settings-only command — with the ACL's own "not allowed" reason (distinct from the Rust
  *     caller-label error), and with the target command proven REAL + mutating from its authorized window
@@ -143,7 +145,7 @@ describe("Trust boundary (F-012)", () => {
     expect(res.resolved).toBe(true); // proves the IPC path works from Settings — later denials are real
   });
 
-  it("the strict CSP blocks inline script, eval, and off-origin fetch — but not app IPC", async () => {
+  it("the strict CSP blocks inline script and off-origin fetch — but not app IPC", async () => {
     // Arm CSP-violation listeners + trigger inline-script injection and an off-origin fetch, stashing outcomes
     // on globals (sync execute only — WebKitGTK rejects execute/async), then read them after a pause.
     await browser.execute(() => {
@@ -177,18 +179,10 @@ describe("Trust boundary (F-012)", () => {
     expect(csp.inlineViolation).toBe(true);
     // Assert a connect-src violation specifically — a bare fetch rejection could be DNS/TLS and prove nothing.
     expect(csp.connectViolation).toBe(true);
-
-    // eval is blocked (no unsafe-eval).
-    const evalOutcome = await browser.execute(() => {
-      try {
-        // biome-ignore lint/security/noGlobalEval: deliberately testing that CSP blocks eval
-        window.eval("1+1");
-        return "ran";
-      } catch {
-        return "threw";
-      }
-    });
-    expect(evalOutcome).toBe("threw");
+    // NOTE: `eval` blocking is NOT asserted here — on Chromium/WebView2 a WebDriver `execute` script runs in
+    // an isolated world that bypasses the page CSP, so `window.eval` runs regardless. The inline-script
+    // violation above already proves `script-src 'self'` is enforced in the page context, and the static
+    // guard (scripts/tauri-trust-boundary.test.ts) asserts the CSP contains no `unsafe-eval`.
   });
 
   it("blocks off-origin navigation and window.open (Rust on_navigation/on_new_window)", async () => {
