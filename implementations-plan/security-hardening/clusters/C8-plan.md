@@ -1,98 +1,156 @@
-# C8 / F-010 + F-016 — desktop-platform-secrets — plan (mid tier)
+# C8 / F-010 + F-016 — desktop-platform-secrets — plan (mid tier) — REVISED after dual audit (both REJECT)
 
 ## Summary
-Two contained desktop hardening findings, both in `packages/accelerator/src-tauri/src/`:
+Two desktop hardening findings in `packages/accelerator/src-tauri/src/`, BOTH honestly LOW / defense-in-depth
+(the audits agree — F-010 is same-user autostart persistence, not privilege escalation; F-016 is an
+ephemeral loopback-name-constrained CA whose recovery needs process-memory/core-dump/swap access), but both
+cheap and correct to close:
 
-- **F-010 (systemd unit injection):** `crash_recovery.rs::enable_impl` writes a systemd user unit with
-  `ExecStart="{exe}"` where `{exe}` = `current_exe().display()` (`:163,170`) — merely wrapped in double
-  quotes, NOT systemd-escaped, and lossy for non-UTF-8. A binary path containing a newline, control char,
-  `"`/`\`, or `%` corrupts the unit or INJECTS directives (a newline can append `ExecStartPre=…`; `%` is a
-  systemd specifier). The path is `current_exe()` — normally the install dir, but a user-writable / crafted
-  install path makes this an autostart-persistence injection primitive.
-- **F-016 (CA key not scrubbed):** `certs.rs::write_new_cert_set` (`:141-152`) generates the HTTPS **CA**
-  private `KeyPair` (`:143`), signs the leaf (`:146`), and plain-`drop`s it at function end (`:151`). A plain
-  drop frees the heap WITHOUT scrubbing — the CA signing key lingers in freed memory / swap / a core dump.
-  The CA key is never written to disk (good), but it should be zeroized + dropped as early as possible. The
-  leaf key stays persistent by design (written to disk, `:150`).
+- **F-010 (autostart path injection):** `crash_recovery.rs::enable_impl` writes `ExecStart="{exe}"` from
+  `current_exe().display()` (`:163,170`) — quoted only, NOT systemd-escaped, lossy for non-UTF-8. A crafted
+  install path with a newline/`%`/`$`/quote can corrupt the unit or inject directives (`ExecStartPre=…`),
+  then `systemctl --user enable`. **The same root cause is in the `tauri-plugin-autostart`/`auto-launch`
+  serializers that run FIRST** (raw unquoted `.desktop` `Exec=`, un-escaped macOS plist `<string>`, unquoted
+  Windows Run-key) — so fixing only the systemd unit is INCOMPLETE.
+- **F-016 (CA key not scrubbed):** `certs.rs::write_new_cert_set` (`:141-152`) generates the HTTPS CA
+  `KeyPair`, signs the leaf, and PLAIN-drops it (scrubs nothing). The CA key never hits disk; the leaf key is
+  persistent by design.
 
-Fix: **F-010** — serialize `ExecStart` with systemd escaping over the path BYTES (reject controls/newlines;
-escape `"`/`\`; double `%`), fail-closed on an unsafe path, and validate the generated unit with
-`systemd-analyze verify` (test-only, never install). **F-016** — wrap the CA key in `Zeroizing` + explicit
-early `drop` right after leaf signing (before the disk writes); document the rcgen backend-allocation residual.
+Fix: **F-010** — a `set_autostart` PREFLIGHT that rejects an unsafe exe path before ANY autostart writer +
+a precise systemd `ExecStart` serializer + propagate failure (fail-closed, remove stale unit). **F-016** —
+`Zeroizing<KeyPair>` (compiles today) + `zeroize` direct dep + early drop + an HONEST partial-scrub residual.
 
-## Facts (verified)
-- `enable_impl` interpolates `exe.display()` into `ExecStart="{exe}"` unquoted-beyond-the-literal-quotes,
-  then `systemctl --user enable` (`crash_recovery.rs:134-197`). Linux-only (`#[cfg(target_os="linux")]`).
-- `write_new_cert_set` generates `ca_key` (rcgen `KeyPair`, PKCS_ECDSA_P256_SHA256), `self_signed`s the CA,
-  signs the leaf via `signed_by(&leaf_key, &ca_cert, &ca_key)`, writes ca_cert+leaf_cert+leaf_key, drops
-  `ca_key` at end (`certs.rs:141-152`). CA key never written; leaf key persistent by design.
-- `certs.rs` already has a `#[cfg(test)] mod tests` (`:458+`); src-tauri tests run in CI (C4 ran 25).
+## Decision ledger — dual audit (codex REJECT + fable REJECT), folded
+- **Both — the escaping spec was wrong.** systemd's `string_is_safe` (verified in upstream `string-util.c`)
+  REJECTS a decoded executable containing controls/newline/DEL, `\`, `"`, `'`, `*`, `?`, `[`, or non-UTF-8.
+  So those are NOT escapable — they must be REJECTED. The supported contract is an ABSOLUTE, valid-UTF-8
+  path. FOLD.
+- **codex — `$` + the `:` prefix.** Quotes do NOT suppress systemd env expansion; `${FOO}`/`$` in the path
+  rewrites argv0. Doubling `$` diverges (executable keeps `$$`, argv0 → `$`). FOLD: use systemd's `:` prefix
+  (disables env expansion) — `ExecStart=":<quoted path with %→%%>"`. After unquote: `:` stripped, `%%`→`%`,
+  `$` literal. (fable independently confirmed the `%`/`\`/`"` order is disjoint + quoting neutralizes a
+  leading prefix char; codex's `:`-prefix is the `$` piece.)
+- **Both — the adjacent autostart plugin has the same vuln.** `auto-launch 0.5.0` emits raw `.desktop`
+  `Exec={} {}` / un-escaped macOS plist / unquoted Windows Run-key, via lossy `current_exe` display; it runs
+  in `set_autostart` BEFORE crash_recovery. FOLD: a shared PREFLIGHT in `set_autostart` (`commands.rs`)
+  rejects an unsafe exe path (conservative union: non-absolute / non-UTF-8 / control/newline / `\"'*?[` /
+  `$`%-hazard) and refuses autostart entirely (never calls the plugin manager OR crash_recovery). This
+  closes ALL serializers at the app boundary without patching 3rd-party crates.
+- **codex — fail-closed must PROPAGATE + clean up.** `enable(&self)` returns `()` + logs; `commands.rs:52
+  set_autostart` succeeds even if crash-recovery silently fails, and returning before the write leaves a
+  stale unit armed. FOLD: `enable()` → `Result`; `set_autostart` surfaces the error; fail-closed
+  disables/removes any prior unit.
+- **Both — the validation gate can't detect injection.** `systemd-analyze verify` validates syntax/
+  loadability/exec-existence, NOT injection (a valid injected `ExecStartPre=` passes), returns 0 on warnings
+  unless `--recursive-errors=yes`, and false-fails a fixture path. FOLD: the REAL gate is STRUCTURAL —
+  exactly one `ExecStart`, no extra lines/directives, and an INVERSE round-trip (serializer output →
+  reproduce systemd unquote/prefix-strip/specifier → equals the intended UTF-8 path); reject-set unit tests;
+  `systemd-analyze --user --man=no --recursive-errors=yes verify` (with a REAL exe like `/bin/true`) only as
+  a syntax smoke.
+- **Both (factual) — rcgen already impls Zeroize.** `src-tauri/Cargo.toml` enables `rcgen features=["zeroize"]`;
+  rcgen 0.13.2 `impl Zeroize for KeyPair` (scrubs ONLY `serialized_der`); `zeroize 1.8.2` already locked.
+  So `Zeroizing<KeyPair>` compiles today; the newtype fallback is DEAD (deleted). Add `zeroize` as a DIRECT
+  dep to NAME it (not re-exported) — pins the locked 1.8.2, zero churn. The 7-day min-age gate is bun-only
+  (no cargo equivalent). FOLD.
+- **Both — F-016 residual oversold.** rcgen's `Zeroize` scrubs only the DER Vec, NOT ring's ECDSA
+  scalar/nonce (no `ZeroizeOnDrop`/`Drop`; this build uses the ring backend) nor generation temporaries nor
+  swap/core-dump. FOLD: residual = "best-effort post-use reduction — only rcgen's serialized DER is
+  guaranteed wiped; the ring backend key + swap + core-dump are NOT." Early drop still meaningful (wipes DER
+  before the fallible file writes). Correct "byte-identical cert set" → validity/chaining/behavior unchanged
+  (key gen is randomized).
+- **L6 (both) — adjacent surfaces are FINE (note them).** Windows `task_xml` already XML-escapes the path
+  (has a test); macOS `crash_recovery::enable_impl` doesn't interpolate the exe (plugin writes it — closed by
+  the preflight); the leaf key shares the un-scrubbed property but is persisted 0600 by design; updater keys
+  are PUBLIC. Add one-line "why X is fine" notes. Recalibrate severity to defense-in-depth (NOT "injection
+  primitive").
+- **Testability (codex vs fable).** fable verified src-tauri DOES `cargo test` on this box (Tauri Linux deps
+  present); CI installs them (`setup-accelerator/action.yml`) + runs `cargo test` on src-tauri
+  (`accelerator.yml:88`). DECISION (codex): keep the serializer a pure fn in the src-tauri lib module (don't
+  move policy to core just to dodge deps); the src-tauri cargo test is the gate (local here + mandatory in CI).
 
-## Inferences (verify in impl)
-- rcgen 0.13 `KeyPair` may not impl `Zeroize` directly ⇒ `Zeroizing<KeyPair>` may not compile; the achievable
-  fix may be a `Zeroize`-newtype over the serialized key bytes OR explicit early-drop + documented residual
-  (rcgen internally scrubs serialized DER but not every ring/aws-lc backend allocation — master-plan note).
-- `systemd-analyze verify` is available on Linux CI runners; gate the verify test behind its presence.
-- src-tauri may not `cargo test` on a GUI-less VPS (Tauri deps) ⇒ local GATE 4 may be core-only + escaping
-  unit logic; the src-tauri tests run in CI (HARD RULE: Tauri-GUI ⇒ CI). Verify locally in impl.
-
-## Asks (defaults chosen — flag to override)
-- A1: F-010 fails CLOSED on an unsafe exe path (control/newline) — skip writing + enabling the unit, log a
-  warning (better than writing a corrupt/injected unit) — chosen.
-- A2: F-016 uses `Zeroizing` if `KeyPair: Zeroize`, else a minimal `Zeroize`-newtype over the key's
-  serialized secret bytes; PLUS explicit early `drop`; residual documented — chosen.
-- A3: `zeroize` crate is the battle-tested choice (already a transitive dep? verify) — chosen.
-
-## Design (draft)
-**F-010** (`crash_recovery.rs`): add `fn systemd_exec_start(exe: &Path) -> Option<String>`:
-- take the path bytes (`exe.as_os_str().as_bytes()` on Unix); return `None` if any byte is a control char
-  (`< 0x20`) or `0x7f` (fail closed).
-- build the value: wrap in `"`; inside, `\` → `\\`, `"` → `\"`; then `%` → `%%` over the whole value
-  (systemd specifier escaping). Return `Some(escaped)`.
-- `enable_impl`: if `systemd_exec_start(&exe)` is `None`, log + return (don't write/enable). Use the escaped
-  value in the unit template.
-
-**F-016** (`certs.rs`): wrap `ca_key` in `Zeroizing` (or a `Zeroize`-newtype); after `leaf_cert` is signed,
-explicit `drop(ca_key)` BEFORE the three `write_pem_file`s; document the residual in the fn doc-comment.
+## Design (folded)
+**F-010** (`crash_recovery.rs` + `commands.rs`):
+- `fn systemd_exec_start(exe: &Path) -> Option<String>`: require absolute + valid UTF-8; reject any of
+  control/newline/DEL, `\`, `"`, `'`, `*`, `?`, `[` (systemd `string_is_safe` set) ⇒ `None`. Else build
+  `":" + '"' + path.replace('%',"%%") + '"'` and return `Some`. (The `:` prefix disables `$` expansion; the
+  reject-set makes `\"'` unnecessary-to-escape because they're refused.)
+- `fn autostart_path_is_safe(exe: &Path) -> bool`: the conservative cross-platform preflight (absolute +
+  UTF-8 + none of the reject-set + no newline) used by `set_autostart` to gate BOTH writers.
+- `enable(&self) -> Result<(), Error>` (was `()`): `enable_impl` returns the systemd error / unsafe-path
+  refusal; fail-closed removes any stale unit before returning. `set_autostart` (`commands.rs`) preflights,
+  and on refusal disables autostart + returns an error to the UI.
+**F-016** (`certs.rs` + `Cargo.toml`): add `zeroize = "1"` (direct, already-locked 1.8.2); `let ca_key =
+Zeroizing::new(KeyPair::generate_for(...)?);`; explicit `drop(ca_key)` right after `leaf_cert` is signed
+(before the three writes); doc-comment the honest residual.
 
 ## Phases
 
-### Phase 1 — F-010 systemd ExecStart escaping + fail-closed + unit verification
-- Add `systemd_exec_start` + wire into `enable_impl`; escape/reject over path bytes.
-- **Validation gate:** `cargo test --manifest-path packages/accelerator/src-tauri/Cargo.toml` (unit tests:
-  plain path escapes to a valid quoted value; `%` → `%%`; embedded `"`/`\` escaped; a newline/control path
-  → `None` (fail closed); + a `describe.skipIf(!systemd-analyze)`-style gated test that writes the generated
-  unit to a temp file and asserts `systemd-analyze verify` passes — never installs) + `cargo clippy
-  --manifest-path …/src-tauri -- -D warnings` + `cargo fmt --check`. If src-tauri can't build on the VPS,
-  the escaping logic is extracted to a testable helper compiled in `core` OR validated in CI. Layers: unit + lint.
+### Phase 1 — F-010 serializer + preflight + fail-closed propagation (+ tests)
+- Add `systemd_exec_start` + `autostart_path_is_safe`; make `enable()` return `Result` + remove stale unit
+  on refusal; add the `set_autostart` preflight gating the plugin manager + crash_recovery.
+- **Validation gate:** `cargo test --manifest-path packages/accelerator/src-tauri/Cargo.toml` — structural +
+  inverse-round-trip tests: a normal absolute path → `Some(":\"…\"")` that round-trips; `%`→`%%`; `$`/space
+  preserved as literal argv0; each of newline/control/`\`/`"`/`'`/`*`/`?`/`[`/relative/non-UTF-8 → `None`;
+  the generated unit has exactly one `ExecStart` + no extra directives; `set_autostart` refuses an unsafe
+  path (neither writer runs) + returns Err; a gated `systemd-analyze --user --man=no --recursive-errors=yes
+  verify` smoke on a `/bin/true` unit — plus `cargo clippy --manifest-path …/src-tauri -- -D warnings` +
+  `cargo fmt --check`. (Runs locally here; mandatory in CI.) Layers: unit + lint.
 
-### Phase 2 — F-016 Zeroize the CA key + early drop + residual doc
-- Wrap `ca_key` in `Zeroizing`/newtype; explicit early `drop` after leaf signing; doc the residual. Add the
-  `zeroize` dep if not present.
-- **Validation gate:** `cargo test --manifest-path packages/accelerator/core/… + …/src-tauri` (existing
-  certs tests still green — the cert set is byte-identical; the CA key change is drop-timing/scrubbing) +
-  clippy `-D warnings` + fmt. Layers: unit + lint.
+### Phase 2 — F-016 Zeroizing CA key + early drop + residual doc (+ Cargo)
+- `Cargo.toml`: `zeroize = "1"` (direct). `certs.rs`: `Zeroizing::new(ca_key)`; early `drop` after signing;
+  honest residual doc-comment.
+- **Validation gate:** `cargo test --manifest-path packages/accelerator/src-tauri/Cargo.toml` (existing
+  certs tests still green — CA/leaf validity + chaining + file set unchanged; the change is drop-timing +
+  DER-scrub) + clippy `-D warnings` + fmt. Layers: unit + lint.
 
 ### Phase 3 — CI + docs
-- Confirm `accelerator.yml` runs the src-tauri tests on these paths; note the `systemd-analyze verify`
-  gating. Brief doc note (README/comments) on the systemd-escape + CA-key-scrub + residual.
-- **Validation gate:** `bun run lint:actions` + full `cargo test` (core + src-tauri, in CI if GUI-less
-  locally). Layers: lint + unit.
+- Confirm `accelerator.yml` runs the src-tauri tests on these paths (it does). Doc note: the systemd-escape
+  policy + the preflight + the CA-key partial-scrub residual + why macOS/Windows/leaf/updater are fine.
+- **Validation gate:** `bun run lint:actions` + full `cargo test` (core + src-tauri) + clippy + fmt. Layers:
+  lint + unit.
 
 ## Security & Adversarial Considerations
-- **Threat model:** (F-010) a crafted/writable install path escalating to autostart persistence via unit
-  injection; (F-016) CA signing-key recovery from freed memory / swap / a core dump. Both are local-ish
-  (attacker who can influence the binary path or read process memory), but cheap to close.
-- **F-016 residual:** rcgen 0.13 scrubs serialized DER but not every backend (ring/aws-lc) allocation, and
-  the OS may have already paged the key to swap before drop — `Zeroizing` + early drop is best-effort, not a
-  guarantee; documented. The leaf key is persistent by design (localhost TLS).
-- **Crypto:** `zeroize` (battle-tested) for scrubbing; rcgen 0.13 (existing) for key/cert; no rolled crypto.
-- **Least privilege / fail-closed:** an unsafe exe path ⇒ no unit written (F-010).
+- **Threat model (honest, per both audits):** F-010 = a crafted/weird install pathname that a victim
+  launches then enables for autostart → persistent same-user code execution on next login (NOT priv-esc; an
+  attacker who can write `~/.config/systemd/user` already has equivalent power). F-016 = CA signing-key
+  recovery from process memory / freed heap / swap / a core dump (an attacker with that capability has
+  already won); the CA is loopback-name-constrained (`certs.rs:97`), so the incremental value is longer-lived
+  localhost minting authority, not a general MITM key.
+- **F-016 residual (honest):** `Zeroizing` scrubs ONLY rcgen's serialized DER; the ring backend private
+  scalar/nonce, generation temporaries, swap pages, and core dumps are NOT scrubbed. Best-effort, not "the
+  only copy is gone." Process-wide channel hardening (`PR_SET_DUMPABLE=0` + `RLIMIT_CORE=0`, `mlock`) is
+  noted as OUT OF SCOPE for this mid cluster (coarse, Linux-only, hurts debuggability) — documented, deferred.
+- **Crypto:** `zeroize 1.8.2` (locked, battle-tested) + rcgen 0.13.2 (existing); no rolled crypto.
+- **Fail-closed:** an unsafe autostart path ⇒ autostart refused entirely + error surfaced (no half-enabled
+  state, no stale unit).
+
+## Assumptions
+### Facts (verified by the audits, cite)
+- F-010 `ExecStart="{exe}"` from `.display()` (`crash_recovery.rs:163,170`, Linux-only). Windows `task_xml`
+  XML-escapes (`:384,393`, tested). macOS `enable_impl` doesn't interpolate the exe (`:62-90`). The
+  `auto-launch 0.5.0` `.desktop`/plist/Run-key serializers are raw/unescaped; the plugin uses lossy
+  `current_exe` display.
+- F-016 `write_new_cert_set` gen→sign→plain-drop (`certs.rs:141-152`); CA loopback-name-constrained (`:97`);
+  leaf persisted 0600 by design (`:150`). rcgen 0.13.2 `impl Zeroize for KeyPair` scrubs only `serialized_der`;
+  `rcgen features=["zeroize"]` on (`Cargo.toml`); `zeroize 1.8.2` locked; ring backend has no zeroizing Drop.
+- CI installs Tauri deps + runs `cargo test` on src-tauri; the 7-day min-age gate is bun-only.
+### Inferences (verify in impl)
+- The `:`-prefix + `%%` + quote serialization round-trips exactly for absolute UTF-8 paths in the reject-set
+  complement (verify with the inverse round-trip test + `systemd-analyze verify` smoke).
+- `enable()` → `Result` is a contained signature change; `set_autostart` is the only caller to thread it.
+### Asks (defaults chosen — flag to override)
+- A1: unsafe path ⇒ refuse autostart ENTIRELY (both writers) + surface an error — chosen (vs the plugin
+  silently serializing an unsafe path).
+- A2: `Zeroizing<KeyPair>` + early drop; residual documented as best-effort/partial; process-wide
+  core-dump/swap hardening OUT of scope (deferred, documented) — chosen.
+- A3: keep the serializer in the src-tauri lib (not core); src-tauri cargo test is the gate (local + CI) —
+  chosen.
 
 ## Seeds (draft)
-- `/goal`: F-010 + F-016 fixed — systemd ExecStart byte-escaped + fail-closed + `systemd-analyze verify`
-  test; CA key `Zeroizing` + early-drop + residual documented; each phase's gate green; post-impl codex
-  xhigh audit folded; PR into security-hardening CI green.
-- `/loop 15m`: drive C8 — F-010 systemd escaping/reject over path bytes + verify test; F-016 Zeroize CA key
-  + early drop. After each edit run the src-tauri cargo test+clippy+fmt (or CI if GUI-less). Commit/push.
-  Consult codex on the escaping spec + the Zeroize-newtype.
+- `/goal`: F-010 + F-016 fixed — systemd_exec_start reject-set + `:`-prefix serializer, set_autostart
+  preflight refusing an unsafe path across ALL writers, enable()→Result fail-closed + stale-unit removal,
+  structural+round-trip validation; CA key Zeroizing + early drop + honest partial-scrub residual; each
+  phase's gate green; post-impl codex xhigh audit folded; PR into security-hardening CI green.
+- `/loop 15m`: drive C8 — F-010 serializer (reject `\"'*?[`/controls/non-UTF-8/relative; `:`+`%%`+quote) +
+  set_autostart preflight + enable()→Result; F-016 Zeroizing CA key + early drop. After each edit run the
+  src-tauri cargo test+clippy+fmt. Commit/push. Consult codex on the systemd round-trip.
