@@ -12,6 +12,7 @@ pub mod bb;
 pub mod config;
 pub mod server;
 pub mod update_manifest;
+pub mod updater_state;
 pub mod versions;
 
 use std::path::PathBuf;
