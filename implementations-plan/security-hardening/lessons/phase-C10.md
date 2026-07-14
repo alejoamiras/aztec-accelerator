@@ -245,5 +245,35 @@ clean both feature sets.
   settings mutators; set-equality build.rs COMMANDS == main.rs generate_handler! == union of grants == 12;
   config allowlist == the 3. 12 static tests total green; clippy -D + cargo test clean.
 
-### REMAINING: P4 (Rust caller-label DiD) → P5 (lock) + WebDriver trust-boundary.spec.ts + built-debug CI lane (D8)
-→ GATE 3 (post-impl codex xhigh on the diff) → GATE 4 (local) → GATE 5 (PR+CI) → GATE 6 (merge).
+### P4 (Rust caller-label DiD) DONE — commit 68a6bf4
+require_label (pure) + require_auth_window/is_auth_label in the LIB commands.rs (not bin windows.rs); a
+`window: tauri::WebviewWindow` param on all 12 commands; settings mutators+getters → "settings",
+respond_update_prompt → "update-prompt", respond_auth → auth-{hash(request_id)} (binds window↔request,
+strengthens SEC-06), get_verified_info → any auth-<32hex>. Getters wrapped in Result (VERIFIED zero internal
+Rust callers). Widened sanitize_window_label 6→16 bytes (48→128 bit); both callers use the shared fn so they
+stay consistent; no e2e/test hardcodes the old width. 3 predicate unit tests. clippy -D both features clean.
+The ACL denies cross-WINDOW-GLOB calls before dispatch (so the label check is unreachable there — its live
+job is the cross-REQUEST binding within the auth-* glob). commitlint: lowercase-lead the subject ("rust …",
+"webdriver …") — "WebDriver"/"Rust"/"DiD" leading are rejected as start/pascal/upper-case.
+
+### P5 (lock) DONE — no new code — commit 1ee32f9 (bundled with the WebDriver spec)
+The static drift tests already gate: `scripts/tauri-trust-boundary.test.ts` runs via `bun test scripts/` =
+accelerator `test:unit`, invoked in the `lint` CI job (accelerator.yml:192) which is in accelerator-status.
+`biome check .` (in `bun run lint`) covers the new TS/JS. Nothing to wire.
+
+### WebDriver trust-boundary.spec.ts + built-debug lane (D8) DONE — commit 1ee32f9
+Real-webview proof (no mocks): no window.__TAURI__; a granted settings cmd resolves; CSP blocks inline
+script (securitypolicyviolation)+eval+off-origin fetch; cross-window ACL denial from the auth popup asserting
+the ACL "not allowed" reason (distinct from the Rust label "not available") + target proven real from
+Settings first (final-codex MED) + state canary. All invokes via injected __TAURI_INTERNALS__ (keyless
+postMessage is dropped pre-ACL). D8: `built-debug` mode added to _e2e-webdriver.yml (`tauri build --debug
+--no-bundle --features webdriver` → target/debug binary — the only path with tauri's custom-protocol feature)
++ a Linux `e2e-webdriver-builtdebug` lane in accelerator.yml, gated in accelerator-status. Note: `on_new_window`
+API present in tauri 2.11 (NewWindowResponse::Deny); on_navigation Fn(&Url)->bool.
+
+### GATE 4 (local) GREEN
+cargo fmt --check; clippy -D (default + webdriver); cargo test src-tauri 24 + core 172; 22 static drift tests
+(all C10 guards); biome clean; actionlint clean. WebDriver/Playwright ⇒ CI (HARD RULE). GATE 2 COMPLETE.
+
+### GATE 3 (post-impl codex xhigh on the 1937-line diff) — running (task bq1f5s854); fold on return.
+→ then GATE 5 (PR into security-hardening + CI green incl. the new built-debug lane) → GATE 6 (merge).
