@@ -37,9 +37,13 @@ fallback.**
 - **C2 (High) — honor the master safe-publication invariant** (`plan.md` F-007): private staging + reject
   unsafe archive members (ONE regular `bb`, no symlinks/`..`, compressed+decompressed size caps) + atomic
   publish + structured marker (archive + binary digest). FOLDED (Phases 1/2).
-- **C3/L6 (High) — real validation gate.** `download-bb.ts` is ROOT `scripts/` → tested via root
-  `bun run test` (NOT `--cwd packages/accelerator test:unit`, whose tests cover `packages/accelerator/
-  scripts/`). `accelerator.yml` must invoke it. FOLDED into every phase gate.
+- **C3/L6 (High) — real validation gate.** VERIFIED: root `bun run test` = `lint + test:typecheck +
+  test:unit`, and `test:unit` runs sdk/playground/accelerator `test:unit` — accelerator's is
+  `bun test scripts/` = `packages/accelerator/scripts/`. NONE of them run ROOT `scripts/`, where
+  `download-bb.ts` (and its new `.test.ts`) live. So the fold is: add a root `test:scripts`
+  (`bun test scripts/`) npm script, fold it into root `test:unit`, AND add a dedicated
+  `accelerator.yml` step + extend the `desktop`/`integration` paths-filters with `scripts/download-bb.ts`
+  (root `scripts/**` is otherwise not a trigger). FOLDED into Phase 1 + Phase 4.
 
 ## Design (folded)
 **Both download paths** (`downloader.rs`, `download-bb.ts`) do, in order:
@@ -75,9 +79,10 @@ fallback.**
   a single regular `bb` (size caps, no symlinks/`..`); finalize+codesign; write the JSON marker with
   archive+final-binary digests; atomically rename staging→live. Skip only when an existing entry's marker
   validates.
-- **Validation gate:** `bun run test` (root — add `scripts/download-bb.test.ts`: verify-mismatch throws +
-  no publish; unsafe archive member rejected; marker written post-codesign; skip only on valid marker —
-  mock fetch/tar) + `bun run lint`. Layers: unit + lint.
+- **Validation gate:** `bun test scripts/download-bb.test.ts` (new root fixture test: verify-mismatch
+  throws + nothing published; unsafe archive member/symlink rejected; single-`bb` publish; marker written
+  post-codesign; skip only on a valid marker; legacy/tampered → re-download — mock fetch + build fixture
+  tarballs) + `bun run lint` (biome). Also add the root `test:scripts` script here. Layers: unit + lint.
 
 ### Phase 2 — core: marker helpers + both `downloader.rs` and the runtime re-verify
 - `cache_layout.rs`: `version_bb_marker_path`, `write_bb_marker` (atomic 0600), `read_bb_marker`, and
@@ -100,11 +105,15 @@ fallback.**
   fmt. Layers: unit + integration.
 
 ### Phase 4 — CI wiring + docs
-- `accelerator.yml`: ensure the root `download-bb` test + core tests run on the relevant paths-filter.
-  Verify the bundled/pinned bb versions expose a GitHub asset digest (else they'd be un-downloadable —
-  align with the already-fail-closed Rust path). Doc note (README/CLAUDE): `bb:download` verifies; legacy
-  unmarked caches re-download on first use; offline unmarked caches fail closed until an online re-download.
-- **Validation gate:** `bun run lint:actions` + full `bun run test` + full `cargo test`. Layers: lint + unit.
+- Root `package.json`: add `"test:scripts": "bun test scripts/"` and fold it into `test:unit` (so root
+  `bun run test` now covers root `scripts/`). `accelerator.yml`: add a `bun run test:scripts` step to the
+  lint/test job and extend the `desktop` + `integration` paths-filters with `scripts/download-bb.ts`
+  (root `scripts/**` is otherwise not an accelerator trigger). Confirm the pinned/bundled bb versions
+  expose a GitHub asset digest (else they'd be un-downloadable — aligns with the already-fail-closed Rust
+  path). Doc note (README/CLAUDE): `bb:download` verifies; legacy unmarked caches re-download on first use;
+  offline unmarked caches fail closed until an online re-download.
+- **Validation gate:** `bun run lint:actions` + full `bun run test` (now incl. `test:scripts`) + full
+  `cargo test`. Layers: lint + unit.
 
 ## Security & Adversarial Considerations
 - **Threat model:** F-007 = a MITM'd/compromised tarball at download + the runtime trusting the cached
