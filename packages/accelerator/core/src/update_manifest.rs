@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 
 use base64::Engine as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Max base64 length of the embedded `manifest` field, checked BEFORE decoding (DoS guard).
 const MANIFEST_B64_MAX: usize = 64 * 1024;
@@ -27,7 +27,9 @@ const MANIFEST_B64_MAX: usize = 64 * 1024;
 const MANIFEST_SIG_B64_MAX: usize = 4 * 1024;
 
 /// The decoded, signed envelope. `deny_unknown_fields` so an attacker cannot smuggle extra keys.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// `Serialize` so the release pipeline assembles the exact bytes it signs via [`build_signed_envelope`]
+/// — the same struct produces and consumes the envelope, so there is no shape drift.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SignedEnvelope {
     /// Envelope schema discriminator — domain-separates this signature from artifact signatures.
@@ -37,7 +39,7 @@ struct SignedEnvelope {
     platforms: BTreeMap<String, PlatformEntry>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PlatformEntry {
     url: String,
@@ -47,7 +49,7 @@ struct PlatformEntry {
 }
 
 /// Fixed schema string the signer must use; a different value fails closed.
-const ENVELOPE_SCHEMA: &str = "aztec-accelerator-update-manifest-v1";
+pub const ENVELOPE_SCHEMA: &str = "aztec-accelerator-update-manifest-v1";
 
 /// Successful verification result: the SemVer-parsed version and the signed artifact size.
 #[derive(Debug, Clone)]
@@ -198,10 +200,77 @@ pub fn verify_manifest(
     })
 }
 
+/// Assemble the canonical signed-envelope bytes from an (unsigned) feed value — the EXACT bytes the
+/// release pipeline signs. Extracts `version`/`pub_date`/`platforms` from the feed the plugin will
+/// serve, stamps the fixed [`ENVELOPE_SCHEMA`], and serializes. These bytes are what gets signed and
+/// base64-embedded as `manifest`, so there is no canonicalization contract beyond "they round-trip
+/// through [`verify_manifest`]" — which holds by construction, because they are built from the very
+/// fields verify compares back to the outer feed. Mirrors verify's canonical-SemVer rule so the
+/// pipeline never signs a version that verify would reject. Used by the `update-manifest` example tool.
+pub fn build_signed_envelope(feed: &serde_json::Value) -> Result<Vec<u8>, ManifestError> {
+    let version = feed
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ManifestError::MissingField("version"))?;
+    let parsed = semver::Version::parse(version).map_err(|_| ManifestError::NonCanonicalVersion)?;
+    if parsed.to_string() != version {
+        return Err(ManifestError::NonCanonicalVersion);
+    }
+    let pub_date = feed
+        .get("pub_date")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ManifestError::MissingField("pub_date"))?;
+    let platforms_val = feed
+        .get("platforms")
+        .ok_or(ManifestError::MissingField("platforms"))?;
+    // Reuse the strict PlatformEntry parse: an extra/missing field on any platform fails here rather
+    // than producing an envelope verify would later reject.
+    let platforms: BTreeMap<String, PlatformEntry> =
+        serde_json::from_value(platforms_val.clone()).map_err(|_| ManifestError::EnvelopeParse)?;
+    if platforms.is_empty() {
+        return Err(ManifestError::MissingField("platforms"));
+    }
+    let env = SignedEnvelope {
+        schema: ENVELOPE_SCHEMA.to_string(),
+        version: version.to_string(),
+        pub_date: pub_date.to_string(),
+        platforms,
+    };
+    serde_json::to_vec(&env).map_err(|_| ManifestError::EnvelopeParse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn build_signed_envelope_matches_feed_projection() {
+        // The assembled envelope must carry the fixed schema and reproduce the feed's version,
+        // pub_date, and platforms EXACTLY — that equality is what makes verify's outer==envelope
+        // binding pass once the bytes are signed.
+        let feed = feed();
+        let bytes = build_signed_envelope(&feed).unwrap();
+        let env: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(env["schema"], ENVELOPE_SCHEMA);
+        assert_eq!(env["version"], feed["version"]);
+        assert_eq!(env["pub_date"], feed["pub_date"]);
+        let got: BTreeMap<String, PlatformEntry> =
+            serde_json::from_value(env["platforms"].clone()).unwrap();
+        let want: BTreeMap<String, PlatformEntry> =
+            serde_json::from_value(feed["platforms"].clone()).unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn build_signed_envelope_rejects_noncanonical_version() {
+        let mut feed = feed();
+        feed["version"] = json!("v1.0.8");
+        assert!(matches!(
+            build_signed_envelope(&feed),
+            Err(ManifestError::NonCanonicalVersion)
+        ));
+    }
 
     // Fixture signed with a THROWAWAY test key (private key never committed). See
     // tests/fixtures/updater/ — regenerate via `tauri signer generate/sign` if the schema changes.
