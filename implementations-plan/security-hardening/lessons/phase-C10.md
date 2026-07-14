@@ -149,5 +149,24 @@ build.rs is NOT "bare" (does version + verified-sites validation; only the tauri
 "WebDriver passes" does NOT prove all 12 commands are exercised (framework source proves callability); no
 existing real update-prompt positive WebDriver flow; the release WebDriver path is not a true production build.
 
-## Fable double-audit verdict
-(to be appended when the fable/Opus leg returns)
+## Fable double-audit verdict: CHANGES-REQUESTED
+Source-verified against tauri 2.11.0. Full transcript + reconciliation in `clusters/C10-audit-fable.md`.
+Convergent with codex on the central inference (source-proven) + test-design weaknesses + D6 crate boundary.
+Divergences adjudicated: D7→DROP (codex, over fable's retain — fable missed core:default is currently inert);
+D8→built-debug required (fable's is_dev()==!custom-protocol trace, decisive). All folded into plan v2.
+
+## Final fresh-context codex pass — INFRA FAILURE (AFK consult log)
+The deep-tier's final fresh-context codex pass (step 6) was KILLED by the environment TWICE mid-research
+(background task IDs bjhe6zcji-era reruns b1p1gcu9z + b8umlfcpg), each after several minutes reading source,
+before producing any verdict — no recoverable output in the rollout jsonl (only research fragments). Codex
+stayed authenticated (`codex login status` = logged in); the kills are infra (long background codex runs get
+reclaimed), not an auth/OAuth issue. Note: the FIRST-round audit codex run (the CHANGES-REQUESTED one) DID
+complete fine — only the longer final pass gets reclaimed. Mitigation: relaunched a LEAN, time-boxed
+(`timeout 600`, effort `high`) final pass focused ONLY on the 3 contested decisions (D7/D8/test-design) with
+source refs pre-supplied to cut research time (task b14l3s8mi). Per the AFK protocol, if this also dies I close
+GATE 1 on my own judgment — justification: (a) TWO complete source-verified audits (codex+fable) already folded;
+(b) I independently source-verified every load-bearing claim (webview/mod.rs:1819 ACL flip, capability.rs:162 +
+authority.rs:459 empty-selector inertness, manager/mod.rs:53 CSP nonce, lib.rs:308 is_dev, the crate boundary,
+the empty app manifest, no direct Rust test callers); (c) both divergences adjudicated with source citations;
+(d) GATE 3 (mandatory post-impl codex xhigh on the ACTUAL diff) is the designed backstop that re-examines
+everything against real code. The final PLAN pass is belt-and-suspenders, not the load-bearing gate.
