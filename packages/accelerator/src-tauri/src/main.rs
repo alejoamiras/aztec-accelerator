@@ -508,6 +508,17 @@ fn main() {
             #[cfg(feature = "webdriver")]
             {
                 let r = app.asset_resolver();
+                // `iter()` enumerates the EMBEDDED assets only (no dev disk fallback), so a 0 count means
+                // codegen embedded nothing (dev_url injected) while `get()` still works via disk.
+                let embed_count = r.iter().count();
+                let cfg = app.config();
+                tracing::error!(
+                    embed_count,
+                    dev_url = ?cfg.build.dev_url,
+                    frontend_dist = ?cfg.build.frontend_dist,
+                    "F-012 embed state"
+                );
+                let r = app.asset_resolver();
                 for k in [
                     "settings.html",
                     "authorize.html",
