@@ -106,6 +106,66 @@ jobs:
       # accelerator-core's own unit tests (113) — not exercised by `cargo test` in src-tauri.
       - run: cargo test --manifest-path ../core/Cargo.toml
 
+  # F-004: full updater-feed sign/verify round-trip with a THROWAWAY key (no prod secret). Guards the
+  # version-binding property end-to-end against tauri-CLI drift and any change to the update-manifest
+  # tool: happy path (envelope -> tauri signer sign -> splice -> verify) must pass, and the F-004 splice
+  # attack (bump the OUTER version while the signed envelope stays put) must be rejected. The rejection
+  # logic itself is also unit-covered by accelerator-core tests above; this proves the real signing path.
+  updater-feed-e2e:
+    name: Updater Feed Sign/Verify E2E
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/core -> target
+          rust-components: ""
+          # Only the pure core example + the tauri signer are exercised — no GTK stack, no bb sidecar.
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
+      - name: Round-trip sign + verify (throwaway key)
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+
+          # 1. Throwaway updater keypair (never a prod secret; empty password for CI). tauri writes the
+          #    private key + a .pub whose CONTENT is already base64(minisign .pub doc) — the exact format
+          #    tauri.conf.json.plugins.updater.pubkey uses, so the app verifies against this same shape.
+          ( cd packages/accelerator && bunx tauri signer generate --ci -p "" -w "$work/test.key" )
+          cp "$work/test.key.pub" "$work/pubkey.b64"
+          export TAURI_SIGNING_PRIVATE_KEY
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$work/test.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+
+          # 2. Representative unsigned feed (artifact `signature` values are opaque to the manifest
+          #    binding — only the manifest signature is cryptographically checked here).
+          jq -n '{version:"1.2.3", notes:"ci", pub_date:"2026-01-01T00:00:00Z", platforms:{
+            "linux-x86_64":{signature:"art-linux", url:"https://example.test/app.AppImage", size:111},
+            "darwin-aarch64":{signature:"art-mac", url:"https://example.test/app.tar.gz", size:222}
+          }}' > "$work/latest.json"
+
+          tool() { cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- "$@"; }
+
+          # 3. Happy path: envelope -> sign -> splice -> verify (must exit 0).
+          tool envelope --feed "$work/latest.json" > "$work/envelope.json"
+          ( cd packages/accelerator && bunx tauri signer sign "$work/envelope.json" )
+          tool splice --feed "$work/latest.json" --envelope "$work/envelope.json" --sig "$work/envelope.json.sig" > "$work/signed.json"
+          tool verify --feed "$work/signed.json" --pubkey "$work/pubkey.b64"
+          echo "happy-path verify OK"
+
+          # 4. F-004 splice attack: bump the OUTER version; the signed envelope stays at 1.2.3. verify
+          #    MUST reject (OuterMismatch). A pass here is a regression.
+          jq '.version = "9.9.9"' "$work/signed.json" > "$work/tampered.json"
+          if tool verify --feed "$work/tampered.json" --pubkey "$work/pubkey.b64"; then
+            echo "::error::version-splice feed VERIFIED but must have been rejected (F-004 regression)"
+            exit 1
+          fi
+          echo "splice-reject OK (F-004 downgrade attack correctly refused)"
+
   lint:
     name: Lint
     needs: changes
@@ -423,6 +483,7 @@ jobs:
         changes,
         clippy,
         test,
+        updater-feed-e2e,
         lint,
         smoke,
         release-smoke,
@@ -437,7 +498,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"
