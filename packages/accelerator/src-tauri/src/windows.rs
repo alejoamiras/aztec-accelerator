@@ -3,7 +3,21 @@
 use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
 use aztec_accelerator::commands;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::NewWindowResponse;
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+
+/// True iff `url` is the app's OWN local asset origin. Tauri serves the bundled frontend from
+/// `tauri://localhost` (Linux/macOS) or `http://tauri.localhost` (Windows). Every other navigation
+/// target is off-origin. F-012 (codex HIGH-3): the CSP `connect-src` blocks fetch/XHR/WS exfil but NOT
+/// a top-level navigation that smuggles data in the URL, and on Linux the `<meta>`-delivered CSP ignores
+/// `frame-ancestors` — so this Rust guard is the real anti-navigation/anti-exfil control.
+fn is_local_asset_url(url: &Url) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" => url.host_str() == Some("tauri.localhost"),
+        _ => false,
+    }
+}
 
 /// Focus a newly created window. We stay as Accessory (tray-only) rather than
 /// switching to Regular activation policy, which would show the app in the Dock
@@ -47,6 +61,11 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> bool {
             .resizable(false)
             .center()
             .always_on_top(config.always_on_top)
+            // F-012 (codex HIGH-3): confine the webview to its own local asset origin. Block any attempt
+            // to navigate off-origin (data-exfil / phishing) and deny opening new windows/webviews — the
+            // popups never legitimately do either.
+            .on_navigation(is_local_asset_url)
+            .on_new_window(|_url, _features| NewWindowResponse::Deny)
             .build()
     {
         focus_window(&window);
@@ -150,4 +169,43 @@ pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_ver
             focus_if_open: false,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_asset_url;
+    use tauri::Url;
+
+    #[test]
+    fn navigation_guard_allows_only_the_local_asset_origin() {
+        // The real initial loads (Linux/macOS `tauri://localhost`, Windows `http://tauri.localhost`),
+        // including query params, must be permitted.
+        for ok in [
+            "tauri://localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
+            "tauri://localhost/settings.html",
+            "http://tauri.localhost/update-prompt.html?current=1&version=2",
+        ] {
+            assert!(
+                is_local_asset_url(&Url::parse(ok).unwrap()),
+                "{ok} should be allowed"
+            );
+        }
+        // Everything off-origin — including look-alikes and the IPC host — must be blocked.
+        for bad in [
+            "https://evil.example/",
+            "http://localhost/x",                   // wrong host for http
+            "https://tauri.localhost/",             // wrong scheme
+            "http://tauri.localhost.evil.example/", // suffix look-alike
+            "tauri://evil/",
+            "http://ipc.localhost/", // IPC host is not a navigation target
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !is_local_asset_url(&Url::parse(bad).unwrap()),
+                "{bad} should be blocked"
+            );
+        }
+    }
 }
