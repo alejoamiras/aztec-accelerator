@@ -119,16 +119,6 @@ jobs:
           cat /tmp/tauri.log 2>/dev/null || true
           exit 1
 
-      # ── F-012 diagnostic: confirm the frontend assets exist on disk + surface any app startup errors
-      #    (e.g. "asset not found") inline. Temporary; safe to keep as a fast signal for asset regressions.
-      - name: Diagnose frontend assets
-        if: always()
-        run: |
-          echo "── src-tauri/frontend ──"; ls -la src-tauri/frontend || true
-          echo "── src-tauri/frontend/assets ──"; ls -la src-tauri/frontend/assets || true
-          echo "── app startup errors (tauri.log) ──"
-          grep -iE 'asset not found|ERROR|panic' /tmp/tauri.log 2>/dev/null | head -20 || echo "(no tauri.log errors)"
-
       # ── Run tests ──
       - name: Run WebDriver E2E tests
         run: bun run test:e2e:webdriver
