@@ -183,3 +183,34 @@ args and verify its EFFECT (proves the name/args real), THEN the byte-identical 
 window → assert rejection + unchanged canary. Match INVARIANT ACL-message fields (command name, attacker label,
 "not allowed"/window-context wording), NOT the full URL/string (Rust-generated → not OS-brittle, but pin only
 stable substrings). "No other confident HIGH/MEDIUM issue." ⇒ **GATE 1 CLOSED — plan v2 approved, implementation-ready.**
+
+## GATE 2 — implementation log
+### P0 (deps) DONE — commit 470ca75
+`@tauri-apps/api@2.11.1` (exact pin; published 2026-06-17 ⇒ passes the 7-day min-age; matches the tauri 2.11.0
+crate minor line for invoke_key protocol compat). Gate green: frozen-lockfile consistent, package.json sorted.
+
+### P1 (externalize + build guard) DONE — commit 0a86794
+frontend-src/{bridge,authorize,settings,update-prompt}.js (import invoke from @tauri-apps/api/core);
+scripts/build-frontend.ts (Bun.build → gitignored frontend/assets/*.js + fnv1a64 .build-manifest.json;
+clean-before-build); frontend:build script; 3 HTML pages → one <script type=module> each (inline blocks +
+tauri-bridge.js removed); settings markup style=display:none→hidden + runtime --fill→[data-fill] CSS +
+.row[hidden] rule; mock→window.__TAURI_INTERNALS__.invoke (__TAURI__ left undefined); build.rs
+missing/stale-bundle guard (fnv1a64 matching the TS); setup-accelerator builds bundles for desktop jobs +
+tauri before(Dev/Build)Command. Static externalization test (scripts/tauri-trust-boundary.test.ts, 4 tests).
+Flags UNCHANGED (withGlobalTauri still true — P2 flips them).
+- Gate green: `frontend:build` emits 3 bundles; build.rs guard NEGATIVE-TESTED (missing bundle → "missing
+  frontend bundle"; tampered source → "STALE"); `cargo check --features webdriver` compiles (46s); static +
+  full scripts suite (14) green; biome + rustfmt clean.
+
+### GOTCHA — gen/schemas/* are build-regenerated, platform+feature-specific; DO NOT commit the churn.
+Local `cargo check --features webdriver` on Linux regenerated `gen/schemas/*`, ADDING a `linux-schema.json`
+(base has only macOS/desktop) and a `webdriver` ACL key (base built without the feature). These are
+editor-assist artifacts (the runtime ACL is compiled fresh from capability files + AppManifest at build; CI
+does NOT enforce their freshness — else cross-platform CI would already fail on the regen diff). I accidentally
+`git add -A`'d them, then a `git checkout security-hardening -- gen/schemas/` REGRESSED capabilities.json to a
+stale pre-F-004 version (the local `security-hardening` ref lags my parent). FIX: restore ALL gen/schemas from
+HEAD~1 (the parent), `git update-index --skip-worktree` the 4 tracked schemas so builds don't re-dirty the
+tree, and add `gen/schemas/linux-schema.json` to `$(git rev-parse --git-path info/exclude)`.
+**P3 caveat:** when adding the AppManifest, do NOT try to regenerate/commit gen/schemas on this Linux+webdriver
+box — the committed macOS non-webdriver schemas stay as editor artifacts; new capability permissions validate
+at build time regardless (schema is OUTPUT, not input). Use targeted `git add`, never `-A`, for the rest of C10.
