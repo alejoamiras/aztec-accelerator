@@ -14,6 +14,33 @@ resource "aws_s3_bucket_public_access_block" "site" {
   restrict_public_buckets = true
 }
 
+# F-005 (Codex C6): a compromised deploy token can start multipart uploads and leave incomplete parts,
+# which stay billable after the OIDC session expires. Abort incomplete multipart uploads after 1 day.
+resource "aws_s3_bucket_lifecycle_configuration" "site" {
+  bucket = aws_s3_bucket.site.id
+
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {} # whole bucket
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+}
+
+# F-005 (Ask A8): versioning so an accidental/compromised site overwrite is recoverable WITHOUT granting
+# CI any DeleteObjectVersion. CI roles have no version permissions; recovery is an owner/admin action.
+resource "aws_s3_bucket_versioning" "site" {
+  bucket = aws_s3_bucket.site.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 # Allow CloudFront OAC to read from the bucket
 resource "aws_s3_bucket_policy" "site" {
   bucket = aws_s3_bucket.site.id
