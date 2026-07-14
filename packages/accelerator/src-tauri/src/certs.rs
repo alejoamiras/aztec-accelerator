@@ -136,8 +136,9 @@ pub fn certs_exist() -> bool {
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
-/// The CA private key is generated in memory, signs the leaf, and is dropped at function end —
-/// **never written to disk.** Writing to caller-chosen paths lets rotation stage a new set
+/// The CA private key is generated in memory (`Zeroizing`), signs the leaf, and is dropped+scrubbed
+/// EARLY — right after signing, before the file writes (F-016) — and is **never written to disk.**
+/// Writing to caller-chosen paths lets rotation stage a new set
 /// (`*.new`) and atomically swap it in only after the new anchor is trusted.
 fn write_new_cert_set(paths: &CertPaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = OffsetDateTime::now_utc();

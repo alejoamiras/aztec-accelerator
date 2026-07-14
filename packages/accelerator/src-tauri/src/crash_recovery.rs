@@ -255,17 +255,30 @@ fn disable_impl() -> bool {
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "disable", SYSTEMD_NAME])
         .output();
+
+    // F-010: remove the unit file BEFORE the final daemon-reload (so the reload reflects the removal), and
+    // report whether disarm is CONFIRMED — a missing file is success; a file that cannot be removed is not.
+    let mut removed = true;
+    if let Some(config_dir) = dirs::config_dir() {
+        let service_path = config_dir.join(format!("systemd/user/{SYSTEMD_NAME}.service"));
+        if let Err(e) = std::fs::remove_file(&service_path) {
+            if service_path.exists() {
+                tracing::warn!(
+                    "Failed to remove systemd unit (crash recovery not confirmed disarmed): {e}"
+                );
+                removed = false;
+            }
+        }
+    }
+
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output();
 
-    if let Some(config_dir) = dirs::config_dir() {
-        let service_path = config_dir.join(format!("systemd/user/{SYSTEMD_NAME}.service"));
-        let _ = std::fs::remove_file(&service_path);
+    if removed {
+        tracing::info!("systemd user service disabled (crash recovery)");
     }
-
-    tracing::info!("systemd user service disabled (crash recovery)");
-    true
+    removed
 }
 
 // ── Windows ──────────────────────────────────────────────────────────────────
@@ -474,6 +487,8 @@ mod tests {
         let v = super::systemd_exec_start(Path::new("/usr/bin/aztec-accelerator")).unwrap();
         assert_eq!(v, "\":/usr/bin/aztec-accelerator\"");
         assert_eq!(decode_systemd_exec_start(&v), "/usr/bin/aztec-accelerator");
+        // The serialized value can NEVER contain a newline (the unit-injection vector) for any accepted path.
+        assert!(!v.contains('\n'));
         // A `%`, a space, and a `$` all survive as literals (— `%` doubled, `:` disables `$` expansion).
         let v = super::systemd_exec_start(Path::new("/opt/my app/100% $HOME/bb")).unwrap();
         assert_eq!(v, "\":/opt/my app/100%% $HOME/bb\"");
@@ -504,15 +519,27 @@ mod tests {
 
     #[test]
     fn autostart_preflight_rejects_injection_and_accepts_normal_paths() {
-        assert!(super::autostart_path_is_safe(Path::new(
-            "/usr/bin/aztec-accelerator"
-        )));
-        assert!(super::autostart_path_is_safe(Path::new(
-            "/opt/my app/aztec"
-        ))); // space is fine (formatting)
-        assert!(!super::autostart_path_is_safe(Path::new("relative/bb"))); // not absolute
-        assert!(!super::autostart_path_is_safe(Path::new("/x/\nInject"))); // newline
-        assert!(!super::autostart_path_is_safe(Path::new("/x/\u{7f}bb"))); // DEL
+        // A PLATFORM-absolute path is accepted (Windows `is_absolute` needs a drive prefix, so `/usr/...`
+        // is NOT absolute there — the test binary runs on Windows CI too).
+        #[cfg(unix)]
+        let (ok1, ok2, inj_nl, inj_del) = (
+            "/usr/bin/aztec-accelerator",
+            "/opt/my app/aztec",
+            "/x/\nInject",
+            "/x/\u{7f}bb",
+        );
+        #[cfg(windows)]
+        let (ok1, ok2, inj_nl, inj_del) = (
+            r"C:\Program Files\Aztec\aztec.exe",
+            r"C:\my app\aztec.exe", // space + backslash are fine (formatting), not injection
+            "C:\\x\\\nInject",
+            "C:\\x\\\u{7f}bb",
+        );
+        assert!(super::autostart_path_is_safe(Path::new(ok1)));
+        assert!(super::autostart_path_is_safe(Path::new(ok2)));
+        assert!(!super::autostart_path_is_safe(Path::new("relative/bb"))); // not absolute (both platforms)
+        assert!(!super::autostart_path_is_safe(Path::new(inj_nl))); // newline injection
+        assert!(!super::autostart_path_is_safe(Path::new(inj_del))); // DEL control
     }
 
     #[test]
