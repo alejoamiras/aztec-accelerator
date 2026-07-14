@@ -36,7 +36,9 @@ jobs:
       # ── Shared env setup (Bun, Rust toolchain + cache, Linux Tauri deps, bb sidecar) ──
       - uses: ./.github/actions/setup-accelerator
         with:
-          rust-cache-key: e2e-webdriver-${{ inputs.mode }}
+          # F-012: -v2 busts the shared cache once — an earlier PR build could have cached a stale/empty
+          # frontend asset embed (codegen output) that a later build restored instead of regenerating.
+          rust-cache-key: e2e-webdriver-v2-${{ inputs.mode }}
           rust-components: ""
 
       # ── Linux: WebDriver-specific extras (xvfb + tray + dbus) ──
@@ -105,6 +107,16 @@ jobs:
           echo "::error::Servers not ready after 900s"
           cat /tmp/tauri.log 2>/dev/null || true
           exit 1
+
+      # ── F-012 diagnostic: confirm the frontend assets exist on disk + surface any app startup errors
+      #    (e.g. "asset not found") inline. Temporary; safe to keep as a fast signal for asset regressions.
+      - name: Diagnose frontend assets
+        if: always()
+        run: |
+          echo "── src-tauri/frontend ──"; ls -la src-tauri/frontend || true
+          echo "── src-tauri/frontend/assets ──"; ls -la src-tauri/frontend/assets || true
+          echo "── app startup errors (tauri.log) ──"
+          grep -iE 'asset not found|ERROR|panic' /tmp/tauri.log 2>/dev/null | head -20 || echo "(no tauri.log errors)"
 
       # ── Run tests ──
       - name: Run WebDriver E2E tests
