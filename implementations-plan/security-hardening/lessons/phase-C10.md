@@ -275,5 +275,27 @@ API present in tauri 2.11 (NewWindowResponse::Deny); on_navigation Fn(&Url)->boo
 cargo fmt --check; clippy -D (default + webdriver); cargo test src-tauri 24 + core 172; 22 static drift tests
 (all C10 guards); biome clean; actionlint clean. WebDriver/Playwright ⇒ CI (HARD RULE). GATE 2 COMPLETE.
 
-### GATE 3 (post-impl codex xhigh on the 1937-line diff) — running (task bq1f5s854); fold on return.
-→ then GATE 5 (PR into security-hardening + CI green incl. the new built-debug lane) → GATE 6 (merge).
+### GATE 3 (post-impl codex xhigh on the 1937-line diff): CHANGES-REQUESTED — no HIGH, 1 MED + 2 LOW — FOLDED (f34219f)
+Transcript: clusters/C10-audit-codex-postimpl.md. Codex confirmed the CORE sound: legitimate flows work
+(window labels exactly match the Rust guards), the 12-command ACL set-equality holds + no window gets
+another's command, F-004/F-010/SEC-06/F-014 preserved, CSP fits the frontend, NewWindowResponse::Deny works
+on WebKitGTK/WKWebView/WebView2, CI wiring correct, the "not allowed" ACL wording is Rust-generated (not
+engine-specific). All 22 bun + 4 Rust tests passed under its own run. Folds:
+- **MED — nav guard too permissive.** `is_local_asset_url` accepted BOTH `tauri://localhost` AND
+  `http://tauri.localhost` on every OS and ignored ports/creds → on Linux/macOS a real
+  `http://tauri.localhost:59833/?data=…` loopback HTTP navigation (data-exfil) was allowed. FIX: platform-gate
+  the scheme/host (`#[cfg(windows)]` http://tauri.localhost vs `#[cfg(not(windows))]` tauri://localhost) +
+  reject any username/password/explicit port; added other-platform + port + userinfo rejection tests.
+- **LOW — staleness guard didn't hash OUTPUTS.** It fingerprinted only frontend-src inputs, so a swapped
+  `frontend/assets/settings.js` passed (source hashes still matched). FIX: SHA-256 (was fnv1a64; sha2+hex
+  build-deps); manifest schema 2 records outputs + package.json + root bun.lock; build.rs verifies all;
+  build-frontend.ts snapshots inputs before+after the build (mid-build-edit race). Output-swap NEGATIVE-TESTED
+  (`printf >> settings.js` → "STALE or SWAPPED" panic).
+- **LOW — WebDriver proof gaps.** (a) off-origin fetch treated any rejection as CSP → now asserts a
+  `securitypolicyviolation` with effective/violatedDirective `connect-src` (DNS/TLS failure wouldn't fire it);
+  (b) never exercised the nav guards → added an on_navigation/window.open block test (URL + handle-count
+  unchanged); (c) the "mutating" cmd removed a known-absent origin (proved dispatch, not mutation) → now
+  set_speed round-trips a real change, and the cross-window denial uses set_speed with a speed canary (a
+  denied call that WOULD have changed state proves the ACL blocked execution).
+GATE-4 re-validated GREEN post-fold (fmt/clippy -D/test 24+172; 22 static; biome; actionlint).
+→ GATE 5 (push + PR into security-hardening; CI incl. built-debug lane) → GATE 6 (merge).
