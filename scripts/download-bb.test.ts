@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import {
   assertValidVersion,
   type BbMarker,
@@ -252,6 +255,25 @@ describe("findSingleBb (archive-member safety)", () => {
     expect(() => findSingleBb(root)).toThrow(/not found/);
     rmSync(root, { recursive: true, force: true });
   });
+  test("rejects a hardlink bb (nlink > 1)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ex-"));
+    writeFileSync(join(root, "target"), "real");
+    linkSync(join(root, "target"), join(root, "bb")); // hardlink → bb nlink == 2
+    expect(() => findSingleBb(root)).toThrow(/hardlink/);
+    rmSync(root, { recursive: true, force: true });
+  });
+  test("rejects a directory named bb (no regular bb ⇒ not found)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ex-"));
+    mkdirSync(join(root, "bb"));
+    expect(() => findSingleBb(root)).toThrow(/not found/);
+    rmSync(root, { recursive: true, force: true });
+  });
+  test("rejects a wrong-platform archive (only bb.exe ⇒ not found)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ex-"));
+    writeFileSync(join(root, "bb.exe"), "windows");
+    expect(() => findSingleBb(root)).toThrow(/not found/);
+    rmSync(root, { recursive: true, force: true });
+  });
 });
 
 describe("downloadBb end-to-end", () => {
@@ -310,6 +332,46 @@ describe("downloadBb end-to-end", () => {
     wireHappyFetch(v, tarball);
     await expect(downloadBb(v)).rejects.toThrow(/symlink/);
     expect(existsSync(join(base, v))).toBe(false);
+  });
+
+  test("rejects an invalid version BEFORE any fetch or fs write", async () => {
+    routeFetch(() => {
+      throw new Error("fetch must not run for an invalid version");
+    });
+    // assertValidVersion throws first — routeFetch would throw if we ever reached the network/fs path.
+    await expect(downloadBb("../../etc")).rejects.toThrow(/Invalid version/);
+  });
+
+  test("aborts on a corrupt/undecompressable archive (post-digest) without publishing", async () => {
+    const v = "5.0.0-rc.2";
+    const corrupt = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]); // not gzip
+    const asset = `barretenberg-${currentPlatform()}.tar.gz`;
+    routeFetch((url) => {
+      if (url.includes("api.github.com")) {
+        // digest matches the corrupt bytes, so it passes the integrity check and reaches gunzip.
+        return jsonResp(200, { assets: [{ name: asset, digest: `sha256:${sha256Hex(corrupt)}` }] });
+      }
+      return streamResp(corrupt);
+    });
+    await expect(downloadBb(v)).rejects.toThrow(/decompression|tar extraction/);
+    expect(existsSync(join(base, v))).toBe(false);
+  });
+
+  test("published bb + marker have owner-only-ish modes (Unix)", async () => {
+    const v = "5.0.0-rc.2";
+    wireHappyFetch(v, buildTarball("real-bb"));
+    await downloadBb(v);
+    expect(statSync(versionBbPath(v)).mode & 0o777).toBe(0o755);
+    expect(statSync(versionMarkerPath(v)).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("decompression bound (gzip-bomb defense)", () => {
+  test("gunzip rejects output exceeding the cap (the primitive downloadBb relies on)", () => {
+    const { gunzipSync } = require("node:zlib");
+    const gz = gzipSync(Buffer.alloc(2 * 1024 * 1024, 7)); // 2 MiB decompressed
+    expect(() => gunzipSync(gz, { maxOutputLength: 1024 * 1024 })).toThrow();
+    expect(gunzipSync(gz, { maxOutputLength: 4 * 1024 * 1024 }).length).toBe(2 * 1024 * 1024);
   });
 });
 

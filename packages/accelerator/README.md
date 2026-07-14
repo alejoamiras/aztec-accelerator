@@ -107,7 +107,7 @@ When a **specific version is requested**, the *only* acceptable source is the ma
 
 ### Cache Integrity (F-007)
 
-Every cached `bb` is verified end-to-end. On download (both the runtime and `bun run bb:download`), the tarball is checked against the GitHub release asset's published SHA-256 digest, extracted into a private staging directory (rejecting unsafe archive members), ad-hoc re-signed on macOS, then published atomically alongside a `bb.sha256.json` **marker** recording the archive + final-binary digests. Before every prove, the runtime **re-hashes** the cached binary against its marker; a missing, malformed, or mismatched marker fails closed and triggers a fresh verified re-download.
+Every cached `bb` is verified end-to-end. On download (both the runtime and `bun run bb:download`), the tarball is checked against the GitHub release asset's published SHA-256 digest, decompressed under a cumulative size cap (gzip-bomb defense) into a private, owner-only staging directory (rejecting symlink/hardlink/non-regular/extra members), ad-hoc re-signed on macOS, then published alongside a `bb.sha256.json` **marker** recording the archive + final-binary digests. Publish is fail-closed delete-then-rename (a crash leaves no live entry ⇒ verified re-download next use), not an atomic replacement. Before every prove, the runtime **re-hashes** the cached binary against its marker; a missing, malformed, or mismatched marker fails closed and triggers a fresh verified re-download.
 
 - **Legacy caches** (populated before this change, with no marker) re-download on first use.
 - **Offline** machines with an unmarked cache fail closed until an online verified re-download.

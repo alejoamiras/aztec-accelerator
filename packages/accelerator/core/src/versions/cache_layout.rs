@@ -392,4 +392,26 @@ mod tests {
         );
         assert!(read_bb_marker_at(&path, ver, plat).is_ok());
     }
+
+    /// Cross-language contract: the release-metadata fixture the TS suite loads must expose each asset's
+    /// digest as `sha256:<64-lc-hex>` and survive the `sha256:` strip → canonical-hex check that both
+    /// `fetch_github_asset_digest` (Rust) and `fetchAssetDigest` (TS) apply.
+    #[test]
+    fn shared_fixture_release_metadata_has_canonical_digests() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../scripts/__fixtures__/github-release-metadata.json");
+        let raw =
+            std::fs::read_to_string(&path).expect("fixture github-release-metadata.json present");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let assets = v["assets"].as_array().expect("assets array");
+        assert!(!assets.is_empty());
+        for asset in assets {
+            let digest = asset["digest"].as_str().expect("asset digest");
+            let hex = digest.strip_prefix("sha256:").expect("sha256: prefix");
+            assert!(
+                is_hex64(hex),
+                "asset digest must strip to 64-lc-hex: {digest}"
+            );
+        }
+    }
 }

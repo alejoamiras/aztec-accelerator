@@ -20,16 +20,18 @@
  * Windows: bb.exe ships as a bundled Tauri sidecar via packages/accelerator/scripts/copy-bb.ts — NOT
  * this cache tool — so this script is Unix-only and refuses to run on win32.
  */
-import { randomBytes } from "node:crypto";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -37,6 +39,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -47,8 +50,9 @@ export const MARKER_NAME = "bb.sha256.json";
 // bb's tarball is ~5 MiB; cap far above that so a compromised CDN can't OOM us before the digest
 // mismatch is detected. Mirrors Rust MAX_DOWNLOAD_BYTES.
 const MAX_BB_TARBALL_BYTES = 64 * 1024 * 1024;
-// Decompressed bb ceiling — a ≤64 MB-compressed binary inflates to at most a few hundred MB. Mirrors
-// Rust MAX_DECOMPRESSED_BYTES.
+// Decompressed ceiling — a ≤64 MB-compressed binary inflates to at most a few hundred MB. Applied as a
+// CUMULATIVE cap on the whole decompressed tar (before extraction, defeating a gzip bomb) AND to the
+// selected bb. Mirrors Rust MAX_DECOMPRESSED_BYTES.
 const MAX_BB_BINARY_BYTES = 512 * 1024 * 1024;
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -127,6 +131,22 @@ export function sha256Hex(data: Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
+/** Streamed SHA-256 of a file (chunked reads — never buffers the whole binary). Mirrors Rust sha256_file. */
+export function sha256File(path: string): string {
+  const hash = createHash("sha256");
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let n: number;
+    while ((n = readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
 /**
  * Fetch the expected SHA-256 for a release asset from the GitHub API. Mirrors
  * release_metadata.rs::fetch_github_asset_digest, but FAIL-CLOSED at the call site: a non-2xx, a
@@ -183,7 +203,7 @@ export function verifyCachedBb(version: string): boolean {
   if (!st.isFile()) return false;
   const marker = readMarker(version);
   if (!marker) return false;
-  return sha256Hex(new Uint8Array(readFileSync(bb))) === marker.binary_sha256;
+  return sha256File(bb) === marker.binary_sha256;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +276,9 @@ export function findSingleBb(root: string): string {
       }
       if (entry.name === "bb") {
         if (!st.isFile()) throw new Error(`Unsafe archive: bb entry is not a regular file`);
+        // A tar hardlink extracts to an inode with nlink > 1 (linked to another extracted member); a
+        // lone legitimate bb has nlink 1. Reject to match the Rust path's regular-file-only guarantee.
+        if (st.nlink > 1) throw new Error(`Unsafe archive: bb is a hardlink (nlink=${st.nlink})`);
         if (st.size > MAX_BB_BINARY_BYTES) {
           throw new Error(`bb entry too large: ${st.size} bytes > ${MAX_BB_BINARY_BYTES}`);
         }
@@ -274,13 +297,29 @@ export function findSingleBb(root: string): string {
 // Staged, verified install
 // ---------------------------------------------------------------------------
 
+/** Remove crash-stale staging siblings for `version` (`.{version}.tmp.*`) before starting a fresh one. */
+function reapStaleStages(version: string): void {
+  const base = versionsBaseDir();
+  if (!existsSync(base)) return;
+  const prefix = `.${version}.tmp.`;
+  for (const name of readdirSync(base)) {
+    if (name.startsWith(prefix)) {
+      rmSync(join(base, name), { recursive: true, force: true });
+    }
+  }
+}
+
 /**
- * Per-run-UNIQUE, dot-prefixed staging sibling (`.{version}.tmp.<rand>`). Unique so a concurrent
- * Rust/TS publisher never shares (and stomps) one stage; dot-prefixed + non-version-named so
- * listCachedVersions()/inventory never surfaces an in-flight or crash-stale stage.
+ * Create a per-run-UNIQUE, dot-prefixed, owner-only staging sibling (`.{version}.tmp.<rand>`). Unique so
+ * a concurrent Rust/TS publisher never shares (and stomps) one stage; dot-prefixed + non-version-named so
+ * inventory never surfaces an in-flight or crash-stale stage. `mkdir` is strict (non-recursive) so the
+ * astronomically-unlikely name collision fails closed rather than reusing a dir.
  */
-function stagingDir(version: string): string {
-  return join(versionsBaseDir(), `.${version}.tmp.${randomBytes(6).toString("hex")}`);
+function createStagingDir(version: string): string {
+  mkdirSync(versionsBaseDir(), { recursive: true, mode: 0o700 });
+  const stage = join(versionsBaseDir(), `.${version}.tmp.${randomBytes(6).toString("hex")}`);
+  mkdirSync(stage, { mode: 0o700 });
+  return stage;
 }
 
 /**
@@ -305,15 +344,25 @@ export async function downloadBb(version: string): Promise<void> {
     );
   }
 
-  const stage = stagingDir(version);
-  mkdirSync(stage, { recursive: true, mode: 0o700 });
+  reapStaleStages(version);
+  const stage = createStagingDir(version);
   try {
     // Extract into an isolated subdir so only the promoted `bb` + marker ever publish.
     const extract = join(stage, "extract");
     mkdirSync(extract, { mode: 0o700 });
-    const tarPath = join(stage, "archive.tgz");
-    writeFileSync(tarPath, tarball, { mode: 0o600 });
-    const proc = Bun.spawnSync(["tar", "-xzf", tarPath, "-C", extract]);
+    // Bound decompression BEFORE touching the fs: `gunzipSync` with a cumulative output cap aborts a
+    // gzip bomb (system `tar -xz` would stream an unbounded bomb to disk). Then extract the bounded tar.
+    let tarBytes: Buffer;
+    try {
+      tarBytes = gunzipSync(tarball, { maxOutputLength: MAX_BB_BINARY_BYTES });
+    } catch (e) {
+      throw new Error(
+        `bb v${version}: decompression aborted (exceeds ${MAX_BB_BINARY_BYTES} bytes or is corrupt): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    const tarPath = join(stage, "archive.tar");
+    writeFileSync(tarPath, tarBytes, { mode: 0o600 });
+    const proc = Bun.spawnSync(["tar", "-xf", tarPath, "-C", extract]);
     if (!proc.success) throw new Error(`tar extraction failed (exit code ${proc.exitCode})`);
 
     const bbSrc = findSingleBb(extract);
@@ -332,7 +381,7 @@ export async function downloadBb(version: string): Promise<void> {
       }
     }
 
-    const binaryDigest = sha256Hex(new Uint8Array(readFileSync(stagedBb)));
+    const binaryDigest = sha256File(stagedBb);
     const marker: BbMarker = {
       schema: MARKER_SCHEMA,
       version,

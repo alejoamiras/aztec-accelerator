@@ -191,6 +191,29 @@ fn unique_staging_dir(version_dir: &Path) -> Result<PathBuf, Box<dyn Error + Sen
     Ok(version_dir.with_file_name(format!(".{name}.tmp.{}-{nanos}-{seq}", std::process::id())))
 }
 
+/// Remove crash-stale staging siblings for this version (`.{name}.tmp.*`) before a fresh install, so a
+/// crashed prior run can't accumulate hidden cache data. Best-effort: errors are ignored.
+fn reap_stale_stages(version_dir: &Path) {
+    let (Some(parent), Some(name)) = (
+        version_dir.parent(),
+        version_dir.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return;
+    };
+    let prefix = format!(".{name}.tmp.");
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(&prefix))
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
 /// Stage a verified bb tarball privately, finalize it (chmod + macOS codesign), fingerprint the FINAL
 /// binary, write the integrity marker, THEN publish fail-closed into `version_dir` (F-007).
 ///
@@ -212,6 +235,7 @@ pub(crate) fn install_version_dir(
     if let Some(parent) = version_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    reap_stale_stages(version_dir);
     let staging = unique_staging_dir(version_dir)?;
     create_owner_only_dir(&staging)?;
 
@@ -468,8 +492,17 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let version_dir = base.path().join("5.0.0-test");
 
+        // A crash-stale staging sibling from a prior run must be reaped by the next install.
+        let stale = base.path().join(".5.0.0-test.tmp.999-0-0");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("junk"), b"stale").unwrap();
+
         // Fresh install → bb + marker present, marker binds the published binary bytes (post-finalize).
         install_version_dir(&version_dir, &tarball, "5.0.0-test", &archive_digest).unwrap();
+        assert!(
+            !stale.exists(),
+            "crash-stale staging dir reaped on next install"
+        );
         let bb = version_dir.join(bb_binary_name());
         assert!(bb.exists(), "bb published");
         let marker_path = version_dir.join("bb.sha256.json");
