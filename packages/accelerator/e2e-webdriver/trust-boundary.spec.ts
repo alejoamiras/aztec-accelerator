@@ -15,10 +15,8 @@
  * injected `window.__TAURI_INTERNALS__.invoke` — a hand-rolled postMessage is dropped before the ACL
  * (invoke-key pre-check) and would test the wrong boundary.
  */
-import * as os from "node:os";
 import { readConfig } from "./helpers.ts";
 
-const IS_LINUX = os.platform() === "linux";
 const SETTINGS_TITLE = "Aztec Accelerator Settings";
 const TEST_ORIGIN = "https://trust-boundary-e2e.example.com";
 const PROVE_URL = "http://127.0.0.1:59833/prove";
@@ -242,16 +240,21 @@ describe("Trust boundary (F-012)", () => {
       // Strong canary: had the call executed, speed would now be attackSpeed. It must be unchanged.
       expect(readConfig().speed).toBe(speedBefore);
 
-      // Resolve the popup (Deny) so the pending /prove returns and the window closes.
-      if (IS_LINUX) {
-        await browser
-          .execute(() => (document.getElementById("deny") as HTMLElement | null)?.click())
-          .catch(() => {});
-      } else {
-        await (await browser.$("#deny")).click().catch(() => {});
-      }
+      // Deny the popup (best-effort) so the pending /prove resolves. A JS click works on all engines here.
+      await browser
+        .execute(() => (document.getElementById("deny") as HTMLElement | null)?.click())
+        .catch(() => {});
+      await browser.pause(300);
     } finally {
-      await pending.catch(() => {});
+      // NEVER block the test on the 60s /prove — fire-and-forget. If the deny click was lost, the request
+      // resolves via the app's own auth timeout; closing the popup below stops it leaking into the next spec.
+      void pending.catch(() => {});
+      for (const h of await browser.getWindowHandles()) {
+        if (h !== settingsHandle) {
+          await browser.switchToWindow(h).catch(() => {});
+          await browser.closeWindow().catch(() => {});
+        }
+      }
       await browser.switchToWindow(settingsHandle).catch(() => {});
     }
   });
