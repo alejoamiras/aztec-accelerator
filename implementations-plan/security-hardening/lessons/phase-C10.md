@@ -331,3 +331,19 @@ implying the webview requests assets on a scheme/host ≠ `tauri://localhost`. S
 the working base): withGlobalTauri:false, the strict CSP, dropped core:default+per-window capabilities, the
 `on_navigation`/`on_new_window` guards, the `assets/` subdir + module script. Codex xhigh consulting on the
 root cause (task b3c4ptsbe; prompt scratchpad/c10-asset-debug.md). CI evidence: run 29367925348 (PR #393).
+
+### ROOT CAUSE FOUND (extended probe: `embed_count` + `dev_url`) + FIX (dd21870)
+Nav guards ELIMINATED (removing them didn't fix it). The extended probe (commit 75fcd3e) logged in the dev job:
+`embed_count=0  dev_url=Some(http://127.0.0.1:1430/)  frontend_dist=Some(Directory("./frontend"))`.
+⇒ **`tauri dev` (the tauri CLI) INJECTS a dev-server devUrl (:1430)** via the `TAURI_CONFIG` env, which makes
+tauri-codegen embed an EMPTY asset set (`context.rs:178` — `dev && dev_url.is_some()` ⇒ `EmbeddedAssets::default()`).
+The temp `asset_resolver().get()` probe found the assets only via the DEV DISK FALLBACK (`app.rs:347`, which
+requires `dev_url.is_some()`), but the webview's `tauri://` protocol handler (`protocol/tauri.rs:215`) reads the
+EMPTY EMBED via `manager.get_asset` → "asset not found". FIX: run the dev webdriver job via a plain
+`cargo build --features webdriver` + launch `target/debug/aztec-accelerator` DIRECTLY (no `tauri dev` CLI) —
+no CLI ⇒ no TAURI_CONFIG devUrl injection ⇒ `dev_url=None` ⇒ codegen embeds frontendDist FULLY ⇒ `is_dev()`
+still true (custom-protocol off) but `get_app_url` returns `tauri://localhost` (mod.rs:353) served from the full
+embed. (The built-debug lane uses `tauri build` — NOT `tauri dev` — so it never had the injection; its embed was
+already full.) DEBUG SCAFFOLD STILL IN THE BRANCH — MUST REVERT before merge: the main.rs asset probe (75fcd3e/
+3f4f1fd) and the removed on_navigation/on_new_window guards (0074a10) + the temp _e2e-webdriver "Diagnose
+frontend assets" step (8bac1d2) + the -v2 cache-key bump.
