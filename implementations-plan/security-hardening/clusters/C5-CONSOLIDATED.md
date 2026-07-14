@@ -101,8 +101,9 @@ Files: `infra/tofu/iam.tf`, `infra/tofu/outputs.tf`, `infra/tofu/s3.tf`, `infra/
   `pull_request` rule's `parameters` set `required_review_thread_resolution: true` and
   `allowed_merge_methods: ["squash","rebase"]` (it is a `pull_request.parameters` field, NOT top-level;
   lowercase; linear history needs squash/rebase); set `required_status_checks.parameters.strict_required_status_checks_policy: true`
-  (Codex C5 — else stale-green merges). (If ASK A1 accepted — recommended — append the 4th required check
-  `Actionlint Status`, integration_id 15368.)
+  (Codex C5 — else stale-green merges). **Append the 4th required check `Actionlint Status`
+  (integration_id 15368)** — A1 is RESOLVED YES (audit-recommended; runs the tofu gate; the user may veto
+  it at the approval gate, in which case drop this one line).
 - `README.md`: document the temporary dual-role window + the 3 new secrets + the `--exclude "releases/*"`.
 - **Validation gate:** `tofu -chdir=infra/tofu fmt -check -diff && init -backend=false -input=false && validate`;
   `bun run lint:tofu`; `bun run lint:actions`; `jq -e . infra/rulesets/main-branch-protection.json`;
@@ -121,9 +122,11 @@ Files: `deploy-landing.yml`, `release-accelerator.yml`, `publish-testnet.yml`.
   `release` job authenticates): add an **AWS preflight to the EARLY `validate` job** (job-scoped
   `id-token: write`, `configure-aws-credentials` with the release role, a harmless `s3:GetBucketLocation`)
   and make the `tag`/`release`/publish jobs `needs:` that validation, so a post-cutover trust/secret
-  failure aborts before any tag/release/feed side effect. Add an `auth_probe` `workflow_dispatch` input (or
-  a scratch workflow) to prove the release OIDC token assumes the release role BEFORE the legacy role is
-  deleted. Assert `GITHUB_REF == refs/heads/main` early; keep the exact S3 key; fix the invalidation path
+  failure aborts before any tag/release/feed side effect. Add an `auth_probe` `workflow_dispatch` boolean input to prove the release OIDC token
+  assumes the release role BEFORE the legacy role is deleted. **The probe MUST have zero side effects:
+  when `auth_probe == true`, ONLY the preflight auth job runs and EVERY build/tag/release/publish job is
+  guarded `if: inputs.auth_probe != true` (or gated behind a `needs:` on a job that early-exits under the
+  probe) so a probe run cannot build, tag, publish, or release.** Assert `GITHUB_REF == refs/heads/main` early; keep the exact S3 key; fix the invalidation path
   to `/landing/releases/latest.json` (viewer-function rewrite → cached key is `landing/releases/latest.json`),
   keeping `/releases/latest.json` too.
 - `publish-testnet.yml` (~L80): `${{ secrets.AWS_ROLE_ARN_PLAYGROUND }}`; scope `id-token: write` to the
@@ -156,11 +159,15 @@ Files: `infra/tofu/iam.tf` (delete `aws_iam_role.ci` + `_policy.ci`), `infra/tof
 
 ### Phase 4 — Human-applies runbook (`clusters/C5-runbook.md`; written, NOT executed)
 Adopt Codex's staged, fail-closed sequence + Fable's `simulate-principal-policy` proofs. Critical ordering
-(the whole cutover-safety trick):
+(the whole cutover-safety trick). The **ruleset is applied EARLY — BEFORE the final
+`security-hardening→main` integration PR** (Codex C5) so it protects the cutover integration itself, NOT
+only later changes; it is independent of the role cutover:
 ```
-narrow+add roles (apply) → set 3 secrets → land workflow cutover ON MAIN → smoke new roles
-→ simulate-principal-policy proofs → destroy legacy role+policy → delete old AWS_ROLE_ARN secret
-→ apply ruleset (PUT existing / POST if absent, after backing up the live ruleset)
+preflight (drift/squash-rebase/role-names/Org+boundary check) → back up live ruleset → APPLY RULESET
+  (PUT existing / POST if absent) BEFORE the main-integration PR
+→ narrow+add roles (apply) → set 3 secrets → land workflow cutover ON MAIN
+→ smoke new roles (incl. the D1 negative cross-role AssumeRole smoke + the release auth_probe)
+→ simulate-principal-policy proofs → [separate Phase-3 PR] destroy legacy role+policy → delete old AWS_ROLE_ARN secret
 ```
 Key points baked into the runbook:
 - **The legacy role is retired only AFTER the workflow cutover reaches `main`** — merging C5 into
