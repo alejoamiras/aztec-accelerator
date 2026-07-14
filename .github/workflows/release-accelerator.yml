@@ -910,8 +910,18 @@ jobs:
     if: needs.validate.outputs.is_prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions: {}
+    permissions:
+      contents: read
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-target: x86_64-unknown-linux-gnu
+          rust-cache-key: accelerator-sign-feed
+          rust-workspaces: packages/accelerator/core -> target
+          rust-components: ""
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
       - name: Poll the prod feed + assert it serves this release
         env:
           EXPECTED: ${{ needs.validate.outputs.version }}
@@ -949,7 +959,16 @@ jobs:
             [ -n "$ok" ] || { echo "::error::asset URL not reachable (last=$code): $u"; exit 1; }
             echo "✅ 200 $u"
           done < <(printf '%s' "$FEED" | jq -r '.platforms[].url')
-          echo "✅ live updater feed verified == $EXPECTED, all assets reachable"
+
+          # F-004 (audit M7): run the PRODUCTION verifier over the live feed body. Version + reachable
+          # URLs alone don't prove the signed manifest survived the upload/CDN — a corrupted or dropped
+          # manifest_sig leaves those intact while EVERY C4 client rejects the update. This is the only
+          # cryptographic check on the real published feed.
+          printf '%s' "$FEED" > live-latest.json
+          bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
+          cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- \
+            verify --feed live-latest.json --pubkey pubkey.b64
+          echo "✅ live updater feed verified == $EXPECTED, all assets reachable, manifest signature valid"
 
   bump-source:
     name: Bump source version

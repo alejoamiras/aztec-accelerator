@@ -207,6 +207,13 @@ pub async fn check_for_update(
         }
     };
 
+    // Residual (audit M6): `updater.check()` fetches, BUFFERS, and JSON-parses the whole feed body
+    // BEFORE we ever see `raw_json` — so `verify_manifest`'s 64 KiB manifest-field cap does NOT bound
+    // the feed response itself. A feed writer returning a multi-GB `notes`/`platforms` blob is an
+    // availability-only memory-DoS at check() time. Closing it needs an upstream feed-response byte
+    // limit before JSON parsing, which `tauri-plugin-updater` does not expose (same class as the
+    // artifact-buffer residual #345). Integrity is unaffected: an oversized feed still cannot forge a
+    // valid signed manifest. Documented here so it isn't mistaken for covered by the manifest cap.
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
