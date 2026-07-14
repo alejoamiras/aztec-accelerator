@@ -491,6 +491,9 @@ jobs:
       n-artifact: ${{ matrix.n-artifact }}
       n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
       mode: ${{ matrix.mode }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
   # Linux/AppImage updater smoke — BLOCKING (in `tag.needs` + `release.needs`).
   # Proves a user on the previous stable AppImage auto-updates to N AND the
@@ -505,6 +508,9 @@ jobs:
     uses: ./.github/workflows/_e2e-updater-linux.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
   # Windows/NSIS updater smoke — BLOCKING (in tag.needs + release.needs), proven green on the
   # 1.0.4-rc.3 dry-run (positive + negative). Tests the REAL prod-signed Windows artifact (this run's
@@ -525,6 +531,9 @@ jobs:
     with:
       n-version: ${{ needs.validate.outputs.version }}
       mode: positive
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
   update-smoke-windows-negative:
     name: Updater Smoke (windows-x86_64 / negative)
@@ -539,6 +548,9 @@ jobs:
     with:
       n-version: ${{ needs.validate.outputs.version }}
       mode: negative
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
   tag:
     name: Create Git Tag

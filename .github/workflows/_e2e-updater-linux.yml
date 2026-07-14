@@ -37,6 +37,12 @@ on:
         required: false
         default: positive
         type: string
+    secrets:
+      # F-004: sign the smoke feed with the prod updater key (which N-1 embeds). See _e2e-updater.yml.
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: true
 
 jobs:
   updater-smoke-linux:
@@ -121,6 +127,8 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           APPIMAGE=$(find n1 -name '*.AppImage' | head -1)
           if [ -z "$APPIMAGE" ]; then echo "::error::N-1 AppImage not found"; exit 1; fi

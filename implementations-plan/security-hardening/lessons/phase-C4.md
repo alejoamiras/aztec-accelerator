@@ -69,5 +69,66 @@ end-of-turn). **Proceeded on own judgment**, which is well-grounded because:
   that artifact; it never gets the signing key. `release` `needs: sign-update-feed`, so verify (which
   fails the sign job on a bad feed) gates publication of BOTH the GH asset and the S3 copy.
 
-GATE 3 (post-impl audit on the full C4 diff) will be re-attempted once the workflow lands; if codex is
-still down, note it and rely on local + CI validation + the already-completed GATE-1 double audit.
+## GATE 3 — post-impl Codex audit (session 019f5e8b, gpt-5.6-sol xhigh) — SUCCEEDED
+
+This run stayed up and surfaced two real findings (folded before merge):
+
+- **F-C4-A (must-fix, release-breaking ripple): the updater-smoke harnesses synthesize an UNSIGNED,
+  SIZELESS feed.** `updater-smoke.sh:110`, `updater-smoke-linux.sh:142`, `updater-smoke-windows.ps1:130`
+  build `latest.json` as `{version, notes, pub_date, platforms:{key:{signature, url}}}` — no `manifest`,
+  no `manifest_sig`, no `size`. A client built from THIS branch now runs Layer A and rejects that feed
+  (`MissingField("manifest")`) BEFORE downloading → the POSITIVE update-smoke never updates (fails), and
+  the NEGATIVE smoke passes for the wrong reason (rejected by Layer A, not by artifact-sig mismatch — it
+  loses its teeth). These smokes run ONLY in `release-accelerator.yml` (via `_e2e-updater{,-linux,
+  -windows}.yml`), NOT the PR gate, so PR #387 CI stays green — but a real release would break. Phase 5
+  fix: each smoke must (1) add `size` to the platform entry, (2) sign the manifest with the key whose
+  pubkey the N-1 build embeds — Windows already generates an ephemeral `n1.key` (self-contained, sign
+  with it); macOS/Linux embed the PROD pubkey and the smoke is deliberately keyless ("needs no signing
+  key"), so they need `TAURI_SIGNING_PRIVATE_KEY` passed via the reusable-workflow `secrets:` to sign the
+  manifest for the LOCAL feed URLs — then envelope→sign→splice via the update-manifest tool. Release-only
+  testable (actionlint + shellcheck locally; real validation is a release / workflow_dispatch run).
+
+- **F-C4-B (narrow race, likely document-as-residual): the version-floor advances only AFTER 3 healthy
+  probes, so between a successful install→`app.restart()` (which releases the flock at process exit) and
+  the new build committing floor=N, a concurrently-racing OLD instance could install a validly-signed
+  candidate N' with floor<N'<N — a downgrade from N.** Requires two instances racing in the restart
+  window (the `:59833` single-instance bind guard largely prevents this), feed control, and tight timing.
+  The 3-probe delay is deliberate (committing floor=N pre-restart would let a crash-looping bad update
+  ratchet the floor and brick the updater). Assess severity from Codex's full writeup; if kept, document
+  as a residual with a code comment rather than reintroduce the bad-update-bricks-floor problem.
+
+C4 is therefore NOT merge-ready until F-C4-A is fixed (Phase 5) — the GATE-6 "audit clean" bar is not met
+while a Codex-flagged release-breaking ripple is open. PR #387's own CI is green (smokes aren't on the PR
+gate), but merging as-is would plant a latent release breaker.
+
+### Fold outcome (all 8 findings addressed)
+
+- **H1 restart race** → `updater_state` gains a `pending` high-water: `perform_update` calls
+  `record_pending(current, candidate)` UNDER THE LOCK right after `install()`, before the restart
+  releases it. `candidate_allowed` now gates on `max(current, floor, pending)`; a racing instance sees
+  the raised effective floor and can't install a lower still-signed version. `commit_successful_launch`
+  promotes pending→floor once the launched version catches up. (652c439)
+- **H2** → `commit_launch_floor` REQUIRES the lock (defers if held), was best-effort. (652c439)
+- **H3 tracker commits a never-run version** → confirmed: the redundant-instance bow-out is
+  `cfg!(target_os="windows")` ONLY (main.rs:239), so on mac/linux a second instance keeps running. Added
+  `healthy_aztec_version_on_port()`; the tracker requires `/health.version == CARGO_PKG_VERSION` ×3. The
+  desktop injects its version into `/health` (main.rs:404 `HeadlessState::headless(env!(CARGO_PKG_VERSION))`),
+  so the match holds. (652c439)
+- **M5** → one `layer_b_gate(candidate, current)` shared by check + install; fail-closed on every arm
+  (was fail-open `if let` + omitted `running_below_floor` at install). (652c439)
+- **L8** → `write_state` propagates the parent-dir open + `sync_all` errors (were swallowed). (652c439)
+- **M6** → documented the feed-response buffer DoS residual at `updater.check()` (plugin buffers the
+  whole feed before the manifest cap applies; needs an upstream cap). (7ecbfc1)
+- **M7** → `verify-live-feed` now runs the production `update-manifest verify` over the live CDN feed
+  (checkout + rust added); catches a corrupted/dropped `manifest_sig` that leaves version/URLs intact. (7ecbfc1)
+- **H4** → the updater-smoke feeds are now SIGNED + carry `size`. A shared `sign-smoke-feed.sh`
+  (jq-assembled envelope → `bunx tauri signer sign` → base64 splice) is used by the mac + linux smokes;
+  the Windows smoke does the equivalent in pwsh. The manifest is signed with the PROD key (the synthetic
+  N-1 keeps the committed prod pubkey, verified against L95-97 of `_e2e-updater-windows.yml`), plumbed via
+  new `secrets:` on the 3 reusable workflows + the 4 `release-accelerator.yml` calls; on Windows the prod
+  key OVERRIDES the ephemeral GITHUB_ENV key (which only emitted N-1's artifacts) in the smoke step.
+  `sign-smoke-feed.sh` validated locally end-to-end with a throwaway key (production verifier accepts the
+  signed smoke feed); the pwsh path is release-CI-validated (no local pwsh/Windows). actionlint +
+  shellcheck clean.
+
+All 8 folded. C4 is now merge-candidate pending the CI re-run on the fold (GATE 5) → GATE 6.
