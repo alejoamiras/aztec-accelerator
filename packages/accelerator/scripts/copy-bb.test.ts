@@ -17,13 +17,49 @@ describe("windows bb.exe sidecar supply chain", () => {
     expect(windowsBbReleaseTag("4.3.0-aztecnr-rc.1")).toBe("v4.3.0-aztecnr-rc.1");
   });
 
-  test("the shipped version has a pinned, well-formed checksum", () => {
-    expect(resolveWindowsBbChecksum("4.2.0")).toBe(WINDOWS_BB_CHECKSUMS["4.2.0"]);
-    expect(resolveWindowsBbChecksum("4.2.0")).toMatch(/^[0-9a-f]{64}$/);
+  test("the LIVE bb.js version has an accepted, well-formed manual-review pin", () => {
+    // F-008: key on the version the gate actually resolves (resolveAztecBb), not a hard-coded literal.
+    const { version } = resolveAztecBb();
+    expect(resolveWindowsBbChecksum(version)).toMatch(/^[0-9a-f]{64}$/);
+    expect(WINDOWS_BB_CHECKSUMS[version]?.provenance).toBe("manual-review");
   });
 
-  test("an unknown version fails closed — forces a hash review on every bb bump", () => {
+  test("an unknown version fails closed — forces a reviewed pin on every bb bump", () => {
     expect(() => resolveWindowsBbChecksum("9.9.9")).toThrow(/No pinned Windows bb\.exe SHA-256/);
+  });
+
+  test("a non-manual-review provenance fails closed (reserved attestation)", () => {
+    WINDOWS_BB_CHECKSUMS["0.0.0-att"] = {
+      sha256: "a".repeat(64),
+      provenance: "attestation",
+      note: "reserved",
+    };
+    try {
+      expect(() => resolveWindowsBbChecksum("0.0.0-att")).toThrow(/not accepted yet/);
+    } finally {
+      delete WINDOWS_BB_CHECKSUMS["0.0.0-att"];
+    }
+  });
+
+  test("a malformed sha256 fails closed", () => {
+    WINDOWS_BB_CHECKSUMS["0.0.0-badsha"] = {
+      sha256: "NOTHEX",
+      provenance: "manual-review",
+      note: "x",
+    };
+    try {
+      expect(() => resolveWindowsBbChecksum("0.0.0-badsha")).toThrow(/malformed sha256/);
+    } finally {
+      delete WINDOWS_BB_CHECKSUMS["0.0.0-badsha"];
+    }
+  });
+
+  test("every committed pin is manual-review with a well-formed sha", () => {
+    for (const [version, pin] of Object.entries(WINDOWS_BB_CHECKSUMS)) {
+      expect(pin.provenance, `${version} provenance`).toBe("manual-review");
+      expect(pin.sha256, `${version} sha`).toMatch(/^[0-9a-f]{64}$/);
+      expect(pin.note.length, `${version} note`).toBeGreaterThan(0);
+    }
   });
 
   test("a tampered tarball is rejected (SHA-256 mismatch)", () => {
