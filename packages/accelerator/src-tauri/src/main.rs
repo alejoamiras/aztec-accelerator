@@ -181,7 +181,7 @@ async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
     if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
         let auto_update_pref = { config_state.read().auto_update };
         let current_version = env!("CARGO_PKG_VERSION").to_string();
-        let new_version = update.version.clone();
+        let new_version = update.version().to_string();
 
         // Store the update so respond_update_prompt can use it directly
         if let Some(pending) = app.try_state::<PendingUpdate>() {
