@@ -66,11 +66,11 @@ Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo
   **CHOSEN: surface as ASK A1** (recommend adding `Actionlint Status` — integration_id 15368, already a
   fail-closed aggregate that runs the tofu gate — as a 4th required check so infra validation is a merge
   gate, not advisory). User decides at the approval gate.
-- **D4 — runtime cross-assumption isolation.** fable proposed GitHub `environment:`-scoped subs (Phase 5).
-  main/codex close the same gap via the workflow-file claim (D1). **CHOSEN: the workflow-file claim is
-  primary** (no environment plumbing needed); environments are noted as an optional defense-in-depth ASK
-  A2 (they add a branch-policy layer + protect against the malicious-rename residual if only `workflow`
-  name were available).
+- **D4 — runtime cross-assumption isolation.** fable proposed GitHub `environment:`-scoped subs.
+  main/codex close the same gap via a workflow claim (D1). **CHOSEN: the `workflow` NAME claim (D1) is
+  primary** (no environment plumbing needed; stops the stolen-token threat); environments are an optional
+  defense-in-depth ASK A2 (with the trust-subject footgun noted there), and the stronger file-path binding
+  is ASK A7.
 - **D5 — role granularity (3 vs 2).** All legs: keep 3 (per-pipeline). 2-role (feed vs sites) protects the
   feed but lets a compromised site token cross-deface landing↔playground; 3 roles are the minimum aligned
   with distinct public-damage domains and the correct shape for D1/D4. **CHOSEN: 3 roles.**
@@ -78,19 +78,31 @@ Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo
 ## Phases
 
 ### Phase 1 — PR-1: additive IAM split + ruleset JSON (commit only; deploy-compatible)
-Files: `infra/tofu/iam.tf`, `infra/tofu/outputs.tf`, `infra/tofu/README.md`, `infra/rulesets/main-branch-protection.json`.
+Files: `infra/tofu/iam.tf`, `infra/tofu/outputs.tf`, `infra/tofu/s3.tf`, `infra/tofu/README.md`, `infra/rulesets/main-branch-protection.json`.
 - `iam.tf`: keep the OIDC provider. **Narrow** the legacy `aws_iam_role.ci` trust to `StringEquals sub=main`
   (drop nightlies + both chore/aztec-* NOW) but LEAVE its broad policy (all live workflows still use it
-  until PR-2 lands). **Add** the 3 new roles + inline policies exactly as the table above (StringEquals
-  trust: aud + main sub + job_workflow_ref file claim; landing carries the explicit Deny +
-  `s3:AbortMultipartUpload` on both Allow and Deny; release = Put exact latest.json + GetBucketLocation +
-  invalidation only; playground mirrors landing sans Deny; ListBucket with `s3:prefix` conditions).
+  until PR-2 lands). **Add** the 3 new roles + inline policies exactly as the table above. **Trust
+  (StringEquals):** `aud=sts.amazonaws.com`, `sub=repo:alejoamiras/aztec-accelerator:ref:refs/heads/main`,
+  **and `token.actions.githubusercontent.com:workflow` = the exact workflow NAME** (`Deploy Landing Page` /
+  `Release Accelerator` / `Publish Testnet`) — per D1 (the `workflow` NAME claim, NOT `job_workflow_ref`
+  which the audits could not confirm is emitted for these top-level jobs). Policies: landing carries the
+  explicit Deny + `s3:AbortMultipartUpload` on both Allow and Deny; release = Put exact latest.json +
+  GetBucketLocation + invalidation only (no List/Delete); playground mirrors landing sans Deny. Keep
+  `ListBucket`/`GetBucketLocation` in SEPARATE statements from the object actions; `ListBucket` uses
+  `StringLike s3:prefix ["landing/*"]` / `["playground/*"]` (NEVER put an `s3:prefix` condition on
+  `PutObject` — it would implicit-deny uploads).
+- `s3.tf`: add a bucket-wide `aws_s3_bucket_lifecycle_configuration` rule
+  `AbortIncompleteMultipartUpload` (1 day) so a compromised token can't park billable incomplete parts
+  (Codex C6). [If ASK A8 accepted, also enable `aws_s3_bucket_versioning`.]
 - `outputs.tf`: add `landing_deploy_role_arn`, `release_feed_role_arn`, `playground_testnet_role_arn`;
   keep `ci_role_arn` (removed in PR-3).
 - `main-branch-protection.json`: keep target=main only, `bypass_actors: []`, 0 approvals, the 3 checks +
-  integration_id 15368; ADD rule types `deletion`, `non_fast_forward`, `required_linear_history`; set
-  `required_review_thread_resolution: true`; add `allowed_merge_methods: ["squash","rebase"]` (linear
-  history needs squash/rebase). (If ASK A1 accepted, also append the 4th required check.)
+  integration_id 15368; ADD rule types `deletion`, `non_fast_forward`, `required_linear_history`; in the
+  `pull_request` rule's `parameters` set `required_review_thread_resolution: true` and
+  `allowed_merge_methods: ["squash","rebase"]` (it is a `pull_request.parameters` field, NOT top-level;
+  lowercase; linear history needs squash/rebase); set `required_status_checks.parameters.strict_required_status_checks_policy: true`
+  (Codex C5 — else stale-green merges). (If ASK A1 accepted — recommended — append the 4th required check
+  `Actionlint Status`, integration_id 15368.)
 - `README.md`: document the temporary dual-role window + the 3 new secrets + the `--exclude "releases/*"`.
 - **Validation gate:** `tofu -chdir=infra/tofu fmt -check -diff && init -backend=false -input=false && validate`;
   `bun run lint:tofu`; `bun run lint:actions`; `jq -e . infra/rulesets/main-branch-protection.json`;
@@ -99,28 +111,45 @@ Files: `infra/tofu/iam.tf`, `infra/tofu/outputs.tf`, `infra/tofu/README.md`, `in
 
 ### Phase 2 — PR-2: workflow cutover to per-pipeline secrets + safety asserts (commit only)
 Files: `deploy-landing.yml`, `release-accelerator.yml`, `publish-testnet.yml`.
-- `deploy-landing.yml`: `role-to-assume: ${{ secrets.AWS_ROLE_ARN_LANDING }}`; `sync --delete --exclude "releases/*"`;
-  early `refs/heads/main` assertion for the dispatch path; optional post-sync assert that
-  `landing/releases/latest.json` still exists.
-- `release-accelerator.yml` (~L899): `${{ secrets.AWS_ROLE_ARN_RELEASE }}`; assert `GITHUB_REF == refs/heads/main`
-  in the early validation job; **move the AWS-cred `configure-aws-credentials` step BEFORE `gh release create`**
-  so broken trust/secret wiring fails before a GitHub release is published; keep the exact S3 key; fix the
-  invalidation path to `/landing/releases/latest.json` (the CloudFront viewer function rewrites the URI
-  pre-cache, so the cached key is `landing/releases/latest.json`) — keep `/releases/latest.json` too.
+- `deploy-landing.yml`: `role-to-assume: ${{ secrets.AWS_ROLE_ARN_LANDING }}`;
+  `sync --delete --exclude "releases/*" --exclude "releases"` (both, since IAM Denies the exact
+  `releases` key too); early `refs/heads/main` assertion for the dispatch path; optional post-sync
+  feed-survival assert via `aws s3api list-objects-v2 --prefix landing/releases/latest.json` (NOT
+  head-object — the landing role has no `s3:GetObject`), or omit it.
+- `release-accelerator.yml`: `${{ secrets.AWS_ROLE_ARN_RELEASE }}` at the S3-write step (~L899). **Codex
+  C3 — trust must be proven BEFORE the git tag** (the `tag` job pushes `accelerator-vN` ~L555, BEFORE the
+  `release` job authenticates): add an **AWS preflight to the EARLY `validate` job** (job-scoped
+  `id-token: write`, `configure-aws-credentials` with the release role, a harmless `s3:GetBucketLocation`)
+  and make the `tag`/`release`/publish jobs `needs:` that validation, so a post-cutover trust/secret
+  failure aborts before any tag/release/feed side effect. Add an `auth_probe` `workflow_dispatch` input (or
+  a scratch workflow) to prove the release OIDC token assumes the release role BEFORE the legacy role is
+  deleted. Assert `GITHUB_REF == refs/heads/main` early; keep the exact S3 key; fix the invalidation path
+  to `/landing/releases/latest.json` (viewer-function rewrite → cached key is `landing/releases/latest.json`),
+  keeping `/releases/latest.json` too.
 - `publish-testnet.yml` (~L80): `${{ secrets.AWS_ROLE_ARN_PLAYGROUND }}`; scope `id-token: write` to the
-  `deploy-app` job only (not repo/other jobs); preserve `_publish-sdk.yml`'s Sigstore provenance perms;
-  main-ref validation gating the side-effecting jobs.
-- `publish-nightlies.yml` + `_publish-sdk.yml`: **untouched.**
+  `deploy-app` job **and the `_publish-sdk.yml` call job** (both need it — the latter for Sigstore
+  provenance); main-ref validation gating the side-effecting jobs.
+- **`publish-nightlies.yml`: EXPLICITLY DISABLE the dispatch path** (Codex C2) — its jobs guarded so it
+  cannot run at all (e.g. an early `if: false`-style guard / top-level early-exit with a comment citing the
+  nightlies-dropped decision). It runs `_publish-sdk.yml` (irreversible npm publish) + a separate AWS
+  `deploy-app` job, so leaving it referencing the to-be-deleted secret risks a partial irreversible run.
+  Do NOT merely leave it "untouched". `_publish-sdk.yml`: **untouched.**
 - **Trigger-safety:** PR-2 changes only `.github/workflows/**`, which doesn't match deploy-landing's
   `paths: packages/landing/**` push filter → merging cannot itself fire a deploy.
 - **Validation gate:** `bun run lint:actions`; `rg -n 'secrets\.AWS_ROLE_ARN([^_]|$)' .github/workflows`
-  shows ONLY `publish-nightlies.yml` (dormant); `Actionlint Status` green on the PR.
+  returns NO live-pipeline hit (publish-nightlies is now disabled); `Actionlint Status` green on the PR.
 
 > Phases 1 + 2 land in the SAME C5 PR into `security-hardening` (both are commit-only). They are separated
 > here because the human-apply runbook must apply them at different points (see Phase 4). The legacy-role
-> DELETION (below) is a distinct later commit.
+> DELETION (Phase 3) is a DISTINCT, SEPARATE PR — see below.
 
-### Phase 3 — Legacy role removal (commit prepared; applied only at runbook step, after main cutover)
+### Phase 3 — Legacy role removal (SEPARATE post-smoke PR — NOT in the campaign's main integration)
+**Codex C4:** Phase 3 must NOT ride the campaign's `security-hardening→main` integration. If the deletion
+commit reaches final `main`, an ordinary `tofu apply` from current source would remove the fallback role
+BEFORE the human finishes smoking the new roles. Keep Phase 3 as its own PR, opened + merged only AFTER
+the new roles are proven live (runbook step). This keeps repo source, live AWS state, and the intended
+ordering in agreement.
+Files: `infra/tofu/iam.tf` (delete `aws_iam_role.ci` + `_policy.ci`), `infra/tofu/outputs.tf` (delete `ci_role_arn`).
 Files: `infra/tofu/iam.tf` (delete `aws_iam_role.ci` + `_policy.ci`), `infra/tofu/outputs.tf` (delete `ci_role_arn`).
 - **Validation gate:** same tofu fmt/validate + lint:actions + git diff --check; PR/commit body states the
   expected plan: **2 destroy, 0 add, 0 change, −1 output**; no bucket/distribution changes.
