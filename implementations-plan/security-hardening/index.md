@@ -21,7 +21,7 @@ Loop source-of-truth. Status: PENDING · IN-PROGRESS · DONE · BLOCKED. Pick th
 
 **Sequencing:** C0 first (unblocks CI on PRs into security-hardening). C1–C10 then proceed (cut each branch AFTER the prior merges). C11 stays BLOCKED until F-001's team ships the identity contract.
 
-**Human-gated closeout:** F-005 (`tofu apply` + ruleset API apply + secret cutover + read-back), the temporary `security-hardening` CI trigger/ruleset removal in the final `main` integration PR, and F-002 (F-001 dependency). See `plan.md` → "Human-gated closeout".
+**Human-gated closeout:** F-005 (`tofu apply` + ruleset API apply + secret cutover + read-back), the temporary `security-hardening` CI trigger/ruleset removal in the final `main` integration PR, and F-002 (F-001 dependency). **→ Consolidated operator runbook: [`CLOSEOUT-RUNBOOK.md`](CLOSEOUT-RUNBOOK.md)** (ties together `clusters/C5-runbook.md` + `clusters/C7-runbook.md` + the main-integration + F-002 steps in the exact order to run them). See also `plan.md` → "Human-gated closeout".
 
 **Deferred follow-ups (tracked):**
 - **F-003 Windows DACL** — apply an explicit owner-only Windows ACL to the prove workspace + an effective-ACL test (needs Windows CI). Deferred from C2's R2 audit: the confirmed F-003 vuln is resolved on all platforms by `0o700`/`0o600`-at-creation; this hardens against an out-of-threat-model attacker who already controls the per-user data dir. See lessons/phase-C2.md.
