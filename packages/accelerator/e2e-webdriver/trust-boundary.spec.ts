@@ -36,35 +36,46 @@ interface InvokeResult {
  * that global with another sync execute.
  */
 async function invokeHere(cmd: string, args: Record<string, unknown>): Promise<InvokeResult> {
-  await browser.execute(
-    (c: string, a: Record<string, unknown>) => {
-      const w = window as unknown as {
-        __INVOKE_RESULT__?: InvokeResult;
-        __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: unknown) => Promise<unknown> };
-      };
-      w.__INVOKE_RESULT__ = undefined;
-      const inv = w.__TAURI_INTERNALS__?.invoke;
-      if (typeof inv !== "function") {
-        w.__INVOKE_RESULT__ = { resolved: false, hasPrimitive: false };
-        return;
-      }
-      inv(c, a)
-        .then((v: unknown) => {
-          w.__INVOKE_RESULT__ = { resolved: true, value: v, hasPrimitive: true };
-        })
-        .catch((e: unknown) => {
-          w.__INVOKE_RESULT__ = { resolved: false, error: String(e), hasPrimitive: true };
-        });
-    },
-    cmd,
-    args,
-  );
+  // A prior denied invoke can surface its WebDriver error here — swallow it; the loop below re-reads state.
+  await browser
+    .execute(
+      (c: string, a: Record<string, unknown>) => {
+        const w = window as unknown as {
+          __INVOKE_RESULT__?: InvokeResult;
+          __TAURI_INTERNALS__?: { invoke?: (cmd: string, args: unknown) => Promise<unknown> };
+        };
+        w.__INVOKE_RESULT__ = undefined;
+        const inv = w.__TAURI_INTERNALS__?.invoke;
+        if (typeof inv !== "function") {
+          w.__INVOKE_RESULT__ = { resolved: false, hasPrimitive: false };
+          return;
+        }
+        inv(c, a)
+          .then((v: unknown) => {
+            w.__INVOKE_RESULT__ = { resolved: true, value: v, hasPrimitive: true };
+          })
+          .catch((e: unknown) => {
+            w.__INVOKE_RESULT__ = { resolved: false, error: String(e), hasPrimitive: true };
+          });
+      },
+      cmd,
+      args,
+    )
+    .catch(() => {});
   let res: InvokeResult | null = null;
   await browser.waitUntil(
     async () => {
-      res = await browser.execute(
-        () => (window as unknown as { __INVOKE_RESULT__?: InvokeResult }).__INVOKE_RESULT__ ?? null,
-      );
+      try {
+        res = await browser.execute(
+          () =>
+            (window as unknown as { __INVOKE_RESULT__?: InvokeResult }).__INVOKE_RESULT__ ?? null,
+        );
+      } catch (e) {
+        // tauri-plugin-webdriver surfaces a DENIED/failed invoke as a WebDriver-protocol error on a later
+        // execute (not as a caught JS rejection). Treat that as the rejection outcome — the message carries
+        // the ACL reason (e.g. "… not allowed on window …"), which is exactly what the denial asserts.
+        res = { resolved: false, error: String(e), hasPrimitive: true };
+      }
       return res !== null;
     },
     { timeout: 8000, interval: 100, timeoutMsg: `invoke(${cmd}) did not settle` },
