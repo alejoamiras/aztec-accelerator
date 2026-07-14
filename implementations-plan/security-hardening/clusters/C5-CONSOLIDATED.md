@@ -4,6 +4,8 @@ Consolidation of three independent plans (`C5-plan-main.md`, `C5-plan-codex.md`,
 They converged strongly; the Decision Ledger below records where they diverged and why the consolidated
 choice was made. **Commit + validate only — a human runs `tofu apply`, `gh secret`, and the ruleset API.**
 
+> **GATE 1 status:** deep-tier audit COMPLETE — 3 plans → double audit (Fable *conditional approve* + Codex *reject*, both fully folded) → final fresh-context Codex verdict **APPROVE** (round 5). Awaiting the user's approval-gate decision before GATE 2.
+
 ## Outcome
 Replace the single over-broad `aztec-accelerator-ci-github` role (trusted by 4 refs, whole-bucket write)
 with **three per-pipeline roles**, each trusted ONLY to its own workflow FILE running on `main`, so no

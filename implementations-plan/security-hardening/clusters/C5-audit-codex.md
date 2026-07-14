@@ -176,3 +176,7 @@ These cannot remain assumed:
 - The site bucket is not configured for versioning in tofu, so site overwrite/delete recovery depends on rebuilding and redeploying. Versioning would materially improve recovery without giving CI `DeleteObjectVersion`.
 
 VERDICT: reject (blocking findings: D1 uses a claim absent from top-level jobs and a malformed value; the cutover silently breaks publish-nightlies; release-role trust is not proven before tag creation)
+---
+## Final fresh-context verdict (post-fold)
+Round 1: reject (7 findings). After folding all findings + resolving the D1 claim contradiction (→ `workflow`
+name) + operative-consistency rounds: **round 5 VERDICT: approve.** Deep-tier audit complete.
