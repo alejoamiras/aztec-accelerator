@@ -1,19 +1,23 @@
 /**
- * Shared utilities for Tauri IPC in accelerator frontend pages.
- * Provides consistent error handling and loading states.
+ * Shared utilities for Tauri IPC in the accelerator frontend pages.
  *
- * Loaded via <script src="tauri-bridge.js"> in each HTML page.
- * Functions are used globally — biome can't see cross-file usage.
+ * F-012: this is an ESM module bundled (per page) into `frontend/assets/*.js` by
+ * `scripts/build-frontend.ts`. `invoke` comes from the official `@tauri-apps/api/core`
+ * package — NOT `window.__TAURI__` — so the app runs with `withGlobalTauri: false`
+ * (the global back-door is removed; only `window.__TAURI_INTERNALS__` remains, which
+ * the API's `invoke` delegates to). Loaded via a single `<script type="module">` per page.
  */
 
-const { invoke } = window.__TAURI__.core;
+import { invoke } from "@tauri-apps/api/core";
+
+export { invoke };
 
 /**
  * Show a brief error hint near a control. Disappears after 3 seconds.
  * @param {HTMLElement} anchor — element to show the error near
  * @param {string} message
  */
-function showErrorHint(anchor, message) {
+export function showErrorHint(anchor, message) {
   // Remove any existing hint on this anchor
   const existing = anchor.parentElement?.querySelector(".error-hint");
   if (existing) existing.remove();
@@ -33,8 +37,7 @@ function showErrorHint(anchor, message) {
  * @param {(checked: boolean) => {cmd: string, args?: object}} handler
  *   Function that returns the command name and args based on checked state.
  */
-// biome-ignore lint/correctness/noUnusedVariables: used by HTML pages
-function wireToggle(id, handler) {
+export function wireToggle(id, handler) {
   document.getElementById(id).addEventListener("change", (e) => {
     const el = e.target;
     el.disabled = true;
@@ -61,8 +64,7 @@ function wireToggle(id, handler) {
  * @param {string} [opts.loadingText] — text to show while loading (restores original on error)
  * @param {() => Promise<void>} opts.onClick — async handler
  */
-// biome-ignore lint/correctness/noUnusedVariables: used by HTML pages
-function wireButton(id, opts) {
+export function wireButton(id, opts) {
   const btn = document.getElementById(id);
   btn.addEventListener("click", async () => {
     btn.disabled = true;

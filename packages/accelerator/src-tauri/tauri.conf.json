@@ -4,7 +4,9 @@
   "version": "1.0.7-rc.1",
   "identifier": "dev.aztec.accelerator",
   "build": {
-    "frontendDist": "./frontend"
+    "frontendDist": "./frontend",
+    "beforeDevCommand": "bun run frontend:build",
+    "beforeBuildCommand": "bun run frontend:build"
   },
   "app": {
     "windows": [],

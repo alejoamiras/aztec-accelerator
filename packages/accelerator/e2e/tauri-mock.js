@@ -1,7 +1,10 @@
 /**
- * Mock for window.__TAURI__ — injected via addInitScript BEFORE page scripts load.
- * tauri-bridge.js destructures window.__TAURI__.core on line 9 during <head>,
- * so this MUST be installed before any page navigation.
+ * Mock for Tauri IPC — injected via addInitScript BEFORE page scripts load.
+ *
+ * F-012: the pages now run with `withGlobalTauri: false`, so there is NO `window.__TAURI__`.
+ * The bundled `@tauri-apps/api/core` `invoke` delegates to `window.__TAURI_INTERNALS__.invoke(cmd, args)`
+ * — that is the seam we mock. We deliberately do NOT define `window.__TAURI__`; the trust-boundary
+ * tests assert it stays undefined.
  *
  * Pure JavaScript — no TypeScript syntax. Playwright's addInitScript does not transpile.
  */
@@ -46,19 +49,14 @@ window.__TAURI_MOCK__ = {
   },
 };
 
-window.__TAURI__ = {
-  core: {
-    invoke: async (cmd, args) => {
-      callCounts[cmd] = (callCounts[cmd] || 0) + 1;
-      const callIndex = callCounts[cmd];
-      window.__TAURI_MOCK__.calls.push({ cmd, args, callIndex, timestamp: Date.now() });
-      const handler = handlers[cmd] || defaults[cmd];
-      if (!handler) throw new Error("Unmocked command: " + cmd);
-      return handler(args, callIndex);
-    },
-  },
-  event: {
-    listen: async () => () => {},
-    emit: async () => {},
+// The `@tauri-apps/api/core` `invoke` calls `window.__TAURI_INTERNALS__.invoke(cmd, args, options)`.
+window.__TAURI_INTERNALS__ = {
+  invoke: async (cmd, args) => {
+    callCounts[cmd] = (callCounts[cmd] || 0) + 1;
+    const callIndex = callCounts[cmd];
+    window.__TAURI_MOCK__.calls.push({ cmd, args, callIndex, timestamp: Date.now() });
+    const handler = handlers[cmd] || defaults[cmd];
+    if (!handler) throw new Error("Unmocked command: " + cmd);
+    return handler(args, callIndex);
   },
 };

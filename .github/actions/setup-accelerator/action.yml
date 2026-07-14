@@ -118,3 +118,12 @@ runs:
       if: inputs.run-prebuild != 'false'
       shell: bash
       run: bun run --cwd packages/accelerator prebuild
+
+    # F-012: the desktop src-tauri build.rs fails if the gitignored frontend/assets/*.js bundles are
+    # missing or stale. Build them here so every downstream cargo command (clippy/test/build) in a
+    # desktop job has them. Headless server jobs (install-tauri-system-deps: false) don't build
+    # src-tauri, so they skip this.
+    - name: Build frontend bundles (F-012)
+      if: inputs.install-tauri-system-deps != 'false'
+      shell: bash
+      run: bun run --cwd packages/accelerator frontend:build

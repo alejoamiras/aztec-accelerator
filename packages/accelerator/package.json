@@ -5,6 +5,7 @@
   "description": "Native proving accelerator for Aztec transactions — bypasses browser WASM throttling",
   "type": "module",
   "scripts": {
+    "frontend:build": "bun scripts/build-frontend.ts",
     "prebuild": "bun scripts/copy-bb.ts",
     "prebuild:version": "bun scripts/bb-version.ts",
     "test:e2e:ui": "bunx playwright test --config playwright.config.mjs",
