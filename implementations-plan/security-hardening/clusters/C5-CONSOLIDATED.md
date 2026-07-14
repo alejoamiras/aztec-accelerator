@@ -178,9 +178,10 @@ Key points baked into the runbook:
   name-derived and recreatable.
 
 ## Security & Adversarial Considerations
-- **Core control:** per-pipeline roles + `job_workflow_ref` file binding → a stolen landing/playground
-  token (or a compromised *other* main workflow) cannot assume the release role; only `release-accelerator.yml`
-  on main can write `latest.json`.
+- **Core control:** per-pipeline roles + the `workflow` NAME claim binding (D1) → a stolen landing/playground
+  token cannot assume the release role; only `release-accelerator.yml` on main can write `latest.json`. (A
+  compromised *other* main workflow that RENAMES itself to impersonate is the accepted malicious-main
+  residual.)
 - **Residual — CloudFront invalidation is distribution-wide** (no IAM path condition key). Accepted: cache
   churn / cost only, never a content write. Per-path would need separate distributions (out of scope).
 - **Residual — malicious code already merged to main** runs as the legit workflow (any claim variant).
@@ -208,10 +209,12 @@ Key points baked into the runbook:
   linear/force-push/deletion.
 - Each S3-writing job is top-level in its own workflow file → the workflow-file claim binds per pipeline.
 ### Inferences (verify at implementation / preflight)
-- The `job_workflow_ref` claim + its value format are now RESOLVED by the double audit (Fable H1, AWS docs):
-  key `job_workflow_ref` is valid; value `alejoamiras/aztec-accelerator/.github/workflows/FILE.yml@refs/heads/main`
-  (NO `repo:` prefix); `workflow_ref` is NOT an AWS key. Still add the negative cross-role AssumeRole smoke
-  (D1) as the runtime proof.
+- The workflow-binding claim is RESOLVED (D1): the two audits CONTRADICTED each other on whether
+  `job_workflow_ref` is emitted for top-level jobs, so the plan uses the `workflow` NAME claim (AWS-supported
+  + present for all jobs). The `job_workflow_ref` file-path binding (value
+  `alejoamiras/aztec-accelerator/.github/workflows/FILE.yml@refs/heads/main` — NO `repo:` prefix;
+  `workflow_ref` is NOT an AWS key) is the deferred stronger option (ASK A7), needing empirical proof or
+  reusable-workflow wrapping. The negative cross-role AssumeRole smoke (D1) is the runtime proof either way.
 - The repo still uses the pre-immutable OIDC `sub` format (`ref:refs/heads/main`) — preflight `gh api
   .../actions/oidc/customization/sub`.
 - `aws s3 sync --exclude "releases/*"` protects `landing/releases/*` from `--delete` (documented CLI
@@ -227,7 +230,7 @@ Key points baked into the runbook:
 - **A2:** additionally adopt per-pipeline GitHub `environment:` scoping (defense-in-depth)? [Optional —
   **FOOTGUN (Fable M3): adding `environment:` changes the default `sub` to `…:environment:NAME`, which
   BREAKS the `sub=main` trust unless the trust conditions are switched to the native AWS `environment`
-  condition key at the same time.** Not needed given the `job_workflow_ref` binding already isolates
+  condition key at the same time.** Not needed given the `workflow`-name binding (D1) already isolates
   pipelines.]
 - **A3:** enable hardware-key 2FA on the owner account + confirm tfstate bucket is owner-only + versioned?
   [Out of repo scope; single biggest remaining lever]
