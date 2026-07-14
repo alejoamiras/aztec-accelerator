@@ -68,12 +68,56 @@ a precise systemd `ExecStart` serializer + propagate failure (fail-closed, remov
   (`accelerator.yml:88`). DECISION (codex): keep the serializer a pure fn in the src-tauri lib module (don't
   move policy to core just to dodge deps); the src-tauri cargo test is the gate (local here + mandatory in CI).
 
+## Final-codex fold (round 2) — F-016 APPROVED; F-010 sharpened + honestly bounded
+Codex round-2 approved F-016 (implementation choice + honest residual correct) and rejected only on F-010
+operational completeness. Folded, with an explicit SCOPE decision to keep this a tractable, honest cluster:
+- **Serializer token syntax:** `":/path%%"` not `:"/path%%"` (prefix inside the quote). FOLDED (Design).
+- **`enable()` has THREE callers, not one:** `set_autostart` (`commands.rs:52`), startup rearm
+  (`main.rs:511`), Windows updater rearm (`updater.rs:411`). FOLD: `set_autostart` SURFACES the error to the
+  UI; startup + updater rearm **log-and-continue** (never `?`-abort startup or disturb the updater
+  disarm/rearm invariant). The `disable` path is NEVER blocked by preflight.
+- **Transaction rollback + honest disable:** if plugin-enable succeeds but crash-recovery-enable fails,
+  disable the plugin again; on unsafe preflight, attempt BOTH cleanups. Fix `disable_impl`
+  (`crash_recovery.rs:203`): remove the unit file BEFORE the final daemon-reload, check results, report when
+  disarm can't be confirmed (it currently ignores all failures + always reports success). FOLD (Phase 1).
+- **Webview capability BYPASS:** `capabilities/default.json` grants `autostart:default` incl. raw plugin
+  `allow-enable`/`allow-disable` — the webview can bypass `set_autostart`. FOLD: remove the raw
+  `autostart:allow-enable` grant (the frontend already calls the gated custom command, `settings.html:155`),
+  so the preflight-gated command is the only enable path. (Keep `allow-disable`/`allow-is-enabled` — disable
+  must always work.) (Phase 1.)
+- **Preflight scope — HONEST, not over-rejecting (codex's key correctness point):** a SINGLE cross-platform
+  char-union is WRONG (Linux allows `\`; Windows paths REQUIRE `\`; `=`/space/`&`/`<` matter differently per
+  writer; the plugin serializes `appimage`/canonicalized paths, not raw `current_exe`). FOLD: the preflight
+  rejects ONLY the UNIVERSALLY injection-dangerous set — **controls, newline, non-UTF-8** (the actual
+  injection vectors across systemd-unit / `.desktop` / plist-XML / Run-key) — plus the systemd reject-set is
+  applied ONLY in `systemd_exec_start` (Linux). The per-platform NON-injection formatting quirks in the
+  3rd-party `auto-launch` crate (space-splitting in `.desktop`/Run-key, XML `&`/`<` in the plist) are a
+  documented ROBUSTNESS residual, not a same-process injection this cluster can fix without patching the
+  crate. This keeps the fix correct (no legit path rejected) + honest (newline/control injection closed
+  everywhere). Validate the SAME selected value the plugin uses where feasible.
+- **Testability:** factor a transaction helper taking an EXPLICIT path + injected enable/disable closures
+  (a unit test can't make `current_exe()` unsafe or mock `AppHandle`). macOS/Windows string predicates must
+  be host-independent + Linux-testable. Add an ACL regression assert (raw plugin enable stays un-granted).
+  FOLD (Phase 1 gate).
+- **F-016 wording:** update `certs.rs:151` "only copy is gone" → "rcgen's serialized DER wiped; ring
+  backend/swap/core-dump NOT"; fix the `Cargo.toml` comment; "zero churn" → "no version churn (root package
+  dep list changes)". FOLD (Phase 2).
+
+DECISION: GATE 1 closes here. Three audit rounds (dual + 2 fresh finals) have thoroughly vetted this; F-016
+is approved; the F-010 design is now correct + honestly bounded. Remaining items are implementation-level +
+naturally enforced by the phase gates + GATE 3 (post-impl codex on the ACTUAL diff). The per-platform
+plugin-escaping niceties are a documented residual (3rd-party crate). Proceeding to implementation.
+
 ## Design (folded)
 **F-010** (`crash_recovery.rs` + `commands.rs`):
-- `fn systemd_exec_start(exe: &Path) -> Option<String>`: require absolute + valid UTF-8; reject any of
-  control/newline/DEL, `\`, `"`, `'`, `*`, `?`, `[` (systemd `string_is_safe` set) ⇒ `None`. Else build
-  `":" + '"' + path.replace('%',"%%") + '"'` and return `Some`. (The `:` prefix disables `$` expansion; the
-  reject-set makes `\"'` unnecessary-to-escape because they're refused.)
+- `fn systemd_exec_start(exe: &Path) -> Option<String>`: require absolute + valid UTF-8 + no trailing `/`
+  (input is the real `current_exe`, not any theoretical Path); reject any of control/newline/DEL, `\`, `"`,
+  `'`, `*`, `?`, `[` (systemd `string_is_safe` set) ⇒ `None`. Else build **`format!("\":{}\"", path.replace(
+  '%', "%%"))`** ⇒ `":/path%%"` — the `:` prefix goes INSIDE the opening quote (at the item boundary, per the
+  documented quoting grammar; `:"..."` only works by accident of fragment-concatenation). The `:` disables
+  `$` expansion; the reject-set makes `\"'` unnecessary-to-escape. Test the PRODUCTION unit builder (a
+  hand-written inverse can reproduce the same mistaken grammar); injection safety = strict reject-set + fixed
+  one-line template; `systemd-analyze` = parser-compat smoke only.
 - `fn autostart_path_is_safe(exe: &Path) -> bool`: the conservative cross-platform preflight (absolute +
   UTF-8 + none of the reject-set + no newline) used by `set_autostart` to gate BOTH writers.
 - `enable(&self) -> Result<(), Error>` (was `()`): `enable_impl` returns the systemd error / unsafe-path

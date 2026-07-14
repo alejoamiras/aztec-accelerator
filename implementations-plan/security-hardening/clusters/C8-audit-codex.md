@@ -160,3 +160,114 @@ For F-016, choose an assurance level:
 - A self-signed persistent leaf removes the distinct CA key, but only adopt it after proving macOS/browser direct-leaf trust semantics and confirming the persistent leaf key cannot become an unconstrained trust-anchor signing key.
 
 VERDICT: reject (incomplete F-010 serialization and platform scope; ineffective F-016 fallback and overstated residual; non-enforcing validation gates)
+---
+
+## Final fresh-context pass on the REVISED plan (VERDICT: reject — F-016 approved; F-010 expanded)
+
+Reject. F-016 is substantially folded; F-010 is still neither platform-complete nor operationally gated.
+
+1. `systemd_exec_start`
+
+The reject-set, `%` doubling, and `:` prefix are correct. After proper whole-token quoting, no additional injection-relevant systemd metacharacter is missing.
+
+There is still an internal serializer contradiction:
+
+- [C8-plan.md:29](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:29) shows the correct documented form: `ExecStart=":/path%%"`.
+- [C8-plan.md:75](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:75) constructs `:"/path%%"` instead.
+
+Current systemd’s parser happens to concatenate quoted/unquoted token fragments, but documented quoting requires the opening quote at the item boundary. Use exactly:
+
+```rust
+format!("\":{}\"", path.replace('%', "%%"))
+```
+
+That yields `":/path%%"`—prefix inside the quoted first token. This matches the [documented quoting grammar](https://github.com/systemd/systemd/blob/main/man/systemd.syntax.xml) and `config_parse_exec` ordering in [upstream systemd](https://github.com/systemd/systemd/blob/main/src/core/load-fragment.c).
+
+The inverse round-trip is useful but does not independently prove no injection: a handwritten inverse can reproduce the same mistaken grammar. The injection argument comes from the strict reject-set plus a fixed one-line unit template; the inverse proves executable identity, and `systemd-analyze` supplies parser compatibility. Test the production unit builder, not a separately reconstructed fixture.
+
+Minor contract caveat: systemd also rejects directory-implying or otherwise invalid paths. Either reject trailing `/`/invalid path shapes or state that the input is an actual `current_exe`, not every theoretical absolute UTF-8 `Path`.
+
+2. Plugin preflight
+
+No—the “ALL platforms” claim is false.
+
+- The proposed union is not the union of the actual serializers. [C8-plan.md:36](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:36) mentions `$`/`%`, while the implementation specification at [C8-plan.md:77](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:77) omits them.
+- Linux’s raw `Exec={} {}` at [auto-launch/linux.rs:33](/home/homelab/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/auto-launch-0.5.0/src/linux.rs:33) additionally mishandles spaces, `=`, `%`, and the Desktop Entry reserved set. The [Desktop Entry specification](https://specifications.freedesktop.org/desktop-entry/latest-single/) requires quoting reserved characters and forbids `=` in the executable path.
+- macOS’s raw XML at [auto-launch/macos.rs:87](/home/homelab/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/auto-launch-0.5.0/src/macos.rs:87) requires rejecting XML text hazards such as `&` and `<`; the plan does not.
+- Windows’s unquoted command line at [auto-launch/windows.rs:37](/home/homelab/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/auto-launch-0.5.0/src/windows.rs:37) requires rejecting whitespace/quotes, but ordinary absolute Windows paths require `\`. Applying the systemd union literally therefore rejects essentially every Windows executable.
+
+A single cross-platform character union is the wrong abstraction. Use platform-specific checks against each writer’s exact path.
+
+The exact path is also wrong on Linux AppImage: the plugin serializes `app.env().appimage` when present, not `current_exe`, at [tauri-plugin-autostart/lib.rs:214](/home/homelab/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-plugin-autostart-2.5.1/src/lib.rs:214). macOS serializes a canonicalized path at [tauri-plugin-autostart/lib.rs:202](/home/homelab/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-plugin-autostart-2.5.1/src/lib.rs:202). Preflight must validate the same selected value.
+
+Finally, the webview can bypass `set_autostart`: [capabilities/default.json:6](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/capabilities/default.json:6) grants `autostart:default`, which includes raw plugin enable/disable at [permissions/default.toml:15](/home/homelab/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-plugin-autostart-2.5.1/permissions/default.toml:15). Remove raw `allow-enable`; the checked-in frontend already uses the custom command at [settings.html:155](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/frontend/settings.html:155).
+
+3. `enable() -> Result` and cleanup
+
+The direction is sound, but the transaction and call graph are incomplete.
+
+`set_autostart` is not the only caller:
+
+- Startup rearming: [main.rs:511](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/src/main.rs:511).
+- Windows updater rearming: [updater.rs:411](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/src/updater.rs:411).
+
+That makes [C8-plan.md:140](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:140) factually false. Both callers need explicit policies; blindly propagating with `?` could abort application startup or disturb the updater’s disarm/rearm invariant.
+
+The enable operation also needs transaction-style rollback:
+
+- If plugin enable succeeds and crash-recovery enable fails, disable the plugin again.
+- If plugin enable itself fails, remove any stale crash-recovery unit.
+- On unsafe preflight, attempt both plugin and crash-recovery cleanup even if the first cleanup errors.
+- The disable path must never be blocked by preflight.
+
+Current Linux cleanup ignores every failure, reloads before deleting the file, and always reports success at [crash_recovery.rs:203](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/src/crash_recovery.rs:203). That cannot support the plan’s categorical “no stale unit” claim. Remove the file before the final daemon reload, check results, and report when disarm cannot be confirmed.
+
+4. F-016
+
+The implementation choice is correct:
+
+- `Zeroizing<KeyPair>` invokes rcgen’s existing `Zeroize`.
+- The direct dependency is required and reuses locked zeroize 1.8.2.
+- Early drop after signing shortens the DER lifetime.
+- The residual at [C8-plan.md:119](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:119) is honest: only rcgen’s `serialized_der` is guaranteed wiped; ring state, generation temporaries, swap, and core dumps remain.
+
+Two existing statements must explicitly be updated:
+
+- “the only copy … is gone” at [certs.rs:151](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/src/certs.rs:151).
+- “scrub the in-memory CA private key” / core-dump recovery wording at [Cargo.toml:56](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/Cargo.toml:56).
+
+Also, adding the direct dependency changes the root package’s dependency list in `Cargo.lock`; “no version churn” is accurate, “zero churn” is not literally accurate.
+
+5. Validation gate
+
+The systemd serializer gate is credible after fixing the token syntax and testing the production unit builder.
+
+The all-platform/preflight gate is not yet real:
+
+- A normal unit test cannot make `std::env::current_exe()` unsafe or mock a Tauri `AppHandle`/manager. To assert “neither writer runs,” factor a transaction helper taking an explicit path and injected enable/disable closures.
+- CI’s src-tauri test job is Ubuntu-only at [accelerator.yml:88](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/.github/workflows/accelerator.yml:88). Platform-specific macOS/Windows predicates will not execute there. Make their string policy host-independent and testable on Linux, or add platform test jobs.
+- Add an ACL regression assertion so raw plugin enable cannot silently be re-granted.
+- The Linux analyzer smoke should be mandatory on the designated Linux CI runner, not silently skipped under an unspecified “gated” condition.
+- Existing cert tests exercise generation and rustls loading, but do not independently prove chain validation or memory zeroization; [certs.rs:557](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/packages/accelerator/src-tauri/src/certs.rs:557) does not even consume the written CA. Keep the claim to behavioral regression plus compile-time confirmation of `Zeroizing<KeyPair>`.
+
+6. Assumptions
+
+Misstated facts/inferences:
+
+- “Plugin uses lossy `current_exe` display” at [C8-plan.md:131](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:131) omits AppImage selection and macOS canonicalization.
+- “Only caller” at [C8-plan.md:140](/home/homelab/Projects/aztec-accelerator/aztec-accelerator-2/.claude/worktrees/sechard-desktop-platform-secrets/implementations-plan/security-hardening/clusters/C8-plan.md:140) is false.
+- No oldest-supported-systemd assumption is stated, so the single-host smoke only establishes compatibility with CI’s systemd.
+
+Silent Asks remain around rollback behavior, startup failure policy, updater rearm failure, stale plugin-entry migration, and removal of the raw plugin capability.
+
+Keeping the serializer in src-tauri is fine. Scoping swap/core-dump hardening out is honest and proportionate.
+
+7. Second-order risk
+
+The principal new regression is the “conservative union”: literal rejection of `\` disables Windows autostart universally; expanding it to reject spaces globally would also reject normal Windows and macOS installation paths. Platform-specific policy is required.
+
+Refusing an unsafe enable request and deleting an older entry is consistent with Ask A1, provided the UI gets the refusal and cleanup failures are reported. Disabling must remain possible from every path.
+
+The `Result` change is beneficial, but without explicit handling it can break startup compilation, make startup unexpectedly fatal, or falsely mark Windows updater recovery as rearmed.
+
+VERDICT: reject (inconsistent systemd token syntax; platform-incorrect and bypassable preflight; incomplete Result/caller/rollback cleanup; non-enforcing all-platform validation)
