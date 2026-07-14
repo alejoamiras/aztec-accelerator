@@ -44,6 +44,32 @@ pub async fn healthy_aztec_on_port() -> bool {
     is_healthy_aztec_response(&body)
 }
 
+/// Probe `/health` and return the reported `version` iff the responder is a healthy Aztec
+/// (`status=="ok"`, `api_version==1`) AND carries a string `version`; `None` otherwise. Lets the
+/// F-004 launch tracker confirm it is observing THIS build's OWN server (by matching the reported
+/// version to `CARGO_PKG_VERSION`) rather than a foreign healthy Aztec that happens to own `:59833`.
+/// This matters because the redundant-instance bow-out is Windows-only — on macOS/Linux a second
+/// instance keeps running after losing the bind, so without the version-match a broken new build could
+/// see the incumbent's healthy `/health` and ratchet the floor to a version whose server never ran.
+pub async fn healthy_aztec_version_on_port() -> Option<String> {
+    let url = format!("http://127.0.0.1:{PORT}/health");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.json::<serde_json::Value>().await.ok()?;
+    if !is_healthy_aztec_response(&body) {
+        return None;
+    }
+    body.get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

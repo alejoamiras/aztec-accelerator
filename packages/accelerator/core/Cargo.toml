@@ -21,6 +21,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
 base64 = "0.22"
+# F-004: in-app verification of the signed update-manifest envelope (same crate + version the
+# updater plugin uses for artifact sigs) + SemVer comparison for the monotonic version floor.
+# These live in the GUI-agnostic core so they are unit-testable without the Tauri/GTK toolchain.
+minisign-verify = "=0.2.5"
+semver = "1"
 tempfile = "3"
 tracing = "0.1"
 dirs = "6"

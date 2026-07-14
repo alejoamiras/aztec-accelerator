@@ -38,6 +38,13 @@ on:
         required: false
         default: positive
         type: string
+    secrets:
+      # F-004: a C4+ N-1 enforces the signed-manifest envelope, so the smoke feed must be signed with
+      # the prod updater key (which the synthetic/real N-1 embeds). Same key the build job uses.
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: true
 
 jobs:
   updater-smoke:
@@ -86,6 +93,8 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           DMG=$(find n1 -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi

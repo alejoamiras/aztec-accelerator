@@ -27,9 +27,11 @@ pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
 /// state including auth_manager, config, and show_auth_popup — not a bare Default.
 pub type SharedAppState = Arc<crate::server::AppState>;
 
-/// Holds a pending update so `respond_update_prompt` can use it directly
-/// instead of re-checking the network. Managed as Tauri state.
-pub type PendingUpdate = Arc<parking_lot::Mutex<Option<tauri_plugin_updater::Update>>>;
+/// Holds a pending, already-VERIFIED update so `respond_update_prompt` can use it directly instead of
+/// re-checking the network. Storing a `VerifiedUpdate` (not a raw plugin `Update`) means the prompt
+/// path physically cannot install anything that has not cleared both F-004 layers. Managed as Tauri
+/// state.
+pub type PendingUpdate = Arc<parking_lot::Mutex<Option<crate::updater::VerifiedUpdate>>>;
 
 #[tauri::command]
 pub fn get_config(config: tauri::State<'_, ConfigState>) -> AcceleratorConfig {
@@ -245,7 +247,7 @@ pub fn respond_update_prompt(
             match update {
                 Some(update) => {
                     tracing::info!(
-                        version = %update.version,
+                        version = %update.version(),
                         auto_update,
                         "User clicked Update Now, downloading stored update"
                     );

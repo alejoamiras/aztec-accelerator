@@ -22,7 +22,7 @@ use tokio::sync::Semaphore;
 mod bind;
 pub use bind::bind_with_retry;
 mod probe;
-pub use probe::healthy_aztec_on_port;
+pub use probe::{healthy_aztec_on_port, healthy_aztec_version_on_port};
 mod auth;
 mod host;
 mod prove;
