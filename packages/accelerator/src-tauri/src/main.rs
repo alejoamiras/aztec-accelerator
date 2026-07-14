@@ -502,6 +502,7 @@ fn main() {
             // Hide from Dock — tray-only app
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let bundled_version = env!("AZTEC_BB_VERSION").to_string();
 
             let status = MenuItemBuilder::with_id("status", "Status: Idle")

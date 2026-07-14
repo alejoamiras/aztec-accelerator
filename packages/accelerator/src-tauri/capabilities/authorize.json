@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "authorize",
+  "description": "F-012: the authorization popup (label auth-<hash>) may invoke ONLY the two commands its flow needs — reading the verified-site badge and returning the user's decision. It explicitly canNOT reach settings mutators (remove_approved_origin, enable_safari_support) or the updater, which the ungated pre-F-012 surface allowed.",
+  "local": true,
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["auth-*"],
+  "permissions": ["allow-get-verified-info", "allow-respond-auth"]
+}

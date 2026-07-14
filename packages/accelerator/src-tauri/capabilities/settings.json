@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings",
+  "description": "F-012: the Settings window may invoke ONLY the settings commands. No core:default / autostart / process / updater plugin grants — the frontend calls Rust wrappers that drive plugins natively, and the window is closed from Rust, so it needs no plugin/core JS API.",
+  "local": true,
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["settings"],
+  "permissions": [
+    "allow-get-config",
+    "allow-get-autostart-enabled",
+    "allow-get-system-info",
+    "allow-set-autostart",
+    "allow-set-auto-update",
+    "allow-set-speed",
+    "allow-enable-safari-support",
+    "allow-disable-safari-support",
+    "allow-remove-approved-origin"
+  ]
+}

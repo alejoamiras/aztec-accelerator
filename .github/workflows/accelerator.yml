@@ -354,6 +354,19 @@ jobs:
       runner: ${{ matrix.runner }}
       mode: dev
 
+  # F-012 (D8): the dev matrix above runs `tauri dev`, which is `is_dev()==true` and never exercises the
+  # SHIPPED custom-protocol asset/CSP path. This Linux-only lane does a real `tauri build --debug` so the
+  # trust-boundary spec's CSP + per-window ACL assertions run against a production-mode binary. Linux-only
+  # keeps the extra full-compile cost to one job (the 3-OS dev matrix covers per-platform WebView/IPC diffs).
+  e2e-webdriver-builtdebug:
+    name: E2E WebDriver (built-debug, linux)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    uses: ./.github/workflows/_e2e-webdriver.yml
+    with:
+      runner: ubuntu-latest
+      mode: built-debug
+
   windows-prebuild:
     name: Windows Prebuild Smoke
     needs: changes
@@ -500,6 +513,7 @@ jobs:
         desktop-ui,
         e2e,
         e2e-webdriver,
+        e2e-webdriver-builtdebug,
         windows-prebuild,
         windows-build,
       ]
@@ -508,7 +522,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.e2e-webdriver-builtdebug.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

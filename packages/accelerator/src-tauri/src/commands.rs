@@ -34,18 +34,31 @@ pub type SharedAppState = Arc<crate::server::AppState>;
 pub type PendingUpdate = Arc<parking_lot::Mutex<Option<crate::updater::VerifiedUpdate>>>;
 
 #[tauri::command]
-pub fn get_config(config: tauri::State<'_, ConfigState>) -> AcceleratorConfig {
-    config.read().clone()
+pub fn get_config(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+) -> Result<AcceleratorConfig, String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
+    Ok(config.read().clone())
 }
 
 #[tauri::command]
-pub fn get_autostart_enabled(app: tauri::AppHandle) -> bool {
+pub fn get_autostart_enabled(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     use tauri_plugin_autostart::ManagerExt;
-    app.autolaunch().is_enabled().unwrap_or(false)
+    Ok(app.autolaunch().is_enabled().unwrap_or(false))
 }
 
 #[tauri::command]
-pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+pub fn set_autostart(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
     if enabled {
@@ -75,17 +88,21 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
 
 #[tauri::command]
 pub fn set_speed(
+    window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
     speed: config::Speed,
 ) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     mutate_config(&config, |cfg| cfg.speed = speed)
 }
 
 #[tauri::command]
 pub fn remove_approved_origin(
+    window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
     origin: String,
 ) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     mutate_config(&config, |cfg| {
         cfg.approved_origins
             .retain(|o| o.as_str() != origin.as_str())
@@ -99,13 +116,14 @@ pub struct SystemInfo {
 }
 
 #[tauri::command]
-pub fn get_system_info() -> SystemInfo {
-    SystemInfo {
+pub fn get_system_info(window: tauri::WebviewWindow) -> Result<SystemInfo, String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
+    Ok(SystemInfo {
         platform: std::env::consts::OS.to_string(),
         cpu_count: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),
-    }
+    })
 }
 
 /// DTO returned to the authorization popup when an origin is on the recognized list.
@@ -117,23 +135,34 @@ pub struct VerifiedSiteDto {
 
 #[tauri::command]
 pub fn get_verified_info(
+    window: tauri::WebviewWindow,
     origin: String,
     state: tauri::State<'_, VerifiedSitesState>,
-) -> Option<VerifiedSiteDto> {
-    state.lookup(&origin).map(|s| VerifiedSiteDto {
+) -> Result<Option<VerifiedSiteDto>, String> {
+    // F-012 (D6): only an authorization popup renders the verified badge.
+    require_auth_window(window.label())?;
+    Ok(state.lookup(&origin).map(|s| VerifiedSiteDto {
         display_name: s.display_name.clone(),
-    })
+    }))
 }
 
 #[tauri::command]
 pub fn respond_auth(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     auth: tauri::State<'_, AuthState>,
     request_id: String,
     origin: String,
     allowed: bool,
     remember: bool,
-) {
+) -> Result<(), String> {
+    // F-012 (D6) + SEC-06 (strengthened): bind the calling window to THIS request_id. windows.rs labels
+    // the popup `auth-{hash(request_id)}`; asserting the caller's label == that means a popup opened for
+    // request A physically cannot resolve request B, even if it forged B's id in the payload. Tauri
+    // resolves `window` from the native IPC message, so the label is unspoofable from JS.
+    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
+    require_label(window.label(), &label)?;
+
     let decision = if allowed {
         AuthDecision::Allow { remember }
     } else {
@@ -144,25 +173,71 @@ pub fn respond_auth(
     // origin-keyed resolve could); the real request then denies via its 60s timeout.
     auth.resolve(&request_id, decision);
 
-    // Close the authorization popup window. SEC-06 post-impl (codex L3): the window is labelled by
-    // `request_id`, NOT origin — origin-keying let a resolved request's stale 60s timeout close the
-    // *live* window of a newer same-origin request (and respond_auth close the wrong one). `origin` is
-    // kept on the payload for diagnostics only.
+    // Close the authorization popup window (labelled by `request_id`, not origin — see windows.rs).
+    // `origin` is kept on the payload for diagnostics only.
     tracing::debug!(origin = %origin, %request_id, allowed, "respond_auth decision");
-    let label = format!("auth-{}", sanitize_window_label(&request_id));
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.close();
     }
+    Ok(())
 }
 
 /// Create a unique, collision-free window label from an arbitrary key (an origin or, for auth
 /// popups, the opaque `request_id`). Uses a truncated SHA-256 hash to avoid collisions between
 /// similar keys (e.g. `example.com` vs `example_com` would collide with naive character replacement)
 /// and to keep the label charset window-system-safe.
+///
+/// F-012 (codex MED-6): 16 bytes = 128 bits of the digest. The label is a security binding
+/// (`respond_auth` asserts the caller's window == `auth-{hash(request_id)}`), so the earlier 6-byte
+/// (48-bit) truncation gave a needlessly small margin; 128 bits makes a collision a non-issue while
+/// staying a valid Tauri window label (lowercase hex).
 pub fn sanitize_window_label(key: &str) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(key.as_bytes());
-    hex::encode(&hash[..6])
+    hex::encode(&hash[..16])
+}
+
+/// Fixed window labels the caller-label guard checks against (must match `windows.rs`).
+pub const SETTINGS_LABEL: &str = "settings";
+pub const UPDATE_PROMPT_LABEL: &str = "update-prompt";
+const AUTH_LABEL_PREFIX: &str = "auth-";
+
+/// F-012 (D6) — the PRIMARY, framework-independent caller-label check behind the per-window capability
+/// ACL. Even if a capability were ever mis-scoped, a command still refuses to act for the wrong window.
+/// `actual` is the real invoking window's label, which Tauri resolves from the native IPC message — JS
+/// cannot spoof it. On mismatch: log (generic) and return a generic error that leaks no window topology.
+fn require_label(actual: &str, expected: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        tracing::warn!(
+            actual,
+            "command invoked from an unexpected window; rejecting"
+        );
+        Err("This command is not available from this window.".to_string())
+    }
+}
+
+/// True iff `label` is a well-formed authorization-popup label: `auth-` + exactly 32 lowercase hex chars
+/// (the 128-bit [`sanitize_window_label`] digest). Used by `get_verified_info`, which — unlike
+/// `respond_auth` — doesn't receive the `request_id`, so it can only assert the caller IS an auth popup.
+fn is_auth_label(label: &str) -> bool {
+    label
+        .strip_prefix(AUTH_LABEL_PREFIX)
+        .is_some_and(|h| h.len() == 32 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// Require the caller to be an authorization popup (any `auth-<hash>`). Generic error on mismatch.
+fn require_auth_window(actual: &str) -> Result<(), String> {
+    if is_auth_label(actual) {
+        Ok(())
+    } else {
+        tracing::warn!(
+            actual,
+            "auth command invoked from a non-auth window; rejecting"
+        );
+        Err("This command is not available from this window.".to_string())
+    }
 }
 
 /// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
@@ -170,9 +245,11 @@ pub fn sanitize_window_label(key: &str) -> String {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn enable_safari_support(
+    window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     use crate::certs;
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
@@ -207,7 +284,11 @@ pub async fn enable_safari_support(
 /// Disable Safari Support: save config. HTTPS stops on next restart.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+pub fn disable_safari_support(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     mutate_config(&config, |cfg| cfg.safari_support = false)?;
     tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
     Ok(())
@@ -216,20 +297,27 @@ pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(
 /// Stub for non-macOS platforms.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub async fn enable_safari_support() -> Result<(), String> {
+pub async fn enable_safari_support(window: tauri::WebviewWindow) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     Err("Safari Support is only available on macOS".to_string())
 }
 
 /// Stub for non-macOS platforms.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub fn disable_safari_support() -> Result<(), String> {
+pub fn disable_safari_support(window: tauri::WebviewWindow) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     Err("Safari Support is only available on macOS".to_string())
 }
 
 /// Toggle auto-update preference from Settings.
 #[tauri::command]
-pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> Result<(), String> {
+pub fn set_auto_update(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+    enabled: bool,
+) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
     mutate_config(&config, |cfg| cfg.auto_update = Some(enabled))?;
     tracing::info!(enabled, "Auto-update preference changed via Settings");
     Ok(())
@@ -240,12 +328,14 @@ pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> 
 /// - action="later": dismiss, auto_update stays None (prompt returns next launch)
 #[tauri::command]
 pub fn respond_update_prompt(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     config: tauri::State<'_, ConfigState>,
     pending: tauri::State<'_, PendingUpdate>,
     action: String,
     auto_update: bool,
 ) -> Result<(), String> {
+    require_label(window.label(), UPDATE_PROMPT_LABEL)?;
     match action.as_str() {
         "update" => {
             // Save auto-update preference from the checkbox
@@ -293,5 +383,53 @@ pub fn respond_update_prompt(
 fn close_update_prompt(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("update-prompt") {
         let _ = window.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_auth_label, require_auth_window, require_label, sanitize_window_label};
+
+    #[test]
+    fn require_label_matches_exactly() {
+        assert!(require_label("settings", "settings").is_ok());
+        assert!(require_label("auth-abc", "settings").is_err());
+        assert!(require_label("", "settings").is_err());
+        assert!(require_label("settings ", "settings").is_err()); // no trimming
+    }
+
+    #[test]
+    fn auth_label_is_prefix_plus_128bit_lowercase_hex() {
+        // A real label is `auth-` + the 32-hex (16-byte) digest — the width sanitize_window_label emits.
+        let real = format!("auth-{}", sanitize_window_label("some-request-id"));
+        assert_eq!(sanitize_window_label("some-request-id").len(), 32); // 16 bytes -> 32 hex
+        assert!(is_auth_label(&real));
+        assert!(require_auth_window(&real).is_ok());
+
+        // Reject: wrong prefix, uppercase hex, wrong length, non-hex, the settings label.
+        for bad in [
+            "settings",
+            "auth-",
+            "auth-XYZ",
+            "auth-ABCDEF0123456789ABCDEF0123456789", // uppercase
+            "auth-abc",                              // too short
+            "auth-0123456789abcdef0123456789abcdefff", // too long (34)
+            "notauth-0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!is_auth_label(bad), "{bad} must not be a valid auth label");
+            assert!(require_auth_window(bad).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn sanitize_window_label_is_deterministic_and_collision_resistant() {
+        assert_eq!(sanitize_window_label("a"), sanitize_window_label("a"));
+        assert_ne!(
+            sanitize_window_label("example.com"),
+            sanitize_window_label("example_com")
+        );
+        assert!(sanitize_window_label("x")
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     }
 }

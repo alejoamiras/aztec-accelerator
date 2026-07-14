@@ -209,6 +209,10 @@ describe("Authorization Flow", () => {
 
     await browser.switchToWindow(authWindowHandle!);
 
+    // Wait for the popup page to render before clicking — the "allow" tests already do this via #origin.
+    // F-012 made the popup load its logic from a bundled ES module (slower first paint on WebKitGTK), so
+    // clicking #deny without waiting raced the DOM and intermittently hit "element not found".
+    await browser.$("#deny").waitForExist({ timeout: 5000 });
     await clickBy("#deny");
 
     const proveResponse = await pendingProve;

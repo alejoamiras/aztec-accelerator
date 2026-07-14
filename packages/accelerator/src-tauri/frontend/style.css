@@ -56,6 +56,13 @@ h2 {
   flex: 1;
 }
 
+/* `display: flex` above would override the UA `[hidden] { display: none }`; re-assert it so
+   `#safari-row` (hidden in markup until macOS is detected) stays hidden — F-012 replaced its inline
+   `style="display:none"` with the `hidden` attribute so no inline style is needed under `style-src 'self'`. */
+.row[hidden] {
+  display: none;
+}
+
 /* Toggle switch — <label> so the entire track is clickable */
 .toggle {
   position: relative;
@@ -187,6 +194,18 @@ h2 {
 .speed-slider {
   --fill: 100%;
   -webkit-appearance: none;
+}
+
+/* F-012: the slider fill was set via a runtime `.style.setProperty("--fill", …)` inline style.
+   settings.js now sets `data-fill="0".."4"` instead, mapped here to the fill percentage, so no inline
+   style is written (keeps `style-src 'self'` clean). Index 0-4 → 0/25/50/75/100%. */
+.speed-slider[data-fill="0"] { --fill: 0%; }
+.speed-slider[data-fill="1"] { --fill: 25%; }
+.speed-slider[data-fill="2"] { --fill: 50%; }
+.speed-slider[data-fill="3"] { --fill: 75%; }
+.speed-slider[data-fill="4"] { --fill: 100%; }
+
+.speed-slider {
   appearance: none;
   width: 100%;
   height: 6px;

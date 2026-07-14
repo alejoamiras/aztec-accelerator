@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>C10 / F-012 — Locking the desktop app's trust boundary (ELI5)</title>
+<style>
+  :root {
+    --bg:#faf9f5; --fg:#1c1b18; --muted:#6b675e; --hair:#e2ded3; --surface:#fff;
+    --code:#f0ede4; --link:#3a6ea5; --accent:#2f7d4f; --accent-bg:#e8f3ec;
+    --warn:#9a6a00; --warn-bg:#fbf1d8; --danger:#a3352e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14140f; --fg:#ece7d9; --muted:#9a9484; --hair:#2c2a20; --surface:#1a1a13;
+      --code:#20201a; --link:#8ab4e8; --accent:#7fd8a0; --accent-bg:#16241b;
+      --warn:#e0b34d; --warn-bg:#2a2313; --danger:#e5877f;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    line-height:1.6; }
+  main { max-width:820px; margin:0 auto; padding:2.4rem 1.2rem 4rem; }
+  h1 { font-size:1.7rem; line-height:1.25; margin:0 0 .3rem; }
+  h2 { font-size:1.25rem; margin:2.2rem 0 .6rem; padding-top:1rem; border-top:1px solid var(--hair); }
+  h3 { font-size:1.02rem; margin:1.3rem 0 .3rem; }
+  p,li { font-size:1rem; }
+  code { background:var(--code); padding:.1em .35em; border-radius:4px; font-size:.86em;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .lede { font-size:1.08rem; color:var(--fg); }
+  .tag { display:inline-block; font-size:.72rem; letter-spacing:.04em; text-transform:uppercase;
+    background:var(--accent-bg); color:var(--accent); padding:.2em .6em; border-radius:999px;
+    font-weight:600; vertical-align:middle; }
+  .card { background:var(--surface); border:1px solid var(--hair); border-radius:10px;
+    padding:1rem 1.2rem; margin:.8rem 0; }
+  .phase { border-left:3px solid var(--accent); }
+  .gate { color:var(--muted); font-size:.9rem; margin-top:.35rem; }
+  .warn { background:var(--warn-bg); border:1px solid var(--warn); border-radius:8px;
+    padding:.7rem 1rem; margin:1rem 0; }
+  .warn b { color:var(--warn); }
+  .seed { background:var(--code); border:1px solid var(--hair); border-radius:8px;
+    padding:.8rem 1rem; font-family:ui-monospace,Menlo,monospace; font-size:.82rem;
+    white-space:pre-wrap; word-break:break-word; overflow-x:auto; }
+  ul { padding-left:1.2rem; }
+  .rubric td { padding:.25rem .8rem .25rem 0; font-size:.95rem; vertical-align:top; }
+  .hi { color:var(--danger); font-weight:600; }
+  .lo { color:var(--muted); }
+  a { color:var(--link); }
+  .foot { margin-top:2.5rem; color:var(--muted); font-size:.85rem; }
+</style>
+</head>
+<body>
+<main>
+
+<p><span class="tag">Deep tier</span> &nbsp;<span class="tag">F-012</span> &nbsp;<span class="tag">security-hardening · C10</span></p>
+<h1>Locking the desktop app's "trust boundary"</h1>
+<p class="lede">The Accelerator desktop app shows a few small windows — the site-approval popup, the
+settings panel, the update prompt. Each can talk to the app's Rust core through a set of 12 privileged
+commands. Right now <b>any window can call any command</b> — the approval popup could, in principle, silently
+turn on Safari support or forget an approved site. This plan closes that: each window may call only <i>its
+own</i> commands, hostile injected scripts are blocked, and the whole thing is proven by tests that fail loudly
+if the wall ever has a hole.</p>
+
+<h2>The one thing to understand</h2>
+<p>Tauri (the framework) has a permission system, but we discovered — and then <b>proved in Tauri's own source
+code</b> — that it does <i>not</i> guard your app's own commands unless you explicitly declare them. Today we
+don't, so all 12 commands are wide open to every window. The fix is a switch: once we declare the commands in
+the build script, Tauri flips to "deny unless this window was explicitly granted this command." We add three
+independent layers so the wall holds even if one brick is loose:</p>
+<ul>
+  <li><b>Per-window permissions</b> (the framework's own wall) — proven real, not decorative.</li>
+  <li><b>A Rust identity check</b> on each command ("are you the window I expect?") — a second wall the
+      framework can't bypass, and it also ties the approval popup to the exact request it's answering.</li>
+  <li><b>A strict Content-Security-Policy</b> — blocks injected scripts, inline code, <code>eval</code>, and
+      sneaky ways of leaking data out (network calls, page navigation, form posts).</li>
+</ul>
+
+<h2>Why "deep" tier</h2>
+<table class="rubric">
+  <tr><td>Novelty</td><td class="hi">HIGH</td><td>Tauri v2's ACL model is subtle; the default behavior surprised us.</td></tr>
+  <tr><td>Blast radius</td><td class="hi">HIGH</td><td>Touches every window + every privileged command in the desktop app.</td></tr>
+  <tr><td>Security sensitivity</td><td class="hi">HIGH</td><td>This <i>is</i> the app's trust boundary.</td></tr>
+  <tr><td>Irreversibility</td><td class="lo">low</td><td>It's configuration + tests; reversible.</td></tr>
+  <tr><td>Migration cost</td><td class="lo">low</td><td>No data/state migration.</td></tr>
+  <tr><td>External coupling</td><td>moderate</td><td>Adds one first-party framework dependency + the webview engine.</td></tr>
+</table>
+<p>Three HIGH dimensions → <b>deep</b>: three independent plan drafts, then a double audit (Codex + Fable),
+then a final fresh review. Both audits already ran and their fixes are folded in.</p>
+
+<h2>What we'll do, step by step</h2>
+
+<div class="card phase"><b>P0 — Add the dependency.</b> Pull in the official <code>@tauri-apps/api</code> at an exact
+pinned version so the frontend can call commands without the global back-door.
+<div class="gate">Proves itself by: a clean frozen-lockfile install + lint.</div></div>
+
+<div class="card phase"><b>P1 — Move all code out of the HTML.</b> Today each popup has its script written
+inline in the page. We bundle those into real files and delete the inline blocks and the old bridge.
+<div class="gate">Proves itself by: the bundle builds, the mock UI tests pass, a static test confirms zero inline
+scripts/styles remain.</div></div>
+
+<div class="card phase"><b>P2 — Turn on the strict security policy.</b> Remove the global back-door and switch
+on the Content-Security-Policy plus Rust guards that block navigating or posting a form to an attacker.
+<div class="gate">Proves itself by: real-browser tests where injected scripts, <code>eval</code>, off-site
+fetches, navigations and form posts are all blocked — but normal app calls still work.</div></div>
+
+<div class="card phase"><b>P3 — Flip the permission switch (the big one).</b> Declare the 12 commands and give
+each window only its own. This is all-or-nothing, so we run the <i>full</i> positive test suite (every real
+flow must still work) <b>plus</b> a test that proves a window is refused another window's command — and that no
+side effect happened.
+<div class="gate">Proves itself by: a real-build ("custom-protocol") test lane on Linux + the 3-OS suite +
+an exact per-window permission-matrix static check.</div></div>
+
+<div class="card phase"><b>P4 — Add the Rust identity check.</b> Each command confirms it was called by the
+window it belongs to; the approval popup additionally confirms it's answering the exact request it was opened
+for.
+<div class="gate">Proves itself by: Rust unit tests for the check + the cross-window refusal still holding.</div></div>
+
+<div class="card phase"><b>P5 — Lock it in.</b> Wire the static drift-detector tests into the normal lint/test
+run so a future change that weakens any of this fails CI.
+<div class="gate">Proves itself by: the whole 3-OS pipeline green.</div></div>
+
+<h2>Two judgment calls the audits disagreed on (and how we settled them)</h2>
+<div class="card"><b>Should each window keep the framework's "core" default permissions?</b> → <b>No, drop them.</b>
+It turns out those grants currently apply to <i>no</i> window at all (they're dormant), so keeping them while
+adding the new per-window rules would actually <i>hand out new powers</i> the popups never had. The popups are
+closed by Rust and use no such APIs, so we drop them and add back only a specific one if a test ever proves it's
+needed.</div>
+<div class="card"><b>Is the normal test mode enough to prove the shipped app is safe?</b> → <b>No — add a real-build
+test lane.</b> We found the development test mode never runs the exact code path that ships to users. So the
+key security test also runs against a true production-style build (on Linux, to keep CI cheap), plus a guard
+that stops anyone silently weakening the policy in dev.</div>
+
+<div class="warn"><b>Open question for you:</b> the real-build test lane costs extra CI time. The plan runs it on
+Linux only (the trust-boundary test), keeping the full 3-OS matrix on the fast dev mode. If you'd rather run it
+on all three OSes for maximum parity, say so — otherwise Linux-only is the default.</div>
+
+<h2>What could still go wrong (and the guards)</h2>
+<ul>
+  <li><b>A future change quietly weakens the wall</b> (a new command not listed, a relaxed policy, a new
+      window). → Static "drift-detector" tests fail CI.</li>
+  <li><b>The webview engine itself has a bug.</b> → Out of scope; no CSP can stop a native flaw. Documented as
+      residual.</li>
+  <li><b>A bundled script file goes stale or ships unreviewed code.</b> → Clean-before-build, a staleness guard
+      in the build script, and a scan of the emitted bundles.</li>
+</ul>
+
+<h2>Seeds (for the implementation loop)</h2>
+<p class="lo">These drive the autonomous build once the plan is approved.</p>
+<div class="seed">/goal — F-012 fixed: withGlobalTauri:false + Bun ESM bundles + externalized scripts/styles + strict CSP (with form-action + Rust navigation guards) + per-window capabilities + build.rs AppManifest + Rust caller-label checks. Static + Playwright-mock + WebDriver gates green in CI (isolated cross-window-denial asserting the ACL reason + a state canary; CSP/navigation negatives; a built-debug custom-protocol lane). Post-impl Codex xhigh folded. PR into security-hardening, CI green, merged.</div>
+<div class="seed">/loop 15m — Drive C10 by phase: P0 deps → P1 build+externalize → P2 CSP+navigation flip → P3 capabilities+build.rs manifest (the ACL flip: run the FULL positive suite + the isolated denial proof, no label code yet) → P4 Rust caller-label DiD → P5 lock. Run static+lint locally each phase; Tauri-GUI/WebDriver in CI. Commit and push per phase.</div>
+
+<p class="foot">Companion to <a href="C10-plan.md">plan.md</a>. Audits: <a href="C10-audit-codex.md">Codex</a> ·
+<a href="C10-audit-fable.md">Fable</a>. Debugging log: <a href="../lessons/phase-C10.md">lessons/phase-C10.md</a>.
+Both audits returned CHANGES-REQUESTED; all findings folded into plan v2. Final fresh-context Codex pass
+confirmed both judgment calls (drop core perms; add the real-build test lane) and added one test-design fix
+(prove the blocked command is real before proving it's blocked) — now folded. GATE 1 closed; implementation-ready.</p>
+
+</main>
+</body>
+</html>

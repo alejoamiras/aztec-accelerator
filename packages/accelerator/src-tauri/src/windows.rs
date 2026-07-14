@@ -3,7 +3,32 @@
 use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
 use aztec_accelerator::commands;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::NewWindowResponse;
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+
+/// True iff `url` is the app's OWN local asset origin. Tauri serves the bundled frontend from
+/// `tauri://localhost` (Linux/macOS) or `http://tauri.localhost` (Windows). Every other navigation
+/// target is off-origin. F-012 (codex HIGH-3): the CSP `connect-src` blocks fetch/XHR/WS exfil but NOT
+/// a top-level navigation that smuggles data in the URL, and on Linux the `<meta>`-delivered CSP ignores
+/// `frame-ancestors` — so this Rust guard is the real anti-navigation/anti-exfil control.
+///
+/// GATE-3 (codex MED): match ONLY the current platform's asset origin — accepting `http://tauri.localhost`
+/// on Linux/macOS would permit a real loopback HTTP navigation (e.g. `http://tauri.localhost:59833/?data=…`
+/// hitting a listening server) that is NOT the embedded-asset protocol. Also reject any embedded credentials
+/// or explicit port; the asset origin never has either.
+fn is_local_asset_url(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
+    }
+    #[cfg(not(windows))]
+    {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
+    }
+}
 
 /// Focus a newly created window. We stay as Accessory (tray-only) rather than
 /// switching to Regular activation policy, which would show the app in the Dock
@@ -47,6 +72,13 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> bool {
             .resizable(false)
             .center()
             .always_on_top(config.always_on_top)
+            // F-012 (codex HIGH-3): confine the webview to its own local asset origin. Block any attempt
+            // to navigate off-origin (data-exfil / phishing) and deny opening new windows/webviews — the
+            // popups never legitimately do either. (Confirmed NOT the cause of the CI asset-load failure —
+            // that was `tauri dev` injecting a dev-server devUrl → empty embed; fixed by running the binary
+            // directly. These guards allow the real tauri://localhost initial load.)
+            .on_navigation(is_local_asset_url)
+            .on_new_window(|_url, _features| NewWindowResponse::Deny)
             .build()
     {
         focus_window(&window);
@@ -150,4 +182,80 @@ pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_ver
             focus_if_open: false,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_asset_url;
+    use tauri::Url;
+
+    #[test]
+    fn navigation_guard_allows_only_the_local_asset_origin() {
+        // The real initial loads for THIS platform (incl. query params) must be permitted.
+        #[cfg(not(windows))]
+        let ok_forms = [
+            "tauri://localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
+            "tauri://localhost/settings.html",
+        ];
+        #[cfg(windows)]
+        let ok_forms = [
+            "http://tauri.localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
+            "http://tauri.localhost/settings.html",
+        ];
+        for ok in ok_forms {
+            assert!(
+                is_local_asset_url(&Url::parse(ok).unwrap()),
+                "{ok} should be allowed"
+            );
+        }
+
+        // The OTHER platform's origin must be REJECTED here (codex MED: `http://tauri.localhost` on
+        // Linux/macOS is a real loopback HTTP navigation, not the embedded-asset protocol).
+        #[cfg(not(windows))]
+        let other_platform = "http://tauri.localhost/settings.html";
+        #[cfg(windows)]
+        let other_platform = "tauri://localhost/settings.html";
+        assert!(
+            !is_local_asset_url(&Url::parse(other_platform).unwrap()),
+            "{other_platform} (other platform's origin) must be blocked"
+        );
+
+        // Ports and credentials are never part of the asset origin.
+        #[cfg(not(windows))]
+        let ported_credentialed = [
+            "tauri://localhost:59833/settings.html",
+            "tauri://user@localhost/settings.html",
+            "tauri://user:pass@localhost/settings.html",
+        ];
+        #[cfg(windows)]
+        let ported_credentialed = [
+            "http://tauri.localhost:59833/settings.html",
+            "http://user@tauri.localhost/settings.html",
+            "http://user:pass@tauri.localhost/settings.html",
+        ];
+        for bad in ported_credentialed {
+            assert!(
+                !is_local_asset_url(&Url::parse(bad).unwrap()),
+                "{bad} (port/creds) must be blocked"
+            );
+        }
+
+        // Everything off-origin — look-alikes, the IPC host, non-http(s) schemes — must be blocked.
+        for bad in [
+            "https://evil.example/",
+            "http://localhost/x",                   // wrong host
+            "https://tauri.localhost/",             // wrong scheme
+            "http://tauri.localhost.evil.example/", // suffix look-alike
+            "tauri://evil/",
+            "http://ipc.localhost/", // IPC host is not a navigation target
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !is_local_asset_url(&Url::parse(bad).unwrap()),
+                "{bad} should be blocked"
+            );
+        }
+    }
 }
