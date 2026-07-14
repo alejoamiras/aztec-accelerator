@@ -20,26 +20,25 @@ const ROOT = path.resolve(import.meta.dir, "..");
 const SRC_DIR = path.join(ROOT, "src-tauri", "frontend-src");
 const OUT_DIR = path.join(ROOT, "src-tauri", "frontend", "assets");
 const MANIFEST = path.join(OUT_DIR, ".build-manifest.json");
+// Also fingerprint the dependency surface: a @tauri-apps/api bump (package.json) or a resolution change
+// (root bun.lock) must invalidate the shipped bundles even if frontend-src/ is untouched (GATE-3 codex).
+const PKG_JSON = path.join(ROOT, "package.json");
+const LOCKFILE = path.join(ROOT, "..", "..", "bun.lock");
 
 // Per-page entrypoints (bridge.js is shared and pulled into each bundle, not an entry of its own).
 const ENTRIES = ["authorize.js", "settings.js", "update-prompt.js"] as const;
 
 /**
- * FNV-1a 64-bit over raw bytes → lowercase hex. Deliberately simple and dependency-free so `build.rs`
- * can recompute it identically in Rust (a content fingerprint to detect "forgot to rebuild", not a
- * security primitive — the trust comes from CI building the bundles from reviewed source).
+ * SHA-256 over raw bytes → lowercase hex. `build.rs` recomputes it identically (sha2 crate) so the guard
+ * detects not just "forgot to rebuild" but a swapped/injected OUTPUT bundle — a fnv-style fingerprint an
+ * attacker could trivially forge would not. (An attacker who can rewrite BOTH a bundle and this manifest
+ * still wins; the guard's job is to catch accidental staleness and a bundle-only substitution.)
  */
-function fnv1a64Hex(bytes: Uint8Array): string {
-  const OFFSET = 0xcbf29ce484222325n;
-  const PRIME = 0x100000001b3n;
-  const MASK = 0xffffffffffffffffn;
-  let hash = OFFSET;
-  for (const b of bytes) {
-    hash = ((hash ^ BigInt(b)) * PRIME) & MASK;
-  }
-  return hash.toString(16).padStart(16, "0");
+function sha256Hex(bytes: ArrayBuffer | Uint8Array): string {
+  return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 }
 
+/** Fingerprint every build INPUT: each frontend-src/*.js plus the dependency-surface files. */
 async function hashInputs(): Promise<Record<string, string>> {
   const inputs: Record<string, string> = {};
   const glob = new Glob("*.js");
@@ -47,13 +46,28 @@ async function hashInputs(): Promise<Record<string, string>> {
   for await (const name of glob.scan({ cwd: SRC_DIR })) names.push(name);
   names.sort();
   for (const name of names) {
-    const bytes = new Uint8Array(await Bun.file(path.join(SRC_DIR, name)).arrayBuffer());
-    inputs[name] = fnv1a64Hex(bytes);
+    inputs[`frontend-src/${name}`] = sha256Hex(
+      await Bun.file(path.join(SRC_DIR, name)).arrayBuffer(),
+    );
   }
+  inputs["package.json"] = sha256Hex(await Bun.file(PKG_JSON).arrayBuffer());
+  inputs["bun.lock"] = sha256Hex(await Bun.file(LOCKFILE).arrayBuffer());
   return inputs;
 }
 
+/** Fingerprint every emitted OUTPUT bundle (so a post-build swap is caught). */
+async function hashOutputs(): Promise<Record<string, string>> {
+  const outputs: Record<string, string> = {};
+  for (const e of ENTRIES) {
+    outputs[e] = sha256Hex(await Bun.file(path.join(OUT_DIR, e)).arrayBuffer());
+  }
+  return outputs;
+}
+
 async function main() {
+  // Snapshot inputs BEFORE bundling (to catch a source edit racing the build).
+  const inputsBefore = await hashInputs();
+
   // Clean-before-build: never ship an orphaned stale bundle from a since-deleted source.
   await rm(OUT_DIR, { recursive: true, force: true });
   await mkdir(OUT_DIR, { recursive: true });
@@ -79,8 +93,18 @@ async function main() {
     if (!emitted.has(entry)) throw new Error(`expected bundle ${entry} was not emitted`);
   }
 
+  // Re-snapshot inputs AFTER bundling; a mismatch means a source changed mid-build → the manifest would
+  // record hashes for content the bundles don't reflect. Fail rather than record a lie.
   const inputs = await hashInputs();
-  await Bun.write(MANIFEST, `${JSON.stringify({ schema: 1, algo: "fnv1a64", inputs }, null, 2)}\n`);
+  if (JSON.stringify(inputs) !== JSON.stringify(inputsBefore)) {
+    throw new Error("a tracked input changed during the bundle build; re-run frontend:build");
+  }
+
+  const outputs = await hashOutputs();
+  await Bun.write(
+    MANIFEST,
+    `${JSON.stringify({ schema: 2, algo: "sha256", inputs, outputs }, null, 2)}\n`,
+  );
 
   console.log(
     `frontend:build → ${ENTRIES.length} bundles + manifest in ${path.relative(ROOT, OUT_DIR)}`,

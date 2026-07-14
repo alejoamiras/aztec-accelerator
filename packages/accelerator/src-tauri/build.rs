@@ -1,18 +1,38 @@
-/// FNV-1a 64-bit over raw bytes → lowercase hex, padded to 16. MUST match `scripts/build-frontend.ts`
-/// so the staleness check compares like-for-like (a content fingerprint, not a security primitive).
-fn fnv1a64_hex(bytes: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+/// SHA-256 over raw bytes → lowercase hex. MUST match `scripts/build-frontend.ts` so the guard compares
+/// like-for-like (GATE-3 codex: strong enough to detect a swapped OUTPUT bundle, not just staleness).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+/// Read `path`, compare its SHA-256 to the manifest entry `key`; panic (with `hint`) on missing/mismatch.
+fn verify_hash(
+    path: &str,
+    key: &str,
+    recorded: &serde_json::Map<String, serde_json::Value>,
+    hint: &str,
+) {
+    println!("cargo:rerun-if-changed={path}");
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        panic!("F-012: cannot read `{path}` (manifest key `{key}`): {e} — {hint}")
+    });
+    let expected = recorded
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!("F-012: `{key}` missing from the bundle manifest (STALE) — {hint}")
+        });
+    if sha256_hex(&bytes) != expected {
+        panic!("F-012: `{path}` does not match the bundle manifest (`{key}` STALE or SWAPPED) — {hint}");
     }
-    format!("{hash:016x}")
 }
 
 /// F-012: the popup frontend ships as gitignored `frontend/assets/*.js` bundled from `frontend-src/` by
 /// `bun run frontend:build`. Those bundles are trusted by `script-src 'self'`, so a Rust build must NEVER
-/// silently embed HTML pointing at MISSING or STALE bundles. This fails the build (with a fix hint) unless
-/// every source file's current fingerprint matches the `.build-manifest.json` written at bundle time.
+/// silently embed HTML pointing at MISSING, STALE, or SWAPPED bundles. This fails the build unless the
+/// current sources, the dependency-surface files, AND the emitted bundles all match `.build-manifest.json`.
 fn verify_frontend_bundles() {
     println!("cargo:rerun-if-changed=frontend-src");
     println!("cargo:rerun-if-changed=frontend/assets/.build-manifest.json");
@@ -20,26 +40,41 @@ fn verify_frontend_bundles() {
     let hint = "run `bun run --cwd packages/accelerator frontend:build` before building the Tauri app \
                 (the bundles are gitignored; tauri's beforeDev/beforeBuildCommand does this automatically)";
 
-    for bundle in ["authorize.js", "settings.js", "update-prompt.js"] {
-        let p = format!("frontend/assets/{bundle}");
-        println!("cargo:rerun-if-changed={p}");
-        if !std::path::Path::new(&p).is_file() {
-            panic!("F-012: missing frontend bundle `{p}` — {hint}");
-        }
-    }
-
     let manifest_path = "frontend/assets/.build-manifest.json";
     let manifest_raw = std::fs::read_to_string(manifest_path)
         .unwrap_or_else(|e| panic!("F-012: cannot read {manifest_path}: {e} — {hint}"));
     let manifest: serde_json::Value = serde_json::from_str(&manifest_raw)
         .unwrap_or_else(|e| panic!("F-012: {manifest_path} is not valid JSON: {e} — {hint}"));
-    let recorded = manifest
+    if manifest.get("algo").and_then(|v| v.as_str()) != Some("sha256") {
+        panic!("F-012: {manifest_path} algo is not sha256 — {hint}");
+    }
+    let inputs = manifest
         .get("inputs")
         .and_then(|v| v.as_object())
         .unwrap_or_else(|| panic!("F-012: {manifest_path} has no `inputs` object — {hint}"));
+    let outputs = manifest
+        .get("outputs")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| panic!("F-012: {manifest_path} has no `outputs` object — {hint}"));
 
-    // Every current source file must be present in the manifest with a matching fingerprint.
-    let mut seen = 0usize;
+    // Emitted bundles: exact set + content match (catches a post-build swap).
+    let bundles = ["authorize.js", "settings.js", "update-prompt.js"];
+    if outputs.len() != bundles.len() {
+        panic!(
+            "F-012: manifest lists {} output bundles, expected {} — {hint}",
+            outputs.len(),
+            bundles.len()
+        );
+    }
+    for bundle in bundles {
+        verify_hash(&format!("frontend/assets/{bundle}"), bundle, outputs, hint);
+    }
+
+    // Dependency-surface inputs (a @tauri-apps/api bump must invalidate the bundles).
+    verify_hash("../package.json", "package.json", inputs, hint);
+    verify_hash("../../../bun.lock", "bun.lock", inputs, hint);
+
+    // Every current frontend source must match; the manifest must reference no phantom sources.
     for entry in std::fs::read_dir("frontend-src")
         .unwrap_or_else(|e| panic!("F-012: cannot read frontend-src/: {e}"))
     {
@@ -47,24 +82,25 @@ fn verify_frontend_bundles() {
         if path.extension().and_then(|e| e.to_str()) != Some("js") {
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap()
-            .to_string();
-        let actual = fnv1a64_hex(&std::fs::read(&path).expect("read source"));
-        let expected = recorded.get(&name).and_then(|v| v.as_str()).unwrap_or_else(|| {
-            panic!("F-012: source `frontend-src/{name}` is missing from the bundle manifest (STALE) — {hint}")
-        });
-        if actual != expected {
-            panic!("F-012: `frontend-src/{name}` changed since the bundles were built (STALE) — {hint}");
-        }
-        seen += 1;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap();
+        verify_hash(
+            &format!("frontend-src/{name}"),
+            &format!("frontend-src/{name}"),
+            inputs,
+            hint,
+        );
     }
-    // And the manifest must not reference sources that no longer exist (also stale).
-    if seen != recorded.len() {
-        panic!("F-012: the bundle manifest references {} sources but frontend-src/ has {seen} — {hint}",
-            recorded.len());
+    let src_keys = inputs
+        .keys()
+        .filter(|k| k.starts_with("frontend-src/"))
+        .count();
+    let on_disk = std::fs::read_dir("frontend-src")
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("js"))
+        .count();
+    if src_keys != on_disk {
+        panic!("F-012: manifest lists {src_keys} frontend sources but frontend-src/ has {on_disk} — {hint}");
     }
 }
 

@@ -11,11 +11,22 @@ use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 /// target is off-origin. F-012 (codex HIGH-3): the CSP `connect-src` blocks fetch/XHR/WS exfil but NOT
 /// a top-level navigation that smuggles data in the URL, and on Linux the `<meta>`-delivered CSP ignores
 /// `frame-ancestors` — so this Rust guard is the real anti-navigation/anti-exfil control.
+///
+/// GATE-3 (codex MED): match ONLY the current platform's asset origin — accepting `http://tauri.localhost`
+/// on Linux/macOS would permit a real loopback HTTP navigation (e.g. `http://tauri.localhost:59833/?data=…`
+/// hitting a listening server) that is NOT the embedded-asset protocol. Also reject any embedded credentials
+/// or explicit port; the asset origin never has either.
 fn is_local_asset_url(url: &Url) -> bool {
-    match url.scheme() {
-        "tauri" => url.host_str() == Some("localhost"),
-        "http" => url.host_str() == Some("tauri.localhost"),
-        _ => false,
+    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
+    }
+    #[cfg(not(windows))]
+    {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
     }
 }
 
@@ -178,22 +189,59 @@ mod tests {
 
     #[test]
     fn navigation_guard_allows_only_the_local_asset_origin() {
-        // The real initial loads (Linux/macOS `tauri://localhost`, Windows `http://tauri.localhost`),
-        // including query params, must be permitted.
-        for ok in [
+        // The real initial loads for THIS platform (incl. query params) must be permitted.
+        #[cfg(not(windows))]
+        let ok_forms = [
             "tauri://localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
             "tauri://localhost/settings.html",
-            "http://tauri.localhost/update-prompt.html?current=1&version=2",
-        ] {
+        ];
+        #[cfg(windows)]
+        let ok_forms = [
+            "http://tauri.localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
+            "http://tauri.localhost/settings.html",
+        ];
+        for ok in ok_forms {
             assert!(
                 is_local_asset_url(&Url::parse(ok).unwrap()),
                 "{ok} should be allowed"
             );
         }
-        // Everything off-origin — including look-alikes and the IPC host — must be blocked.
+
+        // The OTHER platform's origin must be REJECTED here (codex MED: `http://tauri.localhost` on
+        // Linux/macOS is a real loopback HTTP navigation, not the embedded-asset protocol).
+        #[cfg(not(windows))]
+        let other_platform = "http://tauri.localhost/settings.html";
+        #[cfg(windows)]
+        let other_platform = "tauri://localhost/settings.html";
+        assert!(
+            !is_local_asset_url(&Url::parse(other_platform).unwrap()),
+            "{other_platform} (other platform's origin) must be blocked"
+        );
+
+        // Ports and credentials are never part of the asset origin.
+        #[cfg(not(windows))]
+        let ported_credentialed = [
+            "tauri://localhost:59833/settings.html",
+            "tauri://user@localhost/settings.html",
+            "tauri://user:pass@localhost/settings.html",
+        ];
+        #[cfg(windows)]
+        let ported_credentialed = [
+            "http://tauri.localhost:59833/settings.html",
+            "http://user@tauri.localhost/settings.html",
+            "http://user:pass@tauri.localhost/settings.html",
+        ];
+        for bad in ported_credentialed {
+            assert!(
+                !is_local_asset_url(&Url::parse(bad).unwrap()),
+                "{bad} (port/creds) must be blocked"
+            );
+        }
+
+        // Everything off-origin — look-alikes, the IPC host, non-http(s) schemes — must be blocked.
         for bad in [
             "https://evil.example/",
-            "http://localhost/x",                   // wrong host for http
+            "http://localhost/x",                   // wrong host
             "https://tauri.localhost/",             // wrong scheme
             "http://tauri.localhost.evil.example/", // suffix look-alike
             "tauri://evil/",
