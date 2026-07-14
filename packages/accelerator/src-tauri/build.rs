@@ -90,5 +90,31 @@ fn main() {
     serde_json::from_str::<serde_json::Value>(&vs_contents)
         .unwrap_or_else(|e| panic!("verified-sites.json is not valid JSON: {e}"));
 
-    tauri_build::build()
+    // F-012: declare the app's IPC command surface. Tauri only enforces the per-window ACL for app-local
+    // commands when an app manifest exists (see tauri `webview/mod.rs`: the invoke gate is
+    // `plugin_command || has_app_acl_manifest`). Declaring these commands sets `has_app_acl` true, which
+    // flips every one of them from framework-default-allow to per-window default-DENY: a window whose
+    // capability does not grant `allow-<command>` is rejected before the handler runs. This is ALL-OR-
+    // NOTHING — every command below MUST be granted by exactly the windows that use it (see
+    // capabilities/*.json), or that flow breaks. Keep this list == the generate_handler! set in main.rs
+    // (the scripts/tauri-trust-boundary.test.ts set-equality guard fails CI on drift).
+    let commands: &[&str] = &[
+        "get_config",
+        "get_autostart_enabled",
+        "set_autostart",
+        "set_speed",
+        "remove_approved_origin",
+        "get_system_info",
+        "get_verified_info",
+        "respond_auth",
+        "enable_safari_support",
+        "disable_safari_support",
+        "set_auto_update",
+        "respond_update_prompt",
+    ];
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(commands)),
+    )
+    .expect("failed to run tauri-build");
 }
