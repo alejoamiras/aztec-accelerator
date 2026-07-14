@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C6 / F-007 — bb cache integrity — ELI5</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --hair:#e2e2e2; --surface:#f7f7f8;
+          --code:#eef; --link:#2b6cb0; --warn:#b7791f; --warn-bg:#fffaf0; --ok:#2f855a; --ok-bg:#f0fff4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181c; --fg:#e6e6e6; --muted:#9aa0a6; --hair:#2c2f36; --surface:#1e2127;
+            --code:#232838; --link:#7fb3ff; --warn:#e0a94b; --warn-bg:#2a2213; --ok:#68d391; --ok-bg:#12241a; } }
+  body { background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         max-width:820px; margin:0 auto; padding:2rem 1.2rem 5rem; }
+  h1 { font-size:1.7rem; margin:.2rem 0 .4rem; } h2 { font-size:1.25rem; margin:2rem 0 .6rem; border-bottom:1px solid var(--hair); padding-bottom:.3rem; }
+  h3 { font-size:1.05rem; margin:1.3rem 0 .3rem; } code { background:var(--code); padding:.1rem .35rem; border-radius:4px; font-size:.88em; }
+  .muted { color:var(--muted); } a { color:var(--link); }
+  .card { background:var(--surface); border:1px solid var(--hair); border-radius:8px; padding:1rem 1.2rem; margin:.8rem 0; }
+  .gate { font-size:.9rem; color:var(--muted); border-left:3px solid var(--hair); padding-left:.7rem; margin-top:.5rem; }
+  .warn { background:var(--warn-bg); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1.1rem; margin:.9rem 0; }
+  .ok { background:var(--ok-bg); border:1px solid var(--ok); border-radius:8px; padding:.8rem 1.1rem; margin:.9rem 0; }
+  pre { background:var(--code); padding:.9rem; border-radius:8px; overflow-x:auto; font-size:.82rem; }
+  ul { padding-left:1.3rem; } li { margin:.25rem 0; }
+</style>
+</head>
+<body>
+
+<h1>C6 — Trusting the <code>bb</code> prover binary the cache hands us</h1>
+<p class="muted">Cluster C6 · Finding F-007 · mid-tier blueprint · branch <code>sechard/bb-cache-integrity</code></p>
+
+<p>The accelerator runs a downloaded native binary called <code>bb</code> to build zero-knowledge proofs.
+That binary reads your private witness data. Today, two things download <code>bb</code> into a trusted cache
+folder and <strong>neither checks that the bytes are the real ones</strong> — and the runtime that later runs
+<code>bb</code> trusts the cache purely because the file <em>exists</em>. So a tampered or man-in-the-middled
+download becomes a trusted binary that runs over your secrets.</p>
+
+<div class="warn">
+<strong>The core bug in one sentence.</strong> <code>scripts/download-bb.ts</code> does
+<code>fetch → untar → chmod</code> with zero digest verification, and Rust's <code>find_bb</code> returns a
+cached <code>bb</code> on <code>exists()</code> with no re-check — and if it ever <em>did</em> reject one, it
+would silently fall through to a different <code>bb</code> from <code>~/.bb</code> or <code>$PATH</code>.
+</div>
+
+<h2>Why mid tier</h2>
+<p>Rubric: <strong>security-sensitivity HIGH</strong> (it's the binary that touches witnesses) and
+<strong>external-coupling HIGH</strong> (GitHub release downloads). Blast radius and irreversibility are
+moderate (per-user cache, re-downloadable). Two HIGH but not novel and not architectural → <strong>mid</strong>
+(plan + competing outline + codex&nbsp;+&nbsp;fable dual audit + final codex pass).</p>
+
+<h2>What we're building</h2>
+<p>The fix is the master plan's own F-007 recipe, applied to <em>both</em> download paths and the runtime:</p>
+<div class="card">
+<strong>1. Verify at download.</strong> Fetch the tarball, compare its SHA-256 against GitHub's published
+release-asset digest (the same fail-closed check the Rust side already does for its own path). No digest, wrong
+digest, or a network error ⇒ refuse.
+</div>
+<div class="card">
+<strong>2. Extract safely into a private staging folder.</strong> Accept only a single regular file named
+<code>bb</code> — reject symlinks, <code>..</code> paths, extra members, and anything over a sane size cap. This
+is the "don't let a malicious archive write outside where you expect" rule.
+</div>
+<div class="card">
+<strong>3. Sign, then fingerprint, then publish atomically.</strong> On macOS we ad-hoc re-sign <code>bb</code>
+(which changes its bytes), so we compute the fingerprint <em>after</em> signing. We write a small
+<code>bb.sha256.json</code> marker (archive digest + final-binary digest) and then rename the finished folder
+into place in one atomic step — a crash never leaves a half-written trusted entry.
+</div>
+<div class="card">
+<strong>4. Re-check every time we run it.</strong> Before running a cached <code>bb</code>, re-hash it and
+compare to the marker. Missing/corrupt/legacy/mismatched marker ⇒ treat the cache as a miss, re-download the
+verified copy, and — crucially — <strong>never silently substitute a different <code>bb</code></strong> for a
+specifically requested version.
+</div>
+
+<div class="ok">
+<strong>Defense in depth, on purpose.</strong> We keep BOTH the download-time check (catches the network
+attacker at the point of attack) and the runtime marker re-check (catches an at-rest tampered cache). Both prior
+reviewers agreed a marker-only design was too weak — it would make <code>bb:download</code> silently "succeed"
+on an unusable cache and only fail much later at the first proof.
+</div>
+
+<h2>Phases &amp; how each proves itself</h2>
+
+<h3>Phase 1 — TypeScript downloader (<code>scripts/download-bb.ts</code>)</h3>
+<p>Add digest verification, private staging, tar-safety, the marker, and atomic publish; skip re-download only
+when an existing marker validates.</p>
+<div class="gate">Proves itself by: root <code>bun run test</code> (new <code>download-bb.test.ts</code>: mismatch
+throws + nothing published; unsafe archive member rejected; marker written post-codesign; skip only on a valid
+marker) + <code>bun run lint</code>.</div>
+
+<h3>Phase 2 — Rust marker helpers + downloader</h3>
+<p>Add <code>verify_cached_bb</code>, marker read/write, stage-and-atomic-publish in <code>downloader.rs</code>;
+make listing use cheap marker-existence only.</p>
+<div class="gate">Proves itself by: <code>cargo test</code> (marker round-trip; accept valid / reject
+missing+mismatch; marker computed post-finalize) + <code>cargo clippy -D warnings</code> + <code>cargo fmt --check</code>.</div>
+
+<h3>Phase 3 — Rust runtime: fail-closed, no wrong-version fallback</h3>
+<p><code>find_bb</code> re-verifies the cache and hard-errors on a bad requested version (no
+sidecar/<code>~/.bb</code>/<code>$PATH</code> fallthrough); <code>prove.rs</code> decides "needs download" via
+verification, not <code>exists()</code>.</p>
+<div class="gate">Proves itself by: <code>cargo test</code> (end-to-end: legacy/tampered cache → exactly one
+verified re-download → correct path; download failure → no execution; requested bad version → Err, not a
+different binary) + clippy + fmt.</div>
+
+<h3>Phase 4 — CI wiring + docs</h3>
+<p>Make sure <code>accelerator.yml</code> runs both the root TS test and the core tests; confirm the pinned bb
+versions actually expose a GitHub digest; document the fail-closed/offline behavior.</p>
+<div class="gate">Proves itself by: <code>bun run lint:actions</code> + full <code>bun run test</code> + full
+<code>cargo test</code>.</div>
+
+<h2>Human context you need</h2>
+<ul>
+<li><strong>GitHub release-asset digests</strong> are a real feature (since June 2025): each asset exposes an
+immutable <code>sha256:…</code> generated at upload. We mirror the exact fetch the Rust side already uses.</li>
+<li><strong>macOS ad-hoc signing changes the binary</strong>, which is why the fingerprint must be taken last.
+Getting that order wrong would make every Mac cache-hit falsely fail.</li>
+<li><strong>The listing path feeds <code>/health</code> and the tray</strong>, which get polled — so listing must
+stay a cheap folder stat, never a "hash every cached binary" loop (that could read gigabytes on each poll).</li>
+</ul>
+
+<h2>Open questions (defaults chosen)</h2>
+<ul>
+<li><strong>Legacy caches</strong> (downloaded before this change, no marker): default = fail-closed +
+re-download on first use. Offline machines with a legacy cache will need one online re-download.</li>
+<li><strong>Same-UID local attacker</strong> who can already write the cache can rewrite both binary <em>and</em>
+marker — this is <em>out of scope</em> for F-007 (it's a network-integrity finding; that attacker already has a
+higher privilege). Closing it needs a publisher signature or a folder ACL — noted as future work.</li>
+</ul>
+
+<h2>Seed strings</h2>
+<pre>/goal  All C6 phases marked done in plan.md, each backed by its validation gate
+       (root `bun run test` + `cargo test`/clippy/fmt + `lint:actions`) with the
+       command output in the transcript; post-impl codex xhigh audit on the diff
+       folded; PR into security-hardening with CI green; ledger row set DONE.</pre>
+<pre>/loop 15m  Drive C6: verify-on-download (both paths) + private staging + tar-safety
+           + structured marker (archive+binary digests, post-codesign) + atomic publish
+           + fail-closed runtime rehash with NO wrong-version fallback. After each edit
+           run the touched package's test+lint (root `bun run test` for scripts/).
+           Commit/push. Consult codex on any marker/tar-safety detail.</pre>
+
+<p class="muted">Full plan: <a href="C6-plan.md">C6-plan.md</a> · audits: <a href="C6-audit-codex.md">codex</a>,
+<a href="C6-audit-fable.md">fable</a> · master: <a href="../plan.md">plan.md</a></p>
+
+</body>
+</html>
