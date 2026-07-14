@@ -54,11 +54,31 @@ describe("windows bb.exe sidecar supply chain", () => {
     }
   });
 
-  test("every committed pin is manual-review with a well-formed sha", () => {
+  test("an empty / whitespace review note fails closed", () => {
+    WINDOWS_BB_CHECKSUMS["0.0.0-emptynote"] = {
+      sha256: "a".repeat(64),
+      provenance: "manual-review",
+      note: "",
+    };
+    WINDOWS_BB_CHECKSUMS["0.0.0-wsnote"] = {
+      sha256: "a".repeat(64),
+      provenance: "manual-review",
+      note: "   ",
+    };
+    try {
+      expect(() => resolveWindowsBbChecksum("0.0.0-emptynote")).toThrow(/empty review note/);
+      expect(() => resolveWindowsBbChecksum("0.0.0-wsnote")).toThrow(/empty review note/);
+    } finally {
+      delete WINDOWS_BB_CHECKSUMS["0.0.0-emptynote"];
+      delete WINDOWS_BB_CHECKSUMS["0.0.0-wsnote"];
+    }
+  });
+
+  test("every committed pin is manual-review with a well-formed sha + a real note", () => {
     for (const [version, pin] of Object.entries(WINDOWS_BB_CHECKSUMS)) {
       expect(pin.provenance, `${version} provenance`).toBe("manual-review");
       expect(pin.sha256, `${version} sha`).toMatch(/^[0-9a-f]{64}$/);
-      expect(pin.note.length, `${version} note`).toBeGreaterThan(0);
+      expect(pin.note.trim().length, `${version} note`).toBeGreaterThan(0);
     }
   });
 

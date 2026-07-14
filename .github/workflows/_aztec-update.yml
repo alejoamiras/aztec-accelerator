@@ -46,6 +46,10 @@ jobs:
     name: Check for new ${{ inputs.dist_tag }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # F-008 least-privilege: reusable jobs inherit the CALLER's GITHUB_TOKEN scope unless downgraded
+    # here. This job only reads, so read-only — the token cannot merge/push even if a step tried.
+    permissions:
+      contents: read
     outputs:
       needs_update: ${{ steps.check.outputs.needs_update }}
       new_version: ${{ steps.check.outputs.new_version }}
@@ -67,10 +71,12 @@ jobs:
         run: |
           if [ -n "$INPUT_VERSION" ]; then
             # F-008: validate the forced version against the strict pattern BEFORE emitting it as an
-            # output (it flows into branch names, commits, and the fetch URL). Fail closed on anything
-            # outside X.Y.Z[-nightly.YYYYMMDD|-rc.N|-aztecnr-rc.N]. LC_ALL=C for a byte-wise match.
-            if ! LC_ALL=C printf '%s' "$INPUT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(nightly\.[0-9]{8}|rc\.[0-9]+|aztecnr-rc\.[0-9]+))?$'; then
-              echo "::error::Invalid forced version: '$INPUT_VERSION'"
+            # output (it flows into branch names, commits, the fetch URL). A WHOLE-STRING bash `=~` match
+            # (not `grep`, which matches any single line) so a multiline value like $'5.0.0\nneeds_update=false'
+            # cannot slip an injected output record past the check. Generic error — never echo the raw value.
+            VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-(nightly\.[0-9]{8}|rc\.[0-9]+|aztecnr-rc\.[0-9]+))?$'
+            if [[ ! "$INPUT_VERSION" =~ $VERSION_RE ]]; then
+              echo "::error::Invalid forced version (rejected before use)"
               exit 1
             fi
             CURRENT=$(bun -e "console.log(JSON.parse(require('fs').readFileSync('packages/sdk/package.json','utf8')).devDependencies['@aztec/aztec.js'])")
@@ -105,6 +111,9 @@ jobs:
     if: needs.check-update.outputs.needs_update == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Needs contents:write ONLY here — the branch push. It does NOT create/merge PRs.
+    permissions:
+      contents: write
     env:
       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
     steps:
@@ -164,6 +173,11 @@ jobs:
     if: needs.update.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # F-008: read-only GITHUB_TOKEN — ALL PR create/edit/close/merge here use the scoped App tokens
+    # (create-pr token has no contents:write; the opt-in merge uses a separate contents-scoped token).
+    # So even the inherited GITHUB_TOKEN cannot merge/push on the `none` path.
+    permissions:
+      contents: read
     env:
       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
       CURRENT_VERSION: ${{ needs.check-update.outputs.current_version }}
@@ -191,11 +205,14 @@ jobs:
           NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
         run: |
           CURRENT_BRANCH="${BRANCH_PREFIX}-${NEW_VERSION}"
+          # F-008: pass branch_prefix/current-branch as jq --arg DATA, never interpolated into the jq
+          # program (a crafted prefix could otherwise rewrite the filter and select every open PR).
           gh pr list \
             --base "$TARGET_BRANCH" \
             --state open \
             --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"${BRANCH_PREFIX}-\")) | select(.headRefName != \"${CURRENT_BRANCH}\") | .number" \
+          | jq -r --arg prefix "${BRANCH_PREFIX}-" --arg current "$CURRENT_BRANCH" \
+              '.[] | select(.headRefName | startswith($prefix)) | select(.headRefName != $current) | .number' \
           | while read -r pr_num; do
               echo "Closing stale PR #$pr_num"
               # F-008 least-privilege: close WITHOUT --delete-branch (deletion needs contents:write,

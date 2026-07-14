@@ -104,6 +104,6 @@ Deleting the role revokes its already-issued sessions; that's why R6 waits for a
 ## Residuals accepted (see C5-CONSOLIDATED.md §Security)
 CloudFront invalidation is distribution-wide (no path IAM key) — cache-bust only. The release role can
 still OVERWRITE `latest.json` with garbage/replay — F-004 client-side manifest verification is the
-backstop (it cannot DELETE it). `publish-nightlies.yml` is inert (unset `NIGHTLIES_ENABLED`) — reviving it
-needs a 4th `playground-nightly/*` role. Owner/admin compromise can rewrite rulesets/secrets — no second
+backstop (it cannot DELETE it). `publish-nightlies.yml` is DELETED (nightlies unused) — reviving it
+needs a reviewed source change PLUS a 4th `playground-nightly/*` role. Owner/admin compromise can rewrite rulesets/secrets — no second
 human authority in a solo repo (hardware-key 2FA is the out-of-repo lever).

@@ -128,6 +128,13 @@ export function resolveWindowsBbChecksum(version: string): string {
       `Windows bb.exe pin for ${version} has a malformed sha256: ${JSON.stringify(pin.sha256)}`,
     );
   }
+  // A manual-review pin MUST carry a non-empty review record (what a human checked). An empty/whitespace
+  // note means the review evidence is missing — fail closed (F-008).
+  if (typeof pin.note !== "string" || pin.note.trim().length === 0) {
+    throw new Error(
+      `Windows bb.exe pin for ${version} has an empty review note — a manual-review pin must record what was reviewed.`,
+    );
+  }
   return pin.sha256;
 }
 
