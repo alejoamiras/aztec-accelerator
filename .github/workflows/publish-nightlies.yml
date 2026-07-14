@@ -1,5 +1,13 @@
 name: Publish Nightlies
 
+# F-005 (C5): the `nightlies` branch is UNUSED (owner decision 2026-07-14). This workflow is
+# workflow_dispatch-only and mixes an irreversible npm publish (`_publish-sdk.yml`) with an AWS deploy;
+# after the F-005 cutover its AWS role + `AWS_ROLE_ARN` secret are gone, so a stray dispatch could
+# npm-publish while the deploy fails (a partial, irreversible run). Every job is therefore hard-disabled
+# disabled: every job is gated on the repo variable `NIGHTLIES_ENABLED == 'true'`, which is NOT set, so
+# nothing runs. Do NOT re-enable (set that var) without FIRST adding a dedicated `playground-nightly/*`
+# deploy role + `AWS_ROLE_ARN_NIGHTLIES` secret (see C5 Ask A6).
+
 on:
   workflow_dispatch:
 
@@ -8,12 +16,12 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write
-  contents: write
+  contents: read
 
 jobs:
   changes:
     name: Detect changes
+    if: ${{ vars.NIGHTLIES_ENABLED == 'true' }} # F-005: disabled (nightlies unused)
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
@@ -31,13 +39,14 @@ jobs:
               - "packages/playground/**"
 
   e2e:
+    if: ${{ vars.NIGHTLIES_ENABLED == 'true' }} # F-005: disabled (nightlies unused)
     uses: ./.github/workflows/_e2e.yml
     with:
       ref: ${{ github.sha }}
 
   publish-sdk:
     needs: [changes, e2e]
-    if: needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch'
+    if: ${{ vars.NIGHTLIES_ENABLED == 'true' }} # F-005: disabled (nightlies unused; was: sdk changed || dispatch)
     uses: ./.github/workflows/_publish-sdk.yml
     with:
       dist_tag: nightlies
@@ -45,11 +54,13 @@ jobs:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   deploy-app:
-    # Deploy playground unless E2E explicitly failed — skip on cancel, proceed on skip/success.
-    if: ${{ !cancelled() && needs.e2e.result != 'failure' }}
+    if: ${{ vars.NIGHTLIES_ENABLED == 'true' }} # F-005: disabled (nightlies unused; was: !cancelled() && e2e != failure)
     needs: e2e
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -70,7 +81,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_NIGHTLIES }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Deploy playground to S3

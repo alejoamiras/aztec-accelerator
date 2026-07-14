@@ -7,6 +7,11 @@ on:
         description: "Version to release (e.g. 1.2.0)"
         required: true
         type: string
+      auth_probe:
+        description: "F-005: prove the release OIDC role assumes correctly, then STOP (no build/tag/release/publish)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-accelerator
@@ -47,6 +52,29 @@ jobs:
             echo "is_prerelease=$IS_PRERELEASE"
           } >> "$GITHUB_OUTPUT"
           echo "Resolved: version=$INPUT_VERSION  is_prerelease=$IS_PRERELEASE"
+
+  # F-005 (Codex C3): prove the release OIDC token can assume the release-feed role BEFORE any tag/release
+  # side effect. `tag` needs this, so a post-cutover trust/secret failure aborts before a dangling tag is
+  # pushed. Runs on every dispatch (the release role is assumable on Release Accelerator/main regardless of
+  # is_prerelease); with `auth_probe=true` this is the only meaningful job — the side-effecting jobs are
+  # all guarded off. GetBucketLocation is the least-privilege probe (allowed by the release policy).
+  release-auth-preflight:
+    name: Release AWS trust preflight
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Prove the release role (GetBucketLocation only)
+        run: |
+          aws s3api get-bucket-location --bucket "${{ secrets.S3_BUCKET_NAME }}" >/dev/null
+          echo "✅ release role assumed + GetBucketLocation OK"
 
   e2e-webdriver:
     name: Pre-release E2E Gate
@@ -554,7 +582,10 @@ jobs:
 
   tag:
     name: Create Git Tag
-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
+    needs: [validate, release-auth-preflight, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
+    # F-005: skip in auth_probe mode so a probe never pushes a tag. release-auth-preflight in `needs`
+    # means a broken release-role trust aborts BEFORE the tag is pushed (no dangling tag).
+    if: ${{ !inputs.auth_probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -704,7 +735,9 @@ jobs:
     # sign-update-feed is SKIPPED for prereleases (they get no feed); a skipped need must not skip
     # release. Run whenever nothing FAILED/was cancelled — so a failed signing correctly blocks release,
     # a skipped one (prerelease) does not.
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    # F-005: `!inputs.auth_probe` so a probe never publishes. `tag` is skipped in probe mode, but this
+    # job's `!cancelled()` would otherwise still run it — guard explicitly.
+    if: ${{ !inputs.auth_probe && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -896,7 +929,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
         if: needs.validate.outputs.is_prerelease == 'false'
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }} # F-005: feed-only role (Put latest.json)
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Upload latest.json to S3 for auto-updater
@@ -906,9 +939,11 @@ jobs:
           aws s3 cp release-files/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
             --content-type application/json \
             --cache-control "max-age=300"
+          # F-005: the viewer-request CloudFront function rewrites the URI PRE-cache, so the cached key is
+          # `/landing/releases/latest.json`; invalidate that (keep the legacy path too, harmless).
           aws cloudfront create-invalidation \
             --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --paths "/releases/latest.json"
+            --paths "/landing/releases/latest.json" "/releases/latest.json"
 
   # Enforce the live-feed check that was previously done by hand: after `release`
   # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
