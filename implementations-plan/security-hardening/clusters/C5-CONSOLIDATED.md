@@ -18,7 +18,7 @@ feed-deletion bug in the landing sync. Nightlies is out of scope (branch unused)
 | `…-release-feed` | `release-accelerator.yml` | Put ONLY `landing/releases/latest.json`; GetBucketLocation; CreateInvalidation (no List, no Delete) | release-accelerator.yml · `AWS_ROLE_ARN_RELEASE` |
 | `…-playground-testnet` | `publish-testnet.yml` | Put/Delete `playground/*`; ListBucket prefix `playground/`; GetBucketLocation; CreateInvalidation | publish-testnet.yml · `AWS_ROLE_ARN_PLAYGROUND` |
 
-Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo:alejoamiras/aztec-accelerator:ref:refs/heads/main`, **and a workflow-file claim** (see Ledger D1) binding it to exactly one workflow.
+Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo:alejoamiras/aztec-accelerator:ref:refs/heads/main`, **and the `workflow` NAME claim** (see Ledger D1 — resolved after the audits contradicted each other on `job_workflow_ref`) binding it to exactly one workflow: `Deploy Landing Page` / `Release Accelerator` / `Publish Testnet`.
 
 ## Corrections to the original brief (verified in-tree — all three legs caught these)
 1. **`deploy-landing.yml:38-41` uses `sync --delete`** (not "no --delete"). `packages/landing/dist/` has no
@@ -34,24 +34,30 @@ Each role trust conditions on `StringEquals`: `aud=sts.amazonaws.com`, `sub=repo
    dispatched from another ref fails BEFORE side effects.
 
 ## Decision Ledger (divergences resolved)
-- **D1 — workflow-binding claim (main+codex agree on binding; differ on WHICH claim).** All roles share
-  `sub=main`, so `sub` alone does NOT isolate pipelines from each other. Bind each role to its workflow.
-  Codex used `token.actions.githubusercontent.com:workflow` (the workflow NAME — impersonatable by a
-  rename). Main-leg used `job_workflow_ref` (the workflow FILE @ ref — immune to renames). **CHOSEN: the
-  FILE-path claim** `token.actions.githubusercontent.com:job_workflow_ref`, StringEquals, value
-  **`alejoamiras/aztec-accelerator/.github/workflows/<file>.yml@refs/heads/main`** — **NO `repo:` prefix**
-  (that prefix is for `sub` ONLY; the `repo:`-prefixed value was an ERROR caught by the double audit
-  [Fable H1] that would fail EVERY AssumeRole). `job_workflow_ref` is a CONFIRMED AWS IAM condition key
-  (AWS "Available keys for AWS OIDC federation", GitHub tab: actor, actor_id, `job_workflow_ref`,
-  repository, repository_id, repository_owner_id, `workflow`, ref, environment, enterprise_id); for these
-  top-level S3 jobs it equals the calling workflow's ref. **There is NO `workflow_ref` AWS key** — the only
-  weaker fallback is `workflow` (workflow NAME, renameable), used ONLY if the file claim proves unusable.
-  MANDATORY runbook gate: a **negative cross-role AssumeRole smoke** — from main, a scratch/other workflow
-  attempts `role-to-assume: <release ARN>` and MUST be DENIED. This is the ONLY gate that catches a wrong
-  claim value AND the "drop the claim to unblock deploys" degraded hotfix (positive smokes +
-  simulate-principal-policy never evaluate TRUST policies → they'd pass silently). Residual (all variants):
-  malicious code *already merged to main* runs as the legit workflow — unstoppable by any claim; mitigated
-  by main protection + F-004 client-side manifest verification.
+- **D1 — workflow-binding claim (RESOLVED after a double-audit CONTRADICTION).** All roles share
+  `sub=main`, so `sub` alone does NOT isolate pipelines from each other; bind each role to its workflow.
+  The two audits DISAGREED on the file-path claim: **Fable** said `job_workflow_ref` is present for
+  top-level jobs (== the workflow ref) and AWS-supported; **Codex** said `job_workflow_ref` is emitted
+  ONLY for jobs inside a *reusable* workflow — these three S3 jobs are TOP-LEVEL, so their token carries
+  `workflow_ref` (which AWS does NOT expose as a condition key), NOT `job_workflow_ref` → every AssumeRole
+  would fail. This dispute is load-bearing (a wrong choice = total deploy outage), so we do NOT guess.
+  **CHOSEN: the `workflow` (NAME) claim** — `token.actions.githubusercontent.com:workflow`, StringEquals,
+  exact values `Deploy Landing Page` / `Release Accelerator` / `Publish Testnet` (the `name:` of each
+  workflow). BOTH audits + the AWS GitHub-tab doc agree `workflow` is AWS-supported AND present for ALL
+  jobs (top-level or reusable). It addresses the actual threat this binding targets — a STOLEN token
+  exfiltrated from one pipeline's run cannot assume another role. Its only weakness (a PR that RENAMES a
+  workflow's `name:` to impersonate another) requires MERGING to main, i.e. it is a strict subset of the
+  already-accepted "malicious code on main" residual (unstoppable by ANY claim). The stronger file-path
+  binding (`job_workflow_ref` value `alejoamiras/aztec-accelerator/.github/workflows/<file>.yml@refs/heads/main`
+  — NO `repo:` prefix, which is `sub`-only) is deferred as an OPTIONAL upgrade (ASK A7) requiring EITHER
+  empirical proof the claim is present for these top-level jobs, OR wrapping each S3 job in a reusable
+  workflow so `job_workflow_ref` is unambiguously populated. MANDATORY runbook gate regardless: a
+  **negative cross-role AssumeRole smoke** — from main, a scratch/other workflow attempts
+  `role-to-assume: <release ARN>` and MUST be DENIED. It is the ONLY gate that catches a mis-bound claim or
+  a "drop the claim to unblock deploys" degraded hotfix (positive smokes + `simulate-principal-policy`
+  never evaluate TRUST policies → they'd pass silently). Residual (all variants): malicious code *already
+  merged to main* runs as the legit workflow — mitigated by main protection + F-004 client-side manifest
+  verification.
 - **D2 — release policy scope.** Codex: exact object `landing/releases/latest.json`. main/fable:
   `landing/releases/*`. **CHOSEN: exact object** (tightest least-privilege; the only object the release
   writes). Note in README: adding a second release-feed object requires a policy update.
@@ -219,6 +225,55 @@ Key points baked into the runbook:
 - **L2 → folded** in Facts (OIDC-sub wording qualified).
 - **L4 → folded**: Phase-2 scopes `id-token: write` to the `deploy-app` job **and the `_publish-sdk.yml`
   call job** (both need it — the latter for Sigstore provenance).
+
+## Double-audit fold (Codex — REJECT, all blockers folded)
+Codex rejected the pre-fold plan; every finding is folded (all are plan-text / sequencing corrections):
+- **C1 (Critical) → D1 rewritten** above: the Codex↔Fable contradiction on `job_workflow_ref` (present for
+  top-level jobs?) is resolved by using the `workflow` NAME claim (AWS-supported + always present).
+  file-path binding deferred to ASK **A7**. Negative cross-role AssumeRole smoke retained.
+- **C2 (High) → nightlies must be EXPLICITLY retired, not silently broken.** `publish-nightlies.yml` is
+  `workflow_dispatch` and CAN be dispatched on main (operators select the ref); it runs `_publish-sdk.yml`
+  (irreversible **npm publish**) in one job and `deploy-app` (AWS) in another. Deleting the legacy role +
+  secret would let a dispatch publish to npm SUCCESSFULLY while `deploy-app` fails — a partial, irreversible
+  run. **FOLD (Phase 2):** explicitly disable the dispatch path of `publish-nightlies.yml` (e.g. a guard
+  `if: ${{ github.event_name == 'workflow_dispatch' && false }}` on its jobs, or a top-level early-exit
+  step, with a comment pointing at the nightlies-dropped decision) so it cannot run at all — NOT merely
+  leave it referencing a to-be-deleted secret. Supersedes A6's "documented dormancy": dormancy is made
+  ACTIVE (the workflow is inert), removing the irreversible-npm risk.
+- **C3 (High) → release trust must be proven BEFORE the git tag.** `release-accelerator.yml` pushes the tag
+  (`tag` job, ~L555) BEFORE the `release` job authenticates to AWS; moving AWS creds before `gh release
+  create` is not enough — a post-cutover trust/secret failure leaves a dangling `accelerator-vN` tag with
+  no release/feed. **FOLD (Phase 2):** add a stable-release AWS PREFLIGHT to the early `validate` job
+  (job-scoped `id-token: write`, configure the release role, call a harmless `s3:GetBucketLocation`), and
+  make the `tag`/`release`/publish jobs `needs:` that validation. Add an `auth_probe` dispatch input (or a
+  scratch workflow) so the human can prove the release OIDC token assumes the release role BEFORE deleting
+  the legacy role.
+- **C4 (Med) → Phase 3 (legacy deletion) is a SEPARATE post-smoke PR**, NOT part of the campaign's
+  security-hardening→main integration. Otherwise an ordinary `tofu apply` from final `main` removes the
+  fallback role before smokes finish. The "no in-flight runs" preflight must include QUEUED + RUNNING jobs
+  for all old-role consumers (deleting a role revokes already-issued sessions).
+- **C5 (Med) → ruleset hardening.** Set `strict_required_status_checks_policy: true` (else stale-green
+  commits merge). Resolve **A1 = YES** (require `Actionlint Status`; its own workflow already declares it
+  required). Apply the ruleset BEFORE the final security-hardening→main PR so it protects the cutover
+  itself.
+- **C6 (Med) → multipart-upload cost.** `PutObject` authorizes multipart init/complete; a compromised
+  token can leave incomplete parts billable after expiry (`AbortMultipartUpload` only helps honest CLIs).
+  **FOLD (Phase 1):** add a bucket-wide `AbortIncompleteMultipartUpload` lifecycle rule (e.g. 1 day) to
+  `s3.tf`.
+- **C7 (Low) → S3 carve-out edges.** `--exclude "releases/*"` AND `--exclude "releases"` (cover the exact
+  `releases` key the IAM Deny also names); keep `ListBucket`/`GetBucketLocation` in SEPARATE statements
+  from object actions (never put the `s3:prefix` condition on `PutObject` — it would implicit-deny uploads);
+  no head-object assert (use `list-objects-v2`); reword "feed deletion impossible" → "the CI roles cannot
+  call `DeleteObject`" (the release role can still OVERWRITE `latest.json` with garbage/replay — F-004
+  client verification is the backstop).
+- **Residuals Codex added:** the site bucket has NO S3 versioning in tofu → site overwrite/delete recovery
+  needs a rebuild+redeploy; consider enabling bucket versioning (materially improves recovery without
+  giving CI `DeleteObjectVersion`) — ASK **A8**. The solo-account "no SCP/permission-boundary" assumption
+  is unsafe (a personal account can be in an AWS Org) → preflight must inspect Org/boundary state before
+  trusting `simulate-principal-policy`.
+- **A7 (new):** choose the workflow-binding mechanism before implementation — `workflow` NAME (chosen
+  default, simple, rename-weak) vs reusable-workflow wrapping + `job_workflow_ref` file binding (stronger,
+  more refactor). **A8 (new):** enable S3 bucket versioning for site-recovery?
 
 ## Seeds (draft — finalized post-approval)
 - **/goal (recommended):** All C5 phases ✓ in the consolidated plan, each backed by its validation gate
