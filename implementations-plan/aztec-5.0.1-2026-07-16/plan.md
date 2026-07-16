@@ -51,7 +51,7 @@ Pure bump cycle first, token swap as a second playground-only cycle. Codex prefe
 
 **Validation gate:** override + frozen installs exit 0; zero skips + all `@aztec/*` pins `5.0.1` + standards pin present exactly once; **attestation subject digest == installed tarball integrity (recorded)**; lock-diff per the discipline above; `bun run test` exit 0 (lint + 3-graph playground typecheck + scripts-tsc + sdk + unit + **the new root `test:scripts` running the extended bump-tool test**); playground `build` exit 0; Playwright mocked (8) green; production smoke (2) green (proves standards import/bundling in the built bundle — load-time only); token CI spec disposition recorded (enabled & green incl. negative cases, or measured & explicitly rejected with the number); `CRS_CACHE_VERSION` = `5.0.1`. Layers: lint · typecheck ×3 · unit (incl. scripts) · UI-mock e2e · production-build (load) smoke.
 
-### P2 — Land the PR: native-bb-5.0.1 e2e + runtime-download gate
+### P2 ✓ — Land the PR — gate passed 2026-07-16 (PR #395 merged; all CI green incl. the ENABLED token spec + native-bb transmit; local download gate vs bb 5.0.1 PASSED)
 
 - Branch → PR (bump commit + swap commit kept separate) → CI → auto-merge. No workflow edits expected beyond the bump tool script; `lint:actions` if any YAML moves.
 - `sdk.yml` native-bb e2e (`build_accelerator: true`, sandbox auto-detects 5.0.1): asserts `transmit`.
@@ -69,7 +69,7 @@ Pure bump cycle first, token swap as a second playground-only cycle. Codex prefe
 
 **Validation gate:** pre-flight explicit; FPC deployed + balance recorded; pre-publish standards smoke (or contingency executed + documented) BEFORE (c); publish+deploy green; registry test passes; released-app native + Safari + WASM pass; **live-bundle token flow 500/500 recorded**; `npm view` `testnet` = `latest` = `5.0.1`. Layers: e2e-live-network (two stages incl. production-bundle behavior) · registry-artifact.
 
-### P4 — Deprecate `@alejoamiras/aztec-standards`
+### P4 ⛔ BLOCKED (2026-07-16) — Deprecate `@alejoamiras/aztec-standards` — awaiting owner npm auth (`npm whoami` → 401; `npm owner ls` confirms alejoamiras owns it; the command is surfaced in chat — one login + one command + OTP)
 
 - Pre-check (codex 7 + fable A4): `npm whoami` = `alejoamiras` AND `npm owner ls @alejoamiras/aztec-standards` includes them; expect an interactive OTP on write (2FA) — run interactively, never script the OTP.
 - `npm deprecate @alejoamiras/aztec-standards "Moved to @aztec-foundation/aztec-standards — install that package instead."` (no range = all versions; reversible with an empty message).
