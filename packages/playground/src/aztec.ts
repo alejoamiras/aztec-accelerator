@@ -5,7 +5,7 @@ import {
 } from "@alejoamiras/aztec-accelerator";
 import { getInitialTestAccountsData } from "@aztec/accounts/testing/lazy";
 import { NO_FROM } from "@aztec/aztec.js/account";
-import type { AztecAddress } from "@aztec/aztec.js/addresses";
+import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { NO_WAIT } from "@aztec/aztec.js/contracts";
 import { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee";
 import { Fq, Fr } from "@aztec/aztec.js/fields";
@@ -13,9 +13,12 @@ import { createAztecNodeClient } from "@aztec/aztec.js/node";
 import type { TxHash } from "@aztec/aztec.js/tx";
 import type { Wallet } from "@aztec/aztec.js/wallet";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
-import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { getContractInstanceFromInstantiationParams } from "@aztec/stdlib/contract";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
+// Deep-path import: the standards package ships no `exports` map / `main`, and
+// moduleResolution "Bundler" + vite both resolve package-internal paths directly
+// (same pattern the noir-contracts artifacts use internally).
+import { TokenContract } from "@aztec-foundation/aztec-standards/dist/src/artifacts/Token.js";
 
 export type LogFn = (
   msg: string,
@@ -585,8 +588,17 @@ export async function deployToken(
 
   try {
     onStep("deploying token");
-    log("Deploying TokenContract (admin=Alice)...");
-    const tokenDeploy = TokenContract.deploy(state.wallet, alice, "Accelerator", "ACEL", 18);
+    log("Deploying TokenContract (minter=Alice)...");
+    // constructor_with_minter: auth_contract = ZERO disables the authorization hooks
+    // (verified against the aztec-standards Noir source — "zero address to disable").
+    const tokenDeploy = TokenContract.deployWithOpts(
+      { method: "constructor_with_minter", wallet: state.wallet },
+      "Accelerator",
+      "ACEL",
+      18,
+      alice,
+      AztecAddress.ZERO,
+    );
     const { timing: tokenStep, txHash: tokenTxHash } = await executeStep({
       step: "deploy token",
       method: tokenDeploy,
@@ -680,10 +692,17 @@ export async function runTokenFlow(
       );
     }
 
-    // Step 1: Deploy TokenContract
+    // Step 1: Deploy TokenContract (standards token; minter constructor, auth hooks disabled)
     onStep("deploying token");
-    log("Deploying TokenContract (admin=Alice)...");
-    const tokenDeploy = TokenContract.deploy(state.wallet, alice, "Accelerator", "ACEL", 18);
+    log("Deploying TokenContract (minter=Alice)...");
+    const tokenDeploy = TokenContract.deployWithOpts(
+      { method: "constructor_with_minter", wallet: state.wallet },
+      "Accelerator",
+      "ACEL",
+      18,
+      alice,
+      AztecAddress.ZERO,
+    );
     const { timing: tokenStep, txHash: tokenTxHash } = await executeStep({
       step: "deploy token",
       method: tokenDeploy,
@@ -723,7 +742,8 @@ export async function runTokenFlow(
     log("Transferring 500 ACEL Alice → Bob...");
     const { timing: transferStep, txHash: transferTxHash } = await executeStep({
       step: "private transfer",
-      method: token.methods.transfer(bob, 500n),
+      // Standards API: explicit from/to + authwit nonce (0 = the standard self-call path).
+      method: token.methods.transfer_private_to_private(alice, bob, 500n, 0),
       sendOpts: { from: alice, fee },
       log,
       onConfirming: () => onStep("confirming transfer"),

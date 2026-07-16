@@ -110,6 +110,9 @@ export async function runTokenFlowAndAssert(
   expect(flowLog, "Token flow should not have failed — check browser console above").not.toContain(
     "Token flow failed:",
   );
+  // Behavioral assertion, not just flow completion: mint 1000 → transfer 500 must land
+  // exactly 500/500 (guards the standards-token semantics, not only the UI plumbing).
+  expect(flowLog).toContain("Balances — Alice: 500, Bob: 500");
 
   await expect(page.locator("#progress")).toHaveClass(/hidden/);
   await expect(page.locator("#results")).not.toHaveClass(/hidden/);
