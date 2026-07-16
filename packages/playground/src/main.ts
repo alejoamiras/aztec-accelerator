@@ -94,7 +94,9 @@ function handleProverPhase(ascii: AsciiController, phase: string, _data?: unknow
 
 function setActionButtonsDisabled(disabled: boolean): void {
   $btn("deploy-btn").disabled = disabled;
-  $btn("token-flow-btn").disabled = disabled;
+  // The token flow needs a session-deployed sender (see pickSessionSender) — an enabled
+  // button must imply the action can succeed, so it stays disabled until one exists.
+  $btn("token-flow-btn").disabled = disabled || state.sessionAddresses.length === 0;
 }
 
 // ── Deploy ──

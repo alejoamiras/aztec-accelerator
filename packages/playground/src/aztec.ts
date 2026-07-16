@@ -3,7 +3,6 @@ import {
   type AcceleratorPhaseData,
   AcceleratorProver,
 } from "@alejoamiras/aztec-accelerator";
-import { getInitialTestAccountsData } from "@aztec/accounts/testing/lazy";
 import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { NO_WAIT } from "@aztec/aztec.js/contracts";
@@ -64,7 +63,6 @@ export interface AztecState {
    * so its entrypoint fails in-circuit with "Failed to get a note".
    */
   sessionAddresses: AztecAddress[];
-  selectedAccountIndex: number;
   uiMode: UiMode;
   /** True when the network requires real proofs (not simulated). */
   proofsRequired: boolean;
@@ -83,19 +81,14 @@ export const state: AztecState = {
   embeddedWallet: null,
   registeredAddresses: [],
   sessionAddresses: [],
-  selectedAccountIndex: 0,
   uiMode: "accelerated",
   proofsRequired: false,
   feePaymentMethod: undefined,
 };
 
-/** Pick the tx sender: the selected account if session-deployed, else any session account. */
+/** Pick the tx sender: the first session-deployed account (imported accounts can't sign here). */
 function pickSessionSender(): AztecAddress {
-  const selected = state.registeredAddresses[state.selectedAccountIndex];
-  const sender =
-    selected && state.sessionAddresses.some((a) => a.equals(selected))
-      ? selected
-      : state.sessionAddresses[0];
+  const sender = state.sessionAddresses[0];
   if (!sender) {
     throw new Error(
       "Deploy a test account first — imported accounts (e.g. sandbox test accounts) can't send from this session's wallet",
@@ -237,6 +230,11 @@ export async function initializeFPC(wallet: Wallet, log: LogFn): Promise<void> {
 }
 
 async function doInitializeWallet(log: LogFn): Promise<boolean> {
+  // Fresh wallet instance → any previously-tracked addresses belong to a dead ephemeral
+  // store and must not survive a retry (their notes are gone with the old store).
+  state.registeredAddresses = [];
+  state.sessionAddresses = [];
+
   await initializeNode(log);
 
   log("Creating wallet (may take a moment)...");
@@ -256,22 +254,8 @@ async function doInitializeWallet(log: LogFn): Promise<boolean> {
 
   await initializeFPC(state.wallet!, log);
 
-  if (!state.proofsRequired) {
-    log("Registering sandbox accounts...");
-    // Register accounts serially: one wallet store, deterministic ordering (historically this
-    // also dodged an IndexedDB TransactionInactiveError; the 5.0 store is in-memory).
-    const testAccounts = await getInitialTestAccountsData();
-    state.registeredAddresses = [];
-    for (const account of testAccounts) {
-      const mgr = await state.embeddedWallet!.createSchnorrAccount(
-        account.secret,
-        account.salt,
-        account.signingKey,
-      );
-      state.registeredAddresses.push(mgr.address);
-    }
-    log(`Registered ${state.registeredAddresses.length} accounts`, "success");
-  }
+  // NOTE: sandbox genesis test accounts are deliberately NOT registered anymore — since only
+  // session-deployed accounts can send (see sessionAddresses), importing them served nothing.
 
   return true;
 }
@@ -583,81 +567,17 @@ export async function deployTestAccount(
   }
 }
 
-export async function deployToken(
-  log: LogFn,
-  onTick: (elapsedMs: number) => void,
-  onStep: (stepName: string) => void,
-  onPhase?: (phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void,
-): Promise<DeployResult> {
-  if (!state.wallet || state.registeredAddresses.length < 1) {
-    throw new Error("Wallet not initialized — no registered addresses");
-  }
-
-  const mode = state.uiMode;
-  const alice = pickSessionSender();
-  const steps: StepTiming[] = [];
-  const totalStart = Date.now();
-  const proveTracker = createProveTracker();
-  state.prover?.setOnPhase(
-    onPhase
-      ? (phase, data) => {
-          if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
-          onPhase(phase, data);
-        }
-      : null,
-  );
-
-  const interval = setInterval(() => {
-    onTick(Date.now() - totalStart);
-  }, 100);
-
-  try {
-    onStep("deploying token");
-    log("Deploying TokenContract (minter=Alice)...");
-    // constructor_with_minter: auth_contract = ZERO disables the authorization hooks
-    // (verified against the aztec-standards Noir source — "zero address to disable").
-    const tokenDeploy = TokenContract.deployWithOpts(
-      { method: "constructor_with_minter", wallet: state.wallet },
-      "Accelerator",
-      "ACEL",
-      18,
-      alice,
-      AztecAddress.ZERO,
-    );
-    const { timing: tokenStep, txHash: tokenTxHash } = await executeStep({
-      step: "deploy token",
-      method: tokenDeploy,
-      sendOpts: { from: alice, fee: { paymentMethod: state.feePaymentMethod! } },
-      log,
-      onConfirming: () => onStep("confirming token deploy"),
-      proveTracker,
-    });
-    steps.push(tokenStep);
-
-    const address = (await tokenDeploy.getAddress()).toString();
-    const totalDurationMs = Date.now() - totalStart;
-    log(
-      `Token deployed in ${(totalDurationMs / 1000).toFixed(1)}s → ${address}`,
-      "success",
-      `${EXPLORER_BASE}/${tokenTxHash}`,
-    );
-
-    return { address, steps, totalDurationMs, mode };
-  } finally {
-    state.prover?.setOnPhase(null);
-    clearInterval(interval);
-  }
-}
-
 export async function runTokenFlow(
   log: LogFn,
   onTick: (elapsedMs: number) => void,
   onStep: (stepName: string) => void,
   onPhase?: (phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void,
 ): Promise<TokenFlowResult> {
-  if (!state.wallet || state.registeredAddresses.length < 1) {
-    throw new Error("Wallet not initialized — deploy at least one account first");
+  if (!state.wallet) {
+    throw new Error("Wallet not initialized");
   }
+  // Sender validity (session-deployed account exists) is checked by pickSessionSender below,
+  // which throws the actionable "deploy a test account first" guidance on every network.
 
   const mode = state.uiMode;
   const alice = pickSessionSender();

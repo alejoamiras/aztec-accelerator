@@ -41,8 +41,10 @@ test.describe("Accelerated", () => {
 
   // Re-enabled at 5.0.1 (the "~7 min WASM regression" note was pre-5.0): the standards-token
   // demo is the surface under test. Self-skips without ACCELERATOR_URL (the CI job doesn't
-  // provide the accelerator today).
+  // provide the accelerator today). The 4-minute timeout IS the plan's CI-time budget —
+  // mechanized, not a comment asking a human to re-measure.
   test("runs full token flow", async () => {
+    test.setTimeout(240_000);
     const page = sharedPage;
     await expect(page.locator("#mode-accelerated")).toHaveClass(/mode-active/);
     await runTokenFlowAndAssert(page, "accelerated");
@@ -69,9 +71,10 @@ test.describe("Local", () => {
   });
 
   // Re-enabled at 5.0.1 as the automated behavioral gate on the standards token (WASM path;
-  // asserts the 500/500 balance outcome). Plan rule: if the measured CI time exceeds ~4 min,
-  // re-skip with the number recorded in the plan ledger.
+  // asserts a NEW 500/500 balance outcome). The 4-minute timeout IS the plan's CI-time
+  // budget — mechanized (measured: ~2 min in CI at 5.0.1).
   test("runs full token flow", async () => {
+    test.setTimeout(240_000);
     const page = sharedPage;
     await expect(page.locator("#mode-local")).toHaveClass(/mode-active/);
     await runTokenFlowAndAssert(page, "local");
