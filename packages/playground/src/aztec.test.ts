@@ -17,7 +17,6 @@ afterEach(() => {
   state.embeddedWallet = null;
   state.registeredAddresses = [];
   state.sessionAddresses = [];
-  state.selectedAccountIndex = 0;
   state.uiMode = "accelerated";
   state.proofsRequired = false;
   state.feePaymentMethod = undefined;

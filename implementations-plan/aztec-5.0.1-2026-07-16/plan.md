@@ -59,7 +59,7 @@ Pure bump cycle first, token swap as a second playground-only cycle. Codex prefe
 
 **Validation gate:** PR CI green (sdk.yml transmit + app.yml incl. 3-graph typecheck + accelerator.yml + actionlint.yml + local-network job with whatever token-spec disposition P1 set); local download gate passes vs 5.0.1; PR auto-merges. Layers: lint · typecheck · unit · e2e (native bb 5.0.1) · download+digest.
 
-### P3 — FPC redeploy → pre-publish smoke → publish `testnet` → acceptance (incl. live-bundle token pass) → promote `latest`
+### P3 ✓ — FPC redeploy → pre-publish smoke → publish `testnet` → acceptance (incl. live-bundle token pass) → promote `latest` — gate passed 2026-07-16 (FPC `0x1441…970c` funded 1000 FJ; pre-publish standards smoke green; `testnet`=`latest`=5.0.1; registry-artifact + released-1.0.6 native + Safari owner-verified + WASM green; LIVE-BUNDLE standards token 500/500 recorded; contingency never fired)
 
 - **(a)** Fail-closed pre-flight (nodeVersion **expect `5.0.0` — correct this cycle**; l1ChainId 11155111; derived 5.0.1 salt-0 FPC `getContract` logged, RPC-error ≠ absent). Deploy `--salt 0x0`, `BRIDGE_AMOUNT=1000000000000000000000`; key via gitignored `scripts/.env` (recreate; delete at P3 end). Post-flight balance query in lessons.
 - **(b)** Pre-publish smoke on `dev:testnet` (registry port; playground-local vite): account deploy + **standards-token flow** (deploy w/ minter, mint 1000, private transfer 500, balances 500/500 — same narrative assertion as today's demo). Gates the publish. **CONTINGENCY TRIGGER LIVES HERE**: standards leg fails & not quickly fixable → revert swap commit → re-run account+FPC leg → proceed with the pure security patch → re-land swap later via `skip_sdk_publish=true` deploy.

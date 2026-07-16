@@ -52,7 +52,9 @@ export async function initSharedPage(browser: { newPage: () => Promise<Page> }):
   }
 
   await expect(page.locator("#deploy-btn")).toBeEnabled();
-  await expect(page.locator("#token-flow-btn")).toBeEnabled();
+  // The token flow needs a session-deployed sender, so its button stays disabled
+  // until the first deploy of the session (ensureSessionAccount handles that).
+  await expect(page.locator("#token-flow-btn")).toBeDisabled();
 
   return page;
 }
@@ -92,11 +94,27 @@ export async function deployAndAssert(page: Page, mode: "local" | "accelerated")
   await expect(page.locator("#token-flow-btn")).toBeEnabled();
 }
 
+/**
+ * Ensure a session-deployed account exists (the token flow's sender requirement).
+ * The token-flow button stays disabled until one does, so its state is the signal.
+ */
+export async function ensureSessionAccount(page: Page, mode: "local" | "accelerated") {
+  if (await page.locator("#token-flow-btn").isDisabled()) {
+    await deployAndAssert(page, mode);
+  }
+}
+
 /** Run token flow and assert all UI state transitions. */
 export async function runTokenFlowAndAssert(
   page: Page,
   mode: "local" | "accelerated",
 ): Promise<void> {
+  await ensureSessionAccount(page, mode);
+  // Snapshot the shared #log BEFORE the run: the balance assertion below must match a NEW
+  // occurrence, not a stale line from an earlier token flow on the same page.
+  const priorMatches =
+    (await page.locator("#log").textContent())?.match(/Balances — Alice: 500, Bob: 500/g)?.length ??
+    0;
   await page.click("#token-flow-btn");
 
   await expect(page.locator("#progress")).not.toHaveClass(/hidden/);
@@ -112,7 +130,9 @@ export async function runTokenFlowAndAssert(
   );
   // Behavioral assertion, not just flow completion: mint 1000 → transfer 500 must land
   // exactly 500/500 (guards the standards-token semantics, not only the UI plumbing).
-  expect(flowLog).toContain("Balances — Alice: 500, Bob: 500");
+  // Occurrence-counted so a stale line from an earlier run can't satisfy it.
+  const nowMatches = flowLog?.match(/Balances — Alice: 500, Bob: 500/g)?.length ?? 0;
+  expect(nowMatches, "a NEW 500/500 balance line must appear for THIS run").toBe(priorMatches + 1);
 
   await expect(page.locator("#progress")).toHaveClass(/hidden/);
   await expect(page.locator("#results")).not.toHaveClass(/hidden/);

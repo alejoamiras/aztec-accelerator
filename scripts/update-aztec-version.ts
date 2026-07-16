@@ -98,9 +98,11 @@ async function pinWindowsBbChecksum(version: string): Promise<string> {
     if (!res.ok) return `Windows bb checksum: fetch failed (HTTP ${res.status}) — pin "${version}" in ${COPY_BB_FILE} manually.`;
     const digest = await crypto.subtle.digest("SHA-256", await res.arrayBuffer());
     const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    const marker = "};\n\nexport function resolveWindowsBbChecksum";
-    const idx = original.indexOf(marker);
-    const entry = `  // @aztec/bb.js ${version} — sha256 of barretenberg-amd64-windows.tar.gz from the v${version} release (auto-pinned).\n  "${version}": "${sha}",\n`;
+    // Anchor on the CHECKSUMS map's own closing brace — not on whatever declaration happens
+    // to follow the map (that anchor went stale once before and auto-insert silently failed).
+    const mapStart = original.indexOf("const WINDOWS_BB_CHECKSUMS");
+    const idx = mapStart === -1 ? -1 : original.indexOf("\n};", mapStart);
+    const entry = `\n  // @aztec/bb.js ${version} — sha256 of barretenberg-amd64-windows.tar.gz from the v${version} release (auto-pinned).\n  "${version}": "${sha}",`;
     if (idx === -1) return `Windows bb checksum for ${version} = ${sha} — couldn't auto-insert; add it to ${COPY_BB_FILE} manually.`;
     await Bun.write(COPY_BB_FILE, original.slice(0, idx) + entry + original.slice(idx));
     return `Windows bb checksum: pinned ${version} = ${sha.slice(0, 12)}… in ${COPY_BB_FILE}.`;
@@ -128,6 +130,18 @@ async function main() {
   const skipPackages = await findMissingPackages(newVersion, PACKAGE_JSON_FILES);
   if (skipPackages.size > 0) {
     console.log(`Skipping unpublished packages: ${[...skipPackages].join(", ")}`);
+    // LOCKSTEP packages track @aztec/* releases from a DIFFERENT publisher — a skip here means
+    // the app would run mixed versions (undeclared runtime imports of @aztec/aztec.js make that
+    // lockstep a hard requirement). Loud, not fatal: nightlies stay unblocked, and the CI token
+    // spec is the behavioral gate that catches a truly broken mix.
+    const lockstepSkipped = [...skipPackages].filter((p) => LOCKSTEP_PACKAGES.has(p));
+    if (lockstepSkipped.length > 0) {
+      console.warn(
+        `⚠️  LOCKSTEP PACKAGE(S) NOT PUBLISHED AT ${newVersion}: ${lockstepSkipped.join(", ")} — ` +
+          `left at their previous version; the app will mix versions until they publish. ` +
+          `Verify the CI token spec passes before trusting this bump.`,
+      );
+    }
   }
 
   let updatedFiles = 0;
