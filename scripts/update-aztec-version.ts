@@ -13,6 +13,18 @@ const PACKAGE_JSON_FILES = [
   "packages/playground/package.json",
 ];
 
+/**
+ * Companion packages that must stay in version-lockstep with @aztec/*: their generated
+ * code carries undeclared runtime imports of @aztec/aztec.js resolved against OUR pins,
+ * so version skew breaks at runtime, silently. Explicit allowlist — NOT a scope prefix —
+ * so unrelated @aztec-foundation packages never get swept up.
+ */
+const LOCKSTEP_PACKAGES = new Set(["@aztec-foundation/aztec-standards"]);
+
+export function isAztecManagedDep(key: string): boolean {
+  return key.startsWith("@aztec/") || LOCKSTEP_PACKAGES.has(key);
+}
+
 export function validateVersion(version: string): boolean {
   return VERSION_PATTERN.test(version);
 }
@@ -24,7 +36,7 @@ export function updatePackageJson(content: string, newVersion: string, skipPacka
     const deps = pkg[section];
     if (!deps) continue;
     for (const [key, value] of Object.entries(deps)) {
-      if (key.startsWith("@aztec/") && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
+      if (isAztecManagedDep(key) && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
         if (skipPackages?.has(key)) continue;
         deps[key] = newVersion;
       }
@@ -42,7 +54,7 @@ async function findMissingPackages(version: string, packageFiles: string[]): Pro
       const deps = pkg[section];
       if (!deps) continue;
       for (const [key, value] of Object.entries(deps)) {
-        if (key.startsWith("@aztec/") && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
+        if (isAztecManagedDep(key) && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
           allAztecPackages.add(key);
         }
       }

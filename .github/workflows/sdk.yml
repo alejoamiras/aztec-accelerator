@@ -25,6 +25,7 @@ jobs:
           filters: |
             relevant:
               - 'packages/sdk/**'
+              - 'scripts/**'
               - 'tsconfig.json'
               - 'biome.json'
               - 'package.json'
@@ -94,6 +95,8 @@ jobs:
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/sdk test:unit
+      # Release tooling (bump/publish-version scripts) rides the SDK pipeline.
+      - run: bun run test:scripts
 
   e2e:
     name: E2E Tests

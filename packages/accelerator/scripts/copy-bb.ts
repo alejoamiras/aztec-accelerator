@@ -71,6 +71,9 @@ export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
   // release; matches the GitHub release asset digest. The Windows Prebuild/Build Smoke gates
   // independently re-fetch + verify.
   "5.0.0": "ec58f1d0c0b7392475e5a6477dcde0717bf64563963030d416151a534ca13e96",
+  // @aztec/bb.js 5.0.1 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.1 release;
+  // matches the GitHub release asset digest.
+  "5.0.1": "f7a2d6b10d4208f4a4d0990b71df1360033688f2b621040cf297e4676ea59c4c",
 };
 
 export function windowsBbReleaseTag(version: string): string {
