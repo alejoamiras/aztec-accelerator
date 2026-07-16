@@ -92,6 +92,8 @@ Pure bump cycle first, token swap as a second playground-only cycle. Codex prefe
 
 ## Assumptions
 
+> **Pre-implementation snapshot** (post-impl codex, low): everything below records the world AS PLANNED (2026-07-16, before P1). Repo statements like "zero standards references", "token specs skipped", "updater rewrites only @aztec/ keys", and "npm tags 5.0.0" were true then and are superseded by the shipped state (see the phase headers + post-impl audit section for final-state truth).
+
 **Facts** (all independently re-verified by the fable audit unless noted):
 - `@aztec/stdlib@5.0.1` npm 2026-07-15T19:15:34Z; GitHub v5.0.1 release 2026-07-15T20:00:20Z, 17 barretenberg assets, "required for aztec.nr/aztec.js/PXE, optional for node operators" verbatim.
 - Live testnet at planning: `nodeVersion 5.0.0`, `rollupVersion 1821665230`, `l1ChainId 11155111`.
@@ -128,6 +130,20 @@ None scheduled (no new trust boundary; 4th consecutive cycle).
 ## Final fresh-context codex pass (mid, xhigh) — `conditional approve`, all 5 conditions folded
 
 Session `019f6b9c-e640-7483-a18d-9369a3ae21cd` (fresh context; saw plan + both transcripts + ledger). Verdict `conditional approve` with 5 conditions, all fold-repairs: (1) contingency mechanics operationalized (revert-PR ordering, old-token gates while reverted, standards requirement re-attaches at the re-land); (2) attestation subject digest cryptographically compared to the installed tarball + workflow skim; (3) scripts tests made a real gate (root `test:scripts` + sdk.yml wiring/path trigger); (4) the automated/negative-coverage disposition made honest (in the spec if enabled; explicit rejection otherwise); (5) fallback semantics (`Contract.deploy`, not `.at`) + P4 hold = BLOCKED, never ✓. Confirmed: the old-state-interop rejection is sound; the reproducibility trade proportionate. Transcript appended to `audit-codex.md`.
+
+## Post-impl code review + codex audit (2026-07-16)
+
+**/code-review max --fix** (wf_e4d99a43): 13/15 findings applied (PR #397, merged 18:25Z after one self-inflicted round-1 CI failure — see `lessons/post-impl.md`). Skips: Bob timing (re-dispositioned below), deep-path import (residual re-affirmed below).
+
+**Codex post-impl audit** (fresh xhigh session `019f6c18-5648-7992-bc2e-b4a987ca6edb`, saw `36994ec` + the review commit + this plan): verdict **FIX-BEFORE-MERGE** (landed post-merge → follow-up PR). No critical. Correctness of the standards call sites, session model, and e2e assertions: **clean**. Asks: **clean** (no silently-assumed decision). Dispositions:
+
+- **High #1** (review commit broke local-network `beforeAll`): already fixed in `a6668a0` before the verdict; codex confirms.
+- **High #2** (provenance ≠ benign; rebuild + byte-compare demanded): **stands rejected** — same demand as round-1, endorsed as a proportionate trade by the final fresh-context pass; no new evidence. The "only our code executes" phrasing it attacked is **withdrawn** (the wrapper + bytecode DO execute; the residual is the ledgered supply-chain trust in the attested publisher). Its negative-tests sub-ask was already explicitly rejected in P1 (`lessons/phase-1.md` — the demo UI cannot express Bob-initiated actions).
+- **Medium #7 + #5 + Low #10 → ADOPTED in the follow-up PR**: scripts typecheck as a real sdk.yml gate (`typecheck:scripts` root script + path-filter entry — bun test transpile accepts what tsc rejects); `_aztec-update.yml` stages `aztec.ts` + `copy-bb.ts` + fails on unstaged remainder (the bot was discarding the CRS bump and the checksum auto-pin — the repaired anchor was dead in the bot path); `permissions: contents: read` on sdk.yml.
+- **Low #11 → ADOPTED** (Facts labeled as pre-implementation snapshot, above).
+- **Named follow-ups (not this cycle; mediums/lows, none live-affecting):** (3) lockstep fail-open — only a confirmed 404 should count as "unpublished", abort stable/rc bumps on any lockstep skip (nightly-only override); (4) `check-aztec-update` treats dist-tag rollback as an upgrade + `auto_merge:false` does a direct `gh pr merge` — require monotonic semver, always check-gated; (6) Windows checksum pin trusts one control plane for bytes+truth and buffers unbounded — size cap + print-only mode; (8) wallet-retry reset is partial/non-atomic (stop old EmbeddedWallet, commit init state atomically); (9) Bob timing skew — **re-dispositioned honestly**: codex is right that "pre-existing" explains provenance not correctness; the fix (deploy Bob outside the timer) changes demo comparability semantics and stays a named follow-up, not a silent skip.
+
+Transcript appended to `audit-codex.md`. Evidence: `lessons/post-impl.md`.
 
 ## Seeds (FINAL — approved 2026-07-16 unconditionally; drafts unchanged = canonical)
 
