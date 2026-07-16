@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — aztec-5.0.1-2026-07-16</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.5rem 0; padding: 1rem 1.25rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    .verdicts { background: #f0fff4; padding: 1rem 1.25rem; border-left: 3px solid #22863a; margin: 1.5rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Aztec 5.0.1 security patch + standards-token migration</h1>
+  <p>Aztec shipped 5.0.1 yesterday — a security patch that closes several ways a hostile sender could break note delivery for anyone on 5.0.0, which is what our live playground and our npm users run today. This plan updates everything to 5.0.1, swaps the playground's demo token to the newly-official <code>@aztec-foundation/aztec-standards</code> package (the successor to your own package), re-deploys the fee-sponsor contract (its address moved again), publishes SDK 5.0.1, and finally marks your old npm package as deprecated with a signpost to the new one. Everything runs on the machinery the 5.0.0 release built and proved.</p>
+
+  <h2>Why this tier was chosen</h2>
+  <p><code>mid</code> — fourth time on these rails (low novelty), but it leans on lots of outside state: two freshly-published npm packages (one from a scope that was <em>hours</em> old at planning), a live test network, and a contract deployment. Rubric: 1 HIGH (external coupling), the rest MODERATE. The dual audit again earned its keep: codex initially <em>rejected</em> the draft, the independent Fable audit dug up facts nobody had (including reading the new token's actual source code to verify a parameter the docs don't document).</p>
+
+  <h2>Phases</h2>
+  <div class="phase">
+    <h3>Phase 1: Update packages + swap the demo token + teach the bump tool</h3>
+    <p>Bump the 24 Aztec pins to 5.0.1. Add the new standards package (recording its cryptographic build-attestation as evidence at install time) and rewrite the token demo to use it — <strong>as its own commit</strong>, so it can be surgically undone if it misbehaves (that's the safety valve below). Teach the version-bump tool about the new package so future bumps can't silently strand it. Refresh the lockfile with the same one-time local quarantine bypass as the last three cycles, then hand-review every changed line of it.</p>
+    <p class="muted">Proves itself by: install + frozen-install clean; every pin exactly 5.0.1; lint, all typechecks, unit tests (incl. the extended bump tool's), UI mock tests, and the production-build smoke all green.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 2: Land the change through CI</h3>
+    <p>Open the PR (bump and token-swap kept as separate commits) and let CI prove the important thing: a real transaction proves natively against a 5.0.1 network, plus the local test that downloads and integrity-checks the 5.0.1 proving engine exactly the way the released desktop app will.</p>
+    <p class="muted">Proves itself by: all four CI pipelines green including the native-proving e2e; the download+checksum test passes; PR auto-merges.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 3: Fee contract → test → publish → test on the real site → promote</h3>
+    <p>Re-deploy and fund the fee-sponsor contract (1000 test tokens, same wallet). Then a browser test against the live network <em>before publishing anything</em> — including the new token demo end-to-end. <strong>Safety valve:</strong> if the new token misbehaves there and isn't a quick fix, we revert just the token commit and ship the security patch on schedule — the demo swap re-lands separately later. After publishing and deploying: fresh-install test of the exact npm artifact, the released desktop app genuinely downloading the new proving engine, a Safari check (you), <em>and — new this cycle — the full token demo run once more on the actual deployed website</em> before npm's default version flips to 5.0.1.</p>
+    <p class="muted">Proves itself by: fee contract live + funded (balance recorded); pre-publish demo green; publish + deploy green; all acceptance checks incl. the on-site token run; npm testnet = latest = 5.0.1.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 4: Deprecate your old package</h3>
+    <p>Mark every version of <code>@alejoamiras/aztec-standards</code> as deprecated with a one-line pointer to the new official package. Runs under your personal npm login (never the CI token), expects your 2FA prompt, and verifies every single version shows the notice. Fully reversible.</p>
+    <p class="muted">Proves itself by: every published version returns the deprecation message; the new package still installs cleanly.</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p><strong>Why move fast on a patch?</strong> Unlike the last two cycles, the test network hasn't changed — nothing is drifting. But 5.0.1 fixes bugs where a malicious counterparty can permanently freeze someone's note syncing or send them a note they can never decrypt. Those affect people using our live playground and SDK <em>right now</em>, which is why the release notes say the update is "required" for apps even though node operators can wait.</p>
+  <p><strong>How much do we trust the new package?</strong> We verified what's verifiable: it's published from the official AztecProtocol GitHub organization with a cryptographic attestation tying the artifact to a specific commit and build workflow, its code descends from the long-standing Wonderland implementation, and it contains zero third-party dependencies. What we deliberately do NOT claim: that it's been audited (no evidence exists), or that the attestation proves anyone reviewed the code. The audits made us state this honestly and record the evidence at install time. One auditor even read the token's source to confirm the "no authorization contract" mode we use is genuinely supported — the shipped docs don't say.</p>
+  <p><strong>Why the safety valve?</strong> The one real disagreement between the auditors: codex wanted the security patch and the token swap shipped as two separate releases so a demo problem could never delay a security fix; Fable showed a cheaper way to get the same protection — keep one release, but make the token swap trivially revertible and pre-authorize the fallback. The plan adopts that hybrid.</p>
+
+  <div class="verdicts">
+    <h2>Audit verdicts</h2>
+    <ul>
+      <li><strong>Codex round 1</strong> (fresh session, xhigh): <code>reject</code> → every finding adopted or explicitly dispositioned (2 rejections with reasons, both concurred with by Fable).</li>
+      <li><strong>Fable</strong> (independent context; re-derived every load-bearing fact, several strengthened): <code>conditional approve</code> → all 5 conditions folded.</li>
+      <li><strong>Final fresh-context codex pass</strong>: <code>conditional approve</code> → all 5 conditions folded (it caught that the safety valve, as first written, didn't actually work — the revert needed a PR and the later gates needed to relax; also made the build-attestation check cryptographic instead of a paper trail, and turned the bump-tool test into a gate CI actually runs). <strong>Verdict on record: conditional approve, all conditions folded.</strong></li>
+    </ul>
+  </div>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li>None requiring a decision — your Phase 0 answers covered the sensitive calls (quarantine bypass, same-day promotion, both standards items, autonomy). The only planned pause: Phase 4 needs your local npm login + 2FA tap; if it's not available the exact command is printed and the plan holds there.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope: 5.0.1 bump + standards token swap (with the revert safety valve) + SDK release + playground deploy + bump-tool lockstep extension + old-package deprecation. No desktop app release.</li>
+      <li>Confirm tier <code>mid</code>.</li>
+      <li>Confirm the validation plan (same proven layers + two additions: the live-site token run before the latest flip, and a time-boxed attempt to re-enable an automated token test in CI).</li>
+      <li>Confirm: no <code>/harden</code> pass (4th consecutive cycle, no new trust boundary).</li>
+      <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds (FINAL — approved 2026-07-16 unconditionally)</h2>
+    <p>Run inside this plan's worktree (<code>agent-worktree resume aztec-5.0.1-2026-07-16</code>).</p>
+    <p class="warning">Use exactly ONE per session. They don't compose — setting one replaces the other.</p>
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /loop 15m</h3>
+      <p class="muted">Phase 3's dispatches, manual smokes, and the possible P4 auth hold aren't reliably transcript-observable — the interval loop keeps driving regardless.</p>
+      <pre><code>/loop 15m Drive implementations-plan/aztec-5.0.1-2026-07-16 to completion (P1–P4); never idle. Each firing: read plan.md + lessons/; git status + log; PR → gh pr view --json statusCheckRollup; CI in-flight → gh run watch up to 10m. P1: aztec:update 5.0.1 (zero skips; Windows sha vs release digest) → EXTEND update-aztec-version.ts for @aztec-foundation/aztec-standards lockstep + unit test + NEW root test:scripts (`bun test scripts/`) wired into root test:unit AND sdk.yml (step + scripts/** path trigger) → add standards pin (exact) → ATTESTATION VERIFY: re-fetch attestation, COMPARE subject digest == installed tarball integrity (mismatch = STOP), skim release.yml @ c74541f7…, record all in lessons → TOKEN SWAP AS ITS OWN COMMIT (deep-path import; constructor_with_minter(…, alice, AztecAddress.ZERO) — source-verified; transfer_private_to_private(alice,bob,500n,0)) → attempt re-enable of one local-network token spec INCLUDING negative cases (Bob mint reverts; Bob can't move Alice's balance) — accelerated if the job has the accelerator; else time-box ONE WASM run, &gt;4min → leave skipped + ledger as explicit rejection with the number → kv-store path re-verify → ONE local `bun install --minimum-release-age=0` → lock-diff: review EVERY changed resolution incl. @aztec transitives (expect swaps + exactly one new zero-transitive root) → frozen proof → full P1 gate. P2: PR (commits kept separate) → CI (sdk.yml transmit) → local ACCELERATOR_DOWNLOAD_TEST=1 AZTEC_BB_VERSION=5.0.1 cargo test download_and_verify_bb (packages/accelerator/core) → auto-merge. P3: (a) pre-flight (nodeVersion 5.0.0 EXPECTED, chainId 11155111, getContract logged, RPC-error ≠ absent) → scripts/.env recreated (never inline/print; DELETE at P3 end) → deploy-sponsored-fpc.ts --salt 0x0 BRIDGE_AMOUNT=1000000000000000000000 → balance query in lessons; (b) PRE-PUBLISH SMOKE dev:testnet: account deploy + STANDARDS token 1000→500/500 — MUST PASS BEFORE PUBLISH; CONTINGENCY (operational): standards leg fails &amp; not quickly fixable → REVERT PR (git revert the swap commit → CI → merge) → re-run P3b as the OLD-token flow → publish/accept/promote 5.0.1 with OLD-token live-bundle pass (standards requirement re-attaches only at the re-land) → later: revert-the-revert PR → merge → skip_sdk_publish=true playground-only dispatch → standards production smoke → only then P4; (c) dispatch publish-testnet.yml --ref main post-merge, nothing queued, confirm started, record SHA (AUTONOMOUS); (d) npm tags + live bundle 5.0.1 → registry-artifact test → released-1.0.6 native smoke (grant local-network-access) + Safari (owner click-through — ask, don't skip) + WASM → LIVE-BUNDLE STANDARDS TOKEN FLOW 500/500 recorded in lessons — REQUIRED BEFORE PROMOTE; (e) once (d) fully green, SAME DAY, dispatch promote-latest.yml version=5.0.1 (AUTONOMOUS). P4: npm whoami == alejoamiras AND npm owner ls includes them → npm deprecate @alejoamiras/aztec-standards "Moved to @aztec-foundation/aztec-standards — install that package instead." (interactive OTP; never script it) → verify EVERY version shows the notice → new-scope install resolves; auth insufficient → print command, mark P4 BLOCKED in plan.md (never ✓), SURFACE AND HOLD. Stuck/trade-off → /codex xhigh, log consult. Phase green = plan.md gate passes → ✓ + lessons + print LESSONS_FILE=… → advance. 5× same-step fail → stop, reassess w/ codex. All ✓ → /code-review max --fix → separate commit → codex post-impl audit → address high/critical → wrap-up → stop. HARD LIMITS: never push main; never print the L1 key or npm tokens/OTPs; never expand scope; holds = failed gates, P4 auth, accelerator-interface escalation.</code></pre>
+    </div>
+    <h3>Alternative: /goal</h3>
+    <pre><code>/goal All P1–P4 phases marked ✓ in implementations-plan/aztec-5.0.1-2026-07-16/plan.md (per-phase headers), each ✓ backed by its gate passing in the transcript; LESSONS_FILE printed per phase; attestation binding + lock integrity recorded in P1 lessons; attestation subject digest verified == installed tarball integrity in the transcript; pre-publish standards-token smoke passing BEFORE the publish dispatch (or the decoupling contingency executed per its operational steps and documented); npm dist-tags testnet = latest = 5.0.1 in the transcript; 5.0.1 salt-0 FPC getContract defined with balance recorded; registry-artifact test passing; released-1.0.6 native + Safari + WASM passing; LIVE-BUNDLE token flow 500/500 (standards — or old-token if the contingency fired) recorded before the promote dispatch; P4 ✓ ONLY with every @alejoamiras/aztec-standards version returning the deprecation message — an auth hold means P4 marked BLOCKED, surfaced, and the goal NOT met; /code-review max --fix applied+committed; codex post-impl high/critical addressed; bun run test and bun run lint:actions exit 0. Constraints: never push main; never print the L1 key or OTPs; BRIDGE_AMOUNT=1000 FJ; holds only for failed gates, P4 auth, or accelerator-interface escalation.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="audit-codex.md">Codex audit</a> · <a href="audit-fable.md">Fable audit</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>

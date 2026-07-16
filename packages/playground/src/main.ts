@@ -209,7 +209,7 @@ async function initWallet(): Promise<void> {
       networkLabel.textContent = "proofs simulated";
       networkLabel.className =
         "text-brand-text-muted/50 text-[10px] uppercase tracking-wider ml-auto";
-      appendLog("Ready. Deploy a test account or run the token flow", "success");
+      appendLog("Ready. Deploy a test account to get started", "success");
     }
   } else {
     $("wallet-state").textContent = "failed";

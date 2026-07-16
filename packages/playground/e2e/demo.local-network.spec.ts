@@ -39,8 +39,10 @@ test.describe("Accelerated", () => {
     await deployAndAssert(page, "accelerated");
   });
 
-  // TODO: re-enable when Aztec nightly WASM perf regression is resolved (token flow takes ~7 min on CI)
-  test.skip("runs full token flow", async () => {
+  // Re-enabled at 5.0.1 (the "~7 min WASM regression" note was pre-5.0): the standards-token
+  // demo is the surface under test. Self-skips without ACCELERATOR_URL (the CI job doesn't
+  // provide the accelerator today).
+  test("runs full token flow", async () => {
     const page = sharedPage;
     await expect(page.locator("#mode-accelerated")).toHaveClass(/mode-active/);
     await runTokenFlowAndAssert(page, "accelerated");
@@ -66,8 +68,10 @@ test.describe("Local", () => {
     await deployAndAssert(page, "local");
   });
 
-  // TODO: re-enable when Aztec nightly WASM perf regression is resolved (token flow takes ~7 min on CI)
-  test.skip("runs full token flow", async () => {
+  // Re-enabled at 5.0.1 as the automated behavioral gate on the standards token (WASM path;
+  // asserts the 500/500 balance outcome). Plan rule: if the measured CI time exceeds ~4 min,
+  // re-skip with the number recorded in the plan ledger.
+  test("runs full token flow", async () => {
     const page = sharedPage;
     await expect(page.locator("#mode-local")).toHaveClass(/mode-active/);
     await runTokenFlowAndAssert(page, "local");
