@@ -13,5 +13,11 @@
 - Bump tool extended for lockstep: `isAztecManagedDep()` with an exact-allowlist `LOCKSTEP_PACKAGES = {@aztec-foundation/aztec-standards}` (deliberately NOT a scope prefix); new test asserts the companion bumps and an unrelated `@aztec-foundation/*` package does NOT. New root `test:scripts` (`bun test scripts/` — 26 tests) wired into root `test:unit` AND `sdk.yml` (unit step + `scripts/**` path trigger).
 - Lockfile via ONE local `--minimum-release-age=0` (4th documented use): diff = uniform `@aztec/*` 5.0.0→5.0.1 swaps + exactly 3 non-@aztec lines, all the standards entry (`{}` deps, integrity as above). Full-resolution review: no other integrity or version changed. Frozen install clean.
 
-## Pending
-- Token swap (own commit), CI token-spec attempt w/ negative cases, kv-store re-verify, full P1 gate.
+## Token swap + gate — ✅ green
+
+- Swap as its own commit (`6805c59`; bump/tooling = `358d4aa`): deep-path import (biome reordered it below the @aztec block — the only lint hit), `constructor_with_minter(…, alice, AztecAddress.ZERO)`, `transfer_private_to_private(alice, bob, 500n, 0)`. tsc clean FIRST TRY against the deep path — fable's noir-contracts-pattern precedent held exactly.
+- CI token-spec disposition: local-network job ships NO accelerator (`_e2e-app.yml` has zero accelerator references) → accelerated variant self-skips; BOTH specs un-skipped ("~7 min WASM" note predates 5.0), the WASM one runs in this PR = the measurement; helper strengthened with the `Balances — Alice: 500, Bob: 500` assertion. **Negative authorization cases (Bob-mints-reverts): REJECTED for this harness** — the demo UI cannot express them (fixed flow, no Bob-initiated actions); covered by the source-verified `#[authorize_once]`/minter semantics + the live gates. Ledger updated.
+- kv-store 5.0.1 installed: worker + ordered-binary paths + imports map all present, byte-identical expectations hold.
+- Full gate: `bun run test` exit 0 (lint + 3-graph typecheck + scripts-tsc + all units + NEW test:scripts 26 green); build ✓; mocked 8/8; production smoke 2/2 (re-run after the biome reorder — gates re-run after ANY source change, per the 5.0.0 lesson); CRS `5.0.1`.
+
+LESSONS_FILE=implementations-plan/aztec-5.0.1-2026-07-16/lessons/phase-1.md

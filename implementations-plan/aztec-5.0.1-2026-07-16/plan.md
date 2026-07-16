@@ -39,7 +39,7 @@ Pure bump cycle first, token swap as a second playground-only cycle. Codex prefe
 
 ## Phases
 
-### P1 — Bump + standards integration + tool lockstep + lockfile (local min-age override, 4th use)
+### P1 ✓ — Bump + standards integration + tool lockstep + lockfile — gate passed 2026-07-16
 
 - `bun run aztec:update 5.0.1` — pins (24) + auto-CRS + auto-Windows-checksum (confirm fetched sha vs the GitHub v5.0.1 release asset digest). Zero-skip gate: tool reports none + `grep -rn '"@aztec/' packages/*/package.json` all `5.0.1`.
 - **Extend `update-aztec-version.ts`** (fable P-4, in-cycle): bump `@aztec-foundation/aztec-standards` in lockstep with `@aztec/*` (explicit package allowlist, not a loose prefix match) + extend the tool's unit test + include the package in the zero-skip grep. **Make the scripts tests a REAL gate** (final-codex: nothing runs `scripts/*.test.ts` today — root `test:unit` covers only the three packages): add a root `test:scripts` (`bun test scripts/`) wired into root `test:unit`, and add the same step + a `scripts/**` path trigger to `sdk.yml` (release tooling rides the SDK pipeline) so CI enforces it.
