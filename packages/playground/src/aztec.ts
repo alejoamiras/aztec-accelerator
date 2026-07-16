@@ -57,6 +57,13 @@ export interface AztecState {
   wallet: Wallet | null;
   embeddedWallet: EmbeddedWallet | null;
   registeredAddresses: AztecAddress[];
+  /**
+   * Accounts DEPLOYED in this session (vs imported). Only these can act as tx senders:
+   * the wallet is ephemeral, and an imported account's contract notes (created long ago
+   * by another PXE — e.g. the sandbox's genesis test accounts) are never discovered here,
+   * so its entrypoint fails in-circuit with "Failed to get a note".
+   */
+  sessionAddresses: AztecAddress[];
   selectedAccountIndex: number;
   uiMode: UiMode;
   /** True when the network requires real proofs (not simulated). */
@@ -75,11 +82,27 @@ export const state: AztecState = {
   wallet: null,
   embeddedWallet: null,
   registeredAddresses: [],
+  sessionAddresses: [],
   selectedAccountIndex: 0,
   uiMode: "accelerated",
   proofsRequired: false,
   feePaymentMethod: undefined,
 };
+
+/** Pick the tx sender: the selected account if session-deployed, else any session account. */
+function pickSessionSender(): AztecAddress {
+  const selected = state.registeredAddresses[state.selectedAccountIndex];
+  const sender =
+    selected && state.sessionAddresses.some((a) => a.equals(selected))
+      ? selected
+      : state.sessionAddresses[0];
+  if (!sender) {
+    throw new Error(
+      "Deploy a test account first — imported accounts (e.g. sandbox test accounts) can't send from this session's wallet",
+    );
+  }
+  return sender;
+}
 
 export async function checkAccelerator(): Promise<boolean> {
   try {
@@ -546,7 +569,9 @@ export async function deployTestAccount(
       `${EXPLORER_BASE}/${deployTxHash}`,
     );
 
-    // On live networks, store the deployed address for use in subsequent operations
+    // Session-deployed accounts are the only valid tx senders (see sessionAddresses).
+    state.sessionAddresses.push(accountManager.address);
+    // On live networks, also surface it in the registered list for subsequent operations
     if (state.proofsRequired) {
       state.registeredAddresses.push(accountManager.address);
     }
@@ -569,7 +594,7 @@ export async function deployToken(
   }
 
   const mode = state.uiMode;
-  const alice = state.registeredAddresses[state.selectedAccountIndex];
+  const alice = pickSessionSender();
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
   const proveTracker = createProveTracker();
@@ -635,7 +660,7 @@ export async function runTokenFlow(
   }
 
   const mode = state.uiMode;
-  const alice = state.registeredAddresses[state.selectedAccountIndex];
+  const alice = pickSessionSender();
   const fee = { paymentMethod: state.feePaymentMethod! };
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
@@ -654,9 +679,10 @@ export async function runTokenFlow(
   }, 100);
 
   try {
-    // On live networks, we may need to deploy a second account (bob) for the transfer step
+    // We may need to deploy a second account (bob) for the transfer step. Bob must also be
+    // session-deployed — an imported account can't even receive-and-later-spend reliably here.
     let bob: AztecAddress;
-    const bobCandidate = state.registeredAddresses.find((_, i) => i !== state.selectedAccountIndex);
+    const bobCandidate = state.sessionAddresses.find((a) => !a.equals(alice));
     if (bobCandidate) {
       bob = bobCandidate;
     } else {
@@ -683,6 +709,7 @@ export async function runTokenFlow(
         proveTracker,
       });
       bob = bobManager.address;
+      state.sessionAddresses.push(bob);
       state.registeredAddresses.push(bob);
       steps.push(bobStep);
       log(
