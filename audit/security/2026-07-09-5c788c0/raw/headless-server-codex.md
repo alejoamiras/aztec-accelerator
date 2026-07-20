@@ -1,0 +1,1 @@
+NO FINDINGS — `main.rs` keeps deny-by-default intact: empty/whitespace/trailing-comma `ALLOWED_ORIGINS` stays gated, malformed/wildcard-like entries fail via canonical parsing, allow-all is explicit and conflicts fail closed, and `AZTEC_BB_VERSION` does not widen origin authorization.

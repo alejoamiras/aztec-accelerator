@@ -1,0 +1,23 @@
+1. **Trailing-dot origins collapse into approved non-dot origins**
+
+1. **Impact factors:** Authorization is violated; possible Confidentiality/Availability impact if an untrusted page can use the local prover for private witness flows or CPU-heavy proving. Blast radius is one user per local accelerator instance, with all users exposed to the same matching flaw. Data sensitivity: ZK witness/proof workflow access. Exploitability: network attack via malicious web page; high complexity because attacker must serve content from the browser-distinct trailing-dot origin of an approved/verified host; privileges none; user interaction required to visit the page, but no approval prompt if the non-dot origin is already approved.
+
+2. **Evidence confidence:** High.
+
+3. **OWASP category + CWE:** OWASP A01 Broken Access Control; CWE-863 Incorrect Authorization.
+
+4. **Trace:** Browser sends `Origin: https://trusted.example.` -> `packages/accelerator/core/src/server/auth.rs:24`-`36` reads and parses it -> `packages/accelerator/core/src/authorization.rs:21`-`37` canonicalizes host and strips the trailing dot with `trim_end_matches('.')` -> `packages/accelerator/core/src/server/auth.rs:44`-`51` checks approval -> `packages/accelerator/core/src/authorization.rs:291`-`298` compares against approved `https://trusted.example` -> `packages/accelerator/core/src/server/auth.rs:53`-`54` allows the request -> `packages/accelerator/core/src/server/prove.rs:107`-`112` proceeds to read/prove the body. Browser response readability is enabled by permissive CORS at `packages/accelerator/core/src/server.rs:208`-`215`.
+
+   First-time approval/UX spoof path: raw dotted Origin -> canonical no-dot origin at `packages/accelerator/core/src/server/auth.rs:36` -> popup receives no-dot origin at `packages/accelerator/core/src/server/auth.rs:70`-`72` -> popup URL hides the dot at `packages/accelerator/src-tauri/src/windows.rs:89`-`92` -> remembered approval persists the no-dot origin at `packages/accelerator/core/src/server/auth.rs:84`-`99`.
+
+   Verified badge borrowing path: registry origins are canonicalized with the same function at `packages/accelerator/src-tauri/src/verified_sites.rs:103`-`111`; lookup also canonicalizes caller input at `packages/accelerator/src-tauri/src/verified_sites.rs:121`-`123`; `get_verified_info` returns the trusted display name at `packages/accelerator/src-tauri/src/commands.rs:101`-`108`.
+
+5. **Missing control:** Origin comparison does not preserve the browser-serialized host identity for trailing-dot hosts, and does not reject trailing-dot origins. It collapses two browser-distinct origins before authorization, display, persistence, and verified-site lookup.
+
+6. **Exploit/violation scenario:** User has approved `https://trusted.example`. Attacker serves a page from `https://trusted.example.` through a deployment where dotted Host routing reaches attacker-controlled/default content while the non-dot host is legitimate. The page calls `fetch("http://127.0.0.1:59833/prove", { method: "POST", ... })`; the browser sends `Origin: https://trusted.example.`. The accelerator strips the dot, treats it as `https://trusted.example`, skips the prompt, accepts the witness body, runs proving, and CORS permits the page to read the proof response. If not already approved, the popup displays the non-dot trusted origin and can show the verified display name, so the user is asked to approve the wrong browser origin.
+
+7. **Preconditions:** The user must have approved the non-dot origin, or must approve the misleading popup. The attacker must be able to serve web content from the trailing-dot hostname of a trusted/approved origin, such as through Host-header routing differences, CDN/shared-hosting default routing, or equivalent deployment misconfiguration.
+
+8. **Why existing mitigations fail:** The loopback Host allowlist protects the accelerator listener’s `Host`, not the browser page’s `Origin`. Deny-by-default fails because the unknown dotted origin is normalized into the approved non-dot identity before comparison. UUID request IDs bind the decision to the pending request, but the pending request already stores the collapsed origin. Verified-sites matching is UX-only, but it compounds the spoof by returning the non-dot site’s display name for the dotted origin.
+
+9. **Instances:** `packages/accelerator/core/src/authorization.rs:36`-`37`; `packages/accelerator/core/src/server/auth.rs:36`, `44`-`54`, `70`-`72`, `84`-`99`; `packages/accelerator/src-tauri/src/verified_sites.rs:103`-`111`, `121`-`123`; `packages/accelerator/src-tauri/src/windows.rs:89`-`92`; `packages/accelerator/src-tauri/src/commands.rs:101`-`108`.
