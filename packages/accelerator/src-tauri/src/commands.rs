@@ -77,8 +77,17 @@ pub fn set_autostart(
                     .to_string(),
             );
         }
-        manager.enable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::enable_crash_recovery();
+        // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction. If arming fails
+        // after the launcher went on, roll back (disable the launcher unless it was already on, disarm
+        // any partial recovery) and surface a combined error — never leave a half-enabled state.
+        let prior_enabled = manager.is_enabled().unwrap_or(false);
+        crate::crash_recovery::enable_transaction(
+            prior_enabled,
+            || manager.enable().map_err(|e| e.to_string()),
+            crate::crash_recovery::enable_crash_recovery,
+            || manager.disable().map_err(|e| e.to_string()),
+            crate::crash_recovery::disable_crash_recovery,
+        )?;
     } else {
         manager.disable().map_err(|e| e.to_string())?;
         crate::crash_recovery::disable_crash_recovery();

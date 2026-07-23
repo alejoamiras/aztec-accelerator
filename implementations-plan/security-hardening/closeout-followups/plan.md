@@ -207,7 +207,7 @@ revert clean and let each phase's gate run independently.
 
 ## Phases
 
-### Phase 1 — C8 autostart `enable() → Result` rollback (Rust, self-contained)
+### Phase 1 — C8 autostart `enable() → Result` rollback (Rust, self-contained) — ✓ GREEN (fmt/clippy-D/37 tests; lessons/phase-1.md)
 Steps: enumerate error/success exits → `enable → Result`; mandatory injectable `enable_with_rollback`; `set_autostart`
 rolls back + surfaces combined failure; `main.rs`/`updater.rs` log-and-continue, rearm-only-on-Ok; confirm per-platform
 `disable_impl` revert. Tests: rollback ordering + manager-fail + arm-fail-after-partial + cleanup-fail + prior-enabled,
