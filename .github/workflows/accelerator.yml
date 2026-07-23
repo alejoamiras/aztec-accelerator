@@ -106,6 +106,51 @@ jobs:
       # accelerator-core's own unit tests (113) — not exercised by `cargo test` in src-tauri.
       - run: cargo test --manifest-path ../core/Cargo.toml
 
+  cert-trust:
+    name: Cert Trust (${{ matrix.platform }})
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ${{ matrix.runner }}
+    # 30, not 20: a cold Windows Rust build (this leg has its own cache key) can run ~15-18 min before
+    # the fast read-only trust test even starts.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            test: trust_linux
+            rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            platform: windows
+            test: trust_windows
+            rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+          - runner: macos-latest
+            platform: macos
+            test: trust_macos
+            rust-cache-key: accelerator-desktop-aarch64-apple-darwin
+    defaults:
+      run:
+        working-directory: packages/accelerator/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: ${{ matrix.rust-cache-key }}
+          rust-workspaces: |
+            packages/accelerator/src-tauri -> target
+            packages/accelerator/core -> target
+          rust-components: ""
+      # Linux drives certutil against a throwaway $HOME NSS db (install/verify/chain-validate/remove).
+      - name: Install libnss3-tools (certutil)
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
+      # Real trust-store test per OS. Windows: CurrentUser Root add/verify/remove (spike I3 — expected
+      # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
+      # interactive auth — spike I7, covered by the manual runbook, NOT here).
+      - run: cargo test --test ${{ matrix.test }} -- --ignored --nocapture
+
   lint:
     name: Lint
     needs: changes
@@ -423,6 +468,7 @@ jobs:
         changes,
         clippy,
         test,
+        cert-trust,
         lint,
         smoke,
         release-smoke,
@@ -437,7 +483,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.cert-trust.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

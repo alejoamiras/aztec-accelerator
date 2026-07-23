@@ -62,7 +62,7 @@ test("shows empty state when no origins", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({
       config_version: 1,
-      safari_support: false,
+      https_enabled: false,
       approved_origins: [],
       speed: "full",
     }));
@@ -80,7 +80,7 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
       callCount++;
       return {
         config_version: 1,
-        safari_support: false,
+        https_enabled: false,
         approved_origins: callCount === 1 ? ["https://example.com"] : [],
         speed: "full",
       };
@@ -92,7 +92,8 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
   await expect(page.getByText("https://example.com")).toBeVisible();
 
   // Click Remove
-  await page.getByRole("button", { name: "Remove" }).click();
+  // `exact` so this matches only the origin-list "Remove", not the "Remove certificate trust" button.
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
 
   // Should call remove_approved_origin then reload settings
   const removeCalls = await callsFor(page, "remove_approved_origin");
@@ -171,12 +172,12 @@ test("toggle error reverts checkbox and shows hint", async ({ page }) => {
   await expect(page.locator(".error-hint")).toHaveText("Failed — try again");
 });
 
-test("safari row visible on macOS", async ({ page }) => {
+test("https row visible on macOS", async ({ page }) => {
   await page.goto("/settings.html");
-  await expect(page.locator("#safari-row")).toBeVisible();
+  await expect(page.locator("#https-row")).toBeVisible();
 });
 
-test("safari row hidden on Linux", async ({ page }) => {
+test("https row visible on Linux (NSS trust backend)", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
       platform: "linux",
@@ -185,26 +186,38 @@ test("safari row hidden on Linux", async ({ page }) => {
   });
   await page.goto("/settings.html");
 
-  await expect(page.locator("#safari-row")).not.toBeVisible();
+  await expect(page.locator("#https-row")).toBeVisible();
 });
 
-test("safari toggle calls enable/disable commands", async ({ page }) => {
+test("https row visible on Windows (CurrentUser Root trust backend)", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
+      platform: "windows",
+      cpu_count: 8,
+    }));
+  });
   await page.goto("/settings.html");
 
-  // Enable safari — should call enable_safari_support
-  await page.locator("#safari").evaluate((el: HTMLInputElement) => {
+  await expect(page.locator("#https-row")).toBeVisible();
+});
+
+test("https toggle calls enable/disable commands", async ({ page }) => {
+  await page.goto("/settings.html");
+
+  // Enable HTTPS — should call enable_https
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
     el.checked = true;
     el.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  const enableCalls = await callsFor(page, "enable_safari_support");
+  const enableCalls = await callsFor(page, "enable_https");
   expect(enableCalls.length).toBe(1);
 
-  // Disable safari — should call disable_safari_support
-  await page.locator("#safari").evaluate((el: HTMLInputElement) => {
+  // Disable HTTPS — should call disable_https
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
     el.checked = false;
     el.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  const disableCalls = await callsFor(page, "disable_safari_support");
+  const disableCalls = await callsFor(page, "disable_https");
   expect(disableCalls.length).toBe(1);
 });
 

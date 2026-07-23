@@ -30,12 +30,16 @@
         <span class="slider"></span>
       </label>
     </div>
-    <div id="safari-row" class="row" style="display:none">
-      <span id="safari-label">Safari Support</span>
+    <div id="https-row" class="row" style="display:none">
+      <span id="https-label">Encrypted Connection (HTTPS)</span>
       <label class="toggle">
-        <input type="checkbox" id="safari" role="switch" aria-labelledby="safari-label" />
+        <input type="checkbox" id="https" role="switch" aria-labelledby="https-label" />
         <span class="slider"></span>
       </label>
+    </div>
+    <div id="remove-trust-row" class="row" style="display:none">
+      <span>Certificate</span>
+      <button type="button" id="remove-trust" class="link-button">Remove certificate trust</button>
     </div>
     <div class="speed-section">
       <div class="speed-header">
@@ -53,6 +57,10 @@
         </div>
       </div>
       <div class="speed-description" id="speed-desc"></div>
+    </div>
+    <div class="row">
+      <span>Setup</span>
+      <button type="button" id="run-setup" class="link-button">Run setup again</button>
     </div>
   </div>
 
@@ -108,9 +116,12 @@
       document.getElementById("autostart").checked = autostart;
       document.getElementById("auto-update").checked = config.auto_update === true;
 
-      if (sysInfo.platform === "macos") {
-        document.getElementById("safari-row").style.display = "";
-        document.getElementById("safari").checked = config.safari_support;
+      // HTTPS row: all three desktop OSes now have a trust backend (Keychain / user NSS /
+      // CurrentUser Root).
+      if (["macos", "linux", "windows"].includes(sysInfo.platform)) {
+        document.getElementById("https-row").style.display = "";
+        document.getElementById("https").checked = config.https_enabled;
+        document.getElementById("remove-trust-row").style.display = "";
       }
 
       const idx = speedToIndex(config.speed || "full");
@@ -154,9 +165,22 @@
     // Toggles — all use wireToggle from tauri-bridge.js
     wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
     wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
-    wireToggle("safari", (checked) => ({
-      cmd: checked ? "enable_safari_support" : "disable_safari_support",
+    wireToggle("https", (checked) => ({
+      cmd: checked ? "enable_https" : "disable_https",
     }));
+
+    // "Run setup again" — reopen the first-run onboarding wizard.
+    document.getElementById("run-setup").addEventListener("click", () => {
+      invoke("open_onboarding").catch((err) => console.error("open_onboarding failed:", err));
+    });
+
+    // "Remove certificate trust" (D5) — remove the local CA from all browser stores + turn HTTPS off.
+    wireButton("remove-trust", {
+      onClick: async () => {
+        await invoke("remove_https_trust");
+        document.getElementById("https").checked = false;
+      },
+    });
 
     // Speed slider
     const speedSlider = document.getElementById("speed");

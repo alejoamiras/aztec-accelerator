@@ -99,17 +99,21 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     let port: number | undefined;
     let httpsPort: number | undefined;
     let host: string | undefined;
+    let httpsOnly: boolean | undefined;
 
     if (opts.accelerator) {
       if (opts.accelerator.port !== undefined) port = opts.accelerator.port;
       if (opts.accelerator.httpsPort !== undefined) httpsPort = opts.accelerator.httpsPort;
       if (opts.accelerator.host !== undefined) host = opts.accelerator.host;
+      if (opts.accelerator.httpsOnly !== undefined) httpsOnly = opts.accelerator.httpsOnly;
     }
 
     const envPort =
       typeof process !== "undefined" ? process.env?.AZTEC_ACCELERATOR_PORT : undefined;
     const envHttpsPort =
       typeof process !== "undefined" ? process.env?.AZTEC_ACCELERATOR_HTTPS_PORT : undefined;
+    const envHttpsOnly =
+      typeof process !== "undefined" ? process.env?.AZTEC_ACCELERATOR_HTTPS_ONLY : undefined;
 
     const parsedPort = envPort ? Number.parseInt(envPort, 10) : NaN;
     const parsedHttpsPort = envHttpsPort ? Number.parseInt(envHttpsPort, 10) : NaN;
@@ -118,7 +122,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       httpsPort ??
       (Number.isNaN(parsedHttpsPort) ? DEFAULT_ACCELERATOR_HTTPS_PORT : parsedHttpsPort);
     const resolvedHost = host ?? DEFAULT_ACCELERATOR_HOST;
-    this.#transport = new AcceleratorTransport(resolvedHost, resolvedPort, resolvedHttpsPort);
+    // Explicit option wins; else the env flag (`1`/`true`) enables strict HTTPS-only; else false.
+    const resolvedHttpsOnly =
+      httpsOnly ?? (envHttpsOnly === "1" || envHttpsOnly?.toLowerCase() === "true");
+    this.#transport = new AcceleratorTransport(
+      resolvedHost,
+      resolvedPort,
+      resolvedHttpsPort,
+      resolvedHttpsOnly,
+    );
   }
 
   /** Configure the local accelerator connection (port, host). Resets cached protocol + status. */
@@ -159,10 +171,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     const sdkAztecVersion = this.#getAztecVersion();
 
     try {
-      // Probe both HTTP and HTTPS in parallel (one retry after 1s) — whichever responds
-      // first wins. Chrome/Firefox: HTTP responds (~1ms), HTTPS rejection silently ignored.
-      // Safari with HTTPS enabled: HTTP blocked (mixed content), HTTPS responds.
-      // Both offline twice: probeHealth throws → caught below → { available: false }.
+      // Probe HTTP + HTTPS (one retry after 1s), preferring HTTPS when it's healthy (ok + parseable).
+      // Chrome/Firefox with HTTPS trusted: HTTPS wins → encrypted channel. HTTPS absent/untrusted:
+      // it rejects fast → HTTP wins with no added latency. Safari: HTTP blocked (mixed content) →
+      // HTTPS is the only responder. Both offline twice: probeHealth throws → caught → offline.
       const { response, protocol } = await this.#transport.probeHealth();
 
       if (!response.ok) {

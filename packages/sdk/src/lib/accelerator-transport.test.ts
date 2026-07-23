@@ -157,4 +157,141 @@ describe("AcceleratorTransport", () => {
       await expect(t.probeHealth()).rejects.toBeDefined();
     });
   });
+
+  // Phase 2 (audit R2 / H-2): HTTPS is preferred ONLY when it's healthy (2xx + parseable JSON),
+  // with a bounded grace so the common no-HTTPS path adds no latency.
+  describe("probeHealth — prefer-HTTPS-when-healthy", () => {
+    let originalFetch: typeof globalThis.fetch;
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    const json = (obj: unknown, status = 200) => new Response(JSON.stringify(obj), { status });
+
+    test("healthy HTTPS wins even when HTTP answers first", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        // HTTP answers immediately; HTTPS answers a bit later but well within the grace.
+        if (url.startsWith("https://")) await new Promise((r) => setTimeout(r, 15));
+        return json({ status: "ok" });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const { protocol } = await t.probeHealth();
+      expect(protocol).toBe("https");
+    });
+
+    test("no added latency when HTTPS is absent (refused resolves fast → HTTP wins)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        if (url.startsWith("https://")) throw new TypeError("connection refused");
+        return json({ status: "ok" });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const start = performance.now();
+      const { protocol } = await t.probeHealth();
+      const elapsedMs = performance.now() - start;
+      expect(protocol).toBe("http");
+      // The 250ms grace must NOT be paid when HTTPS refuses instantly.
+      expect(elapsedMs).toBeLessThan(150);
+    });
+
+    test("stalled HTTPS + OK HTTP → HTTP wins after the bounded grace (not the full HTTPS timeout)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        // HTTPS is bound but stalls far past the grace; HTTP is healthy immediately.
+        if (url.startsWith("https://")) await new Promise((r) => setTimeout(r, 1_000));
+        return json({ status: "ok" });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const start = performance.now();
+      const { protocol } = await t.probeHealth();
+      const elapsedMs = performance.now() - start;
+      expect(protocol).toBe("http");
+      // Waited ~the grace, NOT the full 1s stall.
+      expect(elapsedMs).toBeGreaterThanOrEqual(200);
+      expect(elapsedMs).toBeLessThan(600);
+    });
+
+    test("HTTPS 500 + healthy HTTP → HTTP wins (a non-OK HTTPS must not beat healthy HTTP)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        if (url.startsWith("https://")) return json({ error: "boom" }, 500);
+        return json({ status: "ok" });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const { protocol } = await t.probeHealth();
+      expect(protocol).toBe("http");
+    });
+
+    test("HTTPS 200-but-malformed + healthy HTTP → HTTP wins (unparseable body isn't healthy)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        // A 200 whose body is NOT parseable JSON — reachable via a foreign server on the HTTPS port.
+        if (url.startsWith("https://"))
+          return new Response("<html>not json</html>", { status: 200 });
+        return json({ status: "ok" });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const { protocol } = await t.probeHealth();
+      expect(protocol).toBe("http");
+    });
+
+    test("healthy HTTPS still readable by the caller after the winner-selection clone", async () => {
+      globalThis.fetch = mock(async () => json({ aztec_version: "5.0.0" })) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const { response, protocol } = await t.probeHealth();
+      expect(protocol).toBe("https");
+      // #isHealthy cloned the response for its peek, so the original body is still consumable here.
+      expect(await response.json()).toEqual({ aztec_version: "5.0.0" });
+    });
+  });
+
+  describe("httpsOnly strict mode", () => {
+    let originalFetch: typeof globalThis.fetch;
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    test("never constructs an http:// URL and pins https", async () => {
+      const urls: string[] = [];
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        urls.push(url);
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const { protocol } = await t.probeHealth();
+      expect(protocol).toBe("https");
+      expect(urls.every((u) => u.startsWith("https://"))).toBe(true);
+      expect(urls.some((u) => u.startsWith("http://"))).toBe(false);
+      // baseUrl for /prove is https even before any pin, and never the http endpoint.
+      expect(t.baseUrl).toBe("https://127.0.0.1:59834");
+    });
+
+    test("unreachable HTTPS rejects (→ caller maps to offline), never touching http", async () => {
+      const urls: string[] = [];
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        urls.push(url);
+        throw new TypeError("connection refused");
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      await expect(t.probeHealth()).rejects.toBeDefined();
+      expect(urls.some((u) => u.startsWith("http://"))).toBe(false);
+    });
+  });
 });

@@ -44,16 +44,7 @@ pub fn get_autostart_enabled(app: tauri::AppHandle) -> bool {
 
 #[tauri::command]
 pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    if enabled {
-        manager.enable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::enable_crash_recovery();
-    } else {
-        manager.disable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::disable_crash_recovery();
-    }
-    Ok(())
+    set_autostart_inner(&app, enabled)
 }
 
 #[tauri::command]
@@ -148,66 +139,217 @@ pub fn sanitize_window_label(key: &str) -> String {
     hex::encode(&hash[..6])
 }
 
-/// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
-/// The macOS Keychain trust prompt (native password dialog) is triggered by `security add-trusted-cert`.
-#[cfg(target_os = "macos")]
+/// Enable the encrypted (HTTPS) connection: generate certs, install browser trust, save config, start
+/// HTTPS. Cross-platform via [`crate::trust`] — macOS raises the Keychain password dialog, Linux
+/// installs into user NSS stores silently, Windows lands in a later phase (its trust backend errors
+/// until then). Succeeds iff trust landed in ≥1 store (`install_ca_trust` errors otherwise), so on
+/// Linux a missing `certutil` surfaces as an enable failure the wizard can show with a Retry (R3).
 #[tauri::command]
-pub async fn enable_safari_support(
+pub async fn enable_https(
     config: tauri::State<'_, ConfigState>,
     shared_state: tauri::State<'_, SharedAppState>,
+) -> Result<(), String> {
+    enable_https_inner(&config, &shared_state)
+}
+
+/// The shared enable-HTTPS routine, callable outside a Tauri command (the onboarding wizard reuses
+/// it). Generate certs → install browser trust → save config → start HTTPS. Errors iff trust landed
+/// in zero stores (R3), so the wizard can render HTTPS as failed-with-Retry.
+fn enable_https_inner(
+    config: &ConfigState,
+    shared_state: &crate::server::AppState,
 ) -> Result<(), String> {
     use crate::certs;
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
-    // Safari HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
+    // HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
     // the condition the startup gate closes. Fail closed: if the legacy key cannot be removed, refuse
-    // to enable (surfaced to the Settings UI). HTTP is unaffected.
+    // to enable (surfaced to the Settings UI). HTTP is unaffected. (No-op on installs that never had
+    // an on-disk CA key, i.e. every non-macOS install.)
     certs::migrate_legacy_ca_key().map_err(|e| {
-        format!("Legacy CA key could not be removed; refusing to enable Safari HTTPS: {e}")
+        format!("Legacy CA key could not be removed; refusing to enable HTTPS: {e}")
     })?;
+
+    // Already set up? Skip the (re-)install and its OS prompt entirely (post-impl review). An upgrader
+    // whose migrated config already has HTTPS trusted — launch already generated certs, installed
+    // trust, and spawned the listener — clicks the wizard's pre-checked "Start"; without this guard
+    // that would pop a fresh macOS Keychain password dialog to "install" an already-trusted cert and
+    // fire a redundant spawn_https that just fails to bind the already-bound port.
+    if certs::certs_exist() && certs::is_ca_trusted() {
+        mutate_config(config, |cfg| cfg.https_enabled = true)?;
+        tracing::info!("HTTPS already enabled + trusted — no re-install");
+        return Ok(());
+    }
 
     certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
 
     certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
 
-    // Save config
-    {
-        mutate_config(&config, |cfg| cfg.safari_support = true)?;
-    }
+    mutate_config(config, |cfg| cfg.https_enabled = true)?;
 
     // Start HTTPS server with the full shared state (includes auth, config, popup callback)
     let tls_config =
         certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
     // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping it
     // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
-    crate::server::spawn_https((**shared_state).clone(), tls_config);
+    crate::server::spawn_https(shared_state.clone(), tls_config);
 
-    tracing::info!("Safari Support enabled via Settings");
+    tracing::info!("HTTPS enabled");
     Ok(())
 }
 
-/// Disable Safari Support: save config. HTTPS stops on next restart.
-#[cfg(target_os = "macos")]
-#[tauri::command]
-pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
-    mutate_config(&config, |cfg| cfg.safari_support = false)?;
-    tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
+/// Shared autostart toggle (used by the Settings toggle + the onboarding wizard). Enables/disables
+/// the OS autostart entry and the paired crash-recovery mechanism.
+fn set_autostart_inner(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())?;
+        crate::crash_recovery::enable_crash_recovery();
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+        crate::crash_recovery::disable_crash_recovery();
+    }
     Ok(())
 }
 
-/// Stub for non-macOS platforms.
-#[cfg(not(target_os = "macos"))]
+/// Disable the encrypted (HTTPS) connection: save config off. HTTPS stops on next restart. Trust
+/// anchors are left in place (removing them is the separate [`remove_https_trust`] action, so a
+/// re-enable doesn't re-prompt — D5/A4).
 #[tauri::command]
-pub async fn enable_safari_support() -> Result<(), String> {
-    Err("Safari Support is only available on macOS".to_string())
+pub fn disable_https(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    tracing::info!("HTTPS disabled via Settings (HTTPS stops on next restart)");
+    Ok(())
 }
 
-/// Stub for non-macOS platforms.
-#[cfg(not(target_os = "macos"))]
+/// Explicitly remove the local CA from every browser trust store (the "Remove certificate trust"
+/// Settings action — D5). Also flips HTTPS off so the app stops presenting a now-untrusted cert.
 #[tauri::command]
-pub fn disable_safari_support() -> Result<(), String> {
-    Err("Safari Support is only available on macOS".to_string())
+pub fn remove_https_trust(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    let report = crate::trust::remove_ca_trust(&crate::certs::live_ca_cert_path());
+    mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    tracing::info!(
+        removed = report.stores.len(),
+        "Removed CA trust via Settings"
+    );
+    Ok(())
+}
+
+// ── First-run onboarding wizard ──
+
+/// Prefill state for the onboarding wizard. `https_default` is ALWAYS `true` — the HTTPS toggle is
+/// pre-checked for everyone, including upgraders who never had it, to move the whole installed base
+/// onto the encrypted path (A9 / plan §2.1). Autostart + auto-update reflect current state so the
+/// wizard shows an upgrader their real settings.
+#[derive(serde::Serialize)]
+pub struct OnboardingState {
+    pub platform: String,
+    /// HTTPS is pre-checked for everyone incl. upgraders (A9/§2.1). Start-on-Login + Auto-Update
+    /// default to the recommended YES in the wizard UI (not reflected here — the wizard is a
+    /// "recommended setup", and computing OS/config state for the toggle defaults would only let an
+    /// upgrader's prior opt-out silently re-enable on Start).
+    pub https_default: bool,
+}
+
+#[tauri::command]
+pub fn get_onboarding_state() -> OnboardingState {
+    // Intentionally cheap + side-effect-free: the per-OS certificate copy is chosen from `platform`;
+    // no autostart/config/trust probing (the wizard defaults all toggles to YES).
+    OnboardingState {
+        platform: std::env::consts::OS.to_string(),
+        https_default: true,
+    }
+}
+
+/// Per-action result of the wizard's "Start". Each action runs INDEPENDENTLY — a failure in one
+/// (e.g. the cert install) does not abort the others. `Result<(),String>` serializes as
+/// `{"Ok":null}` / `{"Err":"…"}` for the frontend to render per-row ✓/✗.
+#[derive(serde::Serialize)]
+pub struct OnboardingResult {
+    pub https: Result<(), String>,
+    pub autostart: Result<(), String>,
+    pub auto_update: Result<(), String>,
+    /// Whether the once-per-version onboarding marker was set (true iff every requested action ok).
+    pub completed: bool,
+}
+
+/// Execute the wizard's choices. Each runs independently; the onboarding marker is set ONLY when all
+/// requested actions succeed (marker discipline, R4). A failed HTTPS leaves the marker unset so the
+/// wizard returns next launch — unless the user explicitly dismisses via [`dismiss_onboarding`].
+#[tauri::command]
+pub async fn complete_onboarding(
+    app: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
+    https: bool,
+    autostart: bool,
+    auto_update: bool,
+) -> Result<OnboardingResult, String> {
+    let https_res = if https {
+        enable_https_inner(&config, &shared_state)
+    } else {
+        Ok(())
+    };
+    let autostart_res = set_autostart_inner(&app, autostart);
+    let auto_update_res = mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update));
+
+    let all_ok = https_res.is_ok() && autostart_res.is_ok() && auto_update_res.is_ok();
+    let completed = all_ok
+        && mutate_config(&config, |cfg| {
+            cfg.onboarding_version = crate::config::ONBOARDING_VERSION
+        })
+        .is_ok();
+
+    Ok(OnboardingResult {
+        https: https_res,
+        autostart: autostart_res,
+        auto_update: auto_update_res,
+        completed,
+    })
+}
+
+/// Mark onboarding complete without (further) action — the explicit "Continue without HTTPS" (after a
+/// failed cert install) and "Skip for now" paths (R4). The ONLY unconditional marker set.
+#[tauri::command]
+pub fn dismiss_onboarding(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    mutate_config(&config, |cfg| {
+        cfg.onboarding_version = crate::config::ONBOARDING_VERSION
+    })?;
+    tracing::info!("Onboarding dismissed (marker set)");
+    Ok(())
+}
+
+// ── Certificate renewal (macOS/Windows renewal consent window — §7) ──
+
+/// "Renew now" from the renewal consent window: rotate the cert identity (raises the OS trust dialog
+/// with context, unlike a surprise background prompt). Records the prompt time for throttling.
+/// `async` (like `enable_https`/`complete_onboarding`) so the blocking subprocess + modal OS dialog
+/// don't freeze the webview event loop / the "Renewing…" spinner (post-impl review).
+#[tauri::command]
+pub async fn renew_cert(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
+    let _ = mutate_config(&config, |cfg| {
+        cfg.last_rotation_prompt_at = Some(now_unix_secs());
+    });
+    tracing::info!("Certificate renewed via consent window");
+    Ok(())
+}
+
+/// Record that the renewal window was shown/declined (throttles re-prompting).
+#[tauri::command]
+pub fn record_renewal_prompt(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
+    mutate_config(&config, |cfg| {
+        cfg.last_rotation_prompt_at = Some(now_unix_secs());
+    })
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Toggle auto-update preference from Settings.

@@ -9,7 +9,7 @@ mod tls;
 pub use tls::start_https;
 
 /// Spawn the GUI-side HTTPS server with `tls_config`, logging any error. Shared by the two callers
-/// (launch-time `try_start_https` + settings-time `enable_safari_support`) — only the identical
+/// (launch-time `try_start_https` + settings-time `enable_https`) — only the identical
 /// spawn+error-log wrapper is unified; each caller keeps its own (intentionally divergent) TLS-load
 /// and failure-handling preamble upstream. (F-09)
 pub fn spawn_https(

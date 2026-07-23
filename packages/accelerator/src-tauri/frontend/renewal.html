@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Certificate Renewal</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      .r { padding: 20px 22px; }
+      .r h1 { font-size: 1.15rem; margin: 2px 0 8px; }
+      .r p { color: var(--muted, #6b7280); font-size: 0.9rem; margin: 0 0 16px; }
+      .cta { display: flex; gap: 10px; }
+      .cta button { border: none; border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.92rem; font-weight: 600; cursor: pointer; }
+      .cta .primary { flex: 1; background: #f0a020; color: #231a06; }
+      .cta .ghost { background: transparent; border: 1px solid var(--line, #e3e6ea); color: var(--muted, #6b7280); }
+    </style>
+  </head>
+  <body>
+    <div class="r">
+      <h1>Renew your encrypted-connection certificate</h1>
+      <p>
+        The local certificate that lets your browser reach the accelerator over HTTPS is about to
+        expire. Renewing installs a fresh one — your OS will ask you to confirm. If you skip, HTTPS
+        keeps working until the certificate expires, and you'll be reminded again.
+      </p>
+      <div class="cta">
+        <button type="button" class="primary" id="renew">Renew now</button>
+        <button type="button" class="ghost" id="later">Later</button>
+      </div>
+    </div>
+
+    <script src="tauri-bridge.js"></script>
+    <script>
+      const { getCurrentWindow } = window.__TAURI__.window;
+
+      wireButton("renew", {
+        disableAlso: "later",
+        loadingText: "Renewing…",
+        onClick: async () => {
+          await invoke("renew_cert");
+          await getCurrentWindow().close();
+        },
+      });
+      wireButton("later", {
+        onClick: async () => {
+          await invoke("record_renewal_prompt");
+          await getCurrentWindow().close();
+        },
+      });
+    </script>
+  </body>
+</html>

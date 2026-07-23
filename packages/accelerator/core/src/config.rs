@@ -37,15 +37,30 @@ impl Speed {
 
 /// Current config schema version. Bump when fields are removed or renamed.
 /// Added fields with `#[serde(default)]` don't require a version bump.
+///
+/// NOTE: nothing currently *reads* `config_version` — the `safari_support`→`https_enabled` rename
+/// is handled entirely by `#[serde(alias)]`, so this stays at 1 (bumping it would be decorative
+/// until version-gated migration logic exists).
 const CONFIG_VERSION: u32 = 1;
+
+/// The onboarding-wizard consent version. The first-run wizard shows while a config's
+/// `onboarding_version` is `< ONBOARDING_VERSION`. A versioned int (not a bool) so a future
+/// release can re-onboard for a new consent surface by bumping this. New installs AND existing
+/// upgraders both start at 0 (serde default), so both see the wizard once.
+pub const ONBOARDING_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceleratorConfig {
     /// Schema version for future migration support.
     #[serde(default = "default_config_version")]
     pub config_version: u32,
-    #[serde(default)]
-    pub safari_support: bool,
+    /// Whether the local HTTPS listener (browser ⇄ accelerator encrypted channel) is enabled.
+    /// Renamed from `safari_support` (it's no longer macOS/Safari-only) — `#[serde(alias)]` loads
+    /// pre-rename configs 1:1, and the next save writes only `https_enabled`. A config carrying BOTH
+    /// keys is a serde duplicate-field error → defaults (HTTPS off), matching the existing
+    /// malformed-config policy; the app can't self-produce that state (save rewrites the whole file).
+    #[serde(default, alias = "safari_support")]
+    pub https_enabled: bool,
     #[serde(default, deserialize_with = "de_approved_origins")]
     pub approved_origins: Vec<CanonicalOrigin>,
     #[serde(default)]
@@ -59,17 +74,28 @@ pub struct AcceleratorConfig {
     /// has no popup). Existing on-disk configs lacking the field deserialize to `false` (secure).
     #[serde(default)]
     pub auto_approve_localhost: bool,
+    /// First-run onboarding progress. `< ONBOARDING_VERSION` ⇒ the wizard is shown once. Serde
+    /// default 0 = never onboarded (so existing upgraders see it too — the consent moment for the
+    /// HTTPS-by-default migration).
+    #[serde(default)]
+    pub onboarding_version: u32,
+    /// Unix seconds of the last cert-renewal consent prompt (macOS/Windows renewal-window throttle).
+    /// `None` = never prompted. Skipped when `None` to keep on-disk configs clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_rotation_prompt_at: Option<i64>,
 }
 
 impl Default for AcceleratorConfig {
     fn default() -> Self {
         Self {
             config_version: CONFIG_VERSION,
-            safari_support: false,
+            https_enabled: false,
             approved_origins: Vec::new(),
             speed: Speed::default(),
             auto_update: None,
             auto_approve_localhost: false,
+            onboarding_version: 0,
+            last_rotation_prompt_at: None,
         }
     }
 }
@@ -199,11 +225,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_has_safari_support_false() {
+    fn default_config_has_https_disabled() {
         let config = AcceleratorConfig::default();
-        assert!(!config.safari_support);
+        assert!(!config.https_enabled);
         assert!(config.approved_origins.is_empty());
         assert_eq!(config.speed, Speed::Full);
+        assert_eq!(config.onboarding_version, 0);
+        assert_eq!(config.last_rotation_prompt_at, None);
     }
 
     #[test]
@@ -216,10 +244,12 @@ mod tests {
         let cfg_path = cfg_dir.join("config.json");
 
         let original = AcceleratorConfig {
-            safari_support: true,
+            https_enabled: true,
             approved_origins: vec![co("https://example.com"), co("https://other.dev")],
             speed: Speed::Balanced,
             auto_update: Some(true),
+            onboarding_version: 1,
+            last_rotation_prompt_at: Some(1_700_000_000),
             ..Default::default()
         };
 
@@ -229,10 +259,74 @@ mod tests {
         save_to(&original, &cfg_path).unwrap();
         let loaded = load_from(&cfg_path);
 
-        assert_eq!(loaded.safari_support, original.safari_support);
+        assert_eq!(loaded.https_enabled, original.https_enabled);
         assert_eq!(loaded.approved_origins, original.approved_origins);
         assert_eq!(loaded.speed, original.speed);
         assert_eq!(loaded.auto_update, original.auto_update);
+        assert_eq!(loaded.onboarding_version, original.onboarding_version);
+        assert_eq!(
+            loaded.last_rotation_prompt_at,
+            original.last_rotation_prompt_at
+        );
+    }
+
+    // ─── safari_support → https_enabled migration (Phase 1) ──────────────────
+
+    #[test]
+    fn legacy_safari_support_key_migrates_to_https_enabled() {
+        // A pre-rename config on disk uses `safari_support`; the alias must load it 1:1.
+        let cfg: AcceleratorConfig = serde_json::from_str(r#"{"safari_support": true}"#).unwrap();
+        assert!(
+            cfg.https_enabled,
+            "legacy safari_support:true must load as https_enabled:true"
+        );
+
+        let cfg_false: AcceleratorConfig =
+            serde_json::from_str(r#"{"safari_support": false}"#).unwrap();
+        assert!(!cfg_false.https_enabled);
+    }
+
+    #[test]
+    fn save_writes_only_new_key_not_legacy_alias() {
+        // After migration, a save must emit `https_enabled` and never re-emit `safari_support`.
+        let cfg = AcceleratorConfig {
+            https_enabled: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"https_enabled\":true"));
+        assert!(!json.contains("safari_support"));
+    }
+
+    #[test]
+    fn both_keys_present_falls_back_to_defaults() {
+        // A hand-edited config with BOTH keys is a serde duplicate-field error (alias == same field).
+        // load_from must fall back to defaults = HTTPS off (fail-safe; matches existing malformed policy).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.json");
+        std::fs::write(
+            &cfg_path,
+            r#"{"safari_support": true, "https_enabled": true}"#,
+        )
+        .unwrap();
+        let loaded = load_from(&cfg_path);
+        assert!(
+            !loaded.https_enabled,
+            "duplicate keys must fail safe to HTTPS off"
+        );
+    }
+
+    #[test]
+    fn onboarding_version_defaults_to_zero_when_absent() {
+        let cfg: AcceleratorConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.onboarding_version, 0);
+    }
+
+    #[test]
+    fn last_rotation_prompt_at_none_not_serialized() {
+        let cfg = AcceleratorConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("last_rotation_prompt_at"));
     }
 
     #[test]
@@ -280,13 +374,13 @@ mod tests {
     #[test]
     fn load_returns_default_for_missing_file() {
         let config: AcceleratorConfig = serde_json::from_str("{}").unwrap_or_default();
-        assert!(!config.safari_support);
+        assert!(!config.https_enabled);
     }
 
     #[test]
     fn load_returns_default_for_malformed_json() {
         let config: AcceleratorConfig = serde_json::from_str("not json").unwrap_or_default();
-        assert!(!config.safari_support);
+        assert!(!config.https_enabled);
     }
 
     #[test]
