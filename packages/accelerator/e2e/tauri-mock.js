@@ -9,6 +9,10 @@
  * Pure JavaScript — no TypeScript syntax. Playwright's addInitScript does not transpile.
  */
 
+// C9 (A): disable the click-steal guard in the mock env so tests can click immediately (the guard's real
+// 700 ms timing is exercised in the WebDriver E2E against a real window, not here).
+window.__CLICK_GUARD_MS__ = 0;
+
 // Call counter per command for sequencing support
 const callCounts = {};
 
@@ -32,6 +36,9 @@ const defaults = {
   set_auto_update: () => null,
   remove_approved_origin: () => null,
   respond_auth: () => null,
+  // C9 (D8/D15): the popup now sources its origin + actionable-state from the server, not the URL param.
+  // Default = an active popup for example.com; per-test overrides set specific origins / queued state.
+  get_pending_auth: () => ({ origin: "https://example.com", active: true }),
   respond_update_prompt: () => null,
   enable_safari_support: () => null,
   disable_safari_support: () => null,

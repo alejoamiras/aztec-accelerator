@@ -145,7 +145,7 @@ const WINDOW_MATRIX: Record<string, string[]> = {
     "disable_safari_support",
     "remove_approved_origin",
   ],
-  authorize: ["get_verified_info", "respond_auth"],
+  authorize: ["get_verified_info", "get_pending_auth", "respond_auth"],
   "update-prompt": ["respond_update_prompt"],
 };
 const snakeToPerm = (cmd: string) => `allow-${cmd.replace(/_/g, "-")}`;
@@ -226,7 +226,7 @@ describe("F-012 P3 — per-window capability ACL", () => {
 
     expect(buildCommands).toEqual(handlers); // declared surface == registered surface
     expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
-    expect(handlers.length).toBe(12);
+    expect(handlers.length).toBe(13);
   });
 
   test("tauri.conf.json pins the capability allowlist to exactly the 3", async () => {

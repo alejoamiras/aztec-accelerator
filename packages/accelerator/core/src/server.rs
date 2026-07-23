@@ -48,6 +48,15 @@ pub const DEFAULT_BB_VERSION: &str = "unknown";
 /// imports this).
 pub const AUTH_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// C9 (D18): absolute upper bound on how long a `/prove` request blocks waiting for a decision. The REAL
+/// per-popup 60 s deadline is enforced by the popup's ACTIVATION-armed auto-deny timer (windows.rs) — so a
+/// request queued behind a busy popup is NOT denied at 60 s-from-enqueue (the starvation bug). This
+/// backstop only bounds the total queued wait — at most `MAX_PENDING_ORIGINS` popups each taking up to
+/// `AUTH_DECISION_TIMEOUT` — so a queued request that somehow never surfaces can't block forever.
+pub const AUTH_QUEUE_BACKSTOP: Duration = Duration::from_secs(
+    AUTH_DECISION_TIMEOUT.as_secs() * crate::authorization::MAX_PENDING_ORIGINS as u64,
+);
+
 /// Status surfaced to the tray via the `on_status` callback during a `/prove` request.
 /// `display_text()` MUST stay byte-identical to the legacy `"Status: …"` string literals — the
 /// tray label and the `prove_success_path_and_status_sequence` characterization test both pin

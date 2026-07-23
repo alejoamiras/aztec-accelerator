@@ -5,5 +5,9 @@
   "local": true,
   "platforms": ["linux", "macOS", "windows"],
   "windows": ["auth-*"],
-  "permissions": ["allow-get-verified-info", "allow-respond-auth"]
+  "permissions": [
+    "allow-get-verified-info",
+    "allow-respond-auth",
+    "allow-get-pending-auth"
+  ]
 }

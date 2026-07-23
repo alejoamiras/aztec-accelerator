@@ -9,7 +9,7 @@
 use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
 use crate::config;
 
-use super::{AppState, ProveError, AUTH_DECISION_TIMEOUT};
+use super::{AppState, ProveError, AUTH_QUEUE_BACKSTOP};
 
 /// Check if the request origin is authorized. Returns Ok(()) if approved.
 pub(crate) async fn authorize_origin(
@@ -61,21 +61,26 @@ pub(crate) async fn authorize_origin(
     }
 
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-    let (rx, request_id, is_first) = auth_manager.request(&origin).map_err(|_| {
+    let (rx, request_id, is_first, _is_active) = auth_manager.request(&origin).map_err(|_| {
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
         ProveError::TooManyRequests
     })?;
 
     if is_first {
         if let Some(ref show_popup) = state.show_auth_popup {
+            // C9 (D18): the desktop callback (show_auth_popup_window) peeks the arbiter for active-ness and
+            // builds the popup active-or-queued, arming the ACTIVATION-relative 60 s auto-deny itself.
             show_popup(&origin, &request_id);
         }
     }
 
-    let decision = tokio::time::timeout(AUTH_DECISION_TIMEOUT, rx)
+    // C9 (D18): wait up to the QUEUE BACKSTOP, not 60 s-from-enqueue. The real per-popup 60 s deadline is
+    // the popup's activation-armed auto-deny (which resolves Deny → this `rx`), so a request queued behind
+    // a busy popup is never denied before the user actually sees it.
+    let decision = tokio::time::timeout(AUTH_QUEUE_BACKSTOP, rx)
         .await
         .map_err(|_| {
-            tracing::warn!(origin = %origin, "Authorization timed out");
+            tracing::warn!(origin = %origin, "Authorization queue backstop elapsed");
             auth_manager.resolve(&request_id, AuthDecision::Deny);
             ProveError::AuthorizationTimeout
         })?

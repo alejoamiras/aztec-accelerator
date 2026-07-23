@@ -142,6 +142,7 @@ fn main() {
         "remove_approved_origin",
         "get_system_info",
         "get_verified_info",
+        "get_pending_auth",
         "respond_auth",
         "enable_safari_support",
         "disable_safari_support",

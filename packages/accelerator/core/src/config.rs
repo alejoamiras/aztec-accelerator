@@ -370,8 +370,13 @@ mod tests {
     #[test]
     fn de_origins_keeps_canonical() {
         assert_eq!(
-            de_origins(r#"["https://nulo.sh","chrome-extension://abc"]"#),
-            vec![co("https://nulo.sh"), co("chrome-extension://abc")],
+            de_origins(
+                r#"["https://nulo.sh","chrome-extension://abcdefghijklmnopabcdefghijklmnop"]"#
+            ),
+            vec![
+                co("https://nulo.sh"),
+                co("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+            ],
         );
     }
 

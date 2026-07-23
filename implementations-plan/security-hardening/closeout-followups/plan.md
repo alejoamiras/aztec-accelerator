@@ -214,7 +214,7 @@ rolls back + surfaces combined failure; `main.rs`/`updater.rs` log-and-continue,
 all via injected closures.
 **Validation gate** — `bun run --cwd packages/accelerator lint` · `cd packages/accelerator/src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`. Pass: exit 0, new rollback tests green. Layers: lint · unit(Rust).
 
-### Phase 2 — C9 popup (B → C → A)
+### Phase 2 — C9 popup (B → C → A) — ✓ LOCAL GREEN (core 178 + src-tauri 37 + static 12 + clippy/fmt/biome; Playwright+WebDriver CI-only; lessons/phase-2.md)
 Steps: **(B)** per-scheme extension grammar + `canon_*` accept/reject tests. **(C)** `peek_origin` + `get_pending_auth`
 (shared label guard) + register + capability grant + `authorize.js` placeholder→server-origin→`get_verified_info`, A2
 UX (None/error) + Playwright mock handler + retitle query-param test + WebDriver "shows server origin" case. **(A)**

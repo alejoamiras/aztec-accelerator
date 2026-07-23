@@ -492,6 +492,7 @@ fn main() {
             commands::remove_approved_origin,
             commands::get_system_info,
             commands::get_verified_info,
+            commands::get_pending_auth,
             commands::respond_auth,
             commands::enable_safari_support,
             commands::disable_safari_support,
