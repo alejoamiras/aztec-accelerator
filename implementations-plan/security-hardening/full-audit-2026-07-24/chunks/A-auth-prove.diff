@@ -1,0 +1,1099 @@
+diff --git a/packages/accelerator/core/src/authorization.rs b/packages/accelerator/core/src/authorization.rs
+index 7a9bb80..ae84e17 100644
+--- a/packages/accelerator/core/src/authorization.rs
++++ b/packages/accelerator/core/src/authorization.rs
+@@ -1,5 +1,5 @@
+ use parking_lot::Mutex;
+-use std::collections::HashMap;
++use std::collections::{HashMap, VecDeque};
+ use tokio::sync::oneshot;
+ use url::Url;
+ 
+@@ -31,13 +31,19 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
+         return None;
+     }
+ 
++    let host = url.host_str()?;
++    // F-011: reject trailing-dot origins (e.g. `https://example.com.`) instead of silently
++    // collapsing them into the undotted origin. The browser treats the dotted FQDN as a
++    // DISTINCT origin, so it must earn its own approval rather than inherit the undotted
++    // site's grant (and its verified badge). Host-header normalization (server/host.rs) is a
++    // separate transport-level policy and is intentionally left unchanged.
++    if host.is_empty() || host.ends_with('.') {
++        return None;
++    }
++
+     match url.scheme() {
+         "http" | "https" | "ws" | "wss" => {
+-            let host = url.host_str()?.to_ascii_lowercase();
+-            let host = host.trim_end_matches('.');
+-            if host.is_empty() {
+-                return None;
+-            }
++            let host = host.to_ascii_lowercase();
+             Some(match url.port() {
+                 Some(p) => format!("{}://{}:{}", url.scheme(), host, p),
+                 None => format!("{}://{}", url.scheme(), host),
+@@ -47,8 +53,16 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
+             if url.port().is_some() {
+                 return None;
+             }
+-            let id = url.host_str()?.to_ascii_lowercase();
+-            if id.is_empty() {
++            let id = host.to_ascii_lowercase();
++            // D7 (C9): extension IDs have a FIXED plain-ASCII grammar. `url` treats these as opaque-host
++            // schemes, so (unlike http/https) it applies NO IDNA/punycode — a bidi/zero-width/non-ASCII or
++            // wrong-length host would otherwise survive into the canonical origin as a homograph. Validate
++            // the exact grammar and reject anything else BEFORE it becomes a `CanonicalOrigin`.
++            let valid = match scheme {
++                "chrome-extension" => is_chrome_extension_id(&id),
++                _ => is_extension_uuid(&id), // moz-extension / safari-web-extension use a per-install UUID
++            };
++            if !valid {
+                 return None;
+             }
+             Some(format!("{scheme}://{id}"))
+@@ -57,6 +71,23 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
+     }
+ }
+ 
++/// Chrome/Edge extension ID: exactly 32 chars, each in `a`..=`p` (the "mpdecimal" base-16 alphabet
++/// Chromium uses for extension IDs). Always plain ASCII — no legitimate ID contains anything else.
++fn is_chrome_extension_id(id: &str) -> bool {
++    id.len() == 32 && id.bytes().all(|b| matches!(b, b'a'..=b'p'))
++}
++
++/// Firefox/Safari web-extension host: a lowercase UUID (`8-4-4-4-12` hex) — the addon's per-install
++/// internal UUID. Reject any non-hex / misplaced-dash / wrong-length value.
++fn is_extension_uuid(id: &str) -> bool {
++    let b = id.as_bytes();
++    b.len() == 36
++        && b.iter().enumerate().all(|(i, &c)| match i {
++            8 | 13 | 18 | 23 => c == b'-',
++            _ => matches!(c, b'0'..=b'9' | b'a'..=b'f'),
++        })
++}
++
+ /// An origin string guaranteed canonical (RFC 6454) **by construction**.
+ ///
+ /// The only ways to build one run [`canonicalize_origin`], so a `CanonicalOrigin` can never
+@@ -151,6 +182,15 @@ pub enum AuthDecision {
+     Deny,
+ }
+ 
++/// Outcome of [`AuthorizationManager::resolve_active`] — the server-side arbiter gate for a USER decision.
++#[derive(Debug, PartialEq, Eq)]
++pub enum ResolveOutcome {
++    /// Resolved; carries the newly-promoted active `request_id` (if a queued popup was promoted).
++    Resolved(Option<String>),
++    /// Rejected — the request is not the currently-active popup (arbiter enforcement).
++    NotActive,
++}
++
+ /// Manages pending authorization requests.
+ ///
+ /// When a `/prove` request arrives from an unknown origin, the handler calls
+@@ -158,8 +198,18 @@ pub enum AuthDecision {
+ /// shows an authorization popup. Subsequent requests from the same origin
+ /// piggyback on the same popup — they all share the decision.
+ /// Maximum number of distinct origins that can have pending authorization simultaneously.
+-/// Prevents popup/memory spam from a malicious site generating many subdomains.
+-const MAX_PENDING_ORIGINS: usize = 10;
++/// Prevents popup/memory spam from a malicious site generating many subdomains. Public so the server's
++/// queue backstop (`AUTH_QUEUE_BACKSTOP`) can bound the worst-case queued wait at `MAX × 60 s` (C9 D18).
++pub const MAX_PENDING_ORIGINS: usize = 10;
++
++/// Maximum number of concurrent `/prove` requests from ONE origin that may piggyback on a single
++/// pending popup. Each piggyback holds a live `oneshot::Sender` in [`PendingRequest::senders`] until
++/// the user decides (or the 60 s auto-deny fires), so without a cap an approved-pending origin could
++/// flood `/prove` during the decision window and grow that `Vec` without bound (per-origin memory
++/// exhaustion — codex quality audit #2). This bounds the survivors to `MAX × MAX_PENDING_ORIGINS`
++/// senders; the (N+1)-th piggyback is shed with `TooManyRequests` (429). 16 is far above any
++/// legitimate retry burst while a popup is on screen — a real dApp fires one prove and awaits it.
++pub const MAX_PIGGYBACK_SENDERS: usize = 16;
+ 
+ /// A pending authorization awaiting the user's decision: its origin (for display + cleanup) and the
+ /// receivers of every request piggybacking on it.
+@@ -176,33 +226,61 @@ struct PendingState {
+     by_origin: HashMap<CanonicalOrigin, String>,
+     /// `request_id` → the pending request. Decisions resolve by **id**, not origin (SEC-06).
+     by_request: HashMap<String, PendingRequest>,
++    /// C9 (D18/D19): the single-active-popup arbiter. `active` is the ONE `request_id` that owns the
++    /// actionable + always-on-top slot; `queue` is the FIFO of built-but-not-actionable requests. Exactly
++    /// one popup is actionable at a time; on the active one resolving, the head of `queue` is promoted.
++    active: Option<String>,
++    queue: VecDeque<String>,
+ }
+ 
+ impl PendingState {
+     /// q7e3-F-09: insert a new pending request, updating BOTH indexes. The origin↔request_id coupling
+     /// lives here, not hand-synced at each call site, so a future mutator can't update one map and
+-    /// forget the other.
++    /// forget the other. C9 (D18): returns whether this new request became the ACTIVE one (slot was free)
++    /// vs. was enqueued (another popup is already active).
+     fn insert(
+         &mut self,
+         origin: CanonicalOrigin,
+         request_id: String,
+         tx: oneshot::Sender<AuthDecision>,
+-    ) {
++    ) -> bool {
+         self.by_origin.insert(origin.clone(), request_id.clone());
+         self.by_request.insert(
+-            request_id,
++            request_id.clone(),
+             PendingRequest {
+                 origin,
+                 senders: vec![tx],
+             },
+         );
++        if self.active.is_none() {
++            self.active = Some(request_id);
++            true
++        } else {
++            self.queue.push_back(request_id);
++            false
++        }
+     }
+ 
+-    /// q7e3-F-09: remove a pending request by id, updating BOTH indexes; returns it if present.
+-    fn remove(&mut self, request_id: &str) -> Option<PendingRequest> {
++    /// q7e3-F-09: remove a pending request by id, updating BOTH indexes. C9 (D18/D19): if the removed
++    /// request was the ACTIVE one, promote the head of `queue` to active and return its id (so the caller
++    /// can raise+arm that window); if it was merely queued, drop it from `queue` and return `None`.
++    /// Returns `(request, newly_promoted_active)`.
++    fn remove(&mut self, request_id: &str) -> Option<(PendingRequest, Option<String>)> {
+         let req = self.by_request.remove(request_id)?;
+         self.by_origin.remove(&req.origin);
+-        Some(req)
++        let promoted = if self.active.as_deref() == Some(request_id) {
++            let next = self.queue.pop_front();
++            self.active = next.clone();
++            next
++        } else {
++            self.queue.retain(|q| q != request_id);
++            None
++        };
++        Some((req, promoted))
++    }
++
++    fn is_active(&self, request_id: &str) -> bool {
++        self.active.as_deref() == Some(request_id)
+     }
+ }
+ 
+@@ -233,17 +311,27 @@ impl AuthorizationManager {
+     /// by origin string, so a caller that knows only an origin cannot resolve a concurrent request.
+     ///
+     /// Returns `Err` if the maximum number of pending requests is exceeded (DoS protection).
++    /// Returns `Ok((receiver, request_id, is_first, is_active))`. `is_first` ⇒ the caller shows a popup
++    /// carrying `request_id`; `is_active` (C9 D18) ⇒ that popup owns the actionable + always-on-top slot
++    /// now (vs. being enqueued behind an already-active popup). For a piggyback (`!is_first`), `is_active`
++    /// reflects the existing request it joined.
+     pub fn request(
+         &self,
+         origin: &CanonicalOrigin,
+-    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool), &'static str> {
++    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool, bool), &'static str> {
+         let (tx, rx) = oneshot::channel();
+         let mut st = self.state.lock();
+         // Piggyback on an existing pending request for this origin.
+         if let Some(request_id) = st.by_origin.get(origin).cloned() {
++            let is_active = st.is_active(&request_id);
+             if let Some(req) = st.by_request.get_mut(&request_id) {
++                // Bound the per-origin piggyback fan-out: a flood of concurrent /prove during the
++                // decision window must not grow `senders` without limit (per-origin memory DoS).
++                if req.senders.len() >= MAX_PIGGYBACK_SENDERS {
++                    return Err("too many concurrent requests for this origin");
++                }
+                 req.senders.push(tx);
+-                return Ok((rx, request_id, false));
++                return Ok((rx, request_id, false, is_active));
+             }
+         }
+         // New request.
+@@ -251,22 +339,55 @@ impl AuthorizationManager {
+             return Err("too many pending authorization requests");
+         }
+         let request_id = uuid::Uuid::new_v4().to_string();
+-        st.insert(origin.clone(), request_id.clone(), tx);
+-        Ok((rx, request_id, true))
++        let is_active = st.insert(origin.clone(), request_id.clone(), tx);
++        Ok((rx, request_id, true, is_active))
++    }
++
++    /// Resolve the pending request identified by `request_id` with `decision` (SYSTEM paths: the 60 s
++    /// auto-deny timeout, a user closing the window). Sends to every piggybacking receiver and clears both
++    /// maps. C9 (D18/D19): returns the newly-promoted active `request_id` if the resolved one owned the
++    /// active slot and a queued request was promoted — the caller raises + arms that window. A no-op
++    /// (returns `None`) for an unknown/stale id (already resolved, or a tampered/guessed id).
++    pub fn resolve(&self, request_id: &str, decision: AuthDecision) -> Option<String> {
++        let mut st = self.state.lock();
++        let (req, promoted) = st.remove(request_id)?;
++        for tx in req.senders {
++            let _ = tx.send(decision);
++        }
++        promoted
+     }
+ 
+-    /// Resolve the pending request identified by `request_id` with `decision`. Sends to every
+-    /// piggybacking receiver and clears both maps. A no-op for an unknown/stale id (already resolved,
+-    /// or a tampered/guessed id that matches nothing).
+-    pub fn resolve(&self, request_id: &str, decision: AuthDecision) {
++    /// C9 (D19): resolve a USER decision (from `respond_auth`), enforced SERVER-SIDE — succeeds ONLY if
++    /// `request_id` currently owns the ACTIVE slot, so a queued (non-actionable) popup cannot resolve
++    /// itself even if its webview is coerced into calling `respond_auth`. The `{active}` button-disable in
++    /// the frontend is a reflection of this, NOT the gate. On success behaves like [`resolve`] and returns
++    /// the promoted active id; otherwise [`ResolveOutcome::NotActive`].
++    pub fn resolve_active(&self, request_id: &str, decision: AuthDecision) -> ResolveOutcome {
+         let mut st = self.state.lock();
+-        if let Some(req) = st.remove(request_id) {
+-            for tx in req.senders {
+-                let _ = tx.send(decision);
++        if !st.is_active(request_id) {
++            return ResolveOutcome::NotActive;
++        }
++        match st.remove(request_id) {
++            Some((req, promoted)) => {
++                for tx in req.senders {
++                    let _ = tx.send(decision);
++                }
++                ResolveOutcome::Resolved(promoted)
+             }
++            None => ResolveOutcome::NotActive,
+         }
+     }
+ 
++    /// C9 (D8/D15): peek a pending request's SERVER-authoritative origin + whether it currently owns the
++    /// active/actionable slot, WITHOUT consuming it. `None` for an unknown/resolved id. Backs
++    /// `get_pending_auth` so the popup renders the origin the server will actually grant and disables its
++    /// buttons while it is merely queued.
++    pub fn peek(&self, request_id: &str) -> Option<(CanonicalOrigin, bool)> {
++        let st = self.state.lock();
++        let origin = st.by_request.get(request_id)?.origin.clone();
++        Some((origin, st.is_active(request_id)))
++    }
++
+     /// Returns true for localhost origins that should be auto-approved.
+     pub fn is_auto_approved(origin: &str) -> bool {
+         // Q14: reuse the same `url::Url` parsing as `canonicalize_origin` (Substitute Algorithm)
+@@ -277,7 +398,10 @@ impl AuthorizationManager {
+             .ok()
+             .filter(|u| matches!(u.scheme(), "http" | "https"))
+             .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+-            .is_some_and(|h| matches!(h.trim_end_matches('.'), "localhost" | "127.0.0.1" | "[::1]"))
++            // No trailing-dot trim: F-011 makes `canonicalize_origin` reject dotted hosts, so a
++            // CanonicalOrigin never carries one. Matching the exact host keeps this consistent for
++            // any direct caller too (a dotted `localhost.` is NOT auto-approved).
++            .is_some_and(|h| matches!(h.as_str(), "localhost" | "127.0.0.1" | "[::1]"))
+     }
+ 
+     /// Returns true if the origin is approved: in the persisted allowlist, OR — only when
+@@ -368,11 +492,11 @@ mod tests {
+     #[tokio::test]
+     async fn request_and_resolve() {
+         let mgr = AuthorizationManager::new();
+-        let (rx1, id1, is_first1) = mgr.request(&co("https://example.com")).unwrap();
++        let (rx1, id1, is_first1, _) = mgr.request(&co("https://example.com")).unwrap();
+         assert!(is_first1);
+ 
+         // A second request for the SAME origin piggybacks on the same request_id.
+-        let (rx2, id2, is_first2) = mgr.request(&co("https://example.com")).unwrap();
++        let (rx2, id2, is_first2, _) = mgr.request(&co("https://example.com")).unwrap();
+         assert!(!is_first2);
+         assert_eq!(id1, id2, "same origin must share one request_id");
+ 
+@@ -385,7 +509,7 @@ mod tests {
+     #[tokio::test]
+     async fn resolve_deny() {
+         let mgr = AuthorizationManager::new();
+-        let (rx, id, _) = mgr.request(&co("https://evil.com")).unwrap();
++        let (rx, id, _, _) = mgr.request(&co("https://evil.com")).unwrap();
+         mgr.resolve(&id, AuthDecision::Deny);
+         assert_eq!(rx.await.unwrap(), AuthDecision::Deny);
+     }
+@@ -396,7 +520,7 @@ mod tests {
+     #[tokio::test]
+     async fn resolve_ignores_wrong_request_id() {
+         let mgr = AuthorizationManager::new();
+-        let (mut rx, id, _) = mgr.request(&co("https://example.com")).unwrap();
++        let (mut rx, id, _, _) = mgr.request(&co("https://example.com")).unwrap();
+         mgr.resolve("not-the-real-id", AuthDecision::Allow { remember: true });
+         assert!(
+             rx.try_recv().is_err(),
+@@ -419,6 +543,106 @@ mod tests {
+         assert!(mgr.request(&co("https://site0.com")).is_ok());
+     }
+ 
++    /// codex quality audit #2: a single origin flooding /prove during the decision window must not
++    /// grow `senders` without bound. The first `MAX_PIGGYBACK_SENDERS` (the initial request + its
++    /// piggybacks) succeed; the next is shed with an error → the /prove handler maps it to 429.
++    #[test]
++    fn rejects_when_too_many_piggyback_senders() {
++        let mgr = AuthorizationManager::new();
++        let origin = co("https://flood.example");
++        // The first call creates the pending request (1 sender); each subsequent call piggybacks.
++        let mut kept = Vec::new();
++        for _ in 0..MAX_PIGGYBACK_SENDERS {
++            kept.push(mgr.request(&origin).expect("under the cap must succeed"));
++        }
++        assert!(
++            mgr.request(&origin).is_err(),
++            "the (MAX_PIGGYBACK_SENDERS + 1)-th concurrent request must be shed"
++        );
++        // A DIFFERENT origin is unaffected — the cap is per pending request, not global.
++        assert!(mgr.request(&co("https://other.example")).is_ok());
++    }
++
++    // ─── single-active-popup arbiter (C9 D18/D19) ───────────────────────
++
++    #[tokio::test]
++    async fn arbiter_first_is_active_second_is_queued() {
++        let mgr = AuthorizationManager::new();
++        let (_rx1, id1, _first1, active1) = mgr.request(&co("https://a.com")).unwrap();
++        assert!(active1, "first popup owns the active slot");
++        let (_rx2, id2, _first2, active2) = mgr.request(&co("https://b.com")).unwrap();
++        assert!(
++            !active2,
++            "second distinct-origin popup is queued, not active"
++        );
++        assert_eq!(mgr.peek(&id1).map(|(_, a)| a), Some(true));
++        assert_eq!(mgr.peek(&id2).map(|(_, a)| a), Some(false));
++    }
++
++    #[tokio::test]
++    async fn arbiter_resolving_active_promotes_next() {
++        let mgr = AuthorizationManager::new();
++        let (rx1, id1, _, _) = mgr.request(&co("https://a.com")).unwrap();
++        let (_rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
++        // Resolving the active one (system path: timeout / window-close) promotes the queued one.
++        let promoted = mgr.resolve(&id1, AuthDecision::Deny);
++        assert_eq!(
++            promoted.as_deref(),
++            Some(id2.as_str()),
++            "queued b.com is promoted to active"
++        );
++        assert_eq!(rx1.await.unwrap(), AuthDecision::Deny);
++        assert_eq!(
++            mgr.peek(&id2).map(|(_, a)| a),
++            Some(true),
++            "b.com now active"
++        );
++    }
++
++    #[tokio::test]
++    async fn arbiter_resolving_queued_does_not_promote() {
++        let mgr = AuthorizationManager::new();
++        let (_rx1, id1, _, _) = mgr.request(&co("https://a.com")).unwrap();
++        let (rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
++        // Resolving the QUEUED one (its window was closed) leaves the active one; nobody is promoted.
++        let promoted = mgr.resolve(&id2, AuthDecision::Deny);
++        assert_eq!(promoted, None, "resolving a queued popup promotes nobody");
++        assert_eq!(rx2.await.unwrap(), AuthDecision::Deny);
++        assert_eq!(
++            mgr.peek(&id1).map(|(_, a)| a),
++            Some(true),
++            "a.com remains active"
++        );
++    }
++
++    #[tokio::test]
++    async fn arbiter_user_resolve_rejects_non_active() {
++        let mgr = AuthorizationManager::new();
++        let (_rx1, id1, _, _) = mgr.request(&co("https://a.com")).unwrap();
++        let (mut rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
++        // A USER decision from the QUEUED (non-active) popup is REJECTED server-side (arbiter enforcement).
++        assert_eq!(
++            mgr.resolve_active(&id2, AuthDecision::Allow { remember: true }),
++            ResolveOutcome::NotActive
++        );
++        assert!(
++            rx2.try_recv().is_err(),
++            "a queued popup's user-decision must not resolve it"
++        );
++        // The ACTIVE popup's user decision succeeds and promotes b.com.
++        match mgr.resolve_active(&id1, AuthDecision::Allow { remember: false }) {
++            ResolveOutcome::Resolved(promoted) => {
++                assert_eq!(promoted.as_deref(), Some(id2.as_str()))
++            }
++            other => panic!("expected Resolved, got {other:?}"),
++        }
++        assert_eq!(
++            mgr.peek(&id2).map(|(_, a)| a),
++            Some(true),
++            "b.com promoted after active resolved"
++        );
++    }
++
+     // ─── canonicalize_origin ────────────────────────────────────────────
+ 
+     #[test]
+@@ -458,9 +682,26 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn canon_trailing_dot_stripped() {
++    fn canon_trailing_dot_rejected() {
++        // F-011: a trailing-dot origin is a DISTINCT browser origin and must NOT be canonicalized
++        // into (and thereby inherit the approval of) the undotted form — it is rejected outright,
++        // across schemes and with/without an explicit port.
++        for input in [
++            "https://nulo.sh.",
++            "https://nulo.sh.:443",
++            "http://localhost.:5173",
++            "wss://example.com.",
++            "chrome-extension://abcdefghijklmnopabcdefghijklmnop.",
++        ] {
++            assert_eq!(
++                canonicalize_origin(input),
++                None,
++                "trailing-dot origin must be rejected, not collapsed: {input}"
++            );
++        }
++        // Sanity: the undotted forms still canonicalize normally.
+         assert_eq!(
+-            canonicalize_origin("https://nulo.sh."),
++            canonicalize_origin("https://nulo.sh"),
+             Some("https://nulo.sh".to_string()),
+         );
+     }
+@@ -529,6 +770,43 @@ mod tests {
+         assert!(canonicalize_origin("chrome-extension-malicious://abc").is_none());
+     }
+ 
++    #[test]
++    fn canon_extension_accepts_valid_grammar() {
++        // D7: chrome = 32× a..=p; moz/safari = a lowercase UUID (uppercase folds to lowercase).
++        assert_eq!(
++            canonicalize_origin("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
++            Some("chrome-extension://abcdefghijklmnopabcdefghijklmnop".to_string()),
++        );
++        assert_eq!(
++            canonicalize_origin("moz-extension://12345678-90ab-cdef-1234-567890abcdef"),
++            Some("moz-extension://12345678-90ab-cdef-1234-567890abcdef".to_string()),
++        );
++        assert_eq!(
++            canonicalize_origin("safari-web-extension://DEADBEEF-0000-1111-2222-333344445555"),
++            Some("safari-web-extension://deadbeef-0000-1111-2222-333344445555".to_string()),
++        );
++    }
++
++    #[test]
++    fn canon_extension_rejects_invalid_grammar() {
++        // D7: a bidi/zero-width/non-ASCII/wrong-length/out-of-alphabet extension host must be REJECTED,
++        // not lowercased into a homograph canonical origin (opaque-host schemes skip url's IDNA).
++        for bad in [
++            "chrome-extension://short",                             // too short
++            "chrome-extension://abcdefghijklmnopabcdefghijklmno",   // 31 chars
++            "chrome-extension://abcdefghijklmnopabcdefghijklmnopq", // 33 chars
++            "chrome-extension://zbcdefghijklmnopabcdefghijklmnop",  // 'z' is out of a..=p
++            "moz-extension://not-a-uuid-at-all-nope-nope-nope-x",   // not a UUID
++            "moz-extension://12345678-1234-1234-1234-1234567890zz", // non-hex tail
++        ] {
++            assert_eq!(
++                canonicalize_origin(bad),
++                None,
++                "must reject invalid extension id: {bad}"
++            );
++        }
++    }
++
+     #[test]
+     fn canon_rejects_unknown_scheme() {
+         assert!(canonicalize_origin("file:///etc/passwd").is_none());
+@@ -541,7 +819,7 @@ mod tests {
+         let cases = [
+             "https://nulo.sh",
+             "https://nulo.sh:8443",
+-            "chrome-extension://abc",
++            "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+         ];
+         for c in cases {
+             let once = canonicalize_origin(c).unwrap();
+diff --git a/packages/accelerator/core/src/config.rs b/packages/accelerator/core/src/config.rs
+index cf41624..32ff563 100644
+--- a/packages/accelerator/core/src/config.rs
++++ b/packages/accelerator/core/src/config.rs
+@@ -168,7 +168,16 @@ pub fn save_to(
+             .open(&tmp_path)?;
+         file.write_all(json.as_bytes())?;
+     }
+-    #[cfg(not(unix))]
++    #[cfg(windows)]
++    {
++        use std::io::Write;
++        // F-003 Windows tail: write the temp with an owner-only DACL; the SD travels with the same-volume
++        // rename to `config.json`. Clear any stale temp first so CREATE_NEW succeeds.
++        let _ = std::fs::remove_file(&tmp_path);
++        let mut file = crate::win_acl::secure_create_file(&tmp_path)?;
++        file.write_all(json.as_bytes())?;
++    }
++    #[cfg(all(not(unix), not(windows)))]
+     {
+         std::fs::write(&tmp_path, &json)?;
+     }
+@@ -370,8 +379,13 @@ mod tests {
+     #[test]
+     fn de_origins_keeps_canonical() {
+         assert_eq!(
+-            de_origins(r#"["https://nulo.sh","chrome-extension://abc"]"#),
+-            vec![co("https://nulo.sh"), co("chrome-extension://abc")],
++            de_origins(
++                r#"["https://nulo.sh","chrome-extension://abcdefghijklmnopabcdefghijklmnop"]"#
++            ),
++            vec![
++                co("https://nulo.sh"),
++                co("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
++            ],
+         );
+     }
+ 
+@@ -399,6 +413,15 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn de_origins_drops_trailing_dot_without_migrating() {
++        // F-011: a persisted dotted origin is DROPPED on load — never silently rewritten to its
++        // undotted (approved) form, so it cannot inherit the undotted origin's grant.
++        let loaded = de_origins(r#"["https://ok.example","https://bad.example."]"#);
++        assert_eq!(loaded, vec![co("https://ok.example")]);
++        assert!(!loaded.contains(&co("https://bad.example")));
++    }
++
+     #[test]
+     fn de_origins_preserves_order() {
+         assert_eq!(
+diff --git a/packages/accelerator/core/src/server/auth.rs b/packages/accelerator/core/src/server/auth.rs
+index 83b466a..9a66756 100644
+--- a/packages/accelerator/core/src/server/auth.rs
++++ b/packages/accelerator/core/src/server/auth.rs
+@@ -9,7 +9,7 @@
+ use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
+ use crate::config;
+ 
+-use super::{AppState, ProveError, AUTH_DECISION_TIMEOUT};
++use super::{AppState, ProveError, AUTH_QUEUE_BACKSTOP};
+ 
+ /// Check if the request origin is authorized. Returns Ok(()) if approved.
+ pub(crate) async fn authorize_origin(
+@@ -61,21 +61,26 @@ pub(crate) async fn authorize_origin(
+     }
+ 
+     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
+-    let (rx, request_id, is_first) = auth_manager.request(&origin).map_err(|_| {
++    let (rx, request_id, is_first, _is_active) = auth_manager.request(&origin).map_err(|_| {
+         tracing::warn!(origin = %origin, "Too many pending authorization requests");
+         ProveError::TooManyRequests
+     })?;
+ 
+     if is_first {
+         if let Some(ref show_popup) = state.show_auth_popup {
++            // C9 (D18): the desktop callback (show_auth_popup_window) peeks the arbiter for active-ness and
++            // builds the popup active-or-queued, arming the ACTIVATION-relative 60 s auto-deny itself.
+             show_popup(&origin, &request_id);
+         }
+     }
+ 
+-    let decision = tokio::time::timeout(AUTH_DECISION_TIMEOUT, rx)
++    // C9 (D18): wait up to the QUEUE BACKSTOP, not 60 s-from-enqueue. The real per-popup 60 s deadline is
++    // the popup's activation-armed auto-deny (which resolves Deny → this `rx`), so a request queued behind
++    // a busy popup is never denied before the user actually sees it.
++    let decision = tokio::time::timeout(AUTH_QUEUE_BACKSTOP, rx)
+         .await
+         .map_err(|_| {
+-            tracing::warn!(origin = %origin, "Authorization timed out");
++            tracing::warn!(origin = %origin, "Authorization queue backstop elapsed");
+             auth_manager.resolve(&request_id, AuthDecision::Deny);
+             ProveError::AuthorizationTimeout
+         })?
+diff --git a/packages/accelerator/core/src/server/probe.rs b/packages/accelerator/core/src/server/probe.rs
+index a8a78d7..815bc05 100644
+--- a/packages/accelerator/core/src/server/probe.rs
++++ b/packages/accelerator/core/src/server/probe.rs
+@@ -44,6 +44,32 @@ pub async fn healthy_aztec_on_port() -> bool {
+     is_healthy_aztec_response(&body)
+ }
+ 
++/// Probe `/health` and return the reported `version` iff the responder is a healthy Aztec
++/// (`status=="ok"`, `api_version==1`) AND carries a string `version`; `None` otherwise. Lets the
++/// F-004 launch tracker confirm it is observing THIS build's OWN server (by matching the reported
++/// version to `CARGO_PKG_VERSION`) rather than a foreign healthy Aztec that happens to own `:59833`.
++/// This matters because the redundant-instance bow-out is Windows-only — on macOS/Linux a second
++/// instance keeps running after losing the bind, so without the version-match a broken new build could
++/// see the incumbent's healthy `/health` and ratchet the floor to a version whose server never ran.
++pub async fn healthy_aztec_version_on_port() -> Option<String> {
++    let url = format!("http://127.0.0.1:{PORT}/health");
++    let client = reqwest::Client::builder()
++        .timeout(Duration::from_secs(3))
++        .build()
++        .ok()?;
++    let resp = client.get(&url).send().await.ok()?;
++    if !resp.status().is_success() {
++        return None;
++    }
++    let body = resp.json::<serde_json::Value>().await.ok()?;
++    if !is_healthy_aztec_response(&body) {
++        return None;
++    }
++    body.get("version")
++        .and_then(|v| v.as_str())
++        .map(str::to_string)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/packages/accelerator/core/src/server/prove.rs b/packages/accelerator/core/src/server/prove.rs
+index 4006ca8..84d294c 100644
+--- a/packages/accelerator/core/src/server/prove.rs
++++ b/packages/accelerator/core/src/server/prove.rs
+@@ -5,10 +5,15 @@
+ //! version, then run the proof and return base64 + an `x-prove-duration-ms` header. Extracted
+ //! from server.rs (Q2).
+ 
++use std::sync::Arc;
++use std::time::Duration;
++
++use axum::body::{Body, Bytes};
+ use axum::extract::{Request, State};
+ use axum::http::HeaderValue;
+ use axum::response::IntoResponse;
+ use serde_json::json;
++use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+ 
+ use crate::{bb, versions};
+ 
+@@ -67,14 +72,42 @@ pub(crate) fn resolve_version(
+     };
+     tracing::info!(version = %version, "Requested Aztec version");
+ 
++    // `x-aztec-version` is remote-controlled, so check well-formedness + the known-vulnerable REVOCATION
++    // denylist FIRST — BEFORE the bundled short-circuit below (codex denylist-review #1), so a version
++    // the owner has revoked is refused even if it happens to be the bundled one (fail closed; the owner
++    // ships a new bundled version alongside any such revocation). There is NO version FLOOR: the header
++    // is the Aztec version (not a bb version) and many Aztec releases share one bb, so an
++    // older-but-compatible request must be honoured (downloads are still digest-verified against Aztec's
++    // published hash). The denylist is empty by default ⇒ any well-formed version is allowed.
++    if let Err(rej) = versions::check_version_selectable(&version) {
++        tracing::warn!(version = %version, reason = rej.reason(), "Refused remote Aztec version");
++        return Err(ProveError::VersionNotAllowed {
++            version: version.to_string(),
++            reason: rej.reason(),
++        });
++    }
++
+     let bundled = state
+         .bundled_version
+         .as_deref()
+         .unwrap_or(super::DEFAULT_BB_VERSION);
+ 
+-    let needs_download = v != bundled && !versions::version_bb_path(&version).exists();
++    // F-007: normalize an explicit bundled request to `None` — the bundled bb ships as the sidecar, never
++    // the version cache, so it resolves via `find_bb(None)`. This also makes any `Some(v)` downstream an
++    // unambiguously NON-bundled request, so `find_bb` can hard-error on a bad cache entry without a
++    // wrong-version fallback (a bundled `Some(v)` would otherwise be indistinguishable).
++    if v == bundled {
++        return Ok(ResolvedVersion {
++            version: None,
++            needs_download: false,
++        });
++    }
++
++    // Re-download when the cache entry is absent OR present-but-marker-invalid (tampered/legacy), not
++    // merely when the path is missing — `verify_cached_bb` rehashes the binary against its marker (F-007).
++    let needs_download = versions::verify_cached_bb(&version).is_err();
+     if needs_download {
+-        tracing::info!(version = %version, "Version not cached, will download");
++        tracing::info!(version = %version, "Version not cached (or unverified), will download");
+     }
+ 
+     Ok(ResolvedVersion {
+@@ -98,6 +131,102 @@ pub(crate) fn compute_threads(state: &AppState) -> Option<usize> {
+ 
+ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024; // 50MB
+ 
++/// F-009: absolute deadline for buffering the request body while holding the single prove
++/// permit. Bounds a slowloris/stalled uploader before the permit is released. 30s is generous
++/// for 50MB over loopback (~1.7 MiB/s); it is a whole-body deadline, not an idle timeout, so
++/// drip-feeding cannot extend it.
++const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
++
++/// Reject an honestly-declared oversize body BEFORE acquiring the prove permit, so a client
++/// advertising `Content-Length > MAX_BODY_SIZE` is turned away without occupying the single
++/// permit. Chunked/underreported requests are still bounded by `to_bytes` — this is a cheap
++/// fast-path, never the sole limit.
++fn reject_declared_oversize(headers: &axum::http::HeaderMap) -> Result<(), ProveError> {
++    // Inspect EVERY Content-Length value, and each comma-separated element within it (HTTP/2 and
++    // some proxies emit a duplicate-but-consistent list). Parse as u64 so a value that would
++    // overflow usize on 32-bit targets can't wrap below the cap; reject if any element exceeds the
++    // cap or is malformed. Cheap pre-permit fast-path — the to_bytes limit remains authoritative.
++    let mut seen: Option<u64> = None;
++    for value in headers.get_all(axum::http::header::CONTENT_LENGTH) {
++        let Ok(s) = value.to_str() else {
++            return Err(ProveError::PayloadTooLarge(
++                "non-ASCII Content-Length".to_string(),
++            ));
++        };
++        for part in s.split(',') {
++            let part = part.trim();
++            // RFC 7230 §3.3.2: a Content-Length is `1*DIGIT`. Reject empty/partial/non-digit
++            // elements (a permissive skip let `""`, `","`, `1,`, `,1` slip past); parse as u64 so
++            // an over-long value can't wrap below the cap.
++            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
++                return Err(ProveError::PayloadTooLarge(format!(
++                    "malformed Content-Length {part:?}"
++                )));
++            }
++            let len: u64 = part.parse().map_err(|_| {
++                ProveError::PayloadTooLarge(format!("unparsable Content-Length {part:?}"))
++            })?;
++            if len > MAX_BODY_SIZE as u64 {
++                return Err(ProveError::PayloadTooLarge(format!(
++                    "declared Content-Length {len} exceeds {MAX_BODY_SIZE}"
++                )));
++            }
++            // RFC 7230 §3.3.2: multiple Content-Length values must all agree.
++            match seen {
++                Some(prev) if prev != len => {
++                    return Err(ProveError::PayloadTooLarge(format!(
++                        "conflicting Content-Length values {prev} and {len}"
++                    )));
++                }
++                _ => seen = Some(len),
++            }
++        }
++    }
++    Ok(())
++}
++
++/// F-009: acquire the single prove permit, THEN buffer the body (under the size cap + an
++/// absolute read timeout). Returns the owned permit alongside the bytes so the caller holds it
++/// for the whole prove; the permit is released by RAII on every exit path (timeout, size error,
++/// disconnect, cancellation, panic, success). Testable seam.
++async fn acquire_and_read_body(
++    semaphore: Arc<Semaphore>,
++    raw_body: Body,
++    max_body_size: usize,
++    read_timeout: Duration,
++) -> Result<(OwnedSemaphorePermit, Bytes), ProveError> {
++    let permit = semaphore
++        .acquire_owned()
++        .await
++        .map_err(|_| ProveError::ServiceUnavailable)?;
++
++    let body = tokio::time::timeout(read_timeout, axum::body::to_bytes(raw_body, max_body_size))
++        .await
++        .map_err(|_| {
++            tracing::warn!(
++                timeout_secs = read_timeout.as_secs(),
++                "Timed out reading /prove request body"
++            );
++            ProveError::BodyReadTimeout
++        })?
++        .map_err(|e| {
++            tracing::warn!("Failed to read request body: {e}");
++            ProveError::PayloadTooLarge(e.to_string())
++        })?;
++
++    Ok((permit, body))
++}
++
++/// F-009: try to enter the bounded set of in-flight + waiting authorized `/prove` requests.
++/// Non-blocking: if the cap (`MAX_INFLIGHT_PROVE` permits) is full, shed immediately with 429
++/// (`ProveQueueFull`) rather than queueing. The returned guard must be held for the whole request
++/// so it is released (RAII) on every exit path. Testable seam.
++fn try_enter(waiters: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, ProveError> {
++    waiters
++        .try_acquire_owned()
++        .map_err(|_| ProveError::ProveQueueFull)
++}
++
+ pub(crate) async fn prove(
+     State(state): State<AppState>,
+     request: Request,
+@@ -109,20 +238,26 @@ pub(crate) async fn prove(
+     let (parts, raw_body) = request.into_parts();
+     authorize_origin(&state, &parts.headers).await?;
+ 
+-    let body = axum::body::to_bytes(raw_body, MAX_BODY_SIZE)
+-        .await
+-        .map_err(|e| {
+-            tracing::warn!("Failed to read request body: {e}");
+-            ProveError::PayloadTooLarge(e.to_string())
+-        })?;
+-    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
++    // F-009: cap total in-flight + waiting authorized /prove requests. Held (RAII) for the whole
++    // request; a burst beyond MAX_INFLIGHT_PROVE is shed immediately with 429 instead of queueing
++    // behind slow uploaders and stacking fresh per-request read timeouts.
++    let _inflight = try_enter(state.prove_waiters.clone())?;
+ 
+-    // Limit to one concurrent prove — bb already uses all cores.
+-    let _permit = state
+-        .prove_semaphore
+-        .acquire()
+-        .await
+-        .map_err(|_| ProveError::ServiceUnavailable)?;
++    // F-009: turn away an honestly-declared oversize body before taking the prove permit.
++    reject_declared_oversize(&parts.headers)?;
++
++    // F-009: acquire the single prove permit BEFORE buffering the body, so concurrent requests
++    // can't each pin a 50MB buffer ahead of the concurrency gate (memory DoS), and read the body
++    // under an absolute timeout so a stalled uploader can't hold the only permit indefinitely.
++    // `_permit` is held for the whole prove and released by RAII on every exit path.
++    let (_permit, body) = acquire_and_read_body(
++        state.prove_semaphore.clone(),
++        raw_body,
++        MAX_BODY_SIZE,
++        BODY_READ_TIMEOUT,
++    )
++    .await?;
++    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
+ 
+     let requested_version = parts
+         .headers
+@@ -158,6 +293,9 @@ pub(crate) async fn prove(
+                     .as_deref()
+                     .unwrap_or(super::DEFAULT_BB_VERSION)
+                     .to_string();
++                // F-007: the version we just downloaded is about to be proved — exempt it from this
++                // cleanup so the detached eviction can't delete it out from under `bb::prove`.
++                let in_use_owned = version.as_str().to_string();
+                 let on_versions_changed = state.on_versions_changed.clone();
+                 tokio::spawn(async move {
+                     // q7e3-F-08: the caller parses now; an unparseable bundled (defensive,
+@@ -165,7 +303,8 @@ pub(crate) async fn prove(
+                     // parse-else-return. The "unknown" sentinel still parses, so eviction semantics
+                     // in unknown-bundled builds are unchanged (#352 stays deferred).
+                     if let Some(bundled) = versions::AztecVersion::parse(&bundled_owned) {
+-                        versions::cleanup_old_versions(&bundled).await;
++                        let in_use = versions::AztecVersion::parse(&in_use_owned);
++                        versions::cleanup_old_versions(&bundled, in_use.as_ref()).await;
+                     }
+                     if let Some(cb) = on_versions_changed {
+                         cb();
+@@ -221,3 +360,134 @@ pub(crate) async fn prove(
+ 
+     Ok(response)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use axum::http::{header::CONTENT_LENGTH, HeaderMap};
++
++    fn content_length(v: &str) -> HeaderMap {
++        let mut h = HeaderMap::new();
++        h.insert(CONTENT_LENGTH, HeaderValue::from_str(v).unwrap());
++        h
++    }
++
++    #[test]
++    fn declared_oversize_rejected_before_permit() {
++        // F-009: an honestly-declared oversize Content-Length is turned away up front.
++        assert!(matches!(
++            reject_declared_oversize(&content_length(&(MAX_BODY_SIZE + 1).to_string())),
++            Err(ProveError::PayloadTooLarge(_))
++        ));
++        // At/under the cap and absent are allowed (still bounded later by to_bytes).
++        assert!(reject_declared_oversize(&content_length(&MAX_BODY_SIZE.to_string())).is_ok());
++        assert!(reject_declared_oversize(&HeaderMap::new()).is_ok());
++        // Comma-list (HTTP/2 duplicate) with an oversize element must NOT slip past.
++        assert!(matches!(
++            reject_declared_oversize(&content_length(&format!("{0}, {0}", MAX_BODY_SIZE + 1))),
++            Err(ProveError::PayloadTooLarge(_))
++        ));
++        // Malformed / empty / partial values are rejected, not silently ignored.
++        for bad in ["not-a-number", "", ",", "1,", ",1", "1 2"] {
++            assert!(
++                matches!(
++                    reject_declared_oversize(&content_length(bad)),
++                    Err(ProveError::PayloadTooLarge(_))
++                ),
++                "must reject malformed Content-Length {bad:?}"
++            );
++        }
++        // Conflicting comma-list values (RFC 7230 §3.3.2) are rejected even when each is under cap.
++        assert!(matches!(
++            reject_declared_oversize(&content_length("10, 20")),
++            Err(ProveError::PayloadTooLarge(_))
++        ));
++        // Agreeing duplicates under the cap are fine.
++        assert!(reject_declared_oversize(&content_length("10, 10")).is_ok());
++    }
++
++    #[test]
++    fn waiter_cap_sheds_excess_with_queue_full() {
++        // F-009: fill the cap; the next entry is shed with ProveQueueFull; a slot frees on drop.
++        let waiters = Arc::new(Semaphore::new(2));
++        let g1 = try_enter(waiters.clone()).expect("slot 1");
++        let _g2 = try_enter(waiters.clone()).expect("slot 2");
++        assert!(matches!(
++            try_enter(waiters.clone()),
++            Err(ProveError::ProveQueueFull)
++        ));
++        drop(g1);
++        assert!(try_enter(waiters.clone()).is_ok(), "slot freed on drop");
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn body_not_read_until_permit_available() {
++        // F-009 ordering: with zero prove permits, even a READY body must not be returned — the
++        // permit gates the read (proves permit-before-body, not merely that the guard is live).
++        let sem = Arc::new(Semaphore::new(0));
++        let fut = acquire_and_read_body(
++            sem,
++            Body::from(Bytes::from_static(b"ready")),
++            1024,
++            Duration::from_secs(30),
++        );
++        tokio::pin!(fut);
++        assert!(
++            tokio::time::timeout(Duration::from_secs(60), &mut fut)
++                .await
++                .is_err(),
++            "acquire_and_read_body must not resolve without a prove permit"
++        );
++    }
++
++    #[tokio::test]
++    async fn permit_acquired_before_body_and_released_on_drop() {
++        let sem = Arc::new(Semaphore::new(1));
++        let (permit, body) = acquire_and_read_body(
++            sem.clone(),
++            Body::from(Bytes::from_static(b"hello")),
++            1024,
++            Duration::from_secs(30),
++        )
++        .await
++        .expect("happy path");
++        assert_eq!(&body[..], &b"hello"[..]);
++        assert_eq!(
++            sem.available_permits(),
++            0,
++            "permit held across the whole prove"
++        );
++        drop(permit);
++        assert_eq!(sem.available_permits(), 1, "permit released on drop");
++    }
++
++    #[tokio::test]
++    async fn oversized_body_errs_and_releases_permit() {
++        let sem = Arc::new(Semaphore::new(1));
++        let res = acquire_and_read_body(
++            sem.clone(),
++            Body::from(vec![0u8; 10]),
++            4, // tiny cap to force the length error deterministically
++            Duration::from_secs(30),
++        )
++        .await;
++        assert!(matches!(res, Err(ProveError::PayloadTooLarge(_))));
++        assert_eq!(
++            sem.available_permits(),
++            1,
++            "permit released after size error"
++        );
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn stalled_body_times_out_and_releases_permit() {
++        let sem = Arc::new(Semaphore::new(1));
++        // A body whose stream never yields → to_bytes never completes → the read timeout fires.
++        // Under start_paused the virtual clock auto-advances to the only pending timer.
++        let body =
++            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
++        let res = acquire_and_read_body(sem.clone(), body, 1024, Duration::from_secs(30)).await;
++        assert!(matches!(res, Err(ProveError::BodyReadTimeout)));
++        assert_eq!(sem.available_permits(), 1, "permit released after timeout");
++    }
++}
+diff --git a/packages/accelerator/core/src/server/tests.rs b/packages/accelerator/core/src/server/tests.rs
+index fa9c03e..ce76c8b 100644
+--- a/packages/accelerator/core/src/server/tests.rs
++++ b/packages/accelerator/core/src/server/tests.rs
+@@ -998,10 +998,11 @@ fn resolve_version_flags_uncached_for_download() {
+     // (download_bb needs the network); the no-download arm is pinned by
+     // `prove_success_path_and_status_sequence`, and prove() emits Downloading/Proving structurally
+     // around this flag.
+-    let state = AppState::default();
+-    let version = Some("5.0.0-rc.1".to_string());
++    let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.1".to_string()), None, None);
++    let state = AppState::headless(core);
++    let version = Some("5.0.0-rc.2".to_string());
+     let resolved = resolve_version(&state, &version).expect("valid version resolves");
+-    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
++    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.2"));
+     assert!(
+         resolved.needs_download,
+         "uncached non-bundled version must be flagged for download"
+@@ -1009,13 +1010,32 @@ fn resolve_version_flags_uncached_for_download() {
+ }
+ 
+ #[test]
+-fn resolve_version_no_download_for_bundled() {
+-    // The bundled version is always present → never flagged for download (no Downloading status).
++fn resolve_version_allows_older_compatible_version() {
++    // The x-aztec-version header is an Aztec version, not a bb version, and many Aztec releases share
++    // one bb — so an OLDER-but-compatible request (e.g. a 5.0.0-rc.1 dApp against a 5.0.0-rc.2 bundle)
++    // MUST be honoured, not rejected. (This is the over-blocking bug the earlier floor introduced; the
++    // gate is now a known-vulnerable revocation denylist, empty by default.) It still resolves for
++    // download + digest verification.
++    let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.2".to_string()), None, None);
++    let state = AppState::headless(core);
++    let resolved = resolve_version(&state, &Some("5.0.0-rc.1".to_string()))
++        .expect("an older compatible version must be allowed");
++    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
++}
++
++#[test]
++fn resolve_version_normalizes_bundled_to_none() {
++    // F-007: an explicit bundled request normalizes to `version: None` — the bundled bb ships as the
++    // sidecar (resolved via `find_bb(None)`), never the version cache. Never flagged for download, and
++    // `None` means a `Some(v)` downstream is unambiguously non-bundled (⇒ marker-verified cache only).
+     let core = HeadlessState::headless("1.0.0", Some("0.99.0".to_string()), None, None);
+     let state = AppState::headless(core);
+     let requested = Some("0.99.0".to_string());
+     let resolved = resolve_version(&state, &requested).expect("bundled resolves");
+-    assert_eq!(resolved.version.as_deref(), Some("0.99.0"));
++    assert!(
++        resolved.version.is_none(),
++        "bundled request must normalize to None (sidecar path)"
++    );
+     assert!(
+         !resolved.needs_download,
+         "bundled version must NOT download"
+@@ -1134,3 +1154,34 @@ async fn invalid_host_reply_stays_application_json_without_message() {
+         "invalid_host must NOT carry a message field (minimal host-guard reply)"
+     );
+ }
++
++#[tokio::test]
++async fn prove_sheds_with_429_when_waiter_cap_full() {
++    // F-009 (handler-level): with the in-flight/waiting cap already full (prove_waiters exhausted),
++    // an authorized /prove request is shed IMMEDIATELY with 429 prove_queue_full — it never queues
++    // behind slow uploaders. Complements the try_enter unit test with end-to-end handler wiring.
++    let state = AppState {
++        core: std::sync::Arc::new(HeadlessState {
++            prove_waiters: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
++            ..HeadlessState::default()
++        }),
++        ..AppState::default()
++    };
++    let response = router(state)
++        .oneshot(
++            Request::builder()
++                .method("POST")
++                .header("host", "127.0.0.1:59833")
++                .uri("/prove")
++                .body(Body::from("witness"))
++                .unwrap(),
++        )
++        .await
++        .unwrap();
++    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
++    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
++        .await
++        .unwrap();
++    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
++    assert_eq!(json["error"], "prove_queue_full");
++}

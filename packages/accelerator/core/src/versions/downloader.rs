@@ -15,6 +15,7 @@ use super::version_policy::AztecVersion;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
@@ -197,8 +198,41 @@ fn unique_staging_dir(version_dir: &Path) -> Result<PathBuf, Box<dyn Error + Sen
     Ok(version_dir.with_file_name(format!(".{name}.tmp.{}-{nanos}-{seq}", std::process::id())))
 }
 
+/// B1/B2 (full-branch audit): a cache dir is only "stale" (crash-orphaned / safe to delete) if it has
+/// not been touched within this window. A legitimate concurrent download stages + publishes in seconds
+/// (the network download runs BEFORE staging and is capped at 64 MB; the staging step is just a
+/// tarball extract of one flat `bb` binary, whose write bumps the staging dir's own mtime), and a
+/// freshly-downloaded in-use version has a recent mtime. Anything modified within this window is presumed
+/// ACTIVE and is left alone, so concurrent requests can't reap/evict each other's live data. 5 minutes is
+/// ~60× any real extract yet far shorter than a crash-orphan's age.
+///
+/// This is a HEURISTIC, not a lock (re-audit): it does NOT protect a TRULY-OLD cached version that is
+/// being re-executed (reading/executing a binary doesn't refresh its dir mtime) — that residual is a
+/// narrow, recoverable (re-download) TOCTOU; the robust fix is a cross-request lease, deferred. It can
+/// also leave the cache transiently ABOVE its retention limit if many versions are downloaded within one
+/// window — self-healing (a later cleanup, once they age out, evicts them). Both trades favor
+/// availability over strictness and are bounded. See FINDINGS.md B1/B2.
+const CACHE_ENTRY_ACTIVE_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// True if `path` was modified within [`CACHE_ENTRY_ACTIVE_WINDOW`] (⇒ presumed active, do not delete).
+/// Fails SAFE: an unreadable/ambiguous mtime is treated as recent (keep it) rather than reaped.
+pub(crate) fn recently_active(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return true; // can't stat → don't delete
+    };
+    let Ok(modified) = meta.modified() else {
+        return true;
+    };
+    match modified.elapsed() {
+        Ok(age) => age < CACHE_ENTRY_ACTIVE_WINDOW,
+        Err(_) => true, // mtime in the future (clock skew) → treat as active
+    }
+}
+
 /// Remove crash-stale staging siblings for this version (`.{name}.tmp.*`) before a fresh install, so a
-/// crashed prior run can't accumulate hidden cache data. Best-effort: errors are ignored.
+/// crashed prior run can't accumulate hidden cache data. B1: only reap stages OLDER than the active
+/// window — otherwise a concurrent same-version download's in-progress stage would be deleted out from
+/// under it. Best-effort: errors are ignored.
 fn reap_stale_stages(version_dir: &Path) {
     let (Some(parent), Some(name)) = (
         version_dir.parent(),
@@ -213,6 +247,7 @@ fn reap_stale_stages(version_dir: &Path) {
                 .file_name()
                 .to_str()
                 .is_some_and(|n| n.starts_with(&prefix))
+                && !recently_active(&entry.path())
             {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
@@ -471,6 +506,33 @@ mod tests {
         assert!(contents.contains("echo hello"));
     }
 
+    /// B1 (full-branch audit): `reap_stale_stages` must NOT delete a FRESH (recently-active) staging
+    /// sibling — that would be a concurrent same-version download's in-progress stage. Only an OLD
+    /// (crash-orphaned) stage is reaped.
+    #[test]
+    fn reap_stale_stages_spares_recently_active_stages() {
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-rc.2");
+        // A fresh stage (just created ⇒ recent mtime) — simulates a concurrent download's live stage.
+        let fresh = base.path().join(".5.0.0-rc.2.tmp.freshABC");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("bb"), b"in-progress").unwrap();
+        // An OLD stage — backdate its mtime well past the active window.
+        let old = base.path().join(".5.0.0-rc.2.tmp.oldXYZ");
+        std::fs::create_dir_all(&old).unwrap();
+        let long_ago =
+            std::time::SystemTime::now() - (CACHE_ENTRY_ACTIVE_WINDOW + Duration::from_secs(60));
+        filetime::set_file_mtime(&old, filetime::FileTime::from_system_time(long_ago)).unwrap();
+
+        reap_stale_stages(&version_dir);
+
+        assert!(
+            fresh.exists(),
+            "a recently-active stage must be spared (B1)"
+        );
+        assert!(!old.exists(), "a crash-stale (old) stage is still reaped");
+    }
+
     /// F-007 staged verified install: `install_version_dir` extracts + finalizes + writes the marker in
     /// a unique staging dir, then publishes fail-closed — replacing any stale entry wholesale, leaving
     /// no staging dir, and producing a marker whose `binary_sha256` matches the FINAL published binary.
@@ -498,10 +560,15 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let version_dir = base.path().join("5.0.0-test");
 
-        // A crash-stale staging sibling from a prior run must be reaped by the next install.
+        // A crash-stale staging sibling from a prior run must be reaped by the next install. B1: it must
+        // be genuinely OLD (backdated past the active window) — a FRESH sibling is a concurrent download
+        // and is deliberately spared (covered by reap_stale_stages_spares_recently_active_stages).
         let stale = base.path().join(".5.0.0-test.tmp.999-0-0");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("junk"), b"stale").unwrap();
+        let long_ago =
+            std::time::SystemTime::now() - (CACHE_ENTRY_ACTIVE_WINDOW + Duration::from_secs(60));
+        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(long_ago)).unwrap();
 
         // Fresh install → bb + marker present, marker binds the published binary bytes (post-finalize).
         install_version_dir(&version_dir, &tarball, "5.0.0-test", &archive_digest).unwrap();

@@ -1,9 +1,9 @@
 //! `/prove` request handler + version/thread resolution.
 //!
-//! The core proving path: authorize the origin, buffer the body under a 50MB cap, serialize
-//! behind the prove semaphore (bb already uses all cores), resolve+download the requested bb
-//! version, then run the proof and return base64 + an `x-prove-duration-ms` header. Extracted
-//! from server.rs (Q2).
+//! The core proving path: authorize the origin, buffer the body under a 50MB cap (bounded by the
+//! inflight-waiters gate, NOT the prove permit — A1), resolve+download the requested bb version, then
+//! acquire the single prove permit and run the proof (bb already uses all cores), returning base64 +
+//! an `x-prove-duration-ms` header. Extracted from server.rs (Q2).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,10 +131,10 @@ pub(crate) fn compute_threads(state: &AppState) -> Option<usize> {
 
 const MAX_BODY_SIZE: usize = 50 * 1024 * 1024; // 50MB
 
-/// F-009: absolute deadline for buffering the request body while holding the single prove
-/// permit. Bounds a slowloris/stalled uploader before the permit is released. 30s is generous
-/// for 50MB over loopback (~1.7 MiB/s); it is a whole-body deadline, not an idle timeout, so
-/// drip-feeding cannot extend it.
+/// F-009: absolute deadline for buffering the request body. Bounds a slowloris/stalled uploader —
+/// after A1 the body is read WITHOUT the prove permit, so this deadline caps how long a slow upload
+/// occupies an inflight slot (not the prover). 30s is generous for 50MB over loopback (~1.7 MiB/s);
+/// it is a whole-body deadline, not an idle timeout, so drip-feeding cannot extend it.
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Reject an honestly-declared oversize body BEFORE acquiring the prove permit, so a client
@@ -185,22 +185,18 @@ fn reject_declared_oversize(headers: &axum::http::HeaderMap) -> Result<(), Prove
     Ok(())
 }
 
-/// F-009: acquire the single prove permit, THEN buffer the body (under the size cap + an
-/// absolute read timeout). Returns the owned permit alongside the bytes so the caller holds it
-/// for the whole prove; the permit is released by RAII on every exit path (timeout, size error,
-/// disconnect, cancellation, panic, success). Testable seam.
-async fn acquire_and_read_body(
-    semaphore: Arc<Semaphore>,
+/// A1 (full-branch audit): buffer the request body under the size cap + an absolute read timeout,
+/// WITHOUT holding the single prove permit. Concurrent buffers are already bounded by the `_inflight`
+/// waiters cap (`MAX_INFLIGHT_PROVE`) the caller holds, so at most `MAX_INFLIGHT_PROVE × MAX_BODY_SIZE`
+/// is resident. Decoupling the read from the prove permit is the fix for the head-of-line DoS where one
+/// slow (slowloris) uploader held the CPU-bound prover for up to `read_timeout`, 429-ing everyone else;
+/// now a slow upload only occupies an inflight slot while the prover runs on ready requests. Testable seam.
+async fn read_body(
     raw_body: Body,
     max_body_size: usize,
     read_timeout: Duration,
-) -> Result<(OwnedSemaphorePermit, Bytes), ProveError> {
-    let permit = semaphore
-        .acquire_owned()
-        .await
-        .map_err(|_| ProveError::ServiceUnavailable)?;
-
-    let body = tokio::time::timeout(read_timeout, axum::body::to_bytes(raw_body, max_body_size))
+) -> Result<Bytes, ProveError> {
+    tokio::time::timeout(read_timeout, axum::body::to_bytes(raw_body, max_body_size))
         .await
         .map_err(|_| {
             tracing::warn!(
@@ -212,9 +208,7 @@ async fn acquire_and_read_body(
         .map_err(|e| {
             tracing::warn!("Failed to read request body: {e}");
             ProveError::PayloadTooLarge(e.to_string())
-        })?;
-
-    Ok((permit, body))
+        })
 }
 
 /// F-009: try to enter the bounded set of in-flight + waiting authorized `/prove` requests.
@@ -246,17 +240,10 @@ pub(crate) async fn prove(
     // F-009: turn away an honestly-declared oversize body before taking the prove permit.
     reject_declared_oversize(&parts.headers)?;
 
-    // F-009: acquire the single prove permit BEFORE buffering the body, so concurrent requests
-    // can't each pin a 50MB buffer ahead of the concurrency gate (memory DoS), and read the body
-    // under an absolute timeout so a stalled uploader can't hold the only permit indefinitely.
-    // `_permit` is held for the whole prove and released by RAII on every exit path.
-    let (_permit, body) = acquire_and_read_body(
-        state.prove_semaphore.clone(),
-        raw_body,
-        MAX_BODY_SIZE,
-        BODY_READ_TIMEOUT,
-    )
-    .await?;
+    // A1: buffer the body under ONLY the inflight cap (memory bounded to MAX_INFLIGHT_PROVE × 50MB),
+    // NOT the single prove permit — so a slow uploader occupies just an inflight slot for ≤30s and can't
+    // block the prover. The prove permit is acquired later, only around the CPU-bound proof itself.
+    let body = read_body(raw_body, MAX_BODY_SIZE, BODY_READ_TIMEOUT).await?;
     tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
     let requested_version = parts
@@ -326,6 +313,17 @@ pub(crate) async fn prove(
         }
     }
     let threads = compute_threads(&state);
+
+    // A1: acquire the single prove permit ONLY now — around the CPU-bound proof — not across the body
+    // read + version download above (which ran concurrently under the inflight cap). bb saturates all
+    // cores, so proofs still run strictly one at a time; only the serialized *proving* is gated, not I/O.
+    // Held (RAII) until this function returns.
+    let _permit = state
+        .prove_semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ProveError::ServiceUnavailable)?;
 
     let start = std::time::Instant::now();
     let result = bb::prove(&body, version_for_prove.as_ref(), threads).await;
@@ -420,74 +418,48 @@ mod tests {
         assert!(try_enter(waiters.clone()).is_ok(), "slot freed on drop");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn body_not_read_until_permit_available() {
-        // F-009 ordering: with zero prove permits, even a READY body must not be returned — the
-        // permit gates the read (proves permit-before-body, not merely that the guard is live).
-        let sem = Arc::new(Semaphore::new(0));
-        let fut = acquire_and_read_body(
-            sem,
-            Body::from(Bytes::from_static(b"ready")),
-            1024,
-            Duration::from_secs(30),
-        );
-        tokio::pin!(fut);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(60), &mut fut)
-                .await
-                .is_err(),
-            "acquire_and_read_body must not resolve without a prove permit"
-        );
-    }
-
     #[tokio::test]
-    async fn permit_acquired_before_body_and_released_on_drop() {
-        let sem = Arc::new(Semaphore::new(1));
-        let (permit, body) = acquire_and_read_body(
-            sem.clone(),
-            Body::from(Bytes::from_static(b"hello")),
+    async fn body_read_does_not_hold_the_prove_permit() {
+        // A1: reading the body must NOT depend on or hold the single prove permit — a slow uploader
+        // therefore can't block the prover. With zero prove permits available, a READY body still reads.
+        let sem = Arc::new(Semaphore::new(0)); // no prove permits at all
+        let body = read_body(
+            Body::from(Bytes::from_static(b"ready")),
             1024,
             Duration::from_secs(30),
         )
         .await
-        .expect("happy path");
-        assert_eq!(&body[..], &b"hello"[..]);
+        .expect("body reads without any prove permit");
+        assert_eq!(&body[..], &b"ready"[..]);
         assert_eq!(
             sem.available_permits(),
             0,
-            "permit held across the whole prove"
+            "read_body never touches the prove semaphore"
         );
-        drop(permit);
-        assert_eq!(sem.available_permits(), 1, "permit released on drop");
     }
 
+    // (A1: the "permit only around proving" placement in prove() is exercised end-to-end by the
+    // prove-handler integration tests, not a unit test — a standalone semaphore-RAII assertion would only
+    // test tokio, not this code, so it was removed per the re-audit.)
+
     #[tokio::test]
-    async fn oversized_body_errs_and_releases_permit() {
-        let sem = Arc::new(Semaphore::new(1));
-        let res = acquire_and_read_body(
-            sem.clone(),
+    async fn oversized_body_errs() {
+        let res = read_body(
             Body::from(vec![0u8; 10]),
             4, // tiny cap to force the length error deterministically
             Duration::from_secs(30),
         )
         .await;
         assert!(matches!(res, Err(ProveError::PayloadTooLarge(_))));
-        assert_eq!(
-            sem.available_permits(),
-            1,
-            "permit released after size error"
-        );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stalled_body_times_out_and_releases_permit() {
-        let sem = Arc::new(Semaphore::new(1));
+    async fn stalled_body_times_out() {
         // A body whose stream never yields → to_bytes never completes → the read timeout fires.
         // Under start_paused the virtual clock auto-advances to the only pending timer.
         let body =
             Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
-        let res = acquire_and_read_body(sem.clone(), body, 1024, Duration::from_secs(30)).await;
+        let res = read_body(body, 1024, Duration::from_secs(30)).await;
         assert!(matches!(res, Err(ProveError::BodyReadTimeout)));
-        assert_eq!(sem.available_permits(), 1, "permit released after timeout");
     }
 }

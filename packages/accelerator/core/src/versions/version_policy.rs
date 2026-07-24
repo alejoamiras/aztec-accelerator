@@ -291,6 +291,15 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
     };
     for version in evictions(&cached, bundled, in_use) {
         let dir = base.join(version.as_str());
+        // B2 (full-branch audit): skip a version whose dir was touched within the active window — it was
+        // just downloaded (and is likely about to be proved by a CONCURRENT request whose own cleanup
+        // exempts a DIFFERENT in_use version). Age-gating stops two concurrent detached cleanups from
+        // evicting each other's fresh-in-use binary. A truly-old in-use version is still a narrow,
+        // recoverable (re-download) TOCTOU — a full cross-request lease is deferred (see FINDINGS.md B2).
+        if super::downloader::recently_active(&dir) {
+            tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+            continue;
+        }
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
