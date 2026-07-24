@@ -16,5 +16,6 @@ pub use cache_layout::{
 pub use downloader::download_bb;
 pub use release_metadata::{current_platform, download_url};
 pub use version_policy::{
-    cleanup_old_versions, is_valid_version, versions_to_evict, AztecVersion, NetworkTier,
+    check_version_selectable, cleanup_old_versions, is_valid_version, versions_to_evict,
+    AztecVersion, NetworkTier, VersionRejection,
 };

@@ -345,6 +345,13 @@ async fn health(
 #[derive(Debug)]
 pub(crate) enum ProveError {
     InvalidVersion(String),
+    /// codex audit #3: the requested version is well-formed but refused by the downgrade policy
+    /// (older than bundled, a dev/unknown-channel build, build metadata, …). Distinct from
+    /// `InvalidVersion` (malformed/traversal) so a legitimate integrator sees WHY their pin was denied.
+    VersionNotAllowed {
+        version: String,
+        reason: &'static str,
+    },
     PayloadTooLarge(String),
     /// F-009: the request body did not finish arriving within the read timeout while holding
     /// the single prove permit (slowloris / stalled upload). Distinct from PayloadTooLarge.
@@ -372,6 +379,11 @@ impl IntoResponse for ProveError {
                 StatusCode::BAD_REQUEST,
                 "invalid_version",
                 format!("Invalid x-aztec-version header (got '{v}')"),
+            ),
+            ProveError::VersionNotAllowed { version, reason } => (
+                StatusCode::FORBIDDEN,
+                "version_not_allowed",
+                format!("Requested bb version '{version}' is not selectable: {reason}"),
             ),
             ProveError::PayloadTooLarge(e) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
