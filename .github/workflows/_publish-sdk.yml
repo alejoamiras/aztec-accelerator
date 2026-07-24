@@ -146,20 +146,26 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # F2 (full-branch audit): NEVER suppress tag/push failures with `|| true`. The old form let a
-          # pre-claimed tag (an attacker pushing $TAG at a different commit) survive silently — both git
-          # commands failed, but `gh release create` below then blessed that wrong-commit tag while npm
-          # published from HEAD, so the release/source disagreed with the package. Now: an existing tag
-          # MUST already resolve to the exact commit we're publishing (HEAD); anything else aborts.
+          # F2 (full-branch audit): NEVER suppress tag/push failures. The old `git tag/push || true` let a
+          # pre-claimed tag (an attacker pushing $TAG at a different commit) survive silently, then
+          # `gh release create` below blessed that wrong-commit tag while npm published from HEAD.
+          # We query the REMOTE directly with `git ls-remote` (which — unlike `git fetch ... || true` —
+          # exits NON-ZERO on network/auth failure, so a masked error can't let a stale local tag pass) and
+          # require any existing remote tag to resolve to the exact commit we publish (HEAD). `set -e` (the
+          # job default) aborts on an ls-remote failure.
           EXPECTED_SHA="$(git rev-parse HEAD)"
-          git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
-          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null 2>&1; then
-            EXISTING_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
-            if [ "$EXISTING_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::Tag $TAG already exists at $EXISTING_SHA, not the published commit ($EXPECTED_SHA); aborting"
+          # Ask for both the ref and its peeled (^{}) form; an annotated tag reports the commit on the
+          # `^{}` line, a lightweight tag (what `git tag` creates) reports the commit on the plain line.
+          REMOTE_REFS="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          if [ -n "$REMOTE_REFS" ]; then
+            # Prefer the peeled commit if present (annotated), else the direct SHA (lightweight).
+            REMOTE_SHA="$(printf '%s\n' "$REMOTE_REFS" | awk '/\^\{\}$/ {print $1; exit}')"
+            [ -z "$REMOTE_SHA" ] && REMOTE_SHA="$(printf '%s\n' "$REMOTE_REFS" | awk 'NR==1 {print $1}')"
+            if [ "$REMOTE_SHA" != "$EXPECTED_SHA" ]; then
+              echo "::error::Tag $TAG already exists on origin at $REMOTE_SHA, not the published commit ($EXPECTED_SHA); aborting"
               exit 1
             fi
-            echo "Tag $TAG already exists at the expected commit; reusing it"
+            echo "Tag $TAG already on origin at the expected commit; reusing it"
           else
             git tag "$TAG"
             git push origin "$TAG"

@@ -438,15 +438,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn prove_permit_is_held_only_around_proving_and_released_on_drop() {
-        // A1: the permit is acquired separately (in prove(), around bb::prove) and released by RAII.
-        let sem = Arc::new(Semaphore::new(1));
-        let permit = sem.clone().acquire_owned().await.expect("permit");
-        assert_eq!(sem.available_permits(), 0, "permit held during proving");
-        drop(permit);
-        assert_eq!(sem.available_permits(), 1, "permit released on drop");
-    }
+    // (A1: the "permit only around proving" placement in prove() is exercised end-to-end by the
+    // prove-handler integration tests, not a unit test — a standalone semaphore-RAII assertion would only
+    // test tokio, not this code, so it was removed per the re-audit.)
 
     #[tokio::test]
     async fn oversized_body_errs() {

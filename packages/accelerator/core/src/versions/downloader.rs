@@ -199,11 +199,19 @@ fn unique_staging_dir(version_dir: &Path) -> Result<PathBuf, Box<dyn Error + Sen
 }
 
 /// B1/B2 (full-branch audit): a cache dir is only "stale" (crash-orphaned / safe to delete) if it has
-/// not been touched within this window. A legitimate concurrent download stages + publishes in seconds;
-/// a freshly-downloaded in-use version has a recent mtime. Anything modified within this window is
-/// presumed ACTIVE (another request's in-progress stage, or a just-downloaded version about to be
-/// proved) and is left alone, so concurrent requests can't reap/evict each other's live data. 5 minutes
-/// is far longer than any legitimate download+extract yet far shorter than a crash-orphan's age.
+/// not been touched within this window. A legitimate concurrent download stages + publishes in seconds
+/// (the network download runs BEFORE staging and is capped at 64 MB; the staging step is just a
+/// tarball extract of one flat `bb` binary, whose write bumps the staging dir's own mtime), and a
+/// freshly-downloaded in-use version has a recent mtime. Anything modified within this window is presumed
+/// ACTIVE and is left alone, so concurrent requests can't reap/evict each other's live data. 5 minutes is
+/// ~60× any real extract yet far shorter than a crash-orphan's age.
+///
+/// This is a HEURISTIC, not a lock (re-audit): it does NOT protect a TRULY-OLD cached version that is
+/// being re-executed (reading/executing a binary doesn't refresh its dir mtime) — that residual is a
+/// narrow, recoverable (re-download) TOCTOU; the robust fix is a cross-request lease, deferred. It can
+/// also leave the cache transiently ABOVE its retention limit if many versions are downloaded within one
+/// window — self-healing (a later cleanup, once they age out, evicts them). Both trades favor
+/// availability over strictness and are bounded. See FINDINGS.md B1/B2.
 const CACHE_ENTRY_ACTIVE_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// True if `path` was modified within [`CACHE_ENTRY_ACTIVE_WINDOW`] (⇒ presumed active, do not delete).
