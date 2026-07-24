@@ -12,7 +12,7 @@ tests; frontend build + biome; Playwright/WebDriver are CI-only) and committed.
 | 2 | /prove per-origin piggyback sender cap | ✓ done | `fix(prove): cap per-origin piggyback senders` |
 | 3 | Version-downgrade policy (x-aztec-version) | ✓ done | `fix(prove): enforce a safe-default bb version-downgrade policy` |
 | 4 | CWD cache fail-open | ✓ done | `fix(cache): fail closed when home dir is unresolvable` |
-| 5 | Updater rollback-race + bounded streaming | analysis done; codex consult in flight | |
+| 5 | Updater rollback-race + bounded streaming | ✓ done | `fix(updater): record install intent BEFORE install; retryable-intent gate` |
 | 6 | win_acl owner not verified | ✓ done | `fix(f-003): set + verify object OWNER == current user` |
 | 7 | C8 rollback destroys recovery | ✓ done | `fix(c8): autostart rollback restores prior recovery + surfaces failures` |
 | 8 | C9 arbiter promote-before-build | ✓ done | `fix(c9): build auth popup before deciding active-slot` |
@@ -52,13 +52,27 @@ Rate-limit downloads / cap cache / atomic install — partially covered by exist
 
 ## Codex consults (cont.)
 
-### #5 updater record_pending ordering (2026-07-24, gpt-5.6-sol xhigh) — IN FLIGHT
-Consulting on whether the record-AFTER-install fail-open (+ cross-process lock) is an acceptable
-production residual vs moving record-before-install (which poisons a version on any install
-failure, since `commit_successful_launch(current)` only clears `pending <= current`). Also
-confirming the plugin-buffer / feed-buffer size points are correctly accepted (R3 rejected the
-hand-rolled reqwest+minisign rewrite that alone could bound bytes-read). Verdict pending; will act
-on the stronger argument and record it here.
+### #5 updater record_pending ordering (2026-07-24, gpt-5.6-sol xhigh) — RESOLVED, must-fix
+Codex's decisive finding (verified against the pinned plugin source): on **Windows**,
+`tauri-plugin-updater 2.10.1`'s `install()` dispatches the external NSIS/MSI installer and
+`std::process::exit(0)`s — it **never returns**. So `record_pending` in the post-install `Ok`
+branch NEVER ran on Windows → the downgrade window was a CERTAINTY there, not a rare fail-open.
+Must-fix, not a documentable residual.
+
+Adopted (acting on codex's stronger argument):
+- **Record intent BEFORE `install()`, fail-closed** (abort if it can't be recorded / path unresolved).
+- **Retryable-intent gate**: `candidate_allowed` = strictly-above `current`+`floor` AND `>= pending`
+  (equal allowed). This is why record-before doesn't poison a version — the exact intent can be
+  retried; a lower still-signed version stays blocked. Codex's `artifact_id` refinement (match the
+  signed artifact identity on retry, not just the version) was NOT implemented: Layer A already binds
+  version→signed-artifact, so a same-version retry can only be the legitimately-signed one absent
+  signing-key misuse — noted as a possible future hardening.
+- On `install()` Err the intent is KEPT (an Err isn't proof no mutation happened — codex).
+- **Buffering / feed-size points**: codex CONFIRMED they're correctly accepted as availability-only
+  residuals #345/M6 — the plugin buffers an unbounded `Vec` then verifies minisign; bounding
+  bytes-read needs the R3-rejected hand-rolled downloader (would make hand-written verify the sole
+  authenticity control). Ed25519 integrity unaffected. Future fix = upstream/pinned-fork byte limits
+  inside the plugin's own download+verify loop.
 
 ## Notes
 - `semver = "1"` was already a core dependency — no new dep.

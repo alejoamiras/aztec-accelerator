@@ -8,16 +8,18 @@
 //! - **`floor`** — the highest version that has ever SUCCESSFULLY RUN. Advanced only after a new build
 //!   proves it runs (the caller commits post-launch, [`commit_successful_launch`]), so a crashing bad
 //!   update can never ratchet it.
-//! - **`pending`** — the highest version an install has COMMITTED to but that has not yet proven healthy
-//!   ([`record_pending`], written under the updater lock right after a successful `install()`, before
-//!   the restart releases that lock). This closes the restart race: instance A installs `3.0.0` and
-//!   restarts (releasing the lock) before `3.0.0` can commit its floor; without `pending`, a racing
-//!   instance B would still see `floor = 1.0.0` and could install a LOWER `2.0.0`, regressing the
-//!   just-installed higher version. With `pending`, B sees the effective floor already at `3.0.0`.
+//! - **`pending`** — the version an install has COMMITTED to (the install INTENT) but that has not yet
+//!   proven healthy ([`record_pending`], written under the updater lock right BEFORE `install()` — see
+//!   that fn for why after-install is wrong on Windows). This closes the restart race: instance A
+//!   commits `3.0.0` and installs/restarts (releasing the lock) before `3.0.0` can commit its floor;
+//!   without `pending`, a racing instance B would still see `floor = 1.0.0` and could install a LOWER
+//!   `2.0.0`, regressing the just-installed higher version. With `pending`, B sees the floor at `3.0.0`.
 //!
-//! An update candidate is accepted only if it is strictly greater — by SemVer PRECEDENCE (build
-//! metadata ignored) — than `max(current_running, floor, pending)`. A corrupt/unreadable state fails
-//! CLOSED (updates disabled) and is never overwritten, preserving forensic evidence.
+//! An update candidate is accepted only if — by SemVer PRECEDENCE (build metadata ignored) — it is
+//! strictly greater than `max(current_running, floor)` AND not below `pending` (candidate `== pending`
+//! is allowed, so a failed install can be RETRIED with the exact intent without poisoning it; a lower
+//! version stays blocked). A corrupt/unreadable state fails CLOSED (updates disabled) and is never
+//! overwritten, preserving forensic evidence.
 //!
 //! This module is the pure, GUI-agnostic core logic (unit-testable without the Tauri toolchain). The
 //! cross-process `flock` "updater transaction" that serialises check→install→record→commit across
