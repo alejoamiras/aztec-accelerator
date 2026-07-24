@@ -165,7 +165,23 @@ export async function fetchAssetDigest(version: string, asset: string): Promise<
   if (!res.ok) {
     throw new Error(`Cannot verify bb v${version}: release metadata HTTP ${res.status} ${res.statusText}`);
   }
-  const release = (await res.json()) as { assets?: Array<{ name?: string; digest?: string }> };
+  const release = (await res.json()) as {
+    immutable?: boolean;
+    assets?: Array<{ name?: string; digest?: string }>;
+  };
+  // G2 (full-branch audit): the asset AND the digest we verify against both come from the SAME GitHub
+  // release. On a MUTABLE release, a compromised Aztec release token could swap the asset and its
+  // reported digest together, and our check would still pass — this is an inherent trust in Aztec's
+  // release infra. We do NOT hard-require `immutable` (Aztec releases are not all immutable — the API
+  // returns `immutable: false` — so requiring it would break every legitimate download, repeating the
+  // version-floor over-block mistake). Instead we surface the weaker guarantee with a warning; tighten
+  // to a hard requirement only once Aztec publishes immutable releases. See FINDINGS.md (G2).
+  if (release.immutable === false) {
+    console.warn(
+      `⚠️  bb v${version}: GitHub release is MUTABLE — its asset digest is not tamper-locked after publish. ` +
+        `Integrity rests on Aztec's release infrastructure (inherent supply-chain trust).`,
+    );
+  }
   const found = (release.assets ?? []).find((a) => a.name === asset);
   if (!found?.digest) {
     throw new Error(`Cannot verify bb v${version}: no digest for asset ${asset} in release metadata`);

@@ -1,0 +1,1484 @@
+diff --git a/packages/accelerator/core/examples/update-manifest.rs b/packages/accelerator/core/examples/update-manifest.rs
+new file mode 100644
+index 0000000..4a930ca
+--- /dev/null
++++ b/packages/accelerator/core/examples/update-manifest.rs
+@@ -0,0 +1,122 @@
++//! F-004 release-pipeline tool: assemble, splice, and verify the signed update-manifest envelope.
++//!
++//! The Tauri signer (`tauri signer sign`) does the actual minisign signing with the release key; this
++//! tool only assembles the exact bytes to sign and, afterwards, embeds + verifies them — reusing the
++//! SAME `accelerator_core::update_manifest` code the app runs, so the published feed is gated by the
++//! production verifier before it ever reaches a user.
++//!
++//! Pipeline (see release-accelerator.yml):
++//!   1. `update-manifest envelope --feed latest.json > envelope.json`
++//!   2. `tauri signer sign envelope.json`            # → envelope.json.sig (base64 of the minisign doc)
++//!   3. `update-manifest splice --feed latest.json --envelope envelope.json --sig envelope.json.sig \
++//!         > latest.signed.json`
++//!   4. `update-manifest verify --feed latest.signed.json --pubkey pubkey.b64`   # exit 0 ⇒ publishable
++//!
++//! Encoding contract (kept in lockstep with `verify_manifest`):
++//!   - `manifest` = base64(envelope.json bytes); verify base64-decodes it then verifies the sig.
++//!   - `manifest_sig` = the `.sig` file content VERBATIM. Tauri already writes it as base64(minisign
++//!     doc), which is exactly what verify base64-decodes back into the minisign document.
++
++use std::process::ExitCode;
++
++use accelerator_core::update_manifest::{build_signed_envelope, verify_manifest};
++use base64::Engine as _;
++
++fn die(msg: String) -> ! {
++    eprintln!("update-manifest: {msg}");
++    std::process::exit(2);
++}
++
++fn read_to_string(path: &str) -> String {
++    std::fs::read_to_string(path).unwrap_or_else(|e| die(format!("read {path}: {e}")))
++}
++
++fn read_json(path: &str) -> serde_json::Value {
++    serde_json::from_str(&read_to_string(path))
++        .unwrap_or_else(|e| die(format!("parse {path}: {e}")))
++}
++
++/// Value of `--flag <value>` from argv, or exit with a usage error.
++fn flag(args: &[String], name: &str) -> String {
++    args.iter()
++        .position(|a| a == name)
++        .and_then(|i| args.get(i + 1))
++        .cloned()
++        .unwrap_or_else(|| die(format!("missing required {name}")))
++}
++
++fn main() -> ExitCode {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    match args.first().map(String::as_str) {
++        Some("envelope") => {
++            // Emit the canonical envelope bytes to sign, to stdout (binary-exact — no trailing newline).
++            let feed = read_json(&flag(&args, "--feed"));
++            match build_signed_envelope(&feed) {
++                Ok(bytes) => {
++                    use std::io::Write as _;
++                    if let Err(e) = std::io::stdout().write_all(&bytes) {
++                        die(format!("write stdout: {e}"));
++                    }
++                    ExitCode::SUCCESS
++                }
++                Err(e) => {
++                    eprintln!("envelope assembly failed: {e}");
++                    ExitCode::from(1)
++                }
++            }
++        }
++        Some("splice") => {
++            // Embed manifest + manifest_sig into the feed and print the result.
++            let mut feed = read_json(&flag(&args, "--feed"));
++            let env_bytes = std::fs::read(flag(&args, "--envelope"))
++                .unwrap_or_else(|e| die(format!("read envelope: {e}")));
++            let sig = read_to_string(&flag(&args, "--sig"));
++            let b64 = base64::engine::general_purpose::STANDARD;
++            feed["manifest"] = serde_json::Value::String(b64.encode(&env_bytes));
++            // Verbatim: the .sig content is already base64(minisign doc), which is exactly what
++            // verify base64-decodes. Re-encoding here would double-encode and fail verification.
++            feed["manifest_sig"] = serde_json::Value::String(sig.trim().to_string());
++            println!("{}", serde_json::to_string_pretty(&feed).unwrap());
++            ExitCode::SUCCESS
++        }
++        Some("verify") => {
++            // Gate: EVERY platform in the feed must bind through the production verifier.
++            let feed = read_json(&flag(&args, "--feed"));
++            let pubkey = read_to_string(&flag(&args, "--pubkey"));
++            let version = feed["version"]
++                .as_str()
++                .unwrap_or_else(|| die("feed has no string `version`".into()));
++            let platforms = feed["platforms"]
++                .as_object()
++                .unwrap_or_else(|| die("feed has no `platforms` object".into()));
++            if platforms.is_empty() {
++                die("feed has no platforms to verify".into());
++            }
++            let mut all_ok = true;
++            for (target, p) in platforms {
++                let url = p["url"].as_str().unwrap_or_default();
++                let sig = p["signature"].as_str().unwrap_or_default();
++                match verify_manifest(&feed, pubkey.trim(), version, url, sig) {
++                    Ok(v) => println!("OK  {target}: v{} ({} bytes)", v.version, v.size),
++                    Err(e) => {
++                        eprintln!("FAIL {target}: {e}");
++                        all_ok = false;
++                    }
++                }
++            }
++            if all_ok {
++                println!(
++                    "verify: all {} platform(s) bound to the signed envelope",
++                    platforms.len()
++                );
++                ExitCode::SUCCESS
++            } else {
++                ExitCode::from(1)
++            }
++        }
++        _ => {
++            eprintln!("usage: update-manifest <envelope|splice|verify> [--flags]");
++            ExitCode::from(2)
++        }
++    }
++}
+diff --git a/packages/accelerator/core/src/update_manifest.rs b/packages/accelerator/core/src/update_manifest.rs
+new file mode 100644
+index 0000000..d8e6437
+--- /dev/null
++++ b/packages/accelerator/core/src/update_manifest.rs
+@@ -0,0 +1,385 @@
++//! F-004 Layer A: in-app verification of a signed update-manifest envelope.
++//!
++//! `tauri-plugin-updater` verifies each downloaded ARTIFACT's minisign signature against the
++//! pinned pubkey, but it decides "is this newer?" from the UNSIGNED feed `version` field. A
++//! feed-writer can therefore advertise a high `version` while pointing `url`/`signature` at an
++//! OLD, still-validly-signed artifact → a silent downgrade to a vulnerable build (F-004).
++//!
++//! This module closes that by binding the version to the exact signed artifacts. The feed embeds:
++//!   - `manifest`     : base64 of the EXACT envelope JSON bytes that were signed, and
++//!   - `manifest_sig` : base64 of the minisign `.sig` document over those bytes.
++//!
++//! We base64-decode `manifest` and verify the signature over those VERBATIM bytes — no JSON
++//! re-serialization, so there is zero canonicalization drift (the base64 string survives the
++//! plugin's parse of `raw_json` intact). We then require the outer feed's `version`, `pub_date`,
++//! and `platforms` projection — and the specific artifact the plugin selected — to equal the
++//! signed envelope EXACTLY. Any mismatch is fail-closed. The signing key is the existing updater
++//! key (the threat is a feed-writer, not key theft), so no new secret is introduced.
++
++use std::collections::BTreeMap;
++
++use base64::Engine as _;
++use serde::{Deserialize, Serialize};
++
++/// Max base64 length of the embedded `manifest` field, checked BEFORE decoding (DoS guard).
++const MANIFEST_B64_MAX: usize = 64 * 1024;
++/// Max base64 length of the `manifest_sig` field (a minisign `.sig` is tiny).
++const MANIFEST_SIG_B64_MAX: usize = 4 * 1024;
++
++/// The decoded, signed envelope. `deny_unknown_fields` so an attacker cannot smuggle extra keys.
++/// `Serialize` so the release pipeline assembles the exact bytes it signs via [`build_signed_envelope`]
++/// — the same struct produces and consumes the envelope, so there is no shape drift.
++#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++struct SignedEnvelope {
++    /// Envelope schema discriminator — domain-separates this signature from artifact signatures.
++    schema: String,
++    version: String,
++    pub_date: String,
++    platforms: BTreeMap<String, PlatformEntry>,
++}
++
++#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++struct PlatformEntry {
++    url: String,
++    /// Mandatory — the signed byte size. Also makes the SEC-03 pre-flight cap trustworthy.
++    size: u64,
++    signature: String,
++}
++
++/// Fixed schema string the signer must use; a different value fails closed.
++pub const ENVELOPE_SCHEMA: &str = "aztec-accelerator-update-manifest-v1";
++
++/// Successful verification result: the SemVer-parsed version and the signed artifact size.
++#[derive(Debug, Clone)]
++pub struct VerifiedManifest {
++    pub version: semver::Version,
++    pub size: u64,
++}
++
++/// Every failure is a distinct variant so the caller can log a `SECURITY:`-prefixed reason. All
++/// are treated identically by the caller (reject the update), but distinct for forensics.
++#[derive(Debug)]
++pub enum ManifestError {
++    MissingField(&'static str),
++    FieldTooLarge(&'static str),
++    Base64(&'static str),
++    Utf8(&'static str),
++    PubkeyDecode,
++    SignatureDecode,
++    /// The minisign signature over the manifest bytes did not verify against the pinned key.
++    SignatureInvalid,
++    EnvelopeParse,
++    BadSchema,
++    /// Envelope `version` is not canonical SemVer (e.g. leading `v`, or non-canonical form).
++    NonCanonicalVersion,
++    /// Outer feed `version`/`pub_date`/`platforms` disagrees with the signed envelope.
++    OuterMismatch(&'static str),
++    /// The claimed `Update.version` does not equal the signed envelope `version`.
++    VersionMismatch,
++    /// Zero or more-than-one platform entry matched the plugin-selected download URL.
++    ArtifactNotUniquelyMatched,
++    /// The selected artifact's signature/size does not equal the signed envelope's.
++    ArtifactMismatch(&'static str),
++}
++
++impl std::fmt::Display for ManifestError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{self:?}")
++    }
++}
++impl std::error::Error for ManifestError {}
++
++fn b64(s: &str, what: &'static str) -> Result<Vec<u8>, ManifestError> {
++    base64::engine::general_purpose::STANDARD
++        .decode(s.trim())
++        .map_err(|_| ManifestError::Base64(what))
++}
++
++/// Verify the signed manifest envelope embedded in `raw_json` and bind it to the plugin-selected
++/// artifact. `pubkey_b64` is the pinned updater pubkey (base64 of the minisign `.pub` document).
++/// `claimed_version` / `download_url` / `artifact_sig` are the `Update` fields the plugin would act
++/// on. On success the update is cryptographically bound to the exact signed artifact set.
++pub fn verify_manifest(
++    raw_json: &serde_json::Value,
++    pubkey_b64: &str,
++    claimed_version: &str,
++    download_url: &str,
++    artifact_sig: &str,
++) -> Result<VerifiedManifest, ManifestError> {
++    // 1. Extract the embedded fields (base64 strings survive the plugin's JSON parse verbatim).
++    let manifest_b64 = raw_json
++        .get("manifest")
++        .and_then(serde_json::Value::as_str)
++        .ok_or(ManifestError::MissingField("manifest"))?;
++    let manifest_sig_b64 = raw_json
++        .get("manifest_sig")
++        .and_then(serde_json::Value::as_str)
++        .ok_or(ManifestError::MissingField("manifest_sig"))?;
++    if manifest_b64.len() > MANIFEST_B64_MAX {
++        return Err(ManifestError::FieldTooLarge("manifest"));
++    }
++    if manifest_sig_b64.len() > MANIFEST_SIG_B64_MAX {
++        return Err(ManifestError::FieldTooLarge("manifest_sig"));
++    }
++
++    // 2. Decode the EXACT signed bytes + the signature document.
++    let manifest_bytes = b64(manifest_b64, "manifest")?;
++    let sig_doc = b64(manifest_sig_b64, "manifest_sig")?;
++    let sig_doc = String::from_utf8(sig_doc).map_err(|_| ManifestError::Utf8("manifest_sig"))?;
++
++    // 3. Verify the minisign signature over the verbatim manifest bytes with the pinned key.
++    //    allow_legacy=false requires the prehashed format the Tauri 2 signer emits.
++    let pubkey_doc = b64(pubkey_b64, "pubkey")?;
++    let pubkey_doc = String::from_utf8(pubkey_doc).map_err(|_| ManifestError::Utf8("pubkey"))?;
++    let public_key =
++        minisign_verify::PublicKey::decode(&pubkey_doc).map_err(|_| ManifestError::PubkeyDecode)?;
++    let signature =
++        minisign_verify::Signature::decode(&sig_doc).map_err(|_| ManifestError::SignatureDecode)?;
++    public_key
++        .verify(&manifest_bytes, &signature, false)
++        .map_err(|_| ManifestError::SignatureInvalid)?;
++
++    // 4. Parse the now-trusted envelope (strict).
++    let env: SignedEnvelope =
++        serde_json::from_slice(&manifest_bytes).map_err(|_| ManifestError::EnvelopeParse)?;
++    if env.schema != ENVELOPE_SCHEMA {
++        return Err(ManifestError::BadSchema);
++    }
++
++    // 5. Envelope version must be canonical SemVer (reject leading `v` / non-canonical forms even
++    //    though the plugin would accept them) and round-trip to the exact same string.
++    let env_version =
++        semver::Version::parse(&env.version).map_err(|_| ManifestError::NonCanonicalVersion)?;
++    if env_version.to_string() != env.version {
++        return Err(ManifestError::NonCanonicalVersion);
++    }
++
++    // 6. Bind the OUTER feed to the signed envelope (B3): version, pub_date, and the full platforms
++    //    projection must match exactly. `notes` stays unsigned/informational.
++    let outer_version = raw_json.get("version").and_then(serde_json::Value::as_str);
++    if outer_version != Some(env.version.as_str()) {
++        return Err(ManifestError::OuterMismatch("version"));
++    }
++    let outer_pub_date = raw_json.get("pub_date").and_then(serde_json::Value::as_str);
++    if outer_pub_date != Some(env.pub_date.as_str()) {
++        return Err(ManifestError::OuterMismatch("pub_date"));
++    }
++    let outer_platforms = raw_json
++        .get("platforms")
++        .ok_or(ManifestError::OuterMismatch("platforms"))?;
++    let outer_projection: BTreeMap<String, PlatformEntry> =
++        serde_json::from_value(outer_platforms.clone())
++            .map_err(|_| ManifestError::OuterMismatch("platforms"))?;
++    if outer_projection != env.platforms {
++        return Err(ManifestError::OuterMismatch("platforms"));
++    }
++
++    // 7. The claimed Update.version must equal the signed version exactly.
++    if claimed_version != env.version {
++        return Err(ManifestError::VersionMismatch);
++    }
++
++    // 8. Exactly ONE signed platform entry must match the plugin-selected download URL, and its
++    //    signature/size must equal the signed values.
++    let mut matches = env.platforms.values().filter(|p| p.url == download_url);
++    let selected = matches
++        .next()
++        .ok_or(ManifestError::ArtifactNotUniquelyMatched)?;
++    if matches.next().is_some() {
++        return Err(ManifestError::ArtifactNotUniquelyMatched);
++    }
++    if selected.signature != artifact_sig {
++        return Err(ManifestError::ArtifactMismatch("signature"));
++    }
++
++    Ok(VerifiedManifest {
++        version: env_version,
++        size: selected.size,
++    })
++}
++
++/// Assemble the canonical signed-envelope bytes from an (unsigned) feed value — the EXACT bytes the
++/// release pipeline signs. Extracts `version`/`pub_date`/`platforms` from the feed the plugin will
++/// serve, stamps the fixed [`ENVELOPE_SCHEMA`], and serializes. These bytes are what gets signed and
++/// base64-embedded as `manifest`, so there is no canonicalization contract beyond "they round-trip
++/// through [`verify_manifest`]" — which holds by construction, because they are built from the very
++/// fields verify compares back to the outer feed. Mirrors verify's canonical-SemVer rule so the
++/// pipeline never signs a version that verify would reject. Used by the `update-manifest` example tool.
++pub fn build_signed_envelope(feed: &serde_json::Value) -> Result<Vec<u8>, ManifestError> {
++    let version = feed
++        .get("version")
++        .and_then(serde_json::Value::as_str)
++        .ok_or(ManifestError::MissingField("version"))?;
++    let parsed = semver::Version::parse(version).map_err(|_| ManifestError::NonCanonicalVersion)?;
++    if parsed.to_string() != version {
++        return Err(ManifestError::NonCanonicalVersion);
++    }
++    let pub_date = feed
++        .get("pub_date")
++        .and_then(serde_json::Value::as_str)
++        .ok_or(ManifestError::MissingField("pub_date"))?;
++    let platforms_val = feed
++        .get("platforms")
++        .ok_or(ManifestError::MissingField("platforms"))?;
++    // Reuse the strict PlatformEntry parse: an extra/missing field on any platform fails here rather
++    // than producing an envelope verify would later reject.
++    let platforms: BTreeMap<String, PlatformEntry> =
++        serde_json::from_value(platforms_val.clone()).map_err(|_| ManifestError::EnvelopeParse)?;
++    if platforms.is_empty() {
++        return Err(ManifestError::MissingField("platforms"));
++    }
++    let env = SignedEnvelope {
++        schema: ENVELOPE_SCHEMA.to_string(),
++        version: version.to_string(),
++        pub_date: pub_date.to_string(),
++        platforms,
++    };
++    serde_json::to_vec(&env).map_err(|_| ManifestError::EnvelopeParse)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn build_signed_envelope_matches_feed_projection() {
++        // The assembled envelope must carry the fixed schema and reproduce the feed's version,
++        // pub_date, and platforms EXACTLY — that equality is what makes verify's outer==envelope
++        // binding pass once the bytes are signed.
++        let feed = feed();
++        let bytes = build_signed_envelope(&feed).unwrap();
++        let env: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
++        assert_eq!(env["schema"], ENVELOPE_SCHEMA);
++        assert_eq!(env["version"], feed["version"]);
++        assert_eq!(env["pub_date"], feed["pub_date"]);
++        let got: BTreeMap<String, PlatformEntry> =
++            serde_json::from_value(env["platforms"].clone()).unwrap();
++        let want: BTreeMap<String, PlatformEntry> =
++            serde_json::from_value(feed["platforms"].clone()).unwrap();
++        assert_eq!(got, want);
++    }
++
++    #[test]
++    fn build_signed_envelope_rejects_noncanonical_version() {
++        let mut feed = feed();
++        feed["version"] = json!("v1.0.8");
++        assert!(matches!(
++            build_signed_envelope(&feed),
++            Err(ManifestError::NonCanonicalVersion)
++        ));
++    }
++
++    // Fixture signed with a THROWAWAY test key (private key never committed). See
++    // tests/fixtures/updater/ — regenerate via `tauri signer generate/sign` if the schema changes.
++    const PUBKEY_B64: &str = include_str!("../tests/fixtures/updater/pubkey.b64");
++    const LATEST_JSON: &str = include_str!("../tests/fixtures/updater/latest.json");
++    const URL: &str = "https://example.test/app.AppImage";
++    const ART_SIG: &str = "ARTIFACT_SIG_PLACEHOLDER";
++
++    fn feed() -> serde_json::Value {
++        serde_json::from_str(LATEST_JSON).unwrap()
++    }
++    fn pk() -> &'static str {
++        PUBKEY_B64.trim()
++    }
++
++    #[test]
++    fn happy_path_verifies_and_binds() {
++        let v = verify_manifest(&feed(), pk(), "1.0.8", URL, ART_SIG).expect("valid manifest");
++        assert_eq!(v.version, semver::Version::parse("1.0.8").unwrap());
++        assert_eq!(v.size, 12345);
++    }
++
++    #[test]
++    fn splice_high_outer_version_rejected() {
++        // F-004 core attack: attacker bumps the outer/claimed version but cannot re-sign the
++        // envelope (still 1.0.8). Outer≠envelope ⇒ rejected before any download.
++        let mut f = feed();
++        f["version"] = json!("9.9.9");
++        assert!(matches!(
++            verify_manifest(&f, pk(), "9.9.9", URL, ART_SIG),
++            Err(ManifestError::OuterMismatch("version"))
++        ));
++    }
++
++    #[test]
++    fn claimed_version_mismatch_rejected() {
++        // Update.version disagrees with the signed envelope (outer left intact).
++        assert!(matches!(
++            verify_manifest(&feed(), pk(), "2.0.0", URL, ART_SIG),
++            Err(ManifestError::VersionMismatch | ManifestError::OuterMismatch(_))
++        ));
++    }
++
++    #[test]
++    fn tampered_manifest_bytes_fail_signature() {
++        let mut f = feed();
++        let m = f["manifest"].as_str().unwrap().to_string();
++        // flip one char in the base64 → different signed bytes → signature no longer verifies
++        let mut chars: Vec<char> = m.chars().collect();
++        let i = chars.len() / 2;
++        chars[i] = if chars[i] == 'A' { 'B' } else { 'A' };
++        f["manifest"] = json!(chars.into_iter().collect::<String>());
++        assert!(matches!(
++            verify_manifest(&f, pk(), "1.0.8", URL, ART_SIG),
++            Err(ManifestError::SignatureInvalid
++                | ManifestError::EnvelopeParse
++                | ManifestError::Base64(_))
++        ));
++    }
++
++    #[test]
++    fn outer_size_tamper_rejected() {
++        let mut f = feed();
++        f["platforms"]["linux-x86_64"]["size"] = json!(999);
++        assert!(matches!(
++            verify_manifest(&f, pk(), "1.0.8", URL, ART_SIG),
++            Err(ManifestError::OuterMismatch("platforms"))
++        ));
++    }
++
++    #[test]
++    fn missing_envelope_fails_closed() {
++        let mut f = feed();
++        f.as_object_mut().unwrap().remove("manifest");
++        assert!(matches!(
++            verify_manifest(&f, pk(), "1.0.8", URL, ART_SIG),
++            Err(ManifestError::MissingField("manifest"))
++        ));
++    }
++
++    #[test]
++    fn wrong_artifact_sig_rejected() {
++        assert!(matches!(
++            verify_manifest(&feed(), pk(), "1.0.8", URL, "NOT_THE_SIGNED_SIG"),
++            Err(ManifestError::ArtifactMismatch("signature"))
++        ));
++    }
++
++    #[test]
++    fn unmatched_download_url_rejected() {
++        assert!(matches!(
++            verify_manifest(
++                &feed(),
++                pk(),
++                "1.0.8",
++                "https://evil.test/x.AppImage",
++                ART_SIG
++            ),
++            Err(ManifestError::ArtifactNotUniquelyMatched)
++        ));
++    }
++
++    #[test]
++    fn wrong_pubkey_rejected() {
++        // A different (valid-format) key must not verify the signature.
++        let other = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzNzEzODFFMEEzMzU2QTgKUldTb1ZqTUtIamh4czNrcWR3QVZiUmIwdyttSzg5OUhtZXJobURnY05KL2pCZWMydDFPcWkvWFAK";
++        assert!(matches!(
++            verify_manifest(&feed(), other, "1.0.8", URL, ART_SIG),
++            Err(ManifestError::SignatureInvalid)
++        ));
++    }
++}
+diff --git a/packages/accelerator/core/src/updater_state.rs b/packages/accelerator/core/src/updater_state.rs
+new file mode 100644
+index 0000000..6ea2b5f
+--- /dev/null
++++ b/packages/accelerator/core/src/updater_state.rs
+@@ -0,0 +1,396 @@
++//! F-004 Layer B: a monotonic version floor — the rollback ratchet.
++//!
++//! Even if Layer A ([`crate::update_manifest`]) were somehow bypassed, the app must never move
++//! backwards. We persist, in a dedicated owner-only atomically-written state file (NOT `config.json`,
++//! whose load is deliberately fail-OPEN and would silently erase the floor on any parse glitch), two
++//! monotonic high-water marks:
++//!
++//! - **`floor`** — the highest version that has ever SUCCESSFULLY RUN. Advanced only after a new build
++//!   proves it runs (the caller commits post-launch, [`commit_successful_launch`]), so a crashing bad
++//!   update can never ratchet it.
++//! - **`pending`** — the version an install has COMMITTED to (the install INTENT) but that has not yet
++//!   proven healthy ([`record_pending`], written under the updater lock right BEFORE `install()` — see
++//!   that fn for why after-install is wrong on Windows). This closes the restart race: instance A
++//!   commits `3.0.0` and installs/restarts (releasing the lock) before `3.0.0` can commit its floor;
++//!   without `pending`, a racing instance B would still see `floor = 1.0.0` and could install a LOWER
++//!   `2.0.0`, regressing the just-installed higher version. With `pending`, B sees the floor at `3.0.0`.
++//!
++//! An update candidate is accepted only if — by SemVer PRECEDENCE (build metadata ignored) — it is
++//! strictly greater than `max(current_running, floor)` AND not below `pending` (candidate `== pending`
++//! is allowed, so a failed install can be RETRIED with the exact intent without poisoning it; a lower
++//! version stays blocked). A corrupt/unreadable state fails CLOSED (updates disabled) and is never
++//! overwritten, preserving forensic evidence.
++//!
++//! This module is the pure, GUI-agnostic core logic (unit-testable without the Tauri toolchain). The
++//! cross-process `flock` "updater transaction" that serialises check→install→record→commit across
++//! concurrent instances is applied by the desktop caller around these operations; every mutating call
++//! here ([`record_pending`], [`commit_successful_launch`]) MUST run while the caller holds that lock.
++
++use std::io::Write as _;
++use std::path::Path;
++
++use semver::Version;
++use serde::{Deserialize, Serialize};
++
++const SCHEMA: u32 = 1;
++
++/// The persisted state. `deny_unknown_fields` so a tampered file with extra keys is rejected
++/// (→ [`LoadedState::Corrupt`]) rather than silently accepted. `pending` is optional (older files and
++/// the common "nothing installing" case omit it).
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct StateFile {
++    schema: u32,
++    floor: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pending: Option<String>,
++}
++
++/// The distinguishable load outcomes. `Corrupt` and `Missing` are NOT the same: `Missing` bootstraps
++/// (first run / pre-floor upgrade), `Corrupt` fails closed and is never overwritten.
++#[derive(Debug, PartialEq, Eq)]
++pub enum LoadedState {
++    /// No state file yet — first run. Effective floor is `current_running` alone.
++    Missing,
++    /// File exists but is unreadable / not our schema / not canonical SemVer. Fail closed.
++    Corrupt,
++    Valid {
++        floor: Version,
++        /// An install committed to but not yet proven healthy — part of the effective floor.
++        pending: Option<Version>,
++    },
++}
++
++/// Parse a stored version string, requiring canonical round-trip so a non-canonical value can't slip
++/// the comparator.
++fn parse_canonical(s: &str) -> Option<Version> {
++    match Version::parse(s) {
++        Ok(v) if v.to_string() == s => Some(v),
++        _ => None,
++    }
++}
++
++/// Load the state. IO errors other than "not found" are treated as `Corrupt` (fail closed) — a
++/// permission or read failure on security state must not be interpreted as "no floor".
++pub fn load_state(path: &Path) -> LoadedState {
++    let contents = match std::fs::read_to_string(path) {
++        Ok(c) => c,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LoadedState::Missing,
++        Err(_) => return LoadedState::Corrupt,
++    };
++    let parsed: StateFile = match serde_json::from_str(&contents) {
++        Ok(p) => p,
++        Err(_) => return LoadedState::Corrupt,
++    };
++    if parsed.schema != SCHEMA {
++        return LoadedState::Corrupt;
++    }
++    let Some(floor) = parse_canonical(&parsed.floor) else {
++        return LoadedState::Corrupt;
++    };
++    // A present-but-unparseable `pending` is corruption, not "no pending" — fail closed.
++    let pending = match parsed.pending {
++        None => None,
++        Some(ref s) => match parse_canonical(s) {
++            Some(v) => Some(v),
++            None => return LoadedState::Corrupt,
++        },
++    };
++    LoadedState::Valid { floor, pending }
++}
++
++fn gt(a: &Version, b: &Version) -> bool {
++    a.cmp_precedence(b) == std::cmp::Ordering::Greater
++}
++
++/// Is `candidate` acceptable given the running version and the loaded state? Uses SemVer PRECEDENCE
++/// (build metadata ignored, prerelease ordered correctly). A `Corrupt` state rejects everything
++/// (fail closed).
++///
++/// Rules (codex audit #5 — retryable intent semantics):
++/// - strictly above the running version (`current`);
++/// - strictly above the confirmed `floor` (no rollback below a version that ran healthy);
++/// - `>= pending` — i.e. NOT below the pending install intent (a lower still-signed version would
++///   regress the committed install), but candidate `== pending` IS allowed so a failed/interrupted
++///   install can be RETRIED with the exact same version without permanently poisoning it. Recording
++///   the intent BEFORE install (see [`record_pending`]) is what makes this the anti-downgrade floor
++///   even on platforms where `install()` never returns to record it afterwards (Windows exits mid-install).
++pub fn candidate_allowed(candidate: &Version, current: &Version, state: &LoadedState) -> bool {
++    if !gt(candidate, current) {
++        return false;
++    }
++    match state {
++        LoadedState::Corrupt => false,
++        LoadedState::Missing => true,
++        LoadedState::Valid { floor, pending } => {
++            if !gt(candidate, floor) {
++                return false;
++            }
++            match pending {
++                Some(p) => !gt(p, candidate), // candidate >= pending (equal = retry the exact intent)
++                None => true,
++            }
++        }
++    }
++}
++
++/// True iff the running build is BELOW the confirmed FLOOR — a rollback that already happened (someone
++/// installed an older binary out of band). Uses the confirmed `floor` ONLY, never `pending`: being
++/// below `pending` is the NORMAL state while a higher install has committed but not yet launched.
++pub fn running_below_floor(current: &Version, state: &LoadedState) -> bool {
++    matches!(state, LoadedState::Valid { floor, .. } if gt(floor, current))
++}
++
++/// Record that `current` (the running, therefore proven, installer) is COMMITTING to install
++/// `candidate`, which becomes the PENDING intent until a build at that version proves healthy.
++/// Advances `floor` to include `current` and `pending` to include `candidate` (both monotonic by
++/// precedence). MUST be called under the updater lock, and — codex #5 — right BEFORE `install()`
++/// (not after): on Windows `tauri-plugin-updater`'s `install()` dispatches the external installer and
++/// `std::process::exit(0)`s, so anything after it (including this record) never runs. Recording the
++/// intent first is what raises the anti-downgrade floor for a racing instance regardless of platform,
++/// and [`candidate_allowed`] permits re-attempting the exact `candidate` so a failed install does not
++/// poison that version. Refuses a `Corrupt` file.
++pub fn record_pending(path: &Path, current: &Version, candidate: &Version) -> std::io::Result<()> {
++    let (floor, pending) = match load_state(path) {
++        LoadedState::Corrupt => {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                "refusing to overwrite a corrupt version-floor state",
++            ));
++        }
++        LoadedState::Missing => (current.clone(), Some(candidate.clone())),
++        LoadedState::Valid { floor, pending } => {
++            let new_floor = if gt(current, &floor) {
++                current.clone()
++            } else {
++                floor
++            };
++            let new_pending = match pending {
++                Some(p) if gt(&p, candidate) => Some(p),
++                _ => Some(candidate.clone()),
++            };
++            (new_floor, new_pending)
++        }
++    };
++    write_state(path, &floor, pending.as_ref())
++}
++
++/// Record that `current` launched successfully: advance `floor` to `max(floor, current)` and clear any
++/// `pending` that has now been superseded (i.e. `pending <= current` by precedence — the pending
++/// install has launched, so it graduates into the confirmed floor). Monotonic; never lowers. Refuses a
++/// `Corrupt` file. MUST be called under the updater lock.
++pub fn commit_successful_launch(path: &Path, current: &Version) -> std::io::Result<()> {
++    match load_state(path) {
++        LoadedState::Corrupt => Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidData,
++            "refusing to overwrite a corrupt version-floor state",
++        )),
++        LoadedState::Missing => write_state(path, current, None),
++        LoadedState::Valid { floor, pending } => {
++            let new_floor = if gt(current, &floor) {
++                current.clone()
++            } else {
++                floor
++            };
++            // Drop pending once the running version has caught up to (or passed) it.
++            let new_pending = pending.filter(|p| gt(p, current));
++            write_state(path, &new_floor, new_pending.as_ref())
++        }
++    }
++}
++
++/// Atomically write the state with owner-only perms: random temp name in the SAME dir (via
++/// `tempfile`), explicit `0600`, `fsync` of the file AND the parent dir on Unix, chmod/durability
++/// failures are HARD errors (not ignored — L8).
++fn write_state(path: &Path, floor: &Version, pending: Option<&Version>) -> std::io::Result<()> {
++    let parent = path.parent().ok_or_else(|| {
++        std::io::Error::new(std::io::ErrorKind::InvalidInput, "state path has no parent")
++    })?;
++    std::fs::create_dir_all(parent)?;
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
++    }
++
++    let body = serde_json::to_vec(&StateFile {
++        schema: SCHEMA,
++        floor: floor.to_string(),
++        pending: pending.map(ToString::to_string),
++    })?;
++
++    // Random same-dir temp (owner-only from creation), write, fsync, then atomic rename.
++    let mut tmp = tempfile::Builder::new()
++        .prefix(".updater-state-")
++        .tempfile_in(parent)?;
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        tmp.as_file()
++            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
++    }
++    tmp.write_all(&body)?;
++    tmp.as_file().sync_all()?;
++    tmp.persist(path)
++        .map_err(|e| std::io::Error::other(e.error))?;
++
++    // fsync the directory so the rename is durable. Propagate failures (L8): a swallowed dir-fsync
++    // failure could let a crash restore an older/missing dir entry and lower or erase the floor.
++    #[cfg(unix)]
++    {
++        let dir = std::fs::File::open(parent)?;
++        dir.sync_all()?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn v(s: &str) -> Version {
++        Version::parse(s).unwrap()
++    }
++    fn tmp() -> tempfile::TempDir {
++        tempfile::tempdir().unwrap()
++    }
++    fn valid(floor: &str, pending: Option<&str>) -> LoadedState {
++        LoadedState::Valid {
++            floor: v(floor),
++            pending: pending.map(v),
++        }
++    }
++
++    #[test]
++    fn missing_bootstraps() {
++        let d = tmp();
++        assert_eq!(load_state(&d.path().join("s.json")), LoadedState::Missing);
++        assert!(candidate_allowed(
++            &v("1.1.0"),
++            &v("1.0.0"),
++            &LoadedState::Missing
++        ));
++        assert!(!candidate_allowed(
++            &v("1.0.0"),
++            &v("1.0.0"),
++            &LoadedState::Missing
++        ));
++    }
++
++    #[test]
++    fn commit_is_monotonic_and_roundtrips() {
++        let d = tmp();
++        let p = d.path().join("s.json");
++        commit_successful_launch(&p, &v("1.0.8")).unwrap();
++        assert_eq!(load_state(&p), valid("1.0.8", None));
++        commit_successful_launch(&p, &v("1.0.5")).unwrap(); // lower never lowers
++        assert_eq!(load_state(&p), valid("1.0.8", None));
++        commit_successful_launch(&p, &v("1.1.0")).unwrap();
++        assert_eq!(load_state(&p), valid("1.1.0", None));
++    }
++
++    #[test]
++    fn floor_blocks_rollback_candidate() {
++        let f = valid("1.0.8", None);
++        assert!(!candidate_allowed(&v("1.0.7"), &v("1.0.6"), &f));
++        assert!(!candidate_allowed(&v("1.0.8"), &v("1.0.6"), &f)); // equal to floor
++        assert!(candidate_allowed(&v("1.0.9"), &v("1.0.6"), &f));
++    }
++
++    #[test]
++    fn pending_blocks_lower_candidate_before_commit() {
++        // H1 restart race: A installed 3.0.0 (recorded pending), floor still 1.0.0. B (current 1.0.0)
++        // must NOT be allowed to install 2.0.0 — the effective floor is now 3.0.0.
++        let d = tmp();
++        let p = d.path().join("s.json");
++        commit_successful_launch(&p, &v("1.0.0")).unwrap();
++        record_pending(&p, &v("1.0.0"), &v("3.0.0")).unwrap();
++        let st = load_state(&p);
++        assert_eq!(st, valid("1.0.0", Some("3.0.0")));
++        assert!(!candidate_allowed(&v("2.0.0"), &v("1.0.0"), &st)); // regression blocked
++        assert!(candidate_allowed(&v("3.0.1"), &v("1.0.0"), &st)); // strictly-higher allowed
++                                                                   // codex #5: retrying the EXACT pending intent is allowed (a failed/interrupted install must not
++                                                                   // poison that version); anything strictly below it stays blocked.
++        assert!(candidate_allowed(&v("3.0.0"), &v("1.0.0"), &st)); // retry the exact intent
++        assert!(!candidate_allowed(&v("2.9.9"), &v("1.0.0"), &st)); // still below intent → blocked
++                                                                    // running below the confirmed FLOOR is false (1.0.0 == floor); pending doesn't count as floor.
++        assert!(!running_below_floor(&v("1.0.0"), &st));
++    }
++
++    #[test]
++    fn commit_promotes_pending_into_floor() {
++        let d = tmp();
++        let p = d.path().join("s.json");
++        commit_successful_launch(&p, &v("1.0.0")).unwrap();
++        record_pending(&p, &v("1.0.0"), &v("2.0.0")).unwrap();
++        assert_eq!(load_state(&p), valid("1.0.0", Some("2.0.0")));
++        // 2.0.0 launches and proves healthy → floor advances to 2.0.0, pending cleared.
++        commit_successful_launch(&p, &v("2.0.0")).unwrap();
++        assert_eq!(load_state(&p), valid("2.0.0", None));
++    }
++
++    #[test]
++    fn record_pending_is_monotonic() {
++        let d = tmp();
++        let p = d.path().join("s.json");
++        record_pending(&p, &v("1.0.0"), &v("2.0.0")).unwrap();
++        record_pending(&p, &v("1.0.0"), &v("1.5.0")).unwrap(); // lower candidate can't lower pending
++        assert_eq!(load_state(&p), valid("1.0.0", Some("2.0.0")));
++    }
++
++    #[test]
++    fn corrupt_fails_closed_and_is_preserved() {
++        let d = tmp();
++        let p = d.path().join("s.json");
++        std::fs::write(&p, b"{ not json").unwrap();
++        assert_eq!(load_state(&p), LoadedState::Corrupt);
++        assert!(!candidate_allowed(
++            &v("9.9.9"),
++            &v("1.0.0"),
++            &LoadedState::Corrupt
++        ));
++        assert!(commit_successful_launch(&p, &v("2.0.0")).is_err());
++        assert!(record_pending(&p, &v("1.0.0"), &v("2.0.0")).is_err());
++        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ not json"); // untouched
++    }
++
++    #[test]
++    fn wrong_schema_or_bad_pending_is_corrupt() {
++        let d = tmp();
++        let p = d.path().join("s.json");
++        std::fs::write(&p, br#"{"schema":99,"floor":"1.0.0"}"#).unwrap();
++        assert_eq!(load_state(&p), LoadedState::Corrupt);
++        std::fs::write(&p, br#"{"schema":1,"floor":"1.0.0","pending":"notver"}"#).unwrap();
++        assert_eq!(load_state(&p), LoadedState::Corrupt);
++        // Unknown field rejected.
++        std::fs::write(&p, br#"{"schema":1,"floor":"1.0.0","x":1}"#).unwrap();
++        assert_eq!(load_state(&p), LoadedState::Corrupt);
++    }
++
++    #[test]
++    fn prerelease_and_build_metadata_precedence() {
++        let f = valid("1.0.8-rc.2", None);
++        assert!(candidate_allowed(&v("1.0.8-rc.10"), &v("1.0.7"), &f)); // rc.10 > rc.2 numerically
++        assert!(candidate_allowed(&v("1.0.8"), &v("1.0.7"), &f)); // stable > its rc
++        let f2 = valid("1.0.8", None);
++        assert!(!candidate_allowed(&v("1.0.8+build.5"), &v("1.0.0"), &f2)); // build metadata ignored
++    }
++
++    #[test]
++    fn running_below_floor_detects_rollback() {
++        assert!(running_below_floor(&v("1.0.5"), &valid("1.0.8", None)));
++        assert!(!running_below_floor(&v("1.0.8"), &valid("1.0.8", None)));
++        assert!(!running_below_floor(&v("1.0.9"), &valid("1.0.8", None)));
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn written_file_is_owner_only() {
++        use std::os::unix::fs::MetadataExt;
++        let d = tmp();
++        let p = d.path().join("s.json");
++        commit_successful_launch(&p, &v("1.0.0")).unwrap();
++        assert_eq!(std::fs::metadata(&p).unwrap().mode() & 0o777, 0o600);
++        assert_eq!(std::fs::metadata(d.path()).unwrap().mode() & 0o777, 0o700);
++    }
++}
+diff --git a/packages/accelerator/src-tauri/src/updater.rs b/packages/accelerator/src-tauri/src/updater.rs
+index 6502c2e..17f68ba 100644
+--- a/packages/accelerator/src-tauri/src/updater.rs
++++ b/packages/accelerator/src-tauri/src/updater.rs
+@@ -5,16 +5,199 @@
+ //! calls `perform_update()` directly — no redundant network re-check.
+ 
+ use crate::commands::ConfigState;
++use accelerator_core::{update_manifest, updater_state};
++use semver::Version;
++use std::sync::OnceLock;
+ use tauri::AppHandle;
+ use tauri_plugin_updater::UpdaterExt;
+ 
+-/// Check for updates and act based on the user's auto_update preference.
+-/// Returns the `Update` if one is available and the user hasn't opted into auto-update
+-/// (so the caller can show a prompt or store it for later use).
++/// The pinned updater public key, read ONCE from the bundled `tauri.conf.json` — the exact same key
++/// the plugin uses to verify artifact signatures. Reading it from the config (instead of duplicating
++/// the string) guarantees Layer A verifies against the key the build actually trusts. Panics at first
++/// use only if the config is malformed, which is a build-time invariant, not a runtime input.
++fn updater_pubkey() -> &'static str {
++    static PUBKEY: OnceLock<String> = OnceLock::new();
++    PUBKEY.get_or_init(|| {
++        const CONF: &str = include_str!("../tauri.conf.json");
++        let conf: serde_json::Value =
++            serde_json::from_str(CONF).expect("tauri.conf.json is valid JSON");
++        conf["plugins"]["updater"]["pubkey"]
++            .as_str()
++            .expect("tauri.conf.json plugins.updater.pubkey is present")
++            .to_string()
++    })
++}
++
++/// Absolute path to the monotonic version-floor state file. Lives alongside the app's other private
++/// state under `~/.aztec-accelerator/` (same base as `certs/`), deliberately NOT inside `config.json`
++/// (whose load is fail-open and would silently erase the floor on any parse glitch).
++fn updater_state_path() -> Option<std::path::PathBuf> {
++    dirs::home_dir().map(|h| h.join(".aztec-accelerator").join("updater-state.json"))
++}
++
++/// F-004 B2: acquire the cross-process "updater transaction" lock. Serialises check→install and the
++/// post-launch floor commit across concurrent app instances, so two processes can neither race the
++/// floor file nor install over each other. Best-effort and non-blocking: if another instance holds it,
++/// return `None` and the caller bows out (the periodic poller / next launch retries) rather than
++/// blocking the async runtime. The returned guard (the open, exclusively-locked file) releases the
++/// lock on drop — and, on the no-return `app.restart()` path, the OS releases it at process exit.
++fn acquire_updater_lock() -> Option<std::fs::File> {
++    use fs2::FileExt as _;
++    let parent = updater_state_path()?.parent()?.to_path_buf();
++    let _ = std::fs::create_dir_all(&parent);
++    let file = std::fs::OpenOptions::new()
++        .create(true)
++        .read(true)
++        .write(true)
++        .truncate(false)
++        .open(parent.join("updater.lock"))
++        .ok()?;
++    match file.try_lock_exclusive() {
++        Ok(()) => Some(file),
++        Err(_) => {
++            tracing::info!(
++                "Another instance holds the updater lock; skipping this update transaction"
++            );
++            None
++        }
++    }
++}
++
++/// Record that THIS build launched successfully by advancing the monotonic version floor to the
++/// running version (F-004 Layer B). Called once, after the app has proven it actually runs (see the
++/// launch tracker in main.rs) — so a build that boots but immediately wedges never ratchets the floor
++/// and can't lock itself in as the new minimum.
++///
++/// The updater lock is REQUIRED, not best-effort (audit H2): committing the floor without it can race a
++/// concurrent installer — the installer re-checks the floor before `install()`, so a commit that lands
++/// between that check and the install would let the installer write a version below the just-advanced
++/// floor. If the lock is held by another instance's transaction, defer the commit (the next launch
++/// retries) rather than commit unlocked.
++pub fn commit_launch_floor() {
++    let Some(path) = updater_state_path() else {
++        tracing::warn!("cannot resolve updater-state path; skipping floor commit");
++        return;
++    };
++    let current = match Version::parse(env!("CARGO_PKG_VERSION")) {
++        Ok(v) => v,
++        Err(e) => {
++            tracing::warn!("own version is not SemVer ({e}); skipping floor commit");
++            return;
++        }
++    };
++    let Some(_guard) = acquire_updater_lock() else {
++        tracing::warn!(
++            "could not acquire the updater lock; deferring the floor commit to avoid racing a concurrent install"
++        );
++        return;
++    };
++    match updater_state::commit_successful_launch(&path, &current) {
++        Ok(()) => tracing::info!(version = %current, "Version floor committed for this launch"),
++        Err(e) => tracing::warn!("Floor commit skipped: {e}"),
++    }
++}
++
++/// An update that has cleared BOTH F-004 layers: Layer A (the signed-manifest envelope binds the
++/// advertised version to the exact signed artifact set — [`update_manifest::verify_manifest`]) and
++/// Layer B (the candidate is strictly above `max(current, floor)` — [`updater_state`]). Its fields are
++/// private and the ONLY constructor is [`verify_and_gate`], so a value of this type is a
++/// proof-carrying token: [`perform_update`] accepts nothing else, and the frontend holds no updater
++/// capability (see `capabilities/default.json`). Together those make it impossible to install an
++/// artifact that has not cleared both layers.
++pub struct VerifiedUpdate {
++    update: tauri_plugin_updater::Update,
++    /// The SemVer-parsed, envelope-bound version.
++    version: Version,
++    /// The signed artifact byte size (authoritative — from the signed envelope, so the size cap in
++    /// [`perform_update`] cannot be defeated by a lying feed).
++    signed_size: u64,
++}
++
++impl VerifiedUpdate {
++    /// The verified SemVer version — for logging and the post-launch floor commit.
++    pub fn version(&self) -> &Version {
++        &self.version
++    }
++}
++
++/// F-004 Layer B, fail-closed. Returns `Ok(())` iff `candidate` may be installed given the persisted
++/// state and the running version. Every arm — updater-state path resolution, state load, the
++/// running-below-floor check, and candidate-allowed (which itself rejects a `Corrupt` state) — fails
++/// CLOSED (Err) on any problem. Shared by the check-time gate ([`verify_and_gate`]) and the install-time
++/// re-check ([`perform_update`]) so the two can never diverge (audit M5). `current` is passed in so the
++/// caller parses it once and a parse failure is handled as fail-closed there.
++fn layer_b_gate(candidate: &Version, current: &Version) -> Result<(), String> {
++    let Some(path) = updater_state_path() else {
++        return Err("cannot resolve the updater-state path".to_string());
++    };
++    let state = updater_state::load_state(&path);
++    if updater_state::running_below_floor(current, &state) {
++        return Err(
++            "running build is BELOW the version floor (possible out-of-band rollback); refusing all updates"
++                .to_string(),
++        );
++    }
++    if !updater_state::candidate_allowed(candidate, current, &state) {
++        return Err(format!(
++            "candidate {candidate} is not strictly above max(current {current}, floor, pending)"
++        ));
++    }
++    Ok(())
++}
++
++/// F-004 gate: verify the signed manifest (Layer A) and enforce the monotonic version floor
++/// (Layer B). Returns a proof-carrying [`VerifiedUpdate`] iff BOTH pass; on any failure it logs a
++/// `SECURITY:`-prefixed reason and returns `None` (fail closed — the app stays on its current build).
++fn verify_and_gate(update: tauri_plugin_updater::Update) -> Option<VerifiedUpdate> {
++    let current = match Version::parse(env!("CARGO_PKG_VERSION")) {
++        Ok(v) => v,
++        Err(e) => {
++            tracing::error!(
++                "SECURITY: own version {} is not valid SemVer ({e}); refusing update",
++                env!("CARGO_PKG_VERSION")
++            );
++            return None;
++        }
++    };
++
++    // Layer A — bind the advertised version to the signed artifact set. Closes the F-004 splice: a
++    // feed advertising a high version while pointing url/signature at an old, still-validly-signed
++    // artifact is rejected here, BEFORE any download.
++    let verified = match update_manifest::verify_manifest(
++        &update.raw_json,
++        updater_pubkey(),
++        &update.version,
++        update.download_url.as_str(),
++        &update.signature,
++    ) {
++        Ok(v) => v,
++        Err(e) => {
++            tracing::error!("SECURITY: update-manifest verification failed ({e}); refusing update");
++            return None;
++        }
++    };
++
++    // Layer B — the monotonic anti-rollback floor (shared fail-closed gate).
++    if let Err(reason) = layer_b_gate(&verified.version, &current) {
++        tracing::error!("SECURITY: {reason}; refusing update");
++        return None;
++    }
++
++    Some(VerifiedUpdate {
++        update,
++        version: verified.version,
++        signed_size: verified.size,
++    })
++}
++
++/// Check for updates and act based on the user's auto_update preference. Any available update is put
++/// through the F-004 [`verify_and_gate`] FIRST — an unverified or rolled-back candidate never reaches
++/// the prompt or the auto-install path. Returns the [`VerifiedUpdate`] when one is available and the
++/// user hasn't opted into auto-update (so the caller can show a prompt or store it for later use).
+ pub async fn check_for_update(
+     app: &AppHandle,
+     config_state: &ConfigState,
+-) -> Option<tauri_plugin_updater::Update> {
++) -> Option<VerifiedUpdate> {
+     tracing::info!("Checking for updates...");
+     let updater = match app.updater() {
+         Ok(u) => u,
+@@ -24,6 +207,13 @@ pub async fn check_for_update(
+         }
+     };
+ 
++    // Residual (audit M6): `updater.check()` fetches, BUFFERS, and JSON-parses the whole feed body
++    // BEFORE we ever see `raw_json` — so `verify_manifest`'s 64 KiB manifest-field cap does NOT bound
++    // the feed response itself. A feed writer returning a multi-GB `notes`/`platforms` blob is an
++    // availability-only memory-DoS at check() time. Closing it needs an upstream feed-response byte
++    // limit before JSON parsing, which `tauri-plugin-updater` does not expose (same class as the
++    // artifact-buffer residual #345). Integrity is unaffected: an oversized feed still cannot forge a
++    // valid signed manifest. Documented here so it isn't mistaken for covered by the manifest cap.
+     let update = match updater.check().await {
+         Ok(Some(update)) => update,
+         Ok(None) => {
+@@ -36,9 +226,14 @@ pub async fn check_for_update(
+         }
+     };
+ 
+-    let new_version = update.version.clone();
+-    let current_version = env!("CARGO_PKG_VERSION").to_string();
+-    tracing::info!(current = %current_version, new = %new_version, "Update available");
++    tracing::info!(
++        current = env!("CARGO_PKG_VERSION"),
++        new = %update.version,
++        "Update advertised (pre-verification)"
++    );
++
++    // F-004: verify the signed manifest + enforce the version floor BEFORE acting on the update.
++    let verified = verify_and_gate(update)?;
+ 
+     let auto_update_pref = { config_state.read().auto_update };
+     tracing::info!(?auto_update_pref, "Auto-update preference");
+@@ -46,13 +241,13 @@ pub async fn check_for_update(
+     match auto_update_pref {
+         Some(true) => {
+             tracing::info!("Auto-update enabled, performing update");
+-            perform_update(app, update).await;
++            perform_update(app, verified).await;
+             None
+         }
+         _ => {
+-            // None (never asked) or Some(false) (manual) — return the update
+-            // so the caller can show a prompt or add a tray menu item
+-            Some(update)
++            // None (never asked) or Some(false) (manual) — return the verified update
++            // so the caller can show a prompt or add a tray menu item.
++            Some(verified)
+         }
+     }
+ }
+@@ -61,65 +256,68 @@ pub async fn check_for_update(
+ /// of MB; 500 MB is generous headroom that still stops a multi-GB memory blow-up.
+ const MAX_UPDATE_BYTES: u64 = 500 * 1024 * 1024;
+ 
+-/// Pure size lookup over a `latest.json` value: the `size` of the `platforms.*` entry whose `url`
+-/// matches `download_url`. `None` if absent. Split out from [`advertised_update_size`] so it can be
+-/// unit-tested without constructing a plugin `Update` (which has private fields).
+-fn size_from_feed(raw_json: &serde_json::Value, download_url: &str) -> Option<u64> {
+-    raw_json
+-        .get("platforms")?
+-        .as_object()?
+-        .values()
+-        .find(|p| p.get("url").and_then(|u| u.as_str()) == Some(download_url))
+-        .and_then(|p| p.get("size").and_then(serde_json::Value::as_u64))
+-}
++/// Download, verify Ed25519 signature, install, and restart the app. Accepts ONLY a
++/// [`VerifiedUpdate`] — an artifact that has already cleared both F-004 layers.
++pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
++    let VerifiedUpdate {
++        update,
++        version,
++        signed_size,
++    } = verified;
++    tracing::info!(version = %version, signed_size, "Downloading verified update");
+ 
+-/// The advertised artifact size for THIS platform, read from the feed JSON (`latest.json`) by matching
+-/// the download URL. `None` if the feed omits `size` (older feeds). The feed is the same JSON the
+-/// plugin will signature-check, so a feed declaring a huge size is rejected before the plugin buffers
+-/// a single byte.
+-fn advertised_update_size(update: &tauri_plugin_updater::Update) -> Option<u64> {
+-    size_from_feed(&update.raw_json, update.download_url.as_str())
+-}
++    // B2: hold the cross-process updater lock across the whole download+install so no other instance
++    // can race the floor or install concurrently. If another instance is mid-update, bow out (the
++    // poller retries). Held until this fn returns / the process restarts.
++    let _txn = match acquire_updater_lock() {
++        Some(f) => f,
++        None => return,
++    };
+ 
+-/// Download, verify Ed25519 signature, install, and restart the app.
+-pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Update) {
+-    tracing::info!(version = %update.version, "Downloading update");
++    // Parse our own version once; a parse failure is fail-closed (can't safely gate → abort). Needed
++    // both for the install-time re-check and for recording the pending version after install.
++    let current = match Version::parse(env!("CARGO_PKG_VERSION")) {
++        Ok(v) => v,
++        Err(e) => {
++            tracing::error!("SECURITY: own version is not SemVer ({e}); aborting install");
++            return;
++        }
++    };
++
++    // TOCTOU: the floor/pending may have advanced since check_for_update (another instance committed a
++    // launch or recorded a pending install). Re-run the SAME fail-closed Layer B gate under the lock,
++    // right before committing to the download — a Corrupt/raced state now aborts the install.
++    if let Err(reason) = layer_b_gate(&version, &current) {
++        tracing::error!(
++            candidate = %version,
++            "SECURITY: {reason} at install time (raced by another instance); aborting"
++        );
++        return;
++    }
+ 
+     // SEC-03: pre-flight size cap. The plugin buffers the WHOLE artifact into memory before it
+-    // verifies the signature, and its progress callback cannot abort that loop — so a tampered feed
+-    // pointing at a multi-GB blob is a memory-DoS. Reject up front when the feed's advertised `size`
+-    // exceeds the ceiling, BEFORE `download()`. This keeps the plugin's verified download path intact
+-    // (no hand-rolled crypto). Availability-only: minisign still rejects tampered *bytes*; this just
+-    // stops the buffer blow-up.
++    // verifies the artifact signature, and its progress callback cannot abort that loop — so a huge
++    // blob is a memory-DoS. Reject up front when the size exceeds the ceiling, BEFORE `download()`.
++    // Unlike the old feed-derived value, `signed_size` comes from the F-004 signed envelope (Layer A
++    // checked outer==envelope), so a feed can no longer OMIT it or LIE about it to slip the cap — the
++    // two ways the previous best-effort cap could be bypassed without the signing key are both closed.
+     //
+-    // Residual (codex post-impl M2 + re-audit, tracked #345): this cap is best-effort and does NOT
+-    // stop a *malicious* feed. Be honest about why — for the *availability* property the signature
+-    // check is NOT the control, because the plugin buffers BEFORE it verifies. The advertised `size`
+-    // lives in the same `raw_json` the (attacker-controlled) feed supplies, so it is NOT an independent
+-    // authority: an attacker who can tamper the manifest defeats the cap either by OMITTING `size` (the
+-    // `None` arm proceeds) OR by declaring a small false `size` while pointing `url` at a huge blob —
+-    // both re-open the memory-DoS WITHOUT the signing key. So "make `size` mandatory" is INSUFFICIENT
+-    // (a present size can lie). The only real fix is an independent bound on bytes actually read in the
+-    // download path (a streaming abort cap), which `tauri-plugin-updater` does not expose — its
+-    // `download()` buffers into an unbounded Vec with a non-aborting callback. Closing it needs either
+-    // upstream plugin support for a streaming cap or replacing the verified download path — and the
+-    // self-managed reqwest+minisign rewrite was rejected in audit R3 (it would make a hand-rolled
+-    // verify the sole authenticity control = signature-bypass risk). Hence deferred, not "flip a flag":
+-    // availability-only, requires feed compromise, integrity still enforced by minisign on the bytes.
+-    match advertised_update_size(&update) {
+-        Some(size) if size > MAX_UPDATE_BYTES => {
+-            tracing::error!(
+-                size,
+-                max = MAX_UPDATE_BYTES,
+-                "Update artifact exceeds the size cap; refusing to download"
+-            );
+-            return;
+-        }
+-        Some(size) => tracing::info!(size, "Update artifact size within cap"),
+-        None => {
+-            tracing::warn!("Update feed omits artifact size; size cap not enforced for this update")
+-        }
++    // Residual (tracked #345): a *malicious* feed that declares a small (correctly signed) size but
++    // serves a genuinely larger blob at that url still forces the plugin to buffer those bytes before
++    // its artifact-signature check rejects them — an availability-only memory-DoS that needs an
++    // upstream streaming abort cap the plugin does not expose (`download()` buffers into an unbounded
++    // Vec with a non-aborting callback). Integrity is unaffected: minisign still rejects the tampered
++    // bytes. The self-managed reqwest+minisign rewrite that could bound bytes-read was rejected in
++    // audit R3 (it would make a hand-rolled verify the sole authenticity control). Hence deferred.
++    if signed_size > MAX_UPDATE_BYTES {
++        tracing::error!(
++            size = signed_size,
++            max = MAX_UPDATE_BYTES,
++            "Update artifact exceeds the size cap; refusing to download"
++        );
++        return;
+     }
++    tracing::info!(size = signed_size, "Signed artifact size within cap");
+ 
+     // Download first (separate from install) so crash-recovery stays armed through the whole
+     // download/verify span — a mid-download crash is still recovered.
+@@ -143,6 +341,35 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
+         }
+     };
+ 
++    // Defense in depth: the downloaded byte count must equal the SIGNED size. The plugin's own
++    // minisign check already rejects tampered bytes; this additionally rejects a length mismatch
++    // before install. Crash-recovery is still armed here (disarm happens below), so a plain return
++    // is safe.
++    if bytes.len() as u64 != signed_size {
++        tracing::error!(
++            got = bytes.len(),
++            expected = signed_size,
++            "SECURITY: downloaded artifact size does not match the signed size; refusing to install"
++        );
++        return;
++    }
++
++    // codex r3 #5: capture the autostart state ONCE, BEFORE disarming, and drive every re-arm decision
++    // off this value. Re-reading it later (in the guard) could error independently and then wrongly arm
++    // recovery while autostart is actually OFF. If THIS read errors we can't tell → assume enabled: we
++    // are about to disarm, so erring toward "restore it" is the safe default (missing a re-arm leaves the
++    // app unrecoverable; a spurious one is a harmless idempotent write).
++    #[cfg(target_os = "windows")]
++    let was_recovery_enabled = {
++        use tauri_plugin_autostart::ManagerExt;
++        app.autolaunch().is_enabled().unwrap_or_else(|e| {
++            tracing::warn!(
++                "pre-install: autostart state unreadable ({e}); assuming enabled for re-arm safety"
++            );
++            true
++        })
++    };
++
+     // Windows: disarm the always-armed repeating crash-recovery task right before install. A
+     // tick during NSIS file mutation could spawn the exe mid-update (lock the file being
+     // replaced / launch a half-written binary). If we CANNOT verify the task is gone, do NOT
+@@ -156,7 +383,7 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
+         // The app keeps running on the current version, and disarm may have PARTIALLY succeeded
+         // (/Delete worked but /Query couldn't confirm), so recovery could now be off. Restore it
+         // before bailing out — every path that leaves the app running must end armed.
+-        rearm_crash_recovery_if_enabled(app);
++        rearm_crash_recovery_if_enabled(was_recovery_enabled);
+         return;
+     }
+ 
+@@ -165,31 +392,68 @@ pub async fn perform_update(app: &AppHandle, update: tauri_plugin_updater::Updat
+     // app.restart() never returns (Drop would never fire there). The old per-arm `// must rearm`
+     // comments are now structurally enforced by the guard.
+     #[cfg(target_os = "windows")]
+-    let mut recovery_guard = CrashRecoveryGuard::new(|| rearm_crash_recovery_if_enabled(app));
++    let mut recovery_guard =
++        CrashRecoveryGuard::new(move || rearm_crash_recovery_if_enabled(was_recovery_enabled));
++
++    // H1 / codex #5: record the install INTENT under the lock BEFORE install(), and FAIL CLOSED if it
++    // cannot be recorded. This raises the anti-downgrade floor to `version` for any instance that
++    // acquires the lock next, so a racing older instance cannot install a LOWER (still-signed) version
++    // and regress this build. It MUST precede install(): on Windows tauri-plugin-updater's install()
++    // dispatches the external NSIS/MSI installer and `std::process::exit(0)`s — it never returns — so
++    // the old Ok-branch placement recorded NOTHING on Windows, leaving the downgrade window wide open
++    // there. Because `candidate_allowed` permits re-attempting the EXACT recorded version, recording
++    // before install does not poison the version on a failed install. On Windows the recovery_guard
++    // already exists here, so an abort below re-arms crash recovery via its Drop.
++    match updater_state_path() {
++        Some(path) => {
++            if let Err(e) = updater_state::record_pending(&path, &current, &version) {
++                tracing::error!(
++                    candidate = %version,
++                    "SECURITY: failed to record the install intent before install ({e}); aborting to avoid a downgrade window"
++                );
++                return;
++            }
++        }
++        None => {
++            tracing::error!(
++                "SECURITY: cannot resolve the updater-state path; aborting install (no rollback floor)"
++            );
++            return;
++        }
++    }
+ 
+     match update.install(bytes) {
+         Ok(()) => {
+-            // IgnoreNew + the exit-0-if-healthy guard absorb any brief double-launch with the
+-            // restarted build.
++            // Windows never reaches here — install() dispatched the installer and exited the process.
++            // macOS/Linux: the intent is already recorded above; the restarted build commits its floor
++            // and clears the intent on a healthy launch. IgnoreNew + the exit-0-if-healthy guard absorb
++            // any brief double-launch with the restarted build.
+             #[cfg(target_os = "windows")]
+             recovery_guard.rearm_now();
+             tracing::info!("Update installed, restarting");
+             app.restart();
+         }
+         Err(e) => {
++            // Intent stays recorded — a returned Err is not proof that nothing was mutated (codex #5),
++            // and candidate_allowed lets this exact version be retried, so keeping it can't poison the
++            // version. recovery_guard's Drop re-arms crash recovery on return (Windows, if it was armed).
+             tracing::error!("Update install failed: {e}");
+-            // The app keeps running; recovery_guard's Drop re-arms on return (Windows, only if armed).
+         }
+     }
+ }
+ 
+-/// Re-arm the Windows crash-recovery task iff it should be armed (autostart on). Idempotent —
+-/// `enable_crash_recovery` overwrites any existing task.
++/// Re-arm the Windows crash-recovery task iff it was armed before this update disarmed it. The
++/// decision uses `was_enabled` — the autostart state captured ONCE before the disarm (codex r3 #5) —
++/// NOT a fresh read, so a transient read error can neither silently skip a needed re-arm (r2 #5) nor
++/// spuriously arm recovery while autostart is off (r3 #5). Idempotent: `enable_crash_recovery`
++/// overwrites any existing task.
+ #[cfg(target_os = "windows")]
+-fn rearm_crash_recovery_if_enabled(app: &AppHandle) {
+-    use tauri_plugin_autostart::ManagerExt;
+-    if app.autolaunch().is_enabled().unwrap_or(false) {
+-        crate::crash_recovery::enable_crash_recovery();
++fn rearm_crash_recovery_if_enabled(was_enabled: bool) {
++    if was_enabled {
++        // C8 (D12): log-and-continue — a post-update rearm hiccup must not abort, but is never swallowed.
++        if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
++            tracing::warn!("post-update crash-recovery rearm failed: {e}");
++        }
+     }
+ }
+ 
+@@ -239,48 +503,18 @@ impl<F: FnMut()> Drop for CrashRecoveryGuard<F> {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{size_from_feed, CrashRecoveryGuard};
+-    use serde_json::json;
+-
+-    fn feed(aarch64_size: Option<u64>) -> serde_json::Value {
+-        let mut plat = json!({ "signature": "sig", "url": "https://x.test/app-aarch64.tar.gz" });
+-        if let Some(s) = aarch64_size {
+-            plat["size"] = json!(s);
+-        }
+-        json!({
+-            "version": "1.0.5",
+-            "platforms": {
+-                "darwin-aarch64": plat,
+-                "linux-x86_64": { "signature": "s2", "url": "https://x.test/app-linux", "size": 123 },
+-            }
+-        })
+-    }
+-
+-    #[test]
+-    fn size_from_feed_matches_url() {
+-        let f = feed(Some(42_000_000));
+-        assert_eq!(
+-            size_from_feed(&f, "https://x.test/app-aarch64.tar.gz"),
+-            Some(42_000_000)
+-        );
+-        // A different platform's URL resolves to that platform's size.
+-        assert_eq!(size_from_feed(&f, "https://x.test/app-linux"), Some(123));
+-    }
++    use super::{updater_pubkey, CrashRecoveryGuard};
+ 
+     #[test]
+-    fn size_from_feed_none_when_absent_or_unmatched() {
+-        // Matched platform omits size → None (older feed; cap not enforced for it).
+-        assert_eq!(
+-            size_from_feed(&feed(None), "https://x.test/app-aarch64.tar.gz"),
+-            None
+-        );
+-        // URL matches no platform → None.
+-        assert_eq!(size_from_feed(&feed(Some(10)), "https://x.test/nope"), None);
+-        // No platforms object → None.
+-        assert_eq!(
+-            size_from_feed(&json!({ "version": "1" }), "https://x.test/x"),
+-            None
+-        );
++    fn updater_pubkey_matches_config() {
++        // The pinned key Layer A verifies against MUST be exactly the plugin's configured pubkey.
++        // Read tauri.conf.json independently and assert equality (catches a future edit that changes
++        // one but not the other).
++        let conf: serde_json::Value =
++            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
++        let expected = conf["plugins"]["updater"]["pubkey"].as_str().unwrap();
++        assert_eq!(updater_pubkey(), expected);
++        assert!(!updater_pubkey().is_empty());
+     }
+ 
+     // q7e3-F-10 characterization (test-FIRST): the crash-recovery guard's rearm-before-restart +

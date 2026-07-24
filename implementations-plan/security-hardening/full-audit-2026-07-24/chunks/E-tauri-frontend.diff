@@ -1,0 +1,1536 @@
+diff --git a/packages/accelerator/src-tauri/build.rs b/packages/accelerator/src-tauri/build.rs
+index 43dac56..e2047c3 100644
+--- a/packages/accelerator/src-tauri/build.rs
++++ b/packages/accelerator/src-tauri/build.rs
+@@ -1,4 +1,112 @@
++/// SHA-256 over raw bytes → lowercase hex. MUST match `scripts/build-frontend.ts` so the guard compares
++/// like-for-like (GATE-3 codex: strong enough to detect a swapped OUTPUT bundle, not just staleness).
++fn sha256_hex(bytes: &[u8]) -> String {
++    use sha2::{Digest, Sha256};
++    let mut h = Sha256::new();
++    h.update(bytes);
++    hex::encode(h.finalize())
++}
++
++/// Read `path`, compare its SHA-256 to the manifest entry `key`; panic (with `hint`) on missing/mismatch.
++fn verify_hash(
++    path: &str,
++    key: &str,
++    recorded: &serde_json::Map<String, serde_json::Value>,
++    hint: &str,
++) {
++    println!("cargo:rerun-if-changed={path}");
++    let bytes = std::fs::read(path).unwrap_or_else(|e| {
++        panic!("F-012: cannot read `{path}` (manifest key `{key}`): {e} — {hint}")
++    });
++    let expected = recorded
++        .get(key)
++        .and_then(|v| v.as_str())
++        .unwrap_or_else(|| {
++            panic!("F-012: `{key}` missing from the bundle manifest (STALE) — {hint}")
++        });
++    if sha256_hex(&bytes) != expected {
++        panic!("F-012: `{path}` does not match the bundle manifest (`{key}` STALE or SWAPPED) — {hint}");
++    }
++}
++
++/// F-012: the popup frontend ships as gitignored `frontend/assets/*.js` bundled from `frontend-src/` by
++/// `bun run frontend:build`. Those bundles are trusted by `script-src 'self'`, so a Rust build must NEVER
++/// silently embed HTML pointing at MISSING, STALE, or SWAPPED bundles. This fails the build unless the
++/// current sources, the dependency-surface files, AND the emitted bundles all match `.build-manifest.json`.
++fn verify_frontend_bundles() {
++    println!("cargo:rerun-if-changed=frontend-src");
++    println!("cargo:rerun-if-changed=frontend/assets/.build-manifest.json");
++
++    let hint = "run `bun run --cwd packages/accelerator frontend:build` before building the Tauri app \
++                (the bundles are gitignored; tauri's beforeDev/beforeBuildCommand does this automatically)";
++
++    let manifest_path = "frontend/assets/.build-manifest.json";
++    let manifest_raw = std::fs::read_to_string(manifest_path)
++        .unwrap_or_else(|e| panic!("F-012: cannot read {manifest_path}: {e} — {hint}"));
++    let manifest: serde_json::Value = serde_json::from_str(&manifest_raw)
++        .unwrap_or_else(|e| panic!("F-012: {manifest_path} is not valid JSON: {e} — {hint}"));
++    if manifest.get("algo").and_then(|v| v.as_str()) != Some("sha256") {
++        panic!("F-012: {manifest_path} algo is not sha256 — {hint}");
++    }
++    let inputs = manifest
++        .get("inputs")
++        .and_then(|v| v.as_object())
++        .unwrap_or_else(|| panic!("F-012: {manifest_path} has no `inputs` object — {hint}"));
++    let outputs = manifest
++        .get("outputs")
++        .and_then(|v| v.as_object())
++        .unwrap_or_else(|| panic!("F-012: {manifest_path} has no `outputs` object — {hint}"));
++
++    // Emitted bundles: exact set + content match (catches a post-build swap).
++    let bundles = ["authorize.js", "settings.js", "update-prompt.js"];
++    if outputs.len() != bundles.len() {
++        panic!(
++            "F-012: manifest lists {} output bundles, expected {} — {hint}",
++            outputs.len(),
++            bundles.len()
++        );
++    }
++    for bundle in bundles {
++        verify_hash(&format!("frontend/assets/{bundle}"), bundle, outputs, hint);
++    }
++
++    // Dependency-surface inputs (a @tauri-apps/api bump must invalidate the bundles).
++    verify_hash("../package.json", "package.json", inputs, hint);
++    verify_hash("../../../bun.lock", "bun.lock", inputs, hint);
++
++    // Every current frontend source must match; the manifest must reference no phantom sources.
++    for entry in std::fs::read_dir("frontend-src")
++        .unwrap_or_else(|e| panic!("F-012: cannot read frontend-src/: {e}"))
++    {
++        let path = entry.expect("dir entry").path();
++        if path.extension().and_then(|e| e.to_str()) != Some("js") {
++            continue;
++        }
++        let name = path.file_name().and_then(|n| n.to_str()).unwrap();
++        verify_hash(
++            &format!("frontend-src/{name}"),
++            &format!("frontend-src/{name}"),
++            inputs,
++            hint,
++        );
++    }
++    let src_keys = inputs
++        .keys()
++        .filter(|k| k.starts_with("frontend-src/"))
++        .count();
++    let on_disk = std::fs::read_dir("frontend-src")
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("js"))
++        .count();
++    if src_keys != on_disk {
++        panic!("F-012: manifest lists {src_keys} frontend sources but frontend-src/ has {on_disk} — {hint}");
++    }
++}
++
+ fn main() {
++    verify_frontend_bundles();
++
+     // Re-run when AZTEC_VERSION changes (or is created/deleted)
+     println!("cargo:rerun-if-changed=AZTEC_VERSION");
+ 
+@@ -18,5 +126,32 @@ fn main() {
+     serde_json::from_str::<serde_json::Value>(&vs_contents)
+         .unwrap_or_else(|e| panic!("verified-sites.json is not valid JSON: {e}"));
+ 
+-    tauri_build::build()
++    // F-012: declare the app's IPC command surface. Tauri only enforces the per-window ACL for app-local
++    // commands when an app manifest exists (see tauri `webview/mod.rs`: the invoke gate is
++    // `plugin_command || has_app_acl_manifest`). Declaring these commands sets `has_app_acl` true, which
++    // flips every one of them from framework-default-allow to per-window default-DENY: a window whose
++    // capability does not grant `allow-<command>` is rejected before the handler runs. This is ALL-OR-
++    // NOTHING — every command below MUST be granted by exactly the windows that use it (see
++    // capabilities/*.json), or that flow breaks. Keep this list == the generate_handler! set in main.rs
++    // (the scripts/tauri-trust-boundary.test.ts set-equality guard fails CI on drift).
++    let commands: &[&str] = &[
++        "get_config",
++        "get_autostart_enabled",
++        "set_autostart",
++        "set_speed",
++        "remove_approved_origin",
++        "get_system_info",
++        "get_verified_info",
++        "get_pending_auth",
++        "respond_auth",
++        "enable_safari_support",
++        "disable_safari_support",
++        "set_auto_update",
++        "respond_update_prompt",
++    ];
++    tauri_build::try_build(
++        tauri_build::Attributes::new()
++            .app_manifest(tauri_build::AppManifest::new().commands(commands)),
++    )
++    .expect("failed to run tauri-build");
+ }
+diff --git a/packages/accelerator/src-tauri/capabilities/authorize.json b/packages/accelerator/src-tauri/capabilities/authorize.json
+new file mode 100644
+index 0000000..6a51c18
+--- /dev/null
++++ b/packages/accelerator/src-tauri/capabilities/authorize.json
+@@ -0,0 +1,13 @@
++{
++  "$schema": "../gen/schemas/desktop-schema.json",
++  "identifier": "authorize",
++  "description": "F-012: the authorization popup (label auth-<hash>) may invoke ONLY the two commands its flow needs — reading the verified-site badge and returning the user's decision. It explicitly canNOT reach settings mutators (remove_approved_origin, enable_safari_support) or the updater, which the ungated pre-F-012 surface allowed.",
++  "local": true,
++  "platforms": ["linux", "macOS", "windows"],
++  "windows": ["auth-*"],
++  "permissions": [
++    "allow-get-verified-info",
++    "allow-respond-auth",
++    "allow-get-pending-auth"
++  ]
++}
+diff --git a/packages/accelerator/src-tauri/capabilities/default.json b/packages/accelerator/src-tauri/capabilities/default.json
+deleted file mode 100644
+index efe7ff9..0000000
+--- a/packages/accelerator/src-tauri/capabilities/default.json
++++ /dev/null
+@@ -1,7 +0,0 @@
+-{
+-  "$schema": "../gen/schemas/desktop-schema.json",
+-  "identifier": "default",
+-  "description": "Default capabilities for the accelerator",
+-  "platforms": ["linux", "macOS", "windows"],
+-  "permissions": ["core:default", "autostart:default", "updater:default", "process:default"]
+-}
+diff --git a/packages/accelerator/src-tauri/capabilities/settings.json b/packages/accelerator/src-tauri/capabilities/settings.json
+new file mode 100644
+index 0000000..1c8bb32
+--- /dev/null
++++ b/packages/accelerator/src-tauri/capabilities/settings.json
+@@ -0,0 +1,19 @@
++{
++  "$schema": "../gen/schemas/desktop-schema.json",
++  "identifier": "settings",
++  "description": "F-012: the Settings window may invoke ONLY the settings commands. No core:default / autostart / process / updater plugin grants — the frontend calls Rust wrappers that drive plugins natively, and the window is closed from Rust, so it needs no plugin/core JS API.",
++  "local": true,
++  "platforms": ["linux", "macOS", "windows"],
++  "windows": ["settings"],
++  "permissions": [
++    "allow-get-config",
++    "allow-get-autostart-enabled",
++    "allow-get-system-info",
++    "allow-set-autostart",
++    "allow-set-auto-update",
++    "allow-set-speed",
++    "allow-enable-safari-support",
++    "allow-disable-safari-support",
++    "allow-remove-approved-origin"
++  ]
++}
+diff --git a/packages/accelerator/src-tauri/capabilities/update-prompt.json b/packages/accelerator/src-tauri/capabilities/update-prompt.json
+new file mode 100644
+index 0000000..00110e5
+--- /dev/null
++++ b/packages/accelerator/src-tauri/capabilities/update-prompt.json
+@@ -0,0 +1,9 @@
++{
++  "$schema": "../gen/schemas/desktop-schema.json",
++  "identifier": "update-prompt",
++  "description": "F-012: the update prompt (label update-prompt) may invoke ONLY respond_update_prompt. Preserves F-004: it has NO updater:default / process grants — updates flow through the Rust check/perform path that verifies the signed manifest + monotonic floor.",
++  "local": true,
++  "platforms": ["linux", "macOS", "windows"],
++  "windows": ["update-prompt"],
++  "permissions": ["allow-respond-update-prompt"]
++}
+diff --git a/packages/accelerator/src-tauri/frontend-src/authorize.js b/packages/accelerator/src-tauri/frontend-src/authorize.js
+new file mode 100644
+index 0000000..abe6f2d
+--- /dev/null
++++ b/packages/accelerator/src-tauri/frontend-src/authorize.js
+@@ -0,0 +1,120 @@
++import { invoke, isClickGuardActive, showErrorHint, wireButton } from "./bridge.js";
++
++const params = new URLSearchParams(window.location.search);
++// SEC-06: the opaque request id the server issued for this popup — the ONLY value we trust from the URL.
++// C9 (D8): the ORIGIN is NOT taken from the query param; it is fetched from the server (get_pending_auth)
++// so the popup displays exactly what respond_auth will grant. The query `origin` is display-only legacy.
++const requestId = params.get("requestId") || "";
++
++const originEl = document.getElementById("origin");
++const allowBtn = document.getElementById("allow");
++const denyBtn = document.getElementById("deny");
++const rememberEl = document.getElementById("remember");
++
++let serverOrigin = null; // authoritative origin, once get_pending_auth answers
++let badgeShownFor = null; // origin we've already rendered the verified badge for
++let decided = false; // latched ONLY after respond_auth SUCCEEDS — then the window is closing
++let responding = false; // a respond_auth call is in flight — don't let the poll fight the button state
++let poll = null; // active setTimeout id (self-scheduling; never overlaps)
++
++// Never render the query-param origin as authoritative: show a placeholder + disabled controls until the
++// server answers.
++originEl.textContent = "…";
++// codex r2 #1: defensively CLEAR the checkbox on init. The HTML ships it `disabled` so a pre-JS click
++// can't check it, but if anything (autofill/restore) left it checked, `disabled` alone wouldn't uncheck
++// it — and Allow reads `.checked`. Reset before enabling any control.
++rememberEl.checked = false;
++setControlsEnabled(false);
++
++// C9 (audit fix): the Remember checkbox is a consequential action too — a click-steal can pre-arm
++// persistent authorization before the user later Allows. It is disabled while inactive (below) AND its
++// toggle is refused within the click-steal guard window, exactly like Allow/Deny.
++rememberEl.addEventListener("click", (e) => {
++  if (isClickGuardActive()) e.preventDefault();
++});
++
++function setControlsEnabled(on) {
++  // Don't fight the button state while a decision is in flight or already made.
++  if (decided || responding) return;
++  allowBtn.disabled = !on;
++  denyBtn.disabled = !on;
++  rememberEl.disabled = !on; // C9 (audit fix): gate Remember on active-state too
++}
++
++function renderVerifiedBadge(origin) {
++  if (badgeShownFor === origin) return;
++  badgeShownFor = origin;
++  // C9 (D8): the verified badge is keyed on the SERVER origin, not the query param.
++  invoke("get_verified_info", { origin })
++    .then((info) => {
++      if (!info) return;
++      const recognized = document.getElementById("recognized");
++      recognized.querySelector(".recognized-name").textContent = info.display_name;
++      recognized.hidden = false;
++    })
++    .catch(() => {});
++}
++
++async function refreshPending() {
++  if (decided || responding) return;
++  let info;
++  try {
++    info = await invoke("get_pending_auth", { requestId });
++  } catch {
++    // A2: transient IPC error — keep controls disabled and let the user retry/close.
++    setControlsEnabled(false);
++    showErrorHint(allowBtn, "Couldn't reach the accelerator — retrying…");
++    return;
++  }
++  if (decided || responding) return; // state changed while awaiting — drop this (possibly stale) result
++  if (!info) {
++    // A2: None ⇒ the request is already resolved/expired (this popup is stale) ⇒ close it.
++    stopPolling();
++    window.close();
++    return;
++  }
++  serverOrigin = info.origin;
++  originEl.textContent = info.origin;
++  renderVerifiedBadge(info.origin);
++  // Only the ACTIVE popup is actionable (the server enforces this too via resolve_active; this merely
++  // reflects it so a queued popup's controls are visibly disabled until it is promoted).
++  setControlsEnabled(info.active);
++}
++
++function stopPolling() {
++  if (poll !== null) {
++    clearTimeout(poll);
++    poll = null;
++  }
++}
++
++// C9 (audit fix): self-scheduling poll (setTimeout, not setInterval) so calls NEVER overlap — a delayed
++// older `active:false` can no longer overwrite a newer `active:true`. Re-polls so a QUEUED popup enables
++// when promoted (and closes if the request went away). Stops on decision/close.
++async function pollLoop() {
++  await refreshPending();
++  if (decided || poll === null) return;
++  poll = setTimeout(pollLoop, 1000);
++}
++
++poll = setTimeout(pollLoop, 0);
++window.addEventListener("beforeunload", stopPolling);
++
++async function respond(allowed) {
++  // C9 (audit fix): do NOT latch `decided`/stop polling until respond_auth SUCCEEDS. On failure the poll
++  // must keep running so a resolved/expired request still closes and a promoted one stays truthful, rather
++  // than the popup being left falsely actionable with a stale "try again".
++  responding = true;
++  const remember = rememberEl.checked;
++  try {
++    // Send the server-authoritative origin (respond_auth treats it as diagnostics-only, but keep it honest).
++    await invoke("respond_auth", { requestId, origin: serverOrigin ?? "", allowed, remember });
++    decided = true; // success — the Rust side is closing this window
++    stopPolling();
++  } finally {
++    responding = false;
++  }
++}
++
++wireButton("allow", { disableAlso: "deny", guard: true, onClick: () => respond(true) });
++wireButton("deny", { disableAlso: "allow", guard: true, onClick: () => respond(false) });
+diff --git a/packages/accelerator/src-tauri/frontend-src/bridge.js b/packages/accelerator/src-tauri/frontend-src/bridge.js
+new file mode 100644
+index 0000000..ebd5b6a
+--- /dev/null
++++ b/packages/accelerator/src-tauri/frontend-src/bridge.js
+@@ -0,0 +1,119 @@
++/**
++ * Shared utilities for Tauri IPC in the accelerator frontend pages.
++ *
++ * F-012: this is an ESM module bundled (per page) into `frontend/assets/*.js` by
++ * `scripts/build-frontend.ts`. `invoke` comes from the official `@tauri-apps/api/core`
++ * package — NOT `window.__TAURI__` — so the app runs with `withGlobalTauri: false`
++ * (the global back-door is removed; only `window.__TAURI_INTERNALS__` remains, which
++ * the API's `invoke` delegates to). Loaded via a single `<script type="module">` per page.
++ */
++
++import { invoke } from "@tauri-apps/api/core";
++
++export { invoke };
++
++// C9 (A / D9): click-steal guard. A button wired with `guard: true` ignores activation for GUARD_MS after
++// the window last gained focus — reset on EVERY native focus/show, not just first paint — so a popup
++// popped under the cursor (or promoted into the active slot) can't catch a click meant for another window.
++// Gating at click ENTRY also covers keyboard Enter/Space (which dispatch a click event).
++const DEFAULT_GUARD_MS = 700;
++function guardMs() {
++  // Overridable ONLY for tests (Playwright mock sets it to 0). Production never sets this global, so the
++  // real 700 ms guard always applies. Read dynamically so an init-script override takes effect.
++  return typeof window !== "undefined" && typeof window.__CLICK_GUARD_MS__ === "number"
++    ? window.__CLICK_GUARD_MS__
++    : DEFAULT_GUARD_MS;
++}
++function now() {
++  return typeof performance !== "undefined" ? performance.now() : Date.now();
++}
++let inputArmedAt = now();
++function rearmInputGuard() {
++  inputArmedAt = now();
++}
++if (typeof window !== "undefined") {
++  window.addEventListener("focus", rearmInputGuard);
++  window.addEventListener("pageshow", rearmInputGuard);
++}
++// Exported so consequential non-button controls (e.g. the authorize "Remember" checkbox) can gate on the
++// same click-steal window — Allow/Deny aren't the only stealable actions.
++export function isClickGuardActive() {
++  return now() - inputArmedAt < guardMs();
++}
++
++/**
++ * Show a brief error hint near a control. Disappears after 3 seconds.
++ * @param {HTMLElement} anchor — element to show the error near
++ * @param {string} message
++ */
++export function showErrorHint(anchor, message) {
++  // Remove any existing hint on this anchor
++  const existing = anchor.parentElement?.querySelector(".error-hint");
++  if (existing) existing.remove();
++
++  const hint = document.createElement("span");
++  hint.className = "error-hint";
++  hint.textContent = message;
++  anchor.closest(".row, .speed-section, .popup-container")?.appendChild(hint);
++  setTimeout(() => hint.remove(), 3000);
++}
++
++/**
++ * Wire a checkbox toggle to a Tauri command.
++ * Disables during operation, reverts on error with visible feedback.
++ *
++ * @param {string} id — element ID of the checkbox input
++ * @param {(checked: boolean) => {cmd: string, args?: object}} handler
++ *   Function that returns the command name and args based on checked state.
++ */
++export function wireToggle(id, handler) {
++  document.getElementById(id).addEventListener("change", (e) => {
++    const el = e.target;
++    el.disabled = true;
++    const { cmd, args } = handler(el.checked);
++    invoke(cmd, args)
++      .catch((err) => {
++        el.checked = !el.checked;
++        console.error(`Failed to invoke ${cmd}:`, err);
++        showErrorHint(el, "Failed — try again");
++      })
++      .finally(() => {
++        el.disabled = false;
++      });
++  });
++}
++
++/**
++ * Wire a button to a Tauri command.
++ * Disables the button (and an optional second button) during operation.
++ *
++ * @param {string} id — element ID of the button
++ * @param {object} opts
++ * @param {string} [opts.disableAlso] — ID of another button to disable during operation
++ * @param {string} [opts.loadingText] — text to show while loading (restores original on error)
++ * @param {boolean} [opts.guard] — apply the click-steal guard (ignore activation within GUARD_MS of focus)
++ * @param {() => Promise<void>} opts.onClick — async handler
++ */
++export function wireButton(id, opts) {
++  const btn = document.getElementById(id);
++  btn.addEventListener("click", async () => {
++    // C9 (A): ignore a click that lands within the guard window after focus (click-steal defense).
++    if (opts.guard && isClickGuardActive()) return;
++    btn.disabled = true;
++    const originalText = btn.textContent;
++    if (opts.loadingText) btn.textContent = opts.loadingText;
++
++    const otherBtn = opts.disableAlso ? document.getElementById(opts.disableAlso) : null;
++    if (otherBtn) otherBtn.disabled = true;
++
++    try {
++      await opts.onClick();
++    } catch (err) {
++      console.error(`Button ${id} action failed:`, err);
++      btn.textContent = originalText;
++      btn.disabled = false;
++      if (otherBtn) otherBtn.disabled = false;
++      showErrorHint(btn, "Failed — try again");
++    }
++  });
++}
+diff --git a/packages/accelerator/src-tauri/frontend-src/settings.js b/packages/accelerator/src-tauri/frontend-src/settings.js
+new file mode 100644
+index 0000000..849a664
+--- /dev/null
++++ b/packages/accelerator/src-tauri/frontend-src/settings.js
+@@ -0,0 +1,127 @@
++import { invoke, showErrorHint, wireToggle } from "./bridge.js";
++
++// CPU count comes from the Rust backend (std::thread::available_parallelism),
++// NOT navigator.hardwareConcurrency which WebKit caps for fingerprinting protection.
++let CPUS = 1;
++
++function threadsForLevel(index) {
++  const fractions = [1 / 4, 3 / 8, 1 / 2, 3 / 4, 1];
++  return Math.max(1, Math.floor(CPUS * fractions[index]));
++}
++
++const SPEED_LEVELS = [
++  { value: "low", label: "Low" },
++  { value: "light", label: "Light" },
++  { value: "balanced", label: "Balanced" },
++  { value: "high", label: "High" },
++  { value: "full", label: "Full" },
++];
++
++function descForLevel(index) {
++  const t = threadsForLevel(index);
++  if (index === 4) return `All ${CPUS} cores. Fastest proving.`;
++  return `${t} of ${CPUS} cores. ${
++    index <= 1 ? "Keeps the system responsive." : "Good balance of speed and usability."
++  }`;
++}
++
++function speedToIndex(speed) {
++  const idx = SPEED_LEVELS.findIndex((l) => l.value === speed);
++  return idx >= 0 ? idx : 4;
++}
++
++function updateSpeedUI(index) {
++  const level = SPEED_LEVELS[index];
++  document.getElementById("speed-label").textContent = level.label;
++  document.getElementById("speed-desc").textContent = descForLevel(index);
++  // F-012: the slider fill was `.style.setProperty("--fill", …)` (a CSSOM mutation — not
++  // CSP-governed, but externalized for consistency). `[data-fill="N"]` maps to `--fill:N%`
++  // in style.css (0-4 → 0/25/50/75/100%), so no inline style is written.
++  document.getElementById("speed").dataset.fill = String(index);
++}
++
++async function loadSettings() {
++  const [config, sysInfo] = await Promise.all([invoke("get_config"), invoke("get_system_info")]);
++
++  CPUS = sysInfo.cpu_count;
++
++  // codex r2 #6 / r3 #6: the autostart switch ships DISABLED (settings.html) and stays disabled until
++  // its true state is CONFIRMED — so an unknown state is never presented as an actionable "off", and a
++  // failure of ANY preceding request (which would throw before this block) still leaves it disabled
++  // rather than at a false default. Fetched independently so a read error doesn't fail the whole panel.
++  const autostartEl = document.getElementById("autostart");
++  try {
++    autostartEl.checked = await invoke("get_autostart_enabled");
++    autostartEl.disabled = false; // known → actionable
++  } catch (e) {
++    console.error("Failed to read autostart state:", e);
++    showErrorHint(autostartEl, "Autostart state unavailable — reopen Settings to retry");
++  }
++  document.getElementById("auto-update").checked = config.auto_update === true;
++
++  if (sysInfo.platform === "macos") {
++    // F-012: was `.style.display = ""`; the row is `hidden` in markup + `.row[hidden]` in CSS.
++    document.getElementById("safari-row").hidden = false;
++    document.getElementById("safari").checked = config.safari_support;
++  }
++
++  const idx = speedToIndex(config.speed || "full");
++  document.getElementById("speed").value = idx;
++  updateSpeedUI(idx);
++
++  renderOrigins(config.approved_origins || []);
++}
++
++function renderOrigins(origins) {
++  const list = document.getElementById("origins");
++  const empty = document.getElementById("origins-empty");
++  list.innerHTML = "";
++
++  // F-012: was `.style.display`; `[hidden]` on `.empty-state` resolves via the UA stylesheet.
++  empty.hidden = origins.length !== 0;
++  if (origins.length === 0) return;
++
++  for (const origin of origins) {
++    const li = document.createElement("li");
++    li.className = "origin-item";
++
++    const span = document.createElement("span");
++    span.textContent = origin;
++
++    const btn = document.createElement("button");
++    btn.textContent = "Remove";
++    // btn.onclick is a DOM property assignment from this (allowed, external) module —
++    // NOT a CSP inline-string handler, so `script-src 'self'` permits it.
++    btn.onclick = async () => {
++      await invoke("remove_approved_origin", { origin });
++      await loadSettings();
++    };
++
++    li.appendChild(span);
++    li.appendChild(btn);
++    list.appendChild(li);
++  }
++}
++
++// Toggles — all use wireToggle from the shared bridge.
++wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
++wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
++wireToggle("safari", (checked) => ({
++  cmd: checked ? "enable_safari_support" : "disable_safari_support",
++}));
++
++// Speed slider
++const speedSlider = document.getElementById("speed");
++speedSlider.addEventListener("input", (e) => {
++  updateSpeedUI(Number(e.target.value));
++});
++speedSlider.addEventListener("change", (e) => {
++  const level = SPEED_LEVELS[Number(e.target.value)];
++  invoke("set_speed", { speed: level.value }).catch((err) => {
++    console.error("Failed to set speed:", err);
++    showErrorHint(speedSlider, "Failed to save");
++    loadSettings();
++  });
++});
++
++loadSettings().catch((err) => console.error("Failed to load settings:", err));
+diff --git a/packages/accelerator/src-tauri/frontend-src/update-prompt.js b/packages/accelerator/src-tauri/frontend-src/update-prompt.js
+new file mode 100644
+index 0000000..44d5a05
+--- /dev/null
++++ b/packages/accelerator/src-tauri/frontend-src/update-prompt.js
+@@ -0,0 +1,20 @@
++import { invoke, wireButton } from "./bridge.js";
++
++const params = new URLSearchParams(window.location.search);
++const currentVersion = params.get("current") || "unknown";
++const newVersion = params.get("version") || "unknown";
++document.getElementById("version").textContent = `v${currentVersion}  →  v${newVersion}`;
++
++wireButton("update", {
++  disableAlso: "later",
++  loadingText: "Updating…",
++  onClick: () => {
++    const autoUpdate = document.getElementById("auto-update").checked;
++    return invoke("respond_update_prompt", { action: "update", autoUpdate });
++  },
++});
++
++wireButton("later", {
++  disableAlso: "update",
++  onClick: () => invoke("respond_update_prompt", { action: "later", autoUpdate: false }),
++});
+diff --git a/packages/accelerator/src-tauri/src/commands.rs b/packages/accelerator/src-tauri/src/commands.rs
+index de26822..c9ceb61 100644
+--- a/packages/accelerator/src-tauri/src/commands.rs
++++ b/packages/accelerator/src-tauri/src/commands.rs
+@@ -1,4 +1,4 @@
+-use crate::authorization::{AuthDecision, AuthorizationManager};
++use crate::authorization::{AuthDecision, AuthorizationManager, ResolveOutcome};
+ use crate::config::{self, AcceleratorConfig};
+ use crate::verified_sites::VerifiedSitesRegistry;
+ use parking_lot::RwLock;
+@@ -27,48 +27,110 @@ pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
+ /// state including auth_manager, config, and show_auth_popup — not a bare Default.
+ pub type SharedAppState = Arc<crate::server::AppState>;
+ 
+-/// Holds a pending update so `respond_update_prompt` can use it directly
+-/// instead of re-checking the network. Managed as Tauri state.
+-pub type PendingUpdate = Arc<parking_lot::Mutex<Option<tauri_plugin_updater::Update>>>;
++/// Holds a pending, already-VERIFIED update so `respond_update_prompt` can use it directly instead of
++/// re-checking the network. Storing a `VerifiedUpdate` (not a raw plugin `Update`) means the prompt
++/// path physically cannot install anything that has not cleared both F-004 layers. Managed as Tauri
++/// state.
++pub type PendingUpdate = Arc<parking_lot::Mutex<Option<crate::updater::VerifiedUpdate>>>;
+ 
+ #[tauri::command]
+-pub fn get_config(config: tauri::State<'_, ConfigState>) -> AcceleratorConfig {
+-    config.read().clone()
++pub fn get_config(
++    window: tauri::WebviewWindow,
++    config: tauri::State<'_, ConfigState>,
++) -> Result<AcceleratorConfig, String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
++    Ok(config.read().clone())
+ }
+ 
+ #[tauri::command]
+-pub fn get_autostart_enabled(app: tauri::AppHandle) -> bool {
++pub fn get_autostart_enabled(
++    window: tauri::WebviewWindow,
++    app: tauri::AppHandle,
++) -> Result<bool, String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     use tauri_plugin_autostart::ManagerExt;
+-    app.autolaunch().is_enabled().unwrap_or(false)
++    // codex #7: surface an I/O error rather than reporting `false` (disabled). Reading the launcher entry
++    // can fail (permissions, malformed unit); pretending "off" would mislead the user into thinking
++    // autostart is disabled when its true state is unknown.
++    app.autolaunch()
++        .is_enabled()
++        .map_err(|e| format!("cannot read autostart state: {e}"))
+ }
+ 
+ #[tauri::command]
+-pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
++pub fn set_autostart(
++    window: tauri::WebviewWindow,
++    app: tauri::AppHandle,
++    enabled: bool,
++) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     use tauri_plugin_autostart::ManagerExt;
+     let manager = app.autolaunch();
+     if enabled {
+-        manager.enable().map_err(|e| e.to_string())?;
+-        crate::crash_recovery::enable_crash_recovery();
++        // F-010: refuse autostart entirely if this executable's path could inject into ANY OS launcher
++        // serializer (systemd unit / .desktop / plist / Run-key) — BEFORE invoking the plugin (which would
++        // otherwise serialize the unsafe path itself). Fail closed: leave a clean disabled state + surface
++        // the refusal to the UI. (The webview cannot bypass this by calling the raw plugin enable — the
++        // `autostart:allow-enable` capability grant is removed; only this gated command can enable.)
++        let exe =
++            std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
++        if !crate::crash_recovery::autostart_path_is_safe(&exe) {
++            let _ = manager.disable();
++            crate::crash_recovery::disable_crash_recovery();
++            return Err(
++                "Executable path is unsafe for autostart (control/newline/non-UTF-8); refusing to enable."
++                    .to_string(),
++            );
++        }
++        // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction. If arming fails
++        // after the launcher went on, roll back (disable the launcher unless it was already on, disarm
++        // any partial recovery) and surface a combined error — never leave a half-enabled state.
++        // codex #7: an unknown current state makes the rollback's "disable unless prior" undecidable
++        // (guess wrong and we either clobber a pre-existing entry or leave a new one on). Fail closed
++        // rather than run the transaction against an unknown baseline.
++        let prior_enabled = manager
++            .is_enabled()
++            .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
++        crate::crash_recovery::enable_transaction(
++            prior_enabled,
++            || manager.enable().map_err(|e| e.to_string()),
++            crate::crash_recovery::enable_crash_recovery,
++            || manager.disable().map_err(|e| e.to_string()),
++            crate::crash_recovery::disable_crash_recovery,
++        )?;
+     } else {
++        // codex #7: disable the launcher, THEN disarm crash recovery — and surface a non-confirmed disarm.
++        // The bool from disable_crash_recovery was previously ignored, so a failed disarm left the app
++        // able to relaunch on next login while the UI showed autostart as off.
+         manager.disable().map_err(|e| e.to_string())?;
+-        crate::crash_recovery::disable_crash_recovery();
++        if !crate::crash_recovery::disable_crash_recovery() {
++            return Err(
++                "Autostart launcher disabled, but crash recovery could not be confirmed disarmed — \
++                 the app may still relaunch on next login. Please retry."
++                    .to_string(),
++            );
++        }
+     }
+     Ok(())
+ }
+ 
+ #[tauri::command]
+ pub fn set_speed(
++    window: tauri::WebviewWindow,
+     config: tauri::State<'_, ConfigState>,
+     speed: config::Speed,
+ ) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     mutate_config(&config, |cfg| cfg.speed = speed)
+ }
+ 
+ #[tauri::command]
+ pub fn remove_approved_origin(
++    window: tauri::WebviewWindow,
+     config: tauri::State<'_, ConfigState>,
+     origin: String,
+ ) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     mutate_config(&config, |cfg| {
+         cfg.approved_origins
+             .retain(|o| o.as_str() != origin.as_str())
+@@ -82,13 +144,14 @@ pub struct SystemInfo {
+ }
+ 
+ #[tauri::command]
+-pub fn get_system_info() -> SystemInfo {
+-    SystemInfo {
++pub fn get_system_info(window: tauri::WebviewWindow) -> Result<SystemInfo, String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
++    Ok(SystemInfo {
+         platform: std::env::consts::OS.to_string(),
+         cpu_count: std::thread::available_parallelism()
+             .map(|n| n.get())
+             .unwrap_or(1),
+-    }
++    })
+ }
+ 
+ /// DTO returned to the authorization popup when an origin is on the recognized list.
+@@ -100,52 +163,201 @@ pub struct VerifiedSiteDto {
+ 
+ #[tauri::command]
+ pub fn get_verified_info(
++    window: tauri::WebviewWindow,
+     origin: String,
+     state: tauri::State<'_, VerifiedSitesState>,
+-) -> Option<VerifiedSiteDto> {
+-    state.lookup(&origin).map(|s| VerifiedSiteDto {
++) -> Result<Option<VerifiedSiteDto>, String> {
++    // F-012 (D6): only an authorization popup renders the verified badge.
++    require_auth_window(window.label())?;
++    Ok(state.lookup(&origin).map(|s| VerifiedSiteDto {
+         display_name: s.display_name.clone(),
+-    })
++    }))
+ }
+ 
+ #[tauri::command]
+ pub fn respond_auth(
++    window: tauri::WebviewWindow,
+     app: tauri::AppHandle,
+     auth: tauri::State<'_, AuthState>,
+     request_id: String,
+     origin: String,
+     allowed: bool,
+     remember: bool,
+-) {
++) -> Result<(), String> {
++    // F-012 (D6) + SEC-06 (strengthened): bind the calling window to THIS request_id. windows.rs labels
++    // the popup `auth-{hash(request_id)}`; asserting the caller's label == that means a popup opened for
++    // request A physically cannot resolve request B, even if it forged B's id in the payload. Tauri
++    // resolves `window` from the native IPC message, so the label is unspoofable from JS.
++    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
++    require_label(window.label(), &label)?;
++
+     let decision = if allowed {
+         AuthDecision::Allow { remember }
+     } else {
+         AuthDecision::Deny
+     };
+-    // SEC-06: resolve by the opaque `request_id`, NOT the origin. A tampered/guessed payload with a
+-    // wrong id is a harmless no-op (it can't resolve a *different* concurrent request, and the old
+-    // origin-keyed resolve could); the real request then denies via its 60s timeout.
+-    auth.resolve(&request_id, decision);
+-
+-    // Close the authorization popup window. SEC-06 post-impl (codex L3): the window is labelled by
+-    // `request_id`, NOT origin — origin-keying let a resolved request's stale 60s timeout close the
+-    // *live* window of a newer same-origin request (and respond_auth close the wrong one). `origin` is
+-    // kept on the payload for diagnostics only.
+-    tracing::debug!(origin = %origin, %request_id, allowed, "respond_auth decision");
+-    let label = format!("auth-{}", sanitize_window_label(&request_id));
++    // C9 (D19): SERVER-SIDE arbiter enforcement — only the popup that currently owns the ACTIVE slot may
++    // resolve. A queued (non-actionable) popup's webview cannot decide even if coerced into calling
++    // respond_auth; the frontend button-disable is a reflection of this, not the gate. SEC-06: resolution
++    // is still by the opaque `request_id` (a wrong id can't resolve a different request).
++    match auth.resolve_active(&request_id, decision) {
++        ResolveOutcome::Resolved(promoted) => {
++            // Close this popup (labelled by `request_id`; `origin` is diagnostics-only) and promote the
++            // next queued popup into the active slot.
++            tracing::debug!(origin = %origin, %request_id, allowed, "respond_auth decision");
++            if let Some(window) = app.get_webview_window(&label) {
++                let _ = window.close();
++            }
++            if let Some(next) = promoted {
++                arm_active_popup(&app, auth.inner(), &next);
++            }
++            Ok(())
++        }
++        ResolveOutcome::NotActive => {
++            tracing::warn!(%request_id, "respond_auth rejected: not the active authorization popup");
++            Err("not the active authorization request".to_string())
++        }
++    }
++}
++
++/// DTO for [`get_pending_auth`] — the SERVER-authoritative origin the popup must render (C9 D8), plus
++/// whether this popup currently owns the actionable slot (C9 D15), so a queued popup disables its buttons.
++#[derive(serde::Serialize)]
++pub struct PendingAuthDto {
++    pub origin: String,
++    pub active: bool,
++}
++
++#[tauri::command]
++pub fn get_pending_auth(
++    window: tauri::WebviewWindow,
++    auth: tauri::State<'_, AuthState>,
++    request_id: String,
++) -> Result<Option<PendingAuthDto>, String> {
++    // C9 (D8/D19): bind the caller to ITS OWN request via the SAME exact-label guard respond_auth uses, so
++    // a popup can only peek the origin/active-state of the request it was opened for, never another's.
++    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
++    require_label(window.label(), &label)?;
++    Ok(auth
++        .peek(&request_id)
++        .map(|(origin, active)| PendingAuthDto {
++            origin: origin.to_string(),
++            active,
++        }))
++}
++
++// ── C9 single-active-popup arbiter — window helpers (lib, so both `respond_auth` here and
++//    `windows::show_auth_popup_window` in the bin share one implementation) ──────────────────────────
++
++/// C9 (D14/D18/D19): raise a promoted popup into the ACTIVE slot — topmost + focused — and arm its
++/// activation-relative 60 s auto-deny. Called on every promotion (respond_auth / deny timer / window
++/// close). No-op on the window itself if it was already closed; the arbiter state advanced regardless.
++pub fn arm_active_popup(app: &tauri::AppHandle, auth_manager: &AuthState, request_id: &str) {
++    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(request_id));
+     if let Some(window) = app.get_webview_window(&label) {
+-        let _ = window.close();
++        let _ = window.set_always_on_top(true);
++        let _ = window.set_focus();
+     }
++    spawn_active_deny_timer(app, auth_manager, request_id);
++}
++
++/// Spawn the ACTIVE popup's 60 s auto-deny. On fire: resolve Deny (which promotes the next queued request,
++/// if any), close the window, then arm the promoted one — the chain drains the queue one active 60 s
++/// window at a time. `resolve` is a no-op if the request was already decided (respond_auth / user close).
++pub fn spawn_active_deny_timer(app: &tauri::AppHandle, auth_manager: &AuthState, request_id: &str) {
++    let app = app.clone();
++    let auth_manager = auth_manager.clone();
++    let request_id = request_id.to_string();
++    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
++    tauri::async_runtime::spawn(async move {
++        tokio::time::sleep(crate::server::AUTH_DECISION_TIMEOUT).await;
++        let promoted = auth_manager.resolve(&request_id, AuthDecision::Deny);
++        if let Some(window) = app.get_webview_window(&label) {
++            let _ = window.close();
++        }
++        if let Some(promoted) = promoted {
++            arm_active_popup(&app, &auth_manager, &promoted);
++        }
++    });
++}
++
++/// C9 (D14): resolve-as-Deny + promote-next when the user CLOSES a popup without deciding. Idempotent with
++/// the timer + respond_auth (both resolve first, then close — so the `Destroyed` fired by their own close
++/// is a harmless no-op that promotes nobody).
++pub fn attach_close_deny_listener(
++    app: &tauri::AppHandle,
++    auth_manager: &AuthState,
++    window: &tauri::WebviewWindow,
++    request_id: &str,
++) {
++    let app = app.clone();
++    let auth_manager = auth_manager.clone();
++    let request_id = request_id.to_string();
++    window.on_window_event(move |event| {
++        if matches!(event, tauri::WindowEvent::Destroyed) {
++            if let Some(promoted) = auth_manager.resolve(&request_id, AuthDecision::Deny) {
++                arm_active_popup(&app, &auth_manager, &promoted);
++            }
++        }
++    });
+ }
+ 
+ /// Create a unique, collision-free window label from an arbitrary key (an origin or, for auth
+ /// popups, the opaque `request_id`). Uses a truncated SHA-256 hash to avoid collisions between
+ /// similar keys (e.g. `example.com` vs `example_com` would collide with naive character replacement)
+ /// and to keep the label charset window-system-safe.
++///
++/// F-012 (codex MED-6): 16 bytes = 128 bits of the digest. The label is a security binding
++/// (`respond_auth` asserts the caller's window == `auth-{hash(request_id)}`), so the earlier 6-byte
++/// (48-bit) truncation gave a needlessly small margin; 128 bits makes a collision a non-issue while
++/// staying a valid Tauri window label (lowercase hex).
+ pub fn sanitize_window_label(key: &str) -> String {
+     use sha2::{Digest, Sha256};
+     let hash = Sha256::digest(key.as_bytes());
+-    hex::encode(&hash[..6])
++    hex::encode(&hash[..16])
++}
++
++/// Fixed window labels the caller-label guard checks against (must match `windows.rs`).
++pub const SETTINGS_LABEL: &str = "settings";
++pub const UPDATE_PROMPT_LABEL: &str = "update-prompt";
++const AUTH_LABEL_PREFIX: &str = "auth-";
++
++/// F-012 (D6) — the PRIMARY, framework-independent caller-label check behind the per-window capability
++/// ACL. Even if a capability were ever mis-scoped, a command still refuses to act for the wrong window.
++/// `actual` is the real invoking window's label, which Tauri resolves from the native IPC message — JS
++/// cannot spoof it. On mismatch: log (generic) and return a generic error that leaks no window topology.
++fn require_label(actual: &str, expected: &str) -> Result<(), String> {
++    if actual == expected {
++        Ok(())
++    } else {
++        tracing::warn!(
++            actual,
++            "command invoked from an unexpected window; rejecting"
++        );
++        Err("This command is not available from this window.".to_string())
++    }
++}
++
++/// True iff `label` is a well-formed authorization-popup label: `auth-` + exactly 32 lowercase hex chars
++/// (the 128-bit [`sanitize_window_label`] digest). Used by `get_verified_info`, which — unlike
++/// `respond_auth` — doesn't receive the `request_id`, so it can only assert the caller IS an auth popup.
++fn is_auth_label(label: &str) -> bool {
++    label
++        .strip_prefix(AUTH_LABEL_PREFIX)
++        .is_some_and(|h| h.len() == 32 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
++}
++
++/// Require the caller to be an authorization popup (any `auth-<hash>`). Generic error on mismatch.
++fn require_auth_window(actual: &str) -> Result<(), String> {
++    if is_auth_label(actual) {
++        Ok(())
++    } else {
++        tracing::warn!(
++            actual,
++            "auth command invoked from a non-auth window; rejecting"
++        );
++        Err("This command is not available from this window.".to_string())
++    }
+ }
+ 
+ /// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
+@@ -153,9 +365,11 @@ pub fn sanitize_window_label(key: &str) -> String {
+ #[cfg(target_os = "macos")]
+ #[tauri::command]
+ pub async fn enable_safari_support(
++    window: tauri::WebviewWindow,
+     config: tauri::State<'_, ConfigState>,
+     shared_state: tauri::State<'_, SharedAppState>,
+ ) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     use crate::certs;
+ 
+     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
+@@ -190,7 +404,11 @@ pub async fn enable_safari_support(
+ /// Disable Safari Support: save config. HTTPS stops on next restart.
+ #[cfg(target_os = "macos")]
+ #[tauri::command]
+-pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(), String> {
++pub fn disable_safari_support(
++    window: tauri::WebviewWindow,
++    config: tauri::State<'_, ConfigState>,
++) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     mutate_config(&config, |cfg| cfg.safari_support = false)?;
+     tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
+     Ok(())
+@@ -199,20 +417,27 @@ pub fn disable_safari_support(config: tauri::State<'_, ConfigState>) -> Result<(
+ /// Stub for non-macOS platforms.
+ #[cfg(not(target_os = "macos"))]
+ #[tauri::command]
+-pub async fn enable_safari_support() -> Result<(), String> {
++pub async fn enable_safari_support(window: tauri::WebviewWindow) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     Err("Safari Support is only available on macOS".to_string())
+ }
+ 
+ /// Stub for non-macOS platforms.
+ #[cfg(not(target_os = "macos"))]
+ #[tauri::command]
+-pub fn disable_safari_support() -> Result<(), String> {
++pub fn disable_safari_support(window: tauri::WebviewWindow) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     Err("Safari Support is only available on macOS".to_string())
+ }
+ 
+ /// Toggle auto-update preference from Settings.
+ #[tauri::command]
+-pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) -> Result<(), String> {
++pub fn set_auto_update(
++    window: tauri::WebviewWindow,
++    config: tauri::State<'_, ConfigState>,
++    enabled: bool,
++) -> Result<(), String> {
++    require_label(window.label(), SETTINGS_LABEL)?;
+     mutate_config(&config, |cfg| cfg.auto_update = Some(enabled))?;
+     tracing::info!(enabled, "Auto-update preference changed via Settings");
+     Ok(())
+@@ -223,12 +448,14 @@ pub fn set_auto_update(config: tauri::State<'_, ConfigState>, enabled: bool) ->
+ /// - action="later": dismiss, auto_update stays None (prompt returns next launch)
+ #[tauri::command]
+ pub fn respond_update_prompt(
++    window: tauri::WebviewWindow,
+     app: tauri::AppHandle,
+     config: tauri::State<'_, ConfigState>,
+     pending: tauri::State<'_, PendingUpdate>,
+     action: String,
+     auto_update: bool,
+ ) -> Result<(), String> {
++    require_label(window.label(), UPDATE_PROMPT_LABEL)?;
+     match action.as_str() {
+         "update" => {
+             // Save auto-update preference from the checkbox
+@@ -245,7 +472,7 @@ pub fn respond_update_prompt(
+             match update {
+                 Some(update) => {
+                     tracing::info!(
+-                        version = %update.version,
++                        version = %update.version(),
+                         auto_update,
+                         "User clicked Update Now, downloading stored update"
+                     );
+@@ -278,3 +505,51 @@ fn close_update_prompt(app: &tauri::AppHandle) {
+         let _ = window.close();
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{is_auth_label, require_auth_window, require_label, sanitize_window_label};
++
++    #[test]
++    fn require_label_matches_exactly() {
++        assert!(require_label("settings", "settings").is_ok());
++        assert!(require_label("auth-abc", "settings").is_err());
++        assert!(require_label("", "settings").is_err());
++        assert!(require_label("settings ", "settings").is_err()); // no trimming
++    }
++
++    #[test]
++    fn auth_label_is_prefix_plus_128bit_lowercase_hex() {
++        // A real label is `auth-` + the 32-hex (16-byte) digest — the width sanitize_window_label emits.
++        let real = format!("auth-{}", sanitize_window_label("some-request-id"));
++        assert_eq!(sanitize_window_label("some-request-id").len(), 32); // 16 bytes -> 32 hex
++        assert!(is_auth_label(&real));
++        assert!(require_auth_window(&real).is_ok());
++
++        // Reject: wrong prefix, uppercase hex, wrong length, non-hex, the settings label.
++        for bad in [
++            "settings",
++            "auth-",
++            "auth-XYZ",
++            "auth-ABCDEF0123456789ABCDEF0123456789", // uppercase
++            "auth-abc",                              // too short
++            "auth-0123456789abcdef0123456789abcdefff", // too long (34)
++            "notauth-0123456789abcdef0123456789abcdef",
++        ] {
++            assert!(!is_auth_label(bad), "{bad} must not be a valid auth label");
++            assert!(require_auth_window(bad).is_err(), "{bad} must be rejected");
++        }
++    }
++
++    #[test]
++    fn sanitize_window_label_is_deterministic_and_collision_resistant() {
++        assert_eq!(sanitize_window_label("a"), sanitize_window_label("a"));
++        assert_ne!(
++            sanitize_window_label("example.com"),
++            sanitize_window_label("example_com")
++        );
++        assert!(sanitize_window_label("x")
++            .bytes()
++            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
++    }
++}
+diff --git a/packages/accelerator/src-tauri/src/main.rs b/packages/accelerator/src-tauri/src/main.rs
+index 491e8b2..a8f4537 100644
+--- a/packages/accelerator/src-tauri/src/main.rs
++++ b/packages/accelerator/src-tauri/src/main.rs
+@@ -181,7 +181,7 @@ async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
+     if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
+         let auto_update_pref = { config_state.read().auto_update };
+         let current_version = env!("CARGO_PKG_VERSION").to_string();
+-        let new_version = update.version.clone();
++        let new_version = update.version().to_string();
+ 
+         // Store the update so respond_update_prompt can use it directly
+         if let Some(pending) = app.try_state::<PendingUpdate>() {
+@@ -269,6 +269,46 @@ fn spawn_update_poller(app_handle: AppHandle, config: ConfigState) {
+     });
+ }
+ 
++/// Spawn the F-004 Layer B post-launch floor tracker. Once THIS build's OWN accelerator server has
++/// answered `/health` — as a healthy Aztec reporting OUR exact version — 3 consecutive times, advance
++/// the monotonic version floor to the running version. Two guards matter (audit H3):
++///   - 3 consecutive HEALTHY probes (not merely "process started") means a build that boots but
++///     immediately wedges its server never ratchets the floor;
++///   - the reported `/health.version` must equal `CARGO_PKG_VERSION`. The redundant-instance bow-out
++///     is Windows-only, so on macOS/Linux a broken new build that LOST the `:59833` bind would still
++///     see the healthy INCUMBENT's `/health` and could otherwise commit ITS OWN (never-run) version.
++///     Matching the version proves we are observing our own server (we own the bind).
++///
++/// Runs once; gated off for webdriver builds.
++#[cfg(not(feature = "webdriver"))]
++fn spawn_floor_tracker() {
++    tauri::async_runtime::spawn(async move {
++        let want = env!("CARGO_PKG_VERSION");
++        let mut consecutive = 0u32;
++        // Bounded (~2 min) so a genuinely unhealthy build never commits the floor.
++        for _ in 0..40 {
++            tokio::time::sleep(Duration::from_secs(3)).await;
++            if aztec_accelerator::server::healthy_aztec_version_on_port()
++                .await
++                .as_deref()
++                == Some(want)
++            {
++                consecutive += 1;
++                if consecutive >= 3 {
++                    aztec_accelerator::updater::commit_launch_floor();
++                    return;
++                }
++            } else {
++                consecutive = 0;
++            }
++        }
++        tracing::warn!(
++            version = want,
++            "Launch never reached 3 consecutive healthy version-matched probes; version floor not advanced this run"
++        );
++    });
++}
++
+ // ── Desktop bootstrap (q7e3-F-04) ────────────────────────────────────────
+ // `.setup()` was a ~150-line Long Method closure. These phase helpers carry the capture-heavy
+ // construction; the closure stays a thin, visibly-ordered sequencer because two orderings there are
+@@ -291,8 +331,14 @@ fn build_tray(
+             // → relaunch. Windows-only: mac/linux key on exit code (launchd
+             // SuccessfulExit:false / systemd on-failure), so a clean quit is a
+             // no-op there and the recovery entry must persist across quit.
++            // codex #7: surface (log) a non-confirmed disarm — an unconfirmed disable here means the
++            // Task Scheduler recovery entry may survive and relaunch the app within ~1 min of this quit.
+             #[cfg(target_os = "windows")]
+-            aztec_accelerator::crash_recovery::disable_crash_recovery();
++            if !aztec_accelerator::crash_recovery::disable_crash_recovery() {
++                tracing::warn!(
++                    "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
++                );
++            }
+             app.exit(0);
+         }
+         "show_logs" => open_in_browser(&log_dir()),
+@@ -452,6 +498,7 @@ fn main() {
+             commands::remove_approved_origin,
+             commands::get_system_info,
+             commands::get_verified_info,
++            commands::get_pending_auth,
+             commands::respond_auth,
+             commands::enable_safari_support,
+             commands::disable_safari_support,
+@@ -462,6 +509,7 @@ fn main() {
+             // Hide from Dock — tray-only app
+             #[cfg(target_os = "macos")]
+             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
++
+             let bundled_version = env!("AZTEC_BB_VERSION").to_string();
+ 
+             let status = MenuItemBuilder::with_id("status", "Status: Idle")
+@@ -471,8 +519,20 @@ fn main() {
+             // Check autostart on launch for crash recovery
+             {
+                 use tauri_plugin_autostart::ManagerExt;
+-                if app.autolaunch().is_enabled().unwrap_or(false) {
+-                    aztec_accelerator::crash_recovery::enable_crash_recovery();
++                // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and it
++                // must NOT be silently swallowed. codex #7: distinguish a READ ERROR from a confirmed
++                // "off". Treating an is_enabled() error as `false` would silently skip re-arming crash
++                // recovery when autostart was in fact on but momentarily unreadable.
++                match app.autolaunch().is_enabled() {
++                    Ok(true) => {
++                        if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
++                            tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
++                        }
++                    }
++                    Ok(false) => {}
++                    Err(e) => tracing::warn!(
++                        "could not read autostart state at startup; crash recovery not re-armed: {e}"
++                    ),
+                 }
+             }
+ 
+@@ -543,6 +603,8 @@ fn main() {
+             #[cfg(not(feature = "webdriver"))]
+             if should_poll_for_updates() {
+                 spawn_update_poller(app.handle().clone(), config_state.clone());
++                // F-004 Layer B: advance the monotonic version floor once this build proves it runs.
++                spawn_floor_tracker();
+             }
+ 
+             Ok(())
+diff --git a/packages/accelerator/src-tauri/src/windows.rs b/packages/accelerator/src-tauri/src/windows.rs
+index 20b058d..e618e0b 100644
+--- a/packages/accelerator/src-tauri/src/windows.rs
++++ b/packages/accelerator/src-tauri/src/windows.rs
+@@ -3,7 +3,32 @@
+ use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
+ use aztec_accelerator::commands;
+ use std::sync::Arc;
+-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
++use tauri::webview::NewWindowResponse;
++use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
++
++/// True iff `url` is the app's OWN local asset origin. Tauri serves the bundled frontend from
++/// `tauri://localhost` (Linux/macOS) or `http://tauri.localhost` (Windows). Every other navigation
++/// target is off-origin. F-012 (codex HIGH-3): the CSP `connect-src` blocks fetch/XHR/WS exfil but NOT
++/// a top-level navigation that smuggles data in the URL, and on Linux the `<meta>`-delivered CSP ignores
++/// `frame-ancestors` — so this Rust guard is the real anti-navigation/anti-exfil control.
++///
++/// GATE-3 (codex MED): match ONLY the current platform's asset origin — accepting `http://tauri.localhost`
++/// on Linux/macOS would permit a real loopback HTTP navigation (e.g. `http://tauri.localhost:59833/?data=…`
++/// hitting a listening server) that is NOT the embedded-asset protocol. Also reject any embedded credentials
++/// or explicit port; the asset origin never has either.
++fn is_local_asset_url(url: &Url) -> bool {
++    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
++        return false;
++    }
++    #[cfg(windows)]
++    {
++        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
++    }
++    #[cfg(not(windows))]
++    {
++        url.scheme() == "tauri" && url.host_str() == Some("localhost")
++    }
++}
+ 
+ /// Focus a newly created window. We stay as Accessory (tray-only) rather than
+ /// switching to Regular activation policy, which would show the app in the Dock
+@@ -27,31 +52,50 @@ struct WindowConfig<'a> {
+     /// Focus an ALREADY-open window with this label? Settings does (user re-clicked "Settings");
+     /// the auth/update popups don't (they just stay put). Preserves prior per-window behavior.
+     focus_if_open: bool,
++    /// Focus a NEWLY-built window? Settings/update/active-auth do; a QUEUED auth popup (C9 D18) does NOT —
++    /// it is built not-topmost + unfocused and only gains focus when promoted to active.
++    focus_on_create: bool,
+ }
+ 
+-/// Open a window with the given config, or handle an already-open one. Returns `true` iff a window
+-/// with `config.label` was ALREADY open (focused first iff `focus_if_open`); `false` if none existed,
+-/// in which case a new one is built + focused. The bool lets callers (auth) do post-build work only
+-/// for a freshly-handled window. Dedups the get-or-build pattern across the 3 windows.
+-fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> bool {
++/// Open a window with the given config, or handle an already-open one. Returns `Some(window)` for a
++/// FRESHLY-built window (so the caller can do post-build work — attach a close listener, arm a timer),
++/// or `None` if a window with `config.label` was already open (focused first iff `focus_if_open`).
++/// Dedups the get-or-build pattern across the 3 windows.
++fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::WebviewWindow> {
+     if let Some(window) = app.get_webview_window(config.label) {
+         if config.focus_if_open {
+             let _ = window.set_focus();
+         }
+-        return true;
++        return None;
+     }
+-    if let Ok(window) =
+-        WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url.into()))
+-            .title(config.title)
+-            .inner_size(config.width, config.height)
+-            .resizable(false)
+-            .center()
+-            .always_on_top(config.always_on_top)
+-            .build()
++    match WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url.into()))
++        .title(config.title)
++        .inner_size(config.width, config.height)
++        .resizable(false)
++        .center()
++        .always_on_top(config.always_on_top)
++        // codex r2 #4: actually BUILD the window (un)focused. `focus_on_create` previously only gated a
++        // post-build `set_focus`, but tao defaults new windows to focused — so a QUEUED auth popup was
++        // built focused and could steal focus before promotion. Pass it to the builder so a queued popup
++        // (focus_on_create=false) is created unfocused; the active one is raised via `arm_active_popup`.
++        .focused(config.focus_on_create)
++        // F-012 (codex HIGH-3): confine the webview to its own local asset origin. Block any attempt
++        // to navigate off-origin (data-exfil / phishing) and deny opening new windows/webviews — the
++        // popups never legitimately do either. (Confirmed NOT the cause of the CI asset-load failure —
++        // that was `tauri dev` injecting a dev-server devUrl → empty embed; fixed by running the binary
++        // directly. These guards allow the real tauri://localhost initial load.)
++        .on_navigation(is_local_asset_url)
++        .on_new_window(|_url, _features| NewWindowResponse::Deny)
++        .build()
+     {
+-        focus_window(&window);
++        Ok(window) => {
++            if config.focus_on_create {
++                focus_window(&window);
++            }
++            Some(window)
++        }
++        Err(_) => None,
+     }
+-    false
+ }
+ 
+ /// Open or focus the Settings window.
+@@ -66,6 +110,7 @@ pub fn open_settings_window(app: &AppHandle) {
+             height: 520.0,
+             always_on_top: false,
+             focus_if_open: true,
++            focus_on_create: true,
+         },
+     );
+ }
+@@ -91,7 +136,15 @@ pub fn show_auth_popup_window(
+         urlencoding::encode(origin),
+         urlencoding::encode(request_id)
+     );
+-    if open_or_focus_window(
++    // C9 (D18/D19, codex #8): BUILD FIRST, unconditionally as NON-active (not topmost, unfocused, no
++    // timer). Whether this request owns the actionable + always-on-top slot is decided AFTER the window
++    // exists (below), never from a peek taken before the build. The old pre-build peek raced promotion:
++    // if the active popup resolved and promoted THIS request during its own build, the build finished
++    // with a stale `is_active=false` (non-topmost, unfocused, no timer) while the resolve path's
++    // `arm_active_popup` had already run against a not-yet-built window — leaving a server-active but
++    // unraised, un-timed popup. Exactly one popup is actionable at a time; `resolve_active` enforces that
++    // server-side regardless of window state.
++    let Some(window) = open_or_focus_window(
+         app,
+         WindowConfig {
+             label: &label,
+@@ -99,32 +152,40 @@ pub fn show_auth_popup_window(
+             title: "Authorize Site",
+             width: 400.0,
+             height: 300.0,
+-            always_on_top: true,
++            always_on_top: false,
+             focus_if_open: false,
++            focus_on_create: false,
+         },
+-    ) {
+-        return; // popup already open for this request — don't spawn a duplicate timeout
+-    }
+-
+-    // Spawn 60s timeout — always resolve with Deny if still pending.
+-    // This handles both: (a) user ignoring the popup, and (b) user closing the
+-    // window without clicking Allow/Deny. In case (b), the window is gone but
+-    // the pending sender is still in the map. resolve() is a no-op if this
+-    // request was already resolved by respond_auth (sender already consumed).
+-    let app_handle = app.clone();
+-    let origin_owned = origin.to_string();
+-    let request_id_owned = request_id.to_string();
+-    let auth_manager = auth_manager.clone();
+-    tauri::async_runtime::spawn(async move {
+-        tokio::time::sleep(aztec_accelerator::server::AUTH_DECISION_TIMEOUT).await;
+-        // Close window if still open
+-        if let Some(window) = app_handle.get_webview_window(&label) {
+-            let _ = window.close();
++    ) else {
++        // A per-request auth label is NEVER "already open", so `None` here means the window FAILED TO
++        // BUILD (code-review: resource exhaustion etc.). Don't leave the arbiter's `active` slot held with
++        // no timer — that would stall the whole auth queue until the 600 s backstop. Resolve this request
++        // Deny to release the slot and promote + raise the next queued popup.
++        if let Some(promoted) = auth_manager.resolve(request_id, AuthDecision::Deny) {
++            commands::arm_active_popup(app, auth_manager, &promoted);
+         }
+-        // SEC-06: resolve by request_id — no-op if respond_auth already consumed it.
+-        auth_manager.resolve(&request_id_owned, AuthDecision::Deny);
+-        tracing::debug!(origin = %origin_owned, "Authorization timeout cleanup");
+-    });
++        return;
++    };
++
++    // C9 (D14): a user closing the popup WITHOUT deciding must resolve it (Deny) + promote the next queued
++    // popup — closing is not a resolution event to the arbiter otherwise. Idempotent with the timer +
++    // respond_auth (a second resolve of the same id is a no-op → returns None → no double-promote). The
++    // arbiter helpers live in `commands` (the lib) so both this (bin) and `respond_auth` (lib) share them.
++    commands::attach_close_deny_listener(app, auth_manager, &window, request_id);
++
++    // C9 (D18, codex #8): now that the window EXISTS, raise + arm it iff it currently owns the active
++    // slot. Re-peeking HERE (post-build) covers both "active from the start" and "promoted during the
++    // build". If promotion happens AFTER this, the resolve path's `arm_active_popup` finds the now-built
++    // window. Arming is idempotent: a second 60 s timer for the same id simply no-ops on fire (the id
++    // resolves exactly once), and a redundant raise is harmless. A still-queued popup is left non-topmost
++    // + un-timed and gains focus + its 60 s clock only when promoted.
++    let is_active = auth_manager
++        .peek(request_id)
++        .map(|(_, active)| active)
++        .unwrap_or(false);
++    if is_active {
++        commands::arm_active_popup(app, auth_manager, request_id);
++    }
+ }
+ 
+ /// Show the update prompt window.
+@@ -148,6 +209,83 @@ pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_ver
+             height: 280.0,
+             always_on_top: false,
+             focus_if_open: false,
++            focus_on_create: true,
+         },
+     );
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::is_local_asset_url;
++    use tauri::Url;
++
++    #[test]
++    fn navigation_guard_allows_only_the_local_asset_origin() {
++        // The real initial loads for THIS platform (incl. query params) must be permitted.
++        #[cfg(not(windows))]
++        let ok_forms = [
++            "tauri://localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
++            "tauri://localhost/settings.html",
++        ];
++        #[cfg(windows)]
++        let ok_forms = [
++            "http://tauri.localhost/authorize.html?origin=https%3A%2F%2Fx.com&requestId=abc",
++            "http://tauri.localhost/settings.html",
++        ];
++        for ok in ok_forms {
++            assert!(
++                is_local_asset_url(&Url::parse(ok).unwrap()),
++                "{ok} should be allowed"
++            );
++        }
++
++        // The OTHER platform's origin must be REJECTED here (codex MED: `http://tauri.localhost` on
++        // Linux/macOS is a real loopback HTTP navigation, not the embedded-asset protocol).
++        #[cfg(not(windows))]
++        let other_platform = "http://tauri.localhost/settings.html";
++        #[cfg(windows)]
++        let other_platform = "tauri://localhost/settings.html";
++        assert!(
++            !is_local_asset_url(&Url::parse(other_platform).unwrap()),
++            "{other_platform} (other platform's origin) must be blocked"
++        );
++
++        // Ports and credentials are never part of the asset origin.
++        #[cfg(not(windows))]
++        let ported_credentialed = [
++            "tauri://localhost:59833/settings.html",
++            "tauri://user@localhost/settings.html",
++            "tauri://user:pass@localhost/settings.html",
++        ];
++        #[cfg(windows)]
++        let ported_credentialed = [
++            "http://tauri.localhost:59833/settings.html",
++            "http://user@tauri.localhost/settings.html",
++            "http://user:pass@tauri.localhost/settings.html",
++        ];
++        for bad in ported_credentialed {
++            assert!(
++                !is_local_asset_url(&Url::parse(bad).unwrap()),
++                "{bad} (port/creds) must be blocked"
++            );
++        }
++
++        // Everything off-origin — look-alikes, the IPC host, non-http(s) schemes — must be blocked.
++        for bad in [
++            "https://evil.example/",
++            "http://localhost/x",                   // wrong host
++            "https://tauri.localhost/",             // wrong scheme
++            "http://tauri.localhost.evil.example/", // suffix look-alike
++            "tauri://evil/",
++            "http://ipc.localhost/", // IPC host is not a navigation target
++            "data:text/html,<script>alert(1)</script>",
++            "file:///etc/passwd",
++            "javascript:alert(1)",
++        ] {
++            assert!(
++                !is_local_asset_url(&Url::parse(bad).unwrap()),
++                "{bad} should be blocked"
++            );
++        }
++    }
++}

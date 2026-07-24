@@ -145,8 +145,25 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG" || true
-          git push origin "$TAG" || true
+
+          # F2 (full-branch audit): NEVER suppress tag/push failures with `|| true`. The old form let a
+          # pre-claimed tag (an attacker pushing $TAG at a different commit) survive silently — both git
+          # commands failed, but `gh release create` below then blessed that wrong-commit tag while npm
+          # published from HEAD, so the release/source disagreed with the package. Now: an existing tag
+          # MUST already resolve to the exact commit we're publishing (HEAD); anything else aborts.
+          EXPECTED_SHA="$(git rev-parse HEAD)"
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null 2>&1; then
+            EXISTING_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
+            if [ "$EXISTING_SHA" != "$EXPECTED_SHA" ]; then
+              echo "::error::Tag $TAG already exists at $EXISTING_SHA, not the published commit ($EXPECTED_SHA); aborting"
+              exit 1
+            fi
+            echo "Tag $TAG already exists at the expected commit; reusing it"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
 
           if [ "$SDK_VERSION" = "$AZTEC_VERSION" ]; then
             NOTES="Aligned with Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
