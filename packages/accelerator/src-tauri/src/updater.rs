@@ -378,32 +378,49 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
     #[cfg(target_os = "windows")]
     let mut recovery_guard = CrashRecoveryGuard::new(|| rearm_crash_recovery_if_enabled(app));
 
+    // H1 / codex #5: record the install INTENT under the lock BEFORE install(), and FAIL CLOSED if it
+    // cannot be recorded. This raises the anti-downgrade floor to `version` for any instance that
+    // acquires the lock next, so a racing older instance cannot install a LOWER (still-signed) version
+    // and regress this build. It MUST precede install(): on Windows tauri-plugin-updater's install()
+    // dispatches the external NSIS/MSI installer and `std::process::exit(0)`s — it never returns — so
+    // the old Ok-branch placement recorded NOTHING on Windows, leaving the downgrade window wide open
+    // there. Because `candidate_allowed` permits re-attempting the EXACT recorded version, recording
+    // before install does not poison the version on a failed install. On Windows the recovery_guard
+    // already exists here, so an abort below re-arms crash recovery via its Drop.
+    match updater_state_path() {
+        Some(path) => {
+            if let Err(e) = updater_state::record_pending(&path, &current, &version) {
+                tracing::error!(
+                    candidate = %version,
+                    "SECURITY: failed to record the install intent before install ({e}); aborting to avoid a downgrade window"
+                );
+                return;
+            }
+        }
+        None => {
+            tracing::error!(
+                "SECURITY: cannot resolve the updater-state path; aborting install (no rollback floor)"
+            );
+            return;
+        }
+    }
+
     match update.install(bytes) {
         Ok(()) => {
-            // H1: record the just-installed version as PENDING, UNDER THE LOCK, BEFORE the restart
-            // releases it. This raises the effective floor to `version` for any instance that acquires
-            // the lock next — so a racing old instance cannot install a LOWER (still-signed) version and
-            // regress this build between now and when the restarted build commits its own floor. Kept
-            // best-effort with a SECURITY log: the install already happened, and not restarting would
-            // leave the app half-updated; the restarted build still commits its floor on healthy launch.
-            if let Some(path) = updater_state_path() {
-                if let Err(e) = updater_state::record_pending(&path, &current, &version) {
-                    tracing::error!(
-                        candidate = %version,
-                        "SECURITY: failed to record the pending version before restart ({e}); a concurrent downgrade race is briefly possible until the new build commits its floor"
-                    );
-                }
-            }
-            // IgnoreNew + the exit-0-if-healthy guard absorb any brief double-launch with the
-            // restarted build.
+            // Windows never reaches here — install() dispatched the installer and exited the process.
+            // macOS/Linux: the intent is already recorded above; the restarted build commits its floor
+            // and clears the intent on a healthy launch. IgnoreNew + the exit-0-if-healthy guard absorb
+            // any brief double-launch with the restarted build.
             #[cfg(target_os = "windows")]
             recovery_guard.rearm_now();
             tracing::info!("Update installed, restarting");
             app.restart();
         }
         Err(e) => {
+            // Intent stays recorded — a returned Err is not proof that nothing was mutated (codex #5),
+            // and candidate_allowed lets this exact version be retried, so keeping it can't poison the
+            // version. recovery_guard's Drop re-arms crash recovery on return (Windows, if it was armed).
             tracing::error!("Update install failed: {e}");
-            // The app keeps running; recovery_guard's Drop re-arms on return (Windows, only if armed).
         }
     }
 }

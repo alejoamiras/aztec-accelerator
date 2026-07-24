@@ -101,31 +101,34 @@ fn gt(a: &Version, b: &Version) -> bool {
     a.cmp_precedence(b) == std::cmp::Ordering::Greater
 }
 
-/// The effective floor = `max(floor, pending)` by precedence. `None` for `Missing`. `Corrupt` is not
-/// representable here — callers treat it as reject.
-fn effective_floor(state: &LoadedState) -> Option<&Version> {
-    match state {
-        LoadedState::Valid { floor, pending } => match pending {
-            Some(p) if gt(p, floor) => Some(p),
-            _ => Some(floor),
-        },
-        LoadedState::Missing | LoadedState::Corrupt => None,
-    }
-}
-
 /// Is `candidate` acceptable given the running version and the loaded state? Uses SemVer PRECEDENCE
-/// (build metadata ignored, prerelease ordered correctly) and requires STRICTLY greater than
-/// `max(current, floor, pending)`. A `Corrupt` state rejects everything (fail closed).
+/// (build metadata ignored, prerelease ordered correctly). A `Corrupt` state rejects everything
+/// (fail closed).
+///
+/// Rules (codex audit #5 — retryable intent semantics):
+/// - strictly above the running version (`current`);
+/// - strictly above the confirmed `floor` (no rollback below a version that ran healthy);
+/// - `>= pending` — i.e. NOT below the pending install intent (a lower still-signed version would
+///   regress the committed install), but candidate `== pending` IS allowed so a failed/interrupted
+///   install can be RETRIED with the exact same version without permanently poisoning it. Recording
+///   the intent BEFORE install (see [`record_pending`]) is what makes this the anti-downgrade floor
+///   even on platforms where `install()` never returns to record it afterwards (Windows exits mid-install).
 pub fn candidate_allowed(candidate: &Version, current: &Version, state: &LoadedState) -> bool {
-    if matches!(state, LoadedState::Corrupt) {
-        return false;
-    }
     if !gt(candidate, current) {
         return false;
     }
-    match effective_floor(state) {
-        Some(f) => gt(candidate, f),
-        None => true,
+    match state {
+        LoadedState::Corrupt => false,
+        LoadedState::Missing => true,
+        LoadedState::Valid { floor, pending } => {
+            if !gt(candidate, floor) {
+                return false;
+            }
+            match pending {
+                Some(p) => !gt(p, candidate), // candidate >= pending (equal = retry the exact intent)
+                None => true,
+            }
+        }
     }
 }
 
@@ -136,11 +139,15 @@ pub fn running_below_floor(current: &Version, state: &LoadedState) -> bool {
     matches!(state, LoadedState::Valid { floor, .. } if gt(floor, current))
 }
 
-/// Record that `current` (the running, therefore proven, installer) has just installed `candidate`,
-/// which is now PENDING until it proves healthy. Advances `floor` to include `current` and `pending`
-/// to include `candidate` (both monotonic by precedence). MUST be called under the updater lock, right
-/// after a successful `install()` and before the restart releases the lock — that ordering is what
-/// makes a racing instance see the higher effective floor. Refuses a `Corrupt` file.
+/// Record that `current` (the running, therefore proven, installer) is COMMITTING to install
+/// `candidate`, which becomes the PENDING intent until a build at that version proves healthy.
+/// Advances `floor` to include `current` and `pending` to include `candidate` (both monotonic by
+/// precedence). MUST be called under the updater lock, and — codex #5 — right BEFORE `install()`
+/// (not after): on Windows `tauri-plugin-updater`'s `install()` dispatches the external installer and
+/// `std::process::exit(0)`s, so anything after it (including this record) never runs. Recording the
+/// intent first is what raises the anti-downgrade floor for a racing instance regardless of platform,
+/// and [`candidate_allowed`] permits re-attempting the exact `candidate` so a failed install does not
+/// poison that version. Refuses a `Corrupt` file.
 pub fn record_pending(path: &Path, current: &Version, candidate: &Version) -> std::io::Result<()> {
     let (floor, pending) = match load_state(path) {
         LoadedState::Corrupt => {
@@ -299,8 +306,12 @@ mod tests {
         let st = load_state(&p);
         assert_eq!(st, valid("1.0.0", Some("3.0.0")));
         assert!(!candidate_allowed(&v("2.0.0"), &v("1.0.0"), &st)); // regression blocked
-        assert!(candidate_allowed(&v("3.0.1"), &v("1.0.0"), &st)); // only strictly-higher allowed
-                                                                   // running below the confirmed FLOOR is false (1.0.0 == floor); pending doesn't count as floor.
+        assert!(candidate_allowed(&v("3.0.1"), &v("1.0.0"), &st)); // strictly-higher allowed
+                                                                   // codex #5: retrying the EXACT pending intent is allowed (a failed/interrupted install must not
+                                                                   // poison that version); anything strictly below it stays blocked.
+        assert!(candidate_allowed(&v("3.0.0"), &v("1.0.0"), &st)); // retry the exact intent
+        assert!(!candidate_allowed(&v("2.9.9"), &v("1.0.0"), &st)); // still below intent → blocked
+                                                                    // running below the confirmed FLOOR is false (1.0.0 == floor); pending doesn't count as floor.
         assert!(!running_below_floor(&v("1.0.0"), &st));
     }
 
