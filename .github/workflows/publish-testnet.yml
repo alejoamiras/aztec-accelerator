@@ -9,9 +9,15 @@ on:
         type: boolean
         default: false
 
+# Never cancel an IN-FLIGHT run: a canceled half-done npm publish strands irreversible
+# state. Caveat (GitHub semantics): at most ONE run waits per group — a newer dispatch
+# silently replaces a run that is still queued, so after dispatching, confirm your run
+# actually started. If publish-sdk fails AFTER its npm publish step, never blind-redispatch —
+# check `npm view @alejoamiras/aztec-accelerator versions` first; a redispatch mints a
+# `-revision.N` version by design.
 concurrency:
   group: publish-testnet
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # F-005: least-privilege default. id-token: write (OIDC) is granted ONLY to the two jobs that need it
 # (deploy-app for AWS, publish-sdk for Sigstore provenance), not workflow-wide.
@@ -41,11 +47,17 @@ jobs:
     uses: ./.github/workflows/_e2e.yml
     with:
       ref: ${{ github.sha }}
+      # Publish-time gate exercises the NATIVE bb path (asserts `transmit`), not just the
+      # WASM fallback — the artifact being published deserves the same proof as the PR gate.
+      # Playground-only deploys (skip_sdk_publish) keep the lighter WASM gate so an
+      # unrelated native-leg breakage can't block an urgent playground hotfix.
+      build_accelerator: ${{ inputs.skip_sdk_publish != true }}
 
   publish-sdk:
     needs: [changes, e2e]
-    # Skip when deploying the playground only. latest:false — while @aztec deps are rc-labeled the
-    # SDK ships on the `testnet` dist-tag, never npm `latest` (which stays on the last stable line).
+    # Skip when deploying the playground only. The SDK publishes on the `testnet`
+    # dist-tag; npm `latest` moves ONLY via promote-latest.yml, after the live
+    # acceptance smoke (_publish-sdk.yml has no latest capability at all).
     if: (needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch') && inputs.skip_sdk_publish != true
     # id-token+contents:write for _publish-sdk.yml's Sigstore provenance + npm publish.
     permissions:
@@ -54,7 +66,6 @@ jobs:
     uses: ./.github/workflows/_publish-sdk.yml
     with:
       dist_tag: testnet
-      latest: false
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -91,11 +102,24 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Deploy playground to S3
+        env:
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
         run: |
-          aws s3 sync packages/playground/dist/ s3://${{ secrets.S3_BUCKET_NAME }}/playground/ --delete
+          aws s3 sync packages/playground/dist/ "s3://${S3_BUCKET_NAME}/playground/" --delete
+          # The sqlite3mc runtime assets live at STABLE unhashed URLs (the emscripten
+          # locateFile fallback requests them by bare name), so heuristic browser caching
+          # could pin stale bytes across @aztec bumps — force revalidation on them.
+          for f in assets/sqlite3.wasm assets/sqlite3-opfs-async-proxy.js; do
+            if [ -f "packages/playground/dist/$f" ]; then
+              aws s3 cp "packages/playground/dist/$f" "s3://${S3_BUCKET_NAME}/playground/$f" \
+                --cache-control "no-cache" --metadata-directive REPLACE
+            fi
+          done
 
       - name: Invalidate CloudFront
+        env:
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
         run: |
           aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
             --paths "/playground/*"

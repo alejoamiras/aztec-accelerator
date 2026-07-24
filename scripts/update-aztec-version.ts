@@ -13,6 +13,18 @@ const PACKAGE_JSON_FILES = [
   "packages/playground/package.json",
 ];
 
+/**
+ * Companion packages that must stay in version-lockstep with @aztec/*: their generated
+ * code carries undeclared runtime imports of @aztec/aztec.js resolved against OUR pins,
+ * so version skew breaks at runtime, silently. Explicit allowlist — NOT a scope prefix —
+ * so unrelated @aztec-foundation packages never get swept up.
+ */
+const LOCKSTEP_PACKAGES = new Set(["@aztec-foundation/aztec-standards"]);
+
+export function isAztecManagedDep(key: string): boolean {
+  return key.startsWith("@aztec/") || LOCKSTEP_PACKAGES.has(key);
+}
+
 export function validateVersion(version: string): boolean {
   return VERSION_PATTERN.test(version);
 }
@@ -24,7 +36,7 @@ export function updatePackageJson(content: string, newVersion: string, skipPacka
     const deps = pkg[section];
     if (!deps) continue;
     for (const [key, value] of Object.entries(deps)) {
-      if (key.startsWith("@aztec/") && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
+      if (isAztecManagedDep(key) && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
         if (skipPackages?.has(key)) continue;
         deps[key] = newVersion;
       }
@@ -42,7 +54,7 @@ async function findMissingPackages(version: string, packageFiles: string[]): Pro
       const deps = pkg[section];
       if (!deps) continue;
       for (const [key, value] of Object.entries(deps)) {
-        if (key.startsWith("@aztec/") && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
+        if (isAztecManagedDep(key) && typeof value === "string" && AZTEC_VERSION_PATTERN.test(value)) {
           allAztecPackages.add(key);
         }
       }
@@ -99,6 +111,18 @@ async function main() {
   const skipPackages = await findMissingPackages(newVersion, PACKAGE_JSON_FILES);
   if (skipPackages.size > 0) {
     console.log(`Skipping unpublished packages: ${[...skipPackages].join(", ")}`);
+    // LOCKSTEP packages track @aztec/* releases from a DIFFERENT publisher — a skip here means
+    // the app would run mixed versions (undeclared runtime imports of @aztec/aztec.js make that
+    // lockstep a hard requirement). Loud, not fatal: nightlies stay unblocked, and the CI token
+    // spec is the behavioral gate that catches a truly broken mix.
+    const lockstepSkipped = [...skipPackages].filter((p) => LOCKSTEP_PACKAGES.has(p));
+    if (lockstepSkipped.length > 0) {
+      console.warn(
+        `⚠️  LOCKSTEP PACKAGE(S) NOT PUBLISHED AT ${newVersion}: ${lockstepSkipped.join(", ")} — ` +
+          `left at their previous version; the app will mix versions until they publish. ` +
+          `Verify the CI token spec passes before trusting this bump.`,
+      );
+    }
   }
 
   let updatedFiles = 0;

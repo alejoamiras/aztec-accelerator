@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main, security-hardening]
 
+permissions:
+  contents: read
+
 # Cancel a superseded in-flight run when a new commit is pushed to the same PR.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -25,7 +28,9 @@ jobs:
           filters: |
             relevant:
               - 'packages/sdk/**'
+              - 'scripts/**'
               - 'tsconfig.json'
+              - 'tsconfig.scripts.json'
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'
@@ -94,6 +99,10 @@ jobs:
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - run: bun run --cwd packages/sdk test:unit
+      # Release tooling (bump/publish-version scripts) rides the SDK pipeline.
+      # Typecheck too: Bun's test transpile accepts type errors tsc rejects.
+      - run: bun run test:scripts
+      - run: bun run typecheck:scripts
 
   e2e:
     name: E2E Tests

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun", "vite/client"]
+  },
+  "include": ["src/**/*.test.ts", "src/happydom.ts"],
+  "exclude": []
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Root has no "type: module", so NodeNext would treat these Bun-run ESM scripts as CJS.
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  "include": ["scripts/**/*.ts"]
+}

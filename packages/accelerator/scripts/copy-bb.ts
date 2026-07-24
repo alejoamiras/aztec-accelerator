@@ -95,6 +95,16 @@ export const WINDOWS_BB_CHECKSUMS: Record<string, WindowsBbPin> = {
     provenance: "manual-review",
     note: "Legacy pin, change-detector only — v5.0.0-rc.2 asset (5.5 MB gzip, bb.exe only), not independently verified.",
   },
+  "5.0.0": {
+    sha256: "ec58f1d0c0b7392475e5a6477dcde0717bf64563963030d416151a534ca13e96",
+    provenance: "manual-review",
+    note: "v5.0.0 stable asset; matches the GitHub release asset digest. Change-detector only (SEC-02) — the Windows Prebuild/Build Smoke gates independently re-fetch + verify.",
+  },
+  "5.0.1": {
+    sha256: "f7a2d6b10d4208f4a4d0990b71df1360033688f2b621040cf297e4676ea59c4c",
+    provenance: "manual-review",
+    note: "v5.0.1 asset; matches the GitHub release asset digest. Change-detector only (SEC-02) — carried over from main's 5.0.1 cycle and re-verified by the Windows CI gates.",
+  },
 };
 
 export function windowsBbReleaseTag(version: string): string {
