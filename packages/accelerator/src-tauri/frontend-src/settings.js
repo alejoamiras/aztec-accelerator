@@ -41,15 +41,21 @@ function updateSpeedUI(index) {
 }
 
 async function loadSettings() {
-  const [config, autostart, sysInfo] = await Promise.all([
-    invoke("get_config"),
-    invoke("get_autostart_enabled"),
-    invoke("get_system_info"),
-  ]);
+  const [config, sysInfo] = await Promise.all([invoke("get_config"), invoke("get_system_info")]);
 
   CPUS = sysInfo.cpu_count;
 
-  document.getElementById("autostart").checked = autostart;
+  // codex r2 #6: get_autostart_enabled now surfaces a read error (instead of reporting `false`). Fetch it
+  // INDEPENDENTLY so (a) a read failure doesn't fail the whole panel, and (b) an unknown state is NOT
+  // presented as an actionable "off" — disable the switch + show a hint instead.
+  const autostartEl = document.getElementById("autostart");
+  try {
+    autostartEl.checked = await invoke("get_autostart_enabled");
+  } catch (e) {
+    console.error("Failed to read autostart state:", e);
+    autostartEl.disabled = true;
+    showErrorHint(autostartEl, "Autostart state unavailable — reopen Settings to retry");
+  }
   document.getElementById("auto-update").checked = config.auto_update === true;
 
   if (sysInfo.platform === "macos") {

@@ -74,6 +74,11 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
         .resizable(false)
         .center()
         .always_on_top(config.always_on_top)
+        // codex r2 #4: actually BUILD the window (un)focused. `focus_on_create` previously only gated a
+        // post-build `set_focus`, but tao defaults new windows to focused — so a QUEUED auth popup was
+        // built focused and could steal focus before promotion. Pass it to the builder so a queued popup
+        // (focus_on_create=false) is created unfocused; the active one is raised via `arm_active_popup`.
+        .focused(config.focus_on_create)
         // F-012 (codex HIGH-3): confine the webview to its own local asset origin. Block any attempt
         // to navigate off-origin (data-exfil / phishing) and deny opening new windows/webviews — the
         // popups never legitimately do either. (Confirmed NOT the cause of the CI asset-load failure —

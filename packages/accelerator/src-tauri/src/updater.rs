@@ -430,12 +430,23 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
 #[cfg(target_os = "windows")]
 fn rearm_crash_recovery_if_enabled(app: &AppHandle) {
     use tauri_plugin_autostart::ManagerExt;
-    if app.autolaunch().is_enabled().unwrap_or(false) {
+    // codex r2 #5: we reach here AFTER having DISARMED recovery for the install. `unwrap_or(false)` on a
+    // transient is_enabled() read error would silently skip the re-arm and leave recovery OFF (autostart
+    // possibly on). FAIL SAFE instead: on an unreadable state, re-arm anyway — enable_crash_recovery is
+    // idempotent, so a redundant re-arm is harmless, whereas a missed one leaves the app unrecoverable.
+    let should_rearm = match app.autolaunch().is_enabled() {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            tracing::warn!(
+                "post-update: autostart state unreadable ({e}); re-arming crash recovery defensively"
+            );
+            true
+        }
+    };
+    if should_rearm {
         // C8 (D12): log-and-continue — a post-update rearm hiccup must not abort, but is never swallowed.
-        // NOTE: this only marks the guard "rearmed" on the closure running; a failing rearm is surfaced
-        // here so the operator sees a degraded state rather than a false "rearmed".
         if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
-            tracing::warn!("post-update crash-recovery rearm failed (autostart on): {e}");
+            tracing::warn!("post-update crash-recovery rearm failed: {e}");
         }
     }
 }

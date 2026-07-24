@@ -20,6 +20,10 @@ let poll = null; // active setTimeout id (self-scheduling; never overlaps)
 // Never render the query-param origin as authoritative: show a placeholder + disabled controls until the
 // server answers.
 originEl.textContent = "…";
+// codex r2 #1: defensively CLEAR the checkbox on init. The HTML ships it `disabled` so a pre-JS click
+// can't check it, but if anything (autofill/restore) left it checked, `disabled` alone wouldn't uncheck
+// it — and Allow reads `.checked`. Reset before enabling any control.
+rememberEl.checked = false;
 setControlsEnabled(false);
 
 // C9 (audit fix): the Remember checkbox is a consequential action too — a click-steal can pre-arm
