@@ -15,7 +15,7 @@ tests; frontend build + biome; Playwright/WebDriver are CI-only) and committed.
 | 5 | Updater rollback-race + bounded streaming | pending | |
 | 6 | win_acl owner not verified | pending | |
 | 7 | C8 rollback destroys recovery | pending | |
-| 8 | C9 arbiter promote-before-build | pending | |
+| 8 | C9 arbiter promote-before-build | ✓ done | `fix(c9): build auth popup before deciding active-slot` |
 | 9 | Release-CI dispatch-ref / tag-verify | pending (infra: commit+validate only, human applies) | |
 
 ## Codex consults
