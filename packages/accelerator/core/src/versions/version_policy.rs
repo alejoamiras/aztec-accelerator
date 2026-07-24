@@ -305,8 +305,13 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         .iter()
         .filter_map(|s| AztecVersion::parse(s))
         .collect();
+    // codex #4: no resolvable home ⇒ no trusted cache root ⇒ nothing to evict (and never join onto a
+    // CWD fallback). `list_cached_versions` is already empty in this case, but guard the base dir too.
+    let Some(base) = versions_base_dir() else {
+        return;
+    };
     for version in evictions(&cached, bundled, in_use) {
-        let dir = versions_base_dir().join(version.as_str());
+        let dir = base.join(version.as_str());
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
