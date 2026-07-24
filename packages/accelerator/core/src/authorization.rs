@@ -202,6 +202,15 @@ pub enum ResolveOutcome {
 /// queue backstop (`AUTH_QUEUE_BACKSTOP`) can bound the worst-case queued wait at `MAX × 60 s` (C9 D18).
 pub const MAX_PENDING_ORIGINS: usize = 10;
 
+/// Maximum number of concurrent `/prove` requests from ONE origin that may piggyback on a single
+/// pending popup. Each piggyback holds a live `oneshot::Sender` in [`PendingRequest::senders`] until
+/// the user decides (or the 60 s auto-deny fires), so without a cap an approved-pending origin could
+/// flood `/prove` during the decision window and grow that `Vec` without bound (per-origin memory
+/// exhaustion — codex quality audit #2). This bounds the survivors to `MAX × MAX_PENDING_ORIGINS`
+/// senders; the (N+1)-th piggyback is shed with `TooManyRequests` (429). 16 is far above any
+/// legitimate retry burst while a popup is on screen — a real dApp fires one prove and awaits it.
+pub const MAX_PIGGYBACK_SENDERS: usize = 16;
+
 /// A pending authorization awaiting the user's decision: its origin (for display + cleanup) and the
 /// receivers of every request piggybacking on it.
 struct PendingRequest {
@@ -316,6 +325,11 @@ impl AuthorizationManager {
         if let Some(request_id) = st.by_origin.get(origin).cloned() {
             let is_active = st.is_active(&request_id);
             if let Some(req) = st.by_request.get_mut(&request_id) {
+                // Bound the per-origin piggyback fan-out: a flood of concurrent /prove during the
+                // decision window must not grow `senders` without limit (per-origin memory DoS).
+                if req.senders.len() >= MAX_PIGGYBACK_SENDERS {
+                    return Err("too many concurrent requests for this origin");
+                }
                 req.senders.push(tx);
                 return Ok((rx, request_id, false, is_active));
             }
@@ -527,6 +541,26 @@ mod tests {
         assert!(mgr.request(&co("https://one-too-many.com")).is_err());
         // Piggybacking on an existing origin should still work
         assert!(mgr.request(&co("https://site0.com")).is_ok());
+    }
+
+    /// codex quality audit #2: a single origin flooding /prove during the decision window must not
+    /// grow `senders` without bound. The first `MAX_PIGGYBACK_SENDERS` (the initial request + its
+    /// piggybacks) succeed; the next is shed with an error → the /prove handler maps it to 429.
+    #[test]
+    fn rejects_when_too_many_piggyback_senders() {
+        let mgr = AuthorizationManager::new();
+        let origin = co("https://flood.example");
+        // The first call creates the pending request (1 sender); each subsequent call piggybacks.
+        let mut kept = Vec::new();
+        for _ in 0..MAX_PIGGYBACK_SENDERS {
+            kept.push(mgr.request(&origin).expect("under the cap must succeed"));
+        }
+        assert!(
+            mgr.request(&origin).is_err(),
+            "the (MAX_PIGGYBACK_SENDERS + 1)-th concurrent request must be shed"
+        );
+        // A DIFFERENT origin is unaffected — the cap is per pending request, not global.
+        assert!(mgr.request(&co("https://other.example")).is_ok());
     }
 
     // ─── single-active-popup arbiter (C9 D18/D19) ───────────────────────
