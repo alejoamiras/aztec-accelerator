@@ -78,7 +78,8 @@ genuine failure or ambiguity — not on routine gates.
   ┌──────────────────────────────────────────────────────────────────────┐
   │  PHASE 6 — CLOSE OUT                                                 │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  [ ] 6.1  R5b negative cross-role AssumeRole test                    │
+  │  [~] 6.1  R5b: mechanism PROVEN by IAM semantics (see log);          │
+  │           empirical negative test still nice-to-have                 │
   │  [ ] 6.2  R6 retire legacy role (separate PR) + drop AWS_ROLE_ARN    │
   │  [ ] 6.3  ⚠️ OWNER: delete the AWS ROOT access key                    │
   └──────────────────────────────────────────────────────────────────────┘
@@ -127,3 +128,16 @@ Legend: `[✓]` done · `[~]` in progress · `[ ]` pending · `[✗]` failed/blo
   outcome, just with more noise.
   NEXT: owner accepts the agreement at developer.apple.com (Account Holder), then re-dispatch
   release-accelerator with version=1.0.7-rc.1; no code changes needed.
+- 2026-07-24 — R5b (cross-role isolation) resolved by MECHANISM, not just a passing smoke.
+  Verified live in AWS: all three roles carry `token.actions.githubusercontent.com:workflow`
+  StringEquals scoped to their own workflow name (Release Accelerator / Deploy Landing Page /
+  Publish Testnet) alongside sub=refs/heads/main.
+  Proof that the claim is ENFORCED (not silently ignored): IAM evaluates StringEquals on an ABSENT
+  condition key as FALSE ⇒ deny. Both AssumeRoles SUCCEEDED (deploy-landing → ci-landing; release
+  preflight → ci-release-feed). Had AWS not populated the claim, both would have been DENIED.
+  Therefore the key IS populated and DID match; a workflow presenting a different name yields a
+  different value under StringEquals ⇒ denied. Per-workflow isolation holds.
+  This is why the runbook's worry ("a positive smoke passes silently on a dropped claim") does not
+  apply here: a dropped claim would fail CLOSED, not open. An explicit negative test remains
+  belt-and-braces, and is deferred rather than blocking (it would need a throwaway workflow on main
+  or temporarily re-pointing a secret — neither justified for an already-proven mechanism).
