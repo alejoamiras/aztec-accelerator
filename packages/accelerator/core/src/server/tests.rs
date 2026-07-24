@@ -998,12 +998,10 @@ fn resolve_version_flags_uncached_for_download() {
     // (download_bb needs the network); the no-download arm is pinned by
     // `prove_success_path_and_status_sequence`, and prove() emits Downloading/Proving structurally
     // around this flag.
-    // codex #3: a non-bundled request must now clear the downgrade policy, so use a bundled FLOOR
-    // strictly below the request on the same rc channel.
     let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.1".to_string()), None, None);
     let state = AppState::headless(core);
     let version = Some("5.0.0-rc.2".to_string());
-    let resolved = resolve_version(&state, &version).expect("valid newer version resolves");
+    let resolved = resolve_version(&state, &version).expect("valid version resolves");
     assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.2"));
     assert!(
         resolved.needs_download,
@@ -1012,14 +1010,17 @@ fn resolve_version_flags_uncached_for_download() {
 }
 
 #[test]
-fn resolve_version_rejects_downgrade_below_bundled() {
-    // codex #3: a remote x-aztec-version older than the bundled floor is a downgrade → 403, never
-    // downloaded/executed. Bundled is rc.2; requesting the older rc.1 must be refused.
+fn resolve_version_allows_older_compatible_version() {
+    // The x-aztec-version header is an Aztec version, not a bb version, and many Aztec releases share
+    // one bb — so an OLDER-but-compatible request (e.g. a 5.0.0-rc.1 dApp against a 5.0.0-rc.2 bundle)
+    // MUST be honoured, not rejected. (This is the over-blocking bug the earlier floor introduced; the
+    // gate is now a known-vulnerable revocation denylist, empty by default.) It still resolves for
+    // download + digest verification.
     let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.2".to_string()), None, None);
     let state = AppState::headless(core);
-    let result = resolve_version(&state, &Some("5.0.0-rc.1".to_string()));
-    let err = result.expect_err("a downgrade must be refused");
-    assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+    let resolved = resolve_version(&state, &Some("5.0.0-rc.1".to_string()))
+        .expect("an older compatible version must be allowed");
+    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
 }
 
 #[test]

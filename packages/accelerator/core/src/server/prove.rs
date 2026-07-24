@@ -72,6 +72,21 @@ pub(crate) fn resolve_version(
     };
     tracing::info!(version = %version, "Requested Aztec version");
 
+    // `x-aztec-version` is remote-controlled, so check well-formedness + the known-vulnerable REVOCATION
+    // denylist FIRST — BEFORE the bundled short-circuit below (codex denylist-review #1), so a version
+    // the owner has revoked is refused even if it happens to be the bundled one (fail closed; the owner
+    // ships a new bundled version alongside any such revocation). There is NO version FLOOR: the header
+    // is the Aztec version (not a bb version) and many Aztec releases share one bb, so an
+    // older-but-compatible request must be honoured (downloads are still digest-verified against Aztec's
+    // published hash). The denylist is empty by default ⇒ any well-formed version is allowed.
+    if let Err(rej) = versions::check_version_selectable(&version) {
+        tracing::warn!(version = %version, reason = rej.reason(), "Refused remote Aztec version");
+        return Err(ProveError::VersionNotAllowed {
+            version: version.to_string(),
+            reason: rej.reason(),
+        });
+    }
+
     let bundled = state
         .bundled_version
         .as_deref()
@@ -85,18 +100,6 @@ pub(crate) fn resolve_version(
         return Ok(ResolvedVersion {
             version: None,
             needs_download: false,
-        });
-    }
-
-    // codex audit #3: `x-aztec-version` is remote-controlled, so a non-bundled request must clear the
-    // downgrade policy BEFORE we download/execute it — otherwise a dApp could force an authentic-but-
-    // -vulnerable OLD bb (or an arbitrary dev build). Every version that survives this gate is one we
-    // consider safe to prove with. The bundled request already returned above.
-    if let Err(rej) = versions::check_version_selectable(&version, bundled) {
-        tracing::warn!(version = %version, bundled = %bundled, reason = rej.reason(), "Refused remote bb version");
-        return Err(ProveError::VersionNotAllowed {
-            version: version.to_string(),
-            reason: rej.reason(),
         });
     }
 
