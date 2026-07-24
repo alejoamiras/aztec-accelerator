@@ -52,3 +52,10 @@ parity), documented in the plan's Security section.
   fail-closes otherwise).
 - **Codex FFI audit** (plan hard-gate): still to run at post-impl — the correctness backstop for the unsafe
   SID/ACL/handle/free/reparse details, per the plan.
+
+## Post-impl codex audit — consult log
+- First post-impl codex run (full-diff prompt) was **infra-killed** mid-exploration (~5.9k lines streamed,
+  no verdict) — the recurring codex-kill on this box (also hit 3× during planning). Per AFK protocol: logged,
+  not silently skipped.
+- Relaunched **tight**, `win_acl.rs`-only (the highest-risk unsafe FFI), read-only, via stdin — the
+  invocation shape that survived during planning. Verdict folded on completion.
