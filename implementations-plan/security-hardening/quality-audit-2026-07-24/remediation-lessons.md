@@ -12,7 +12,7 @@ tests; frontend build + biome; Playwright/WebDriver are CI-only) and committed.
 | 2 | /prove per-origin piggyback sender cap | ✓ done | `fix(prove): cap per-origin piggyback senders` |
 | 3 | Version-downgrade policy (x-aztec-version) | ✓ done | `fix(prove): enforce a safe-default bb version-downgrade policy` |
 | 4 | CWD cache fail-open | ✓ done | `fix(cache): fail closed when home dir is unresolvable` |
-| 5 | Updater rollback-race + bounded streaming | pending | |
+| 5 | Updater rollback-race + bounded streaming | analysis done; codex consult in flight | |
 | 6 | win_acl owner not verified | ✓ done | `fix(f-003): set + verify object OWNER == current user` |
 | 7 | C8 rollback destroys recovery | ✓ done | `fix(c8): autostart rollback restores prior recovery + surfaces failures` |
 | 8 | C9 arbiter promote-before-build | ✓ done | `fix(c9): build auth popup before deciding active-slot` |
@@ -39,6 +39,26 @@ Codex also recommended (NOT yet done — noted for the owner / future work): a d
 mechanism (a newer authentic release can still regress), per-network/origin local pinning so the
 remote header only *selects within* local policy. Logged; out of scope for the safe default.
 Rate-limit downloads / cap cache / atomic install — partially covered by existing caps + item #5.
+
+## Pre-PR gate (whole branch, so far)
+- `bun run lint` → exit 0 (one PRE-EXISTING biome warning: unused `firstCallMs` in
+  `accelerator-prover.test.ts`, not from this work; warnings don't fail).
+- `bun run test:typecheck` → exit 0.
+- `bun run lint:actions` → clean (release-accelerator.yml change).
+- Per-crate: core 185 tests + clippy + fmt clean; src-tauri crash_recovery/updater tests pass
+  (sidecar-stubbed); win_acl via `cargo check --target x86_64-pc-windows-gnu`; tauri bin
+  `cargo check --features webdriver` clean (sidecar-stubbed).
+- Playwright + WebDriver = CI-only (unsupported OS locally).
+
+## Codex consults (cont.)
+
+### #5 updater record_pending ordering (2026-07-24, gpt-5.6-sol xhigh) — IN FLIGHT
+Consulting on whether the record-AFTER-install fail-open (+ cross-process lock) is an acceptable
+production residual vs moving record-before-install (which poisons a version on any install
+failure, since `commit_successful_launch(current)` only clears `pending <= current`). Also
+confirming the plugin-buffer / feed-buffer size points are correctly accepted (R3 rejected the
+hand-rolled reqwest+minisign rewrite that alone could bound bytes-read). Verdict pending; will act
+on the stronger argument and record it here.
 
 ## Notes
 - `semver = "1"` was already a core dependency — no new dep.
