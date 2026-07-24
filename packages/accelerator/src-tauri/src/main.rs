@@ -181,7 +181,7 @@ async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
     if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {
         let auto_update_pref = { config_state.read().auto_update };
         let current_version = env!("CARGO_PKG_VERSION").to_string();
-        let new_version = update.version.clone();
+        let new_version = update.version().to_string();
 
         // Store the update so respond_update_prompt can use it directly
         if let Some(pending) = app.try_state::<PendingUpdate>() {
@@ -269,6 +269,46 @@ fn spawn_update_poller(app_handle: AppHandle, config: ConfigState) {
     });
 }
 
+/// Spawn the F-004 Layer B post-launch floor tracker. Once THIS build's OWN accelerator server has
+/// answered `/health` — as a healthy Aztec reporting OUR exact version — 3 consecutive times, advance
+/// the monotonic version floor to the running version. Two guards matter (audit H3):
+///   - 3 consecutive HEALTHY probes (not merely "process started") means a build that boots but
+///     immediately wedges its server never ratchets the floor;
+///   - the reported `/health.version` must equal `CARGO_PKG_VERSION`. The redundant-instance bow-out
+///     is Windows-only, so on macOS/Linux a broken new build that LOST the `:59833` bind would still
+///     see the healthy INCUMBENT's `/health` and could otherwise commit ITS OWN (never-run) version.
+///     Matching the version proves we are observing our own server (we own the bind).
+///
+/// Runs once; gated off for webdriver builds.
+#[cfg(not(feature = "webdriver"))]
+fn spawn_floor_tracker() {
+    tauri::async_runtime::spawn(async move {
+        let want = env!("CARGO_PKG_VERSION");
+        let mut consecutive = 0u32;
+        // Bounded (~2 min) so a genuinely unhealthy build never commits the floor.
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if aztec_accelerator::server::healthy_aztec_version_on_port()
+                .await
+                .as_deref()
+                == Some(want)
+            {
+                consecutive += 1;
+                if consecutive >= 3 {
+                    aztec_accelerator::updater::commit_launch_floor();
+                    return;
+                }
+            } else {
+                consecutive = 0;
+            }
+        }
+        tracing::warn!(
+            version = want,
+            "Launch never reached 3 consecutive healthy version-matched probes; version floor not advanced this run"
+        );
+    });
+}
+
 // ── Desktop bootstrap (q7e3-F-04) ────────────────────────────────────────
 // `.setup()` was a ~150-line Long Method closure. These phase helpers carry the capture-heavy
 // construction; the closure stays a thin, visibly-ordered sequencer because two orderings there are
@@ -291,8 +331,14 @@ fn build_tray(
             // → relaunch. Windows-only: mac/linux key on exit code (launchd
             // SuccessfulExit:false / systemd on-failure), so a clean quit is a
             // no-op there and the recovery entry must persist across quit.
+            // codex #7: surface (log) a non-confirmed disarm — an unconfirmed disable here means the
+            // Task Scheduler recovery entry may survive and relaunch the app within ~1 min of this quit.
             #[cfg(target_os = "windows")]
-            aztec_accelerator::crash_recovery::disable_crash_recovery();
+            if !aztec_accelerator::crash_recovery::disable_crash_recovery() {
+                tracing::warn!(
+                    "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
+                );
+            }
             app.exit(0);
         }
         "show_logs" => open_in_browser(&log_dir()),
@@ -452,6 +498,7 @@ fn main() {
             commands::remove_approved_origin,
             commands::get_system_info,
             commands::get_verified_info,
+            commands::get_pending_auth,
             commands::respond_auth,
             commands::enable_safari_support,
             commands::disable_safari_support,
@@ -462,6 +509,7 @@ fn main() {
             // Hide from Dock — tray-only app
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let bundled_version = env!("AZTEC_BB_VERSION").to_string();
 
             let status = MenuItemBuilder::with_id("status", "Status: Idle")
@@ -471,8 +519,20 @@ fn main() {
             // Check autostart on launch for crash recovery
             {
                 use tauri_plugin_autostart::ManagerExt;
-                if app.autolaunch().is_enabled().unwrap_or(false) {
-                    aztec_accelerator::crash_recovery::enable_crash_recovery();
+                // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and it
+                // must NOT be silently swallowed. codex #7: distinguish a READ ERROR from a confirmed
+                // "off". Treating an is_enabled() error as `false` would silently skip re-arming crash
+                // recovery when autostart was in fact on but momentarily unreadable.
+                match app.autolaunch().is_enabled() {
+                    Ok(true) => {
+                        if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
+                            tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(
+                        "could not read autostart state at startup; crash recovery not re-armed: {e}"
+                    ),
                 }
             }
 
@@ -543,6 +603,8 @@ fn main() {
             #[cfg(not(feature = "webdriver"))]
             if should_poll_for_updates() {
                 spawn_update_poller(app.handle().clone(), config_state.clone());
+                // F-004 Layer B: advance the monotonic version floor once this build proves it runs.
+                spawn_floor_tracker();
             }
 
             Ok(())

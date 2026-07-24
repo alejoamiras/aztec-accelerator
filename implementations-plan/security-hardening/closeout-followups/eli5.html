@@ -1,0 +1,222 @@
+<title>Closeout follow-ups — plan ELI5</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --surface:#ffffff; --surface-2:#eef1f5;
+    --fg:#191d26; --muted:#5b6675; --hairline:#dde2e9;
+    --accent:#2f5fd0; --accent-soft:#e7edfb;
+    --done:#1f8a5b; --done-bg:#e3f4ec;
+    --need:#b06f12; --need-bg:#f8efdd;
+    --stop:#b1483d; --stop-bg:#f7e3e0;
+    --code:#eef1f5; --focus:#2f5fd0;
+    --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0f131a; --surface:#161b24; --surface-2:#1c2330;
+      --fg:#e7eaf0; --muted:#9aa5b4; --hairline:#28303c;
+      --accent:#7ba0f0; --accent-soft:#1b2740;
+      --done:#5ec790; --done-bg:#122a20;
+      --need:#e0ab5b; --need-bg:#2c2413;
+      --stop:#e08b7f; --stop-bg:#2c1a17;
+      --code:#1c2330; --focus:#7ba0f0;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f7f9; --surface:#ffffff; --surface-2:#eef1f5; --fg:#191d26; --muted:#5b6675;
+    --hairline:#dde2e9; --accent:#2f5fd0; --accent-soft:#e7edfb; --done:#1f8a5b; --done-bg:#e3f4ec;
+    --need:#b06f12; --need-bg:#f8efdd; --stop:#b1483d; --stop-bg:#f7e3e0; --code:#eef1f5; --focus:#2f5fd0;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f131a; --surface:#161b24; --surface-2:#1c2330; --fg:#e7eaf0; --muted:#9aa5b4;
+    --hairline:#28303c; --accent:#7ba0f0; --accent-soft:#1b2740; --done:#5ec790; --done-bg:#122a20;
+    --need:#e0ab5b; --need-bg:#2c2413; --stop:#e08b7f; --stop-bg:#2c1a17; --code:#1c2330; --focus:#7ba0f0;
+  }
+
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.62;
+    margin:0;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  .wrap{max-width:760px;margin:0 auto;padding:clamp(1.4rem,4vw,3rem) clamp(1.1rem,4vw,1.6rem) 5rem}
+  h1{font-size:clamp(1.55rem,4vw,2.05rem);line-height:1.15;margin:.2rem 0 .1rem;letter-spacing:-.01em;text-wrap:balance}
+  h2{font-size:1.18rem;margin:2.6rem 0 .3rem;letter-spacing:-.005em;text-wrap:balance}
+  h3{font-size:1.02rem;margin:0 0 .15rem}
+  p{margin:.55rem 0}
+  a{color:var(--accent)}
+  .lead{font-size:1.06rem;color:var(--fg)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0}
+  .muted{color:var(--muted)}
+  .rule{height:1px;background:var(--hairline);border:0;margin:2.2rem 0}
+
+  .chips{display:flex;flex-wrap:wrap;gap:.4rem;margin:.9rem 0 0}
+  .chip{font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;
+    padding:.24rem .55rem;border-radius:999px;border:1px solid var(--hairline);color:var(--muted);white-space:nowrap}
+  .chip.accent{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+  .chip.done{color:var(--done);background:var(--done-bg);border-color:transparent}
+  .chip.need{color:var(--need);background:var(--need-bg);border-color:transparent}
+  .chip.stop{color:var(--stop);background:var(--stop-bg);border-color:transparent}
+
+  .card{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;
+    padding:1.15rem 1.25rem;margin:1rem 0}
+  .card .top{display:flex;align-items:baseline;justify-content:space-between;gap:.6rem;flex-wrap:wrap}
+  .item-id{font-family:var(--mono);font-size:.78rem;color:var(--muted)}
+  .gate{font-family:var(--mono);font-size:.78rem;color:var(--muted);margin-top:.5rem;
+    padding-top:.5rem;border-top:1px dashed var(--hairline)}
+  .gate b{color:var(--fg);font-weight:600}
+
+  .callout{border-left:3px solid var(--accent);background:var(--surface);border-radius:0 10px 10px 0;
+    padding:.9rem 1.1rem;margin:1.2rem 0}
+  .callout.need{border-color:var(--need)}
+  .callout.done{border-color:var(--done)}
+  .callout h3{margin-top:0}
+
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:.45rem;font-family:var(--mono);font-size:.8rem;margin:.7rem 0}
+  .flow span{padding:.22rem .5rem;border-radius:6px;background:var(--surface-2);border:1px solid var(--hairline)}
+  .flow .arr{background:none;border:none;color:var(--muted);padding:0 .1rem}
+  .flow .r{color:var(--stop);border-color:var(--stop)}
+  .flow .g{color:var(--done);border-color:var(--done)}
+
+  ul{margin:.4rem 0;padding-left:1.15rem}
+  li{margin:.28rem 0}
+  .decisions{list-style:none;padding:0;margin:.6rem 0;display:grid;gap:.5rem}
+  .decisions li{display:flex;gap:.6rem;align-items:flex-start}
+  .decisions .k{font-family:var(--mono);font-size:.76rem;color:var(--accent);flex:0 0 auto;min-width:9.5rem}
+
+  pre{background:var(--code);border:1px solid var(--hairline);border-radius:10px;padding:.9rem 1rem;
+    overflow-x:auto;font-family:var(--mono);font-size:.8rem;line-height:1.55;margin:.5rem 0}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:.05rem .32rem;border-radius:5px}
+  pre code{background:none;padding:0}
+  .seed{margin:1.1rem 0}
+  .seed .tag{font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .seed.rec{border-radius:12px;border:1px solid var(--accent);background:var(--accent-soft);padding:.2rem 1rem .8rem;margin-top:1rem}
+  .seed.rec .tag{color:var(--accent)}
+  .warn{color:var(--need);font-weight:600;font-size:.92rem}
+
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Aztec Accelerator · security-hardening</p>
+  <h1>Closeout follow-ups</h1>
+  <p class="lead">Three loose ends from the security campaign — a Windows file lock, three fixes to the “allow this
+    site?” prompt, and a cleaner undo when switching on launch-at-startup. Small, self-contained, and landed on the
+    <code>security-hardening</code> branch so the eventual merge to <code>main</code> carries them.</p>
+  <div class="chips">
+    <span class="chip accent">Tier: MID</span>
+    <span class="chip">3 items · 1 branch · 1 PR</span>
+    <span class="chip done">Plan ready for approval</span>
+  </div>
+
+  <h2>Why MID, when you asked for light</h2>
+  <p>It started as <b>light</b> (one review). The review — two independent expert passes, one from Codex and one from
+    a separate model — flagged that the Windows-lock work is <b>brand-new low-level Windows security code</b> and that
+    it touches a real private-key file. Both reviewers said: use the heavier process. So it escalated.</p>
+  <div class="flow">
+    <span>light plan</span><span class="arr">→</span>
+    <span class="r">codex: reject</span><span class="arr">+</span>
+    <span class="r">opus: conditional</span><span class="arr">→</span>
+    <span>escalate → MID</span><span class="arr">→</span>
+    <span>revised plan</span><span class="arr">→</span>
+    <span class="g">fresh pass: conditional ✓</span>
+  </div>
+  <p class="muted">The reviews also caught a factual error in my first draft: I’d called a file “the CA private key.”
+    It isn’t — the certificate authority key is never written to disk. The unprotected file is the <b>localhost TLS
+    key</b>. Corrected, and the plan re-grounded on what’s actually at risk.</p>
+
+  <h2>The three fixes</h2>
+
+  <div class="card">
+    <div class="top"><h3>The Windows lock</h3><span class="chip">F-003 · hardening</span></div>
+    <p>On Mac and Linux, the scratch folder your private transaction data briefly passes through is already locked to
+      just you. On <b>Windows that lock does nothing</b> — the folder inherits whatever permissions it’s given. We add
+      a real owner-only lock, applied at the moment the folder/file is created (so there’s no unlocked instant), and
+      we cover the localhost TLS key and the settings file too.</p>
+    <p class="muted"><b>Honest limit:</b> this separates <i>different Windows users</i>. It does <i>not</i> wall off
+      programs run by the <i>same</i> user — exactly like the Mac/Linux lock. If all your agents run as one Windows
+      user, this is defense-in-depth, not a wall between them.</p>
+    <p class="gate"><b>Proves itself by:</b> a Windows-CI test that reads the folder’s actual permissions back and
+      asserts owner-only, plus a check that a planted shortcut/junction can’t redirect the lock.</p>
+  </div>
+
+  <div class="card">
+    <div class="top"><h3>The “allow this site?” prompt</h3><span class="chip need">C9 · MED + 2×LOW</span></div>
+    <p>Three sharpenings of the approval popup a dApp triggers:</p>
+    <ul>
+      <li><b>Click-steal (MED):</b> today a second prompt can pop up under your cursor and catch a click you meant for
+        the first. Fix: only <b>one prompt is clickable at a time</b>, and buttons ignore a click for a beat after the
+        prompt appears — so a click can’t be stolen.</li>
+      <li><b>Look-alike extension IDs (LOW):</b> reject browser-extension origins with weird hidden/look-alike
+        characters, using each browser’s real ID format.</li>
+      <li><b>Show the real name (LOW):</b> the popup now displays the site name the <b>server actually recorded</b>,
+        not one handed in through the web address.</li>
+    </ul>
+    <p class="gate"><b>Proves itself by:</b> Rust tests for the one-at-a-time queue + the click delay + rejected IDs;
+      a two-site browser test in CI that a click can’t jump prompts.</p>
+  </div>
+
+  <div class="card">
+    <div class="top"><h3>The startup-launch undo</h3><span class="chip">C8 · robustness</span></div>
+    <p>Switching on “launch at startup” does two things. If the second half fails, today the first half is left
+      switched on — a half-on state. Fix: <b>undo the first half</b> if the second fails — and if the <i>undo</i>
+      itself fails, <b>say so loudly</b> instead of pretending it worked. Care is taken not to treat an already-on
+      state as a failure (that would wrongly switch a working setup back off).</p>
+    <p class="gate"><b>Proves itself by:</b> Rust tests that force each failure point and confirm the undo runs
+      completely, in order, and reports honestly.</p>
+  </div>
+
+  <h2>Decisions you already made</h2>
+  <ul class="decisions">
+    <li><span class="k">Tier</span><span>Escalate to <b>MID</b> — both reviewers advised it.</span></li>
+    <li><span class="k">Click-steal fix</span><span>Guard <b>+</b> one-clickable-prompt-at-a-time (the sturdier option).</span></li>
+    <li><span class="k">Windows lock scope</span><span>Scratch folder <b>+ the TLS key + the settings file</b>.</span></li>
+    <li><span class="k">Packaging</span><span>Stack on <code>security-hardening</code>; one PR, three phases.</span></li>
+  </ul>
+
+  <div class="callout need">
+    <h3>What approving means</h3>
+    <p>You’d be confirming: the three-item <b>scope</b> above; the <b>MID</b> tier; that Windows and the popup are
+      verified in <b>CI</b> (this box has no GUI); and which <b>start seed</b> to run the build with. No live systems,
+      secrets, or <code>main</code> are touched — this lands on <code>security-hardening</code> like the rest of the
+      campaign.</p>
+    <p class="muted">Full engineering detail (the unsafe Windows FFI, the arbiter wiring, the rollback transaction)
+      lives in <code>implementations-plan/security-hardening/closeout-followups/plan.md</code>, kept out of here on
+      purpose.</p>
+  </div>
+
+  <h2>Start seeds</h2>
+  <p>Two ways to run the implementation session. <span class="warn">Use exactly one — they don’t combine.</span></p>
+
+  <div class="seed rec">
+    <p class="tag">Recommended · /loop</p>
+    <p class="muted" style="margin:.2rem 0 .4rem">Windows-CI and browser-test results aren’t fully visible turn-by-turn,
+      so an interval cadence keeps it driving through CI waits.</p>
+    <pre><code>/loop 15m Drive implementations-plan/security-hardening/closeout-followups
+forward. Never idle. Each firing: read plan.md + lessons/ (authoritative),
+git status; if a PR exists check gh pr checks (no --watch). Waiting on CI is
+fine — use it to review the diff / strengthen tests. No task? take the next
+pending step; after each edit run the fast layers (cargo fmt/clippy + touched
+crate tests, or bun lint), commit → push. Stuck or a real decision? /codex
+xhigh, log it in lessons/phase-N.md, act on the stronger argument; never merge
+to main/release, never expand scope. Same step failed 5×? reassess with codex.
+Phase green = its plan.md gate passes → mark ✓, file lessons, print
+LESSONS_FILE=..., advance. All phases ✓? /code-review max --fix → commit →
+codex post-impl audit → address high/critical → wrap-up report + stop.</code></pre>
+  </div>
+
+  <div class="seed">
+    <p class="tag">Alternative · /goal</p>
+    <pre><code>/goal All 3 phases in implementations-plan/security-hardening/closeout-
+followups/plan.md marked ✓ (per-phase headers), each ✓ backed by its
+validation gate reported passing in the transcript; per phase the agent
+printed LESSONS_FILE=implementations-plan/security-hardening/closeout-
+followups/lessons/phase-N.md; /code-review max --fix committed; codex
+post-impl audit (xhigh) high/critical addressed (esp. the win_acl unsafe FFI);
+PR into security-hardening green (accelerator-status + WebDriver + windows-
+build lanes); bun run test and bun run lint:actions exit 0 in the transcript.</code></pre>
+  </div>
+
+  <hr class="rule">
+  <p class="muted" style="font-size:.85rem">Plan: <code>implementations-plan/security-hardening/closeout-followups/plan.md</code>
+    · Recon &amp; audit transcripts alongside it · Reviews of record: Codex (v1 reject → folded), Opus (v1 + fresh v2,
+    both conditional → folded).</p>
+</div>

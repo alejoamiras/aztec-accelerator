@@ -77,7 +77,6 @@ async function findMissingPackages(version: string, packageFiles: string[]): Pro
 }
 
 const CRS_FILE = "packages/playground/src/aztec.ts";
-const COPY_BB_FILE = "packages/accelerator/scripts/copy-bb.ts";
 
 /** Bump CRS_CACHE_VERSION so returning playground visitors re-download the CRS if bb.js changed its format. */
 async function updateCrsCacheVersion(version: string): Promise<boolean> {
@@ -88,28 +87,10 @@ async function updateCrsCacheVersion(version: string): Promise<boolean> {
   return true;
 }
 
-/** Fetch + pin the Windows bb.exe SHA-256 (the Windows Prebuild/Build Smoke gates verify it). Best-effort. */
-async function pinWindowsBbChecksum(version: string): Promise<string> {
-  const original = await Bun.file(COPY_BB_FILE).text();
-  if (original.includes(`"${version}":`)) return `Windows bb checksum: already pinned for ${version}.`;
-  const url = `https://github.com/AztecProtocol/aztec-packages/releases/download/v${version}/barretenberg-amd64-windows.tar.gz`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return `Windows bb checksum: fetch failed (HTTP ${res.status}) — pin "${version}" in ${COPY_BB_FILE} manually.`;
-    const digest = await crypto.subtle.digest("SHA-256", await res.arrayBuffer());
-    const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    // Anchor on the CHECKSUMS map's own closing brace — not on whatever declaration happens
-    // to follow the map (that anchor went stale once before and auto-insert silently failed).
-    const mapStart = original.indexOf("const WINDOWS_BB_CHECKSUMS");
-    const idx = mapStart === -1 ? -1 : original.indexOf("\n};", mapStart);
-    const entry = `\n  // @aztec/bb.js ${version} — sha256 of barretenberg-amd64-windows.tar.gz from the v${version} release (auto-pinned).\n  "${version}": "${sha}",`;
-    if (idx === -1) return `Windows bb checksum for ${version} = ${sha} — couldn't auto-insert; add it to ${COPY_BB_FILE} manually.`;
-    await Bun.write(COPY_BB_FILE, original.slice(0, idx) + entry + original.slice(idx));
-    return `Windows bb checksum: pinned ${version} = ${sha.slice(0, 12)}… in ${COPY_BB_FILE}.`;
-  } catch (err) {
-    return `Windows bb checksum: ${(err as Error).message} — pin "${version}" manually.`;
-  }
-}
+// F-008: the Windows bb.exe pin is NEVER auto-generated here. Auto-downloading the asset and writing its
+// own hash is circular (a twice-downloaded asset is not independent evidence). A human adds a reviewed
+// `manual-review` entry to WINDOWS_BB_CHECKSUMS (copy-bb.ts); the post-install `check-windows-bb-pin.ts`
+// step reports whether the live bb.js version has a pin, and the Windows CI gate fails closed without one.
 
 async function main() {
   const newVersion = process.argv[2];
@@ -160,7 +141,7 @@ async function main() {
   // Companion bumps an @aztec version change also requires (lessons from the 5.0.0-rc.2 bump):
   const crsBumped = await updateCrsCacheVersion(newVersion);
   if (crsBumped) console.log(`Bumped CRS_CACHE_VERSION → ${newVersion} in ${CRS_FILE}.`);
-  console.log(await pinWindowsBbChecksum(newVersion));
+  // The Windows bb.exe pin is intentionally NOT touched here (F-008) — see check-windows-bb-pin.ts.
 
   if (updatedFiles === 0 && !crsBumped) {
     console.log("\nAll files already at target version. No changes needed.");

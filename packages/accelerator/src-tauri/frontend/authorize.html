@@ -5,63 +5,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Authorize Site</title>
   <link rel="stylesheet" href="style.css" />
-  <script src="tauri-bridge.js"></script>
+  <script type="module" src="assets/authorize.js"></script>
 </head>
 <body>
   <div class="popup-container">
-    <h2>A site wants to use the Aztec Accelerator</h2>
-    <div class="popup-detail">
-      <div id="recognized" class="recognized-row" hidden>
-        <span class="recognized-name"></span>
-        <svg class="verified-check" aria-label="Verified by Aztec Accelerator maintainers" role="img" viewBox="0 0 24 24">
-          <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-        </svg>
+    <div class="popup-scroll">
+      <h2>A site wants to use the Aztec Accelerator</h2>
+      <div class="popup-detail">
+        <div id="recognized" class="recognized-row" hidden>
+          <span class="recognized-name"></span>
+          <svg class="verified-check" aria-label="Verified by Aztec Accelerator maintainers" role="img" viewBox="0 0 24 24">
+            <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+          </svg>
+        </div>
+        <!-- F-014: the FULL canonical origin is shown as visible, selectable, keyboard-focusable text —
+             never truncated (a truncation could hide the registrable domain and disguise a look-alike).
+             dir=ltr + unicode-bidi isolation (CSS) prevent bidi visual reordering; punycode stays canonical
+             (never decoded to Unicode homoglyphs). -->
+        <div id="origin" class="origin-line" tabindex="0" dir="ltr" role="group" aria-label="Requesting origin"></div>
       </div>
-      <div id="origin" class="origin-line"></div>
+      <label class="popup-remember">
+        <!-- codex r2 #1: ship DISABLED so a click landing before the deferred module runs cannot pre-check
+             it (a disabled checkbox ignores clicks). authorize.js enables it only once this popup is the
+             active, past-the-click-guard request. -->
+        <input type="checkbox" id="remember" disabled />
+        Always allow this site
+      </label>
     </div>
-    <label class="popup-remember">
-      <input type="checkbox" id="remember" checked />
-      Remember this site
-    </label>
     <div class="popup-buttons">
       <button class="btn btn-secondary" id="deny">Deny</button>
-      <button class="btn btn-primary" id="allow">Allow</button>
+      <button class="btn btn-primary" id="allow">Allow once</button>
     </div>
   </div>
-
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const origin = params.get("origin") || "unknown";
-    // SEC-06: the opaque request id the server issued for this popup. Echoed back to respond_auth so
-    // the decision resolves by id (not origin) — a stale/forged popup can't resolve another request.
-    const requestId = params.get("requestId") || "";
-    document.getElementById("origin").textContent = origin;
-
-    // Fetch recognition info; render badge if the origin is on the curated list.
-    // Safe on error: an IPC failure falls through to the unrecognized rendering.
-    invoke("get_verified_info", { origin })
-      .then((info) => {
-        if (!info) return;
-        const recognized = document.getElementById("recognized");
-        recognized.querySelector(".recognized-name").textContent = info.display_name;
-        recognized.hidden = false;
-      })
-      .catch(() => {});
-
-    function respond(allowed) {
-      const remember = document.getElementById("remember").checked;
-      return invoke("respond_auth", { requestId, origin, allowed, remember });
-    }
-
-    wireButton("allow", {
-      disableAlso: "deny",
-      onClick: () => respond(true),
-    });
-
-    wireButton("deny", {
-      disableAlso: "allow",
-      onClick: () => respond(false),
-    });
-  </script>
 </body>
 </html>

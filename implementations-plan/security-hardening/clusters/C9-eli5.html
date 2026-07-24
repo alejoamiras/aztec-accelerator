@@ -1,0 +1,15 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>C9 / F-014 — ELI5</title>
+<style>body{max-width:800px;margin:0 auto;padding:2rem 1.2rem;font:16px/1.6 -apple-system,system-ui,sans-serif;color:#1a1a1a;background:#fff}@media(prefers-color-scheme:dark){body{background:#16181c;color:#e6e6e6}}h1{font-size:1.6rem}h2{font-size:1.2rem;border-bottom:1px solid #ccc;padding-bottom:.3rem;margin-top:1.6rem}code{background:#eef;padding:.1rem .3rem;border-radius:4px}@media(prefers-color-scheme:dark){code{background:#232838}}</style></head><body>
+<h1>C9 — The "which site is asking?" popup (F-014)</h1>
+<p>When a website asks to use the accelerator, a popup shows the site's origin and Allow/Deny. If that origin is displayed in a way that <em>hides</em> the real identity, a user could Allow a malicious look-alike. F-014 fixes how the origin is shown + how "Remember" behaves.</p>
+<h2>What we're fixing</h2>
+<ul>
+<li><b>Show the WHOLE origin, never truncated.</b> The original plan tried a middle-ellipsis, but the audit proved that can't reliably keep the important part (the registrable domain) visible — e.g. <code>tenant.github.io</code>, ports, IPv6, long names all break it, and you can't fit an unbounded host in a fixed width. The correct, simpler fix: show the <em>complete</em> canonical origin as real, selectable, scrollable text (with Allow/Deny always reachable in a footer). Nothing is hidden, so nothing can be disguised. No 200KB public-suffix-list needed.</li>
+<li><b>Keep punycode as-is</b> (don't decode it to Unicode homoglyphs) + isolate text direction so bidi tricks can't visually reorder it.</li>
+<li><b>"Remember" defaults to OFF.</b> A hasty Allow shouldn't permanently trust a site. The primary button becomes "Allow once"; a separate "Always allow this site" checkbox is the deliberate opt-in.</li>
+<li><b>Show the TRUE origin, not a spoofable one.</b> The popup will display the origin the <em>server</em> holds for this request (via a new <code>get_pending_auth</code> command), not a URL parameter that could disagree with the request actually being resolved.</li>
+</ul>
+<h2>Deferred (documented follow-ups)</h2>
+<p>The audit also found two bigger, real issues tracked as follow-ups: stacked popups can "steal" a click by grabbing focus (needs UI serialization), and extension-scheme origins aren't ASCII-validated. Both are beyond this light cluster.</p>
+<p>Full plan: <a href="C9-plan.md">C9-plan.md</a> · audit: <a href="C9-audit-codex.md">codex</a></p>
+</body></html>

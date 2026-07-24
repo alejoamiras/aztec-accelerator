@@ -21,6 +21,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
 base64 = "0.22"
+# F-004: in-app verification of the signed update-manifest envelope (same crate + version the
+# updater plugin uses for artifact sigs) + SemVer comparison for the monotonic version floor.
+# These live in the GUI-agnostic core so they are unit-testable without the Tauri/GTK toolchain.
+minisign-verify = "=0.2.5"
+semver = "1"
 tempfile = "3"
 tracing = "0.1"
 dirs = "6"
@@ -36,7 +41,22 @@ url = "2"
 time = "0.3"
 uuid = { version = "1.20.0", features = ["v4"] }
 
+# F-003 Windows tail: owner-only ACLs on the prove workspace + witness + config.json. Promotes the
+# already-transitive windows-sys (via tempfile/tokio) to a DIRECT edge, version-aligned to the resolved
+# 0.61.x — no NEW crate (supply-chain caution; NOT the unmaintained windows-acl). Windows-only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
 serial_test = "3"
+futures-util = "0.3" # stalled/error body streams for the F-009 /prove read-timeout tests
+filetime = "0.2"     # backdate cache-dir mtimes in the B1/B2 age-gate reap/eviction tests

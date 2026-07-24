@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendDir = join(__dirname, "src-tauri", "frontend");
+// F-012: the pages load bundled `assets/*.js` built from `frontend-src/` — build them before serving.
+const buildFrontend = join(__dirname, "scripts", "build-frontend.ts");
 
 export default defineConfig({
   use: {
@@ -11,7 +13,7 @@ export default defineConfig({
     headless: true,
   },
   webServer: {
-    command: "bunx serve -l 3456 --no-clipboard .",
+    command: `bun ${JSON.stringify(buildFrontend)} && bunx serve -l 3456 --no-clipboard .`,
     port: 3456,
     reuseExistingServer: true,
     cwd: frontendDir,

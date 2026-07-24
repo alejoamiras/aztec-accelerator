@@ -998,10 +998,11 @@ fn resolve_version_flags_uncached_for_download() {
     // (download_bb needs the network); the no-download arm is pinned by
     // `prove_success_path_and_status_sequence`, and prove() emits Downloading/Proving structurally
     // around this flag.
-    let state = AppState::default();
-    let version = Some("5.0.0-rc.1".to_string());
+    let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.1".to_string()), None, None);
+    let state = AppState::headless(core);
+    let version = Some("5.0.0-rc.2".to_string());
     let resolved = resolve_version(&state, &version).expect("valid version resolves");
-    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
+    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.2"));
     assert!(
         resolved.needs_download,
         "uncached non-bundled version must be flagged for download"
@@ -1009,13 +1010,32 @@ fn resolve_version_flags_uncached_for_download() {
 }
 
 #[test]
-fn resolve_version_no_download_for_bundled() {
-    // The bundled version is always present → never flagged for download (no Downloading status).
+fn resolve_version_allows_older_compatible_version() {
+    // The x-aztec-version header is an Aztec version, not a bb version, and many Aztec releases share
+    // one bb — so an OLDER-but-compatible request (e.g. a 5.0.0-rc.1 dApp against a 5.0.0-rc.2 bundle)
+    // MUST be honoured, not rejected. (This is the over-blocking bug the earlier floor introduced; the
+    // gate is now a known-vulnerable revocation denylist, empty by default.) It still resolves for
+    // download + digest verification.
+    let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.2".to_string()), None, None);
+    let state = AppState::headless(core);
+    let resolved = resolve_version(&state, &Some("5.0.0-rc.1".to_string()))
+        .expect("an older compatible version must be allowed");
+    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
+}
+
+#[test]
+fn resolve_version_normalizes_bundled_to_none() {
+    // F-007: an explicit bundled request normalizes to `version: None` — the bundled bb ships as the
+    // sidecar (resolved via `find_bb(None)`), never the version cache. Never flagged for download, and
+    // `None` means a `Some(v)` downstream is unambiguously non-bundled (⇒ marker-verified cache only).
     let core = HeadlessState::headless("1.0.0", Some("0.99.0".to_string()), None, None);
     let state = AppState::headless(core);
     let requested = Some("0.99.0".to_string());
     let resolved = resolve_version(&state, &requested).expect("bundled resolves");
-    assert_eq!(resolved.version.as_deref(), Some("0.99.0"));
+    assert!(
+        resolved.version.is_none(),
+        "bundled request must normalize to None (sidecar path)"
+    );
     assert!(
         !resolved.needs_download,
         "bundled version must NOT download"
@@ -1133,4 +1153,35 @@ async fn invalid_host_reply_stays_application_json_without_message() {
         json.get("message").is_none(),
         "invalid_host must NOT carry a message field (minimal host-guard reply)"
     );
+}
+
+#[tokio::test]
+async fn prove_sheds_with_429_when_waiter_cap_full() {
+    // F-009 (handler-level): with the in-flight/waiting cap already full (prove_waiters exhausted),
+    // an authorized /prove request is shed IMMEDIATELY with 429 prove_queue_full — it never queues
+    // behind slow uploaders. Complements the try_enter unit test with end-to-end handler wiring.
+    let state = AppState {
+        core: std::sync::Arc::new(HeadlessState {
+            prove_waiters: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+            ..HeadlessState::default()
+        }),
+        ..AppState::default()
+    };
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .header("host", "127.0.0.1:59833")
+                .uri("/prove")
+                .body(Body::from("witness"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "prove_queue_full");
 }

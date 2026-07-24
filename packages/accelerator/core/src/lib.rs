@@ -11,7 +11,12 @@ pub mod authorization;
 pub mod bb;
 pub mod config;
 pub mod server;
+pub mod update_manifest;
+pub mod updater_state;
 pub mod versions;
+/// F-003 Windows tail — owner-only ACL helpers (Windows-only; the module is `#![cfg(windows)]`).
+#[cfg(windows)]
+pub mod win_acl;
 
 use std::path::PathBuf;
 

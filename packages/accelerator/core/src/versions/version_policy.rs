@@ -180,6 +180,85 @@ pub fn versions_to_evict(
     to_evict
 }
 
+/// Aztec versions whose bundled `bb` is KNOWN to be vulnerable — a REVOCATION list, **EMPTY by default**.
+///
+/// `x-aztec-version` carries the **Aztec** version (the SDK's `@aztec/stdlib` dependency version), NOT a
+/// barretenberg/`bb` version — and many Aztec releases ship the *same* `bb`. So a "newer-is-safer" floor
+/// keyed on this string would wrongly reject a legitimate older-but-compatible dApp (e.g. an Aztec 5.0.1
+/// app talking to a 5.1.0-bundled accelerator). Instead this is a targeted denylist: the app owner adds a
+/// version string here ONLY if a security defect is found in the `bb` shipped with that Aztec release,
+/// and a remote request for it is then refused (403). Empty ⇒ no restriction — any version the dApp
+/// requests is allowed, and it is still digest-verified against Aztec's published hash on download (so it
+/// is always an AUTHENTIC Aztec `bb`). COMPILE-TIME so a remote dApp cannot change it. Entries must be the
+/// exact wire version string the SDK sends.
+pub const KNOWN_VULNERABLE_VERSIONS: &[&str] = &[];
+
+/// Why a remote-requested version was refused by [`check_version_selectable`]. Carried into the 403
+/// body + a `warn!` so a legitimate integrator sees WHY their pin was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionRejection {
+    /// Passed the `is_valid_version` charset gate but is not a canonical strict semver — a syntactic
+    /// alias (`latest`, `5`, `5.0`) or a non-canonical spelling. Rejected so only well-formed versions
+    /// are ever fetched or exact-matched against the revocation list (codex denylist-review #2).
+    NotSemver,
+    /// Carries `+build` metadata. Two builds with equal SemVer precedence are distinct release
+    /// identities we can't reason about — refuse them.
+    HasBuildMetadata,
+    /// The requested Aztec version is on the [`KNOWN_VULNERABLE_VERSIONS`] revocation list.
+    KnownVulnerable,
+}
+
+impl VersionRejection {
+    /// Short, stable reason string for logs + the error body.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotSemver => "not a canonical strict semver version",
+            Self::HasBuildMetadata => "carries build metadata (ambiguous release identity)",
+            Self::KnownVulnerable => "on the known-vulnerable revocation list",
+        }
+    }
+}
+
+/// Gate a REMOTE `x-aztec-version` request.
+///
+/// The header is the **Aztec** version, not a `bb` version, and the accelerator downloads the `bb`
+/// tarball attached to the Aztec release of that exact version. We therefore CANNOT impose a
+/// "newer-is-safer" floor here — many Aztec versions share one `bb`, so a floor would break a legitimate
+/// older-but-compatible dApp (this was the over-blocking bug this function replaces). Every download is
+/// already digest-verified against Aztec's published hash, so a requested version is always an authentic
+/// Aztec `bb`. The only residual risk — an approved dApp pinning an Aztec version whose bundled `bb` is
+/// *later* found vulnerable — is handled REACTIVELY via the [`KNOWN_VULNERABLE_VERSIONS`] revocation list
+/// (empty by default). Everything not on that list is allowed.
+///
+/// Well-formedness is STILL enforced (codex denylist-review #2): the request must be canonical strict
+/// semver with no build metadata. This rejects aliases (`latest`) the looser `is_valid_version` charset
+/// gate lets through, and keeps the exact-string revocation match meaningful.
+///
+/// (A precise FUTURE gate could run `bb --version` on the downloaded binary to obtain the true
+/// barretenberg build id — distinct from the Aztec/npm version — and denylist on THAT, or ship a signed
+/// updateable revocation manifest. Larger cross-package changes, tracked separately.)
+pub fn check_version_selectable(requested: &str) -> Result<(), VersionRejection> {
+    check_version_against(requested, KNOWN_VULNERABLE_VERSIONS)
+}
+
+/// Inner, denylist-parameterized core of [`check_version_selectable`] — unit-testable against an
+/// arbitrary revocation list (the production const is empty). Validates well-formedness FIRST, then the
+/// revocation match.
+fn check_version_against(requested: &str, denylist: &[&str]) -> Result<(), VersionRejection> {
+    // Canonical strict semver, no build metadata — same well-formedness the earlier gate enforced.
+    let v = semver::Version::parse(requested).map_err(|_| VersionRejection::NotSemver)?;
+    if v.to_string() != requested {
+        return Err(VersionRejection::NotSemver); // non-canonical spelling
+    }
+    if !v.build.is_empty() {
+        return Err(VersionRejection::HasBuildMetadata);
+    }
+    if denylist.contains(&requested) {
+        return Err(VersionRejection::KnownVulnerable);
+    }
+    Ok(())
+}
+
 /// Validate a version string before it is used to build cache paths or download URLs. THE single
 /// source of truth for both the HTTP ingress (`server::prove::resolve_version`) and the `download_bb`
 /// sink. Rejects path-traversal + injection: non-empty, `<= 128` chars, ASCII alnum/`.`/`-`/`_`,
@@ -198,22 +277,52 @@ pub fn is_valid_version(version: &str) -> bool {
 /// Clean up old cached versions per the retention policy.
 /// q7e3-F-08: takes the validated `&AztecVersion` (callers parse; an unparseable bundled skips
 /// cleanup at the call site — same defensive outcome as the old internal parse-else-return).
-pub async fn cleanup_old_versions(bundled: &AztecVersion) {
+pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecVersion>) {
     // Parse the cached dir names into validated versions. An unparseable dir name is skipped — same
     // net outcome as before (the old code classified it Mainnet → retention `None` → never evicted).
     let cached: Vec<AztecVersion> = list_cached_versions()
         .iter()
         .filter_map(|s| AztecVersion::parse(s))
         .collect();
-    let to_evict = versions_to_evict(&cached, bundled);
-
-    for version in &to_evict {
-        let dir = versions_base_dir().join(version.as_str());
+    // codex #4: no resolvable home ⇒ no trusted cache root ⇒ nothing to evict (and never join onto a
+    // CWD fallback). `list_cached_versions` is already empty in this case, but guard the base dir too.
+    let Some(base) = versions_base_dir() else {
+        return;
+    };
+    for version in evictions(&cached, bundled, in_use) {
+        let dir = base.join(version.as_str());
+        // B2 (full-branch audit): skip a version whose dir was touched within the active window — it was
+        // just downloaded (and is likely about to be proved by a CONCURRENT request whose own cleanup
+        // exempts a DIFFERENT in_use version). Age-gating stops two concurrent detached cleanups from
+        // evicting each other's fresh-in-use binary. A truly-old in-use version is still a narrow,
+        // recoverable (re-download) TOCTOU — a full cross-request lease is deferred (see FINDINGS.md B2).
+        if super::downloader::recently_active(&dir) {
+            tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+            continue;
+        }
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
+}
+
+/// The versions to actually delete: the retention-policy evictions MINUS the in-use version.
+///
+/// F-007 race guard: `cleanup_old_versions` is spawned (detached) right after a download and races
+/// `bb::prove`. Without this, a freshly-downloaded old nightly (the oldest excess in its tier) could be
+/// deleted before it executes, turning the now-fail-closed `find_bb` into a spurious hard error. Keeping
+/// the in-use version one round over the limit is harmless — the next cleanup (when it is no longer in
+/// use) evicts it.
+fn evictions(
+    cached: &[AztecVersion],
+    bundled: &AztecVersion,
+    in_use: Option<&AztecVersion>,
+) -> Vec<AztecVersion> {
+    versions_to_evict(cached, bundled)
+        .into_iter()
+        .filter(|v| !in_use.is_some_and(|u| u.as_str() == v.as_str()))
+        .collect()
 }
 #[cfg(test)]
 mod tests {
@@ -379,6 +488,36 @@ mod tests {
     }
 
     #[test]
+    fn evictions_exempt_the_in_use_version() {
+        // F-007: the version being proved right now must never be evicted by the cleanup that races it.
+        let cached = vec![
+            av("5.0.0-nightly.20260301"),
+            av("5.0.0-nightly.20260302"),
+            av("5.0.0-nightly.20260303"),
+            av("5.0.0-nightly.20260304"),
+        ];
+        let bundled = av("4.2.0-aztecnr-rc.2"); // not in this tier
+
+        // No protection: the two oldest are evicted (retention keeps 2).
+        let unprotected = evictions(&cached, &bundled, None);
+        assert!(unprotected.contains(&av("5.0.0-nightly.20260301")));
+        assert!(unprotected.contains(&av("5.0.0-nightly.20260302")));
+
+        // Protecting the OLDEST (the just-downloaded, in-use version): it is exempted, while the next
+        // non-protected version is still evicted.
+        let in_use = av("5.0.0-nightly.20260301");
+        let protected = evictions(&cached, &bundled, Some(&in_use));
+        assert!(
+            !protected.contains(&in_use),
+            "the in-use version must be exempted from eviction"
+        );
+        assert!(
+            protected.contains(&av("5.0.0-nightly.20260302")),
+            "a non-protected excess version is still evicted"
+        );
+    }
+
+    #[test]
     fn bundled_version_never_evicted() {
         let cached = vec![
             av("5.0.0-nightly.20260301"),
@@ -439,6 +578,77 @@ mod tests {
         // Nightlies: 3, keep 2, evict 1
         assert_eq!(evicted.len(), 1);
         assert!(evicted.contains(&av("5.0.0-nightly.20260301")));
+    }
+
+    // ─── remote version selection: known-vulnerable revocation denylist ─────────
+
+    #[test]
+    fn version_policy_allows_everything_by_default() {
+        // The header is the Aztec version (not a bb version), and many Aztec releases share one bb, so
+        // there is NO floor: any well-formed version a dApp requests is allowed — including OLDER ones —
+        // so a legitimate older-but-compatible app is never broken. Default (empty) production denylist.
+        for v in [
+            "5.0.0",
+            "5.1.0",
+            "5.0.1", // older than a 5.1.0 bundle — MUST still be allowed (the bug this replaces)
+            "5.0.0-rc.1", // older rc
+            "5.0.0-nightly.20260307",
+            "4.2.0-aztecnr-rc.2",
+        ] {
+            assert_eq!(check_version_selectable(v), Ok(()), "{v} must be allowed");
+        }
+    }
+
+    #[test]
+    fn version_policy_refuses_a_denylisted_version() {
+        // Exercise the REAL implementation (check_version_against) with a simulated revocation list —
+        // the production const is empty, so this is how we cover the refusal path (codex review #3).
+        let deny = &["5.0.7", "5.1.3-rc.1"];
+        assert_eq!(
+            check_version_against("5.0.7", deny),
+            Err(VersionRejection::KnownVulnerable)
+        );
+        assert_eq!(
+            check_version_against("5.1.3-rc.1", deny),
+            Err(VersionRejection::KnownVulnerable)
+        );
+        // Neighbouring versions are unaffected — the denylist is exact, not a range.
+        assert_eq!(check_version_against("5.0.8", deny), Ok(()));
+        assert_eq!(check_version_against("5.0.6", deny), Ok(()));
+    }
+
+    #[test]
+    fn version_policy_rejects_aliases_and_build_metadata() {
+        // Well-formedness is still enforced (codex review #2): aliases the charset gate lets through, a
+        // non-canonical spelling, and build metadata are all rejected BEFORE any download / revocation
+        // match — regardless of the denylist.
+        for alias in ["latest", "5", "5.0", "5.0.0-alpha_beta"] {
+            assert_eq!(
+                check_version_selectable(alias),
+                Err(VersionRejection::NotSemver),
+                "alias {alias:?} must be rejected"
+            );
+        }
+        assert_eq!(
+            check_version_selectable("5.1.0+build9"),
+            Err(VersionRejection::HasBuildMetadata)
+        );
+    }
+
+    #[test]
+    fn version_policy_denylist_entries_are_wellformed_if_present() {
+        // If the owner ever populates the list, each entry must be a canonical strict semver so it
+        // matches the exact wire version the SDK sends. Does NOT assert emptiness (codex review #4: an
+        // emptiness assertion would break CI exactly when an emergency revocation is added).
+        for v in KNOWN_VULNERABLE_VERSIONS {
+            let parsed = semver::Version::parse(v)
+                .unwrap_or_else(|_| panic!("KNOWN_VULNERABLE_VERSIONS entry {v:?} must be semver"));
+            assert_eq!(
+                &parsed.to_string(),
+                v,
+                "KNOWN_VULNERABLE_VERSIONS entry {v:?} must be canonical"
+            );
+        }
     }
 
     /// CHARACTERIZATION (quality-refactor Phase 0 — Q3 guard). Edge cases the AztecVersion refactor

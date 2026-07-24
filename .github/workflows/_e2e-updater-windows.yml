@@ -35,6 +35,13 @@ on:
         required: false
         default: positive
         type: string
+    secrets:
+      # F-004: the synthetic N-1 keeps the committed PROD pubkey, so the smoke feed's manifest must be
+      # signed with the prod updater key (NOT the ephemeral key that only emitted N-1's artifacts).
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: true
 
 jobs:
   updater-smoke-windows:
@@ -48,7 +55,7 @@ jobs:
       N1_VERSION: ${{ inputs.n1-version }}
       SMOKE_MODE: ${{ inputs.mode }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
@@ -57,7 +64,7 @@ jobs:
 
       # Download the REAL prod-signed N (this run's build): *-setup.nsis.zip + .sig.
       - name: Download N (prod-signed build artifact)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.n-artifact }}
           path: ${{ runner.temp }}/n-dl
@@ -111,6 +118,10 @@ jobs:
         shell: pwsh
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
+          # PROD key for the manifest signature — overrides the ephemeral TAURI_SIGNING_PRIVATE_KEY that
+          # an earlier step exported to GITHUB_ENV (that one only built N-1's artifacts).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $n1 = Get-ChildItem -Path "$env:RUNNER_TEMP\n1" -Filter "*-setup.exe" | Select-Object -First 1
           if (-not $n1) { Write-Error "N-1 installer not found"; exit 1 }

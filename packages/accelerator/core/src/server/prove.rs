@@ -1,14 +1,19 @@
 //! `/prove` request handler + version/thread resolution.
 //!
-//! The core proving path: authorize the origin, buffer the body under a 50MB cap, serialize
-//! behind the prove semaphore (bb already uses all cores), resolve+download the requested bb
-//! version, then run the proof and return base64 + an `x-prove-duration-ms` header. Extracted
-//! from server.rs (Q2).
+//! The core proving path: authorize the origin, buffer the body under a 50MB cap (bounded by the
+//! inflight-waiters gate, NOT the prove permit — A1), resolve+download the requested bb version, then
+//! acquire the single prove permit and run the proof (bb already uses all cores), returning base64 +
+//! an `x-prove-duration-ms` header. Extracted from server.rs (Q2).
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use serde_json::json;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{bb, versions};
 
@@ -67,14 +72,42 @@ pub(crate) fn resolve_version(
     };
     tracing::info!(version = %version, "Requested Aztec version");
 
+    // `x-aztec-version` is remote-controlled, so check well-formedness + the known-vulnerable REVOCATION
+    // denylist FIRST — BEFORE the bundled short-circuit below (codex denylist-review #1), so a version
+    // the owner has revoked is refused even if it happens to be the bundled one (fail closed; the owner
+    // ships a new bundled version alongside any such revocation). There is NO version FLOOR: the header
+    // is the Aztec version (not a bb version) and many Aztec releases share one bb, so an
+    // older-but-compatible request must be honoured (downloads are still digest-verified against Aztec's
+    // published hash). The denylist is empty by default ⇒ any well-formed version is allowed.
+    if let Err(rej) = versions::check_version_selectable(&version) {
+        tracing::warn!(version = %version, reason = rej.reason(), "Refused remote Aztec version");
+        return Err(ProveError::VersionNotAllowed {
+            version: version.to_string(),
+            reason: rej.reason(),
+        });
+    }
+
     let bundled = state
         .bundled_version
         .as_deref()
         .unwrap_or(super::DEFAULT_BB_VERSION);
 
-    let needs_download = v != bundled && !versions::version_bb_path(&version).exists();
+    // F-007: normalize an explicit bundled request to `None` — the bundled bb ships as the sidecar, never
+    // the version cache, so it resolves via `find_bb(None)`. This also makes any `Some(v)` downstream an
+    // unambiguously NON-bundled request, so `find_bb` can hard-error on a bad cache entry without a
+    // wrong-version fallback (a bundled `Some(v)` would otherwise be indistinguishable).
+    if v == bundled {
+        return Ok(ResolvedVersion {
+            version: None,
+            needs_download: false,
+        });
+    }
+
+    // Re-download when the cache entry is absent OR present-but-marker-invalid (tampered/legacy), not
+    // merely when the path is missing — `verify_cached_bb` rehashes the binary against its marker (F-007).
+    let needs_download = versions::verify_cached_bb(&version).is_err();
     if needs_download {
-        tracing::info!(version = %version, "Version not cached, will download");
+        tracing::info!(version = %version, "Version not cached (or unverified), will download");
     }
 
     Ok(ResolvedVersion {
@@ -98,6 +131,96 @@ pub(crate) fn compute_threads(state: &AppState) -> Option<usize> {
 
 const MAX_BODY_SIZE: usize = 50 * 1024 * 1024; // 50MB
 
+/// F-009: absolute deadline for buffering the request body. Bounds a slowloris/stalled uploader —
+/// after A1 the body is read WITHOUT the prove permit, so this deadline caps how long a slow upload
+/// occupies an inflight slot (not the prover). 30s is generous for 50MB over loopback (~1.7 MiB/s);
+/// it is a whole-body deadline, not an idle timeout, so drip-feeding cannot extend it.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reject an honestly-declared oversize body BEFORE acquiring the prove permit, so a client
+/// advertising `Content-Length > MAX_BODY_SIZE` is turned away without occupying the single
+/// permit. Chunked/underreported requests are still bounded by `to_bytes` — this is a cheap
+/// fast-path, never the sole limit.
+fn reject_declared_oversize(headers: &axum::http::HeaderMap) -> Result<(), ProveError> {
+    // Inspect EVERY Content-Length value, and each comma-separated element within it (HTTP/2 and
+    // some proxies emit a duplicate-but-consistent list). Parse as u64 so a value that would
+    // overflow usize on 32-bit targets can't wrap below the cap; reject if any element exceeds the
+    // cap or is malformed. Cheap pre-permit fast-path — the to_bytes limit remains authoritative.
+    let mut seen: Option<u64> = None;
+    for value in headers.get_all(axum::http::header::CONTENT_LENGTH) {
+        let Ok(s) = value.to_str() else {
+            return Err(ProveError::PayloadTooLarge(
+                "non-ASCII Content-Length".to_string(),
+            ));
+        };
+        for part in s.split(',') {
+            let part = part.trim();
+            // RFC 7230 §3.3.2: a Content-Length is `1*DIGIT`. Reject empty/partial/non-digit
+            // elements (a permissive skip let `""`, `","`, `1,`, `,1` slip past); parse as u64 so
+            // an over-long value can't wrap below the cap.
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ProveError::PayloadTooLarge(format!(
+                    "malformed Content-Length {part:?}"
+                )));
+            }
+            let len: u64 = part.parse().map_err(|_| {
+                ProveError::PayloadTooLarge(format!("unparsable Content-Length {part:?}"))
+            })?;
+            if len > MAX_BODY_SIZE as u64 {
+                return Err(ProveError::PayloadTooLarge(format!(
+                    "declared Content-Length {len} exceeds {MAX_BODY_SIZE}"
+                )));
+            }
+            // RFC 7230 §3.3.2: multiple Content-Length values must all agree.
+            match seen {
+                Some(prev) if prev != len => {
+                    return Err(ProveError::PayloadTooLarge(format!(
+                        "conflicting Content-Length values {prev} and {len}"
+                    )));
+                }
+                _ => seen = Some(len),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A1 (full-branch audit): buffer the request body under the size cap + an absolute read timeout,
+/// WITHOUT holding the single prove permit. Concurrent buffers are already bounded by the `_inflight`
+/// waiters cap (`MAX_INFLIGHT_PROVE`) the caller holds, so at most `MAX_INFLIGHT_PROVE × MAX_BODY_SIZE`
+/// is resident. Decoupling the read from the prove permit is the fix for the head-of-line DoS where one
+/// slow (slowloris) uploader held the CPU-bound prover for up to `read_timeout`, 429-ing everyone else;
+/// now a slow upload only occupies an inflight slot while the prover runs on ready requests. Testable seam.
+async fn read_body(
+    raw_body: Body,
+    max_body_size: usize,
+    read_timeout: Duration,
+) -> Result<Bytes, ProveError> {
+    tokio::time::timeout(read_timeout, axum::body::to_bytes(raw_body, max_body_size))
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                timeout_secs = read_timeout.as_secs(),
+                "Timed out reading /prove request body"
+            );
+            ProveError::BodyReadTimeout
+        })?
+        .map_err(|e| {
+            tracing::warn!("Failed to read request body: {e}");
+            ProveError::PayloadTooLarge(e.to_string())
+        })
+}
+
+/// F-009: try to enter the bounded set of in-flight + waiting authorized `/prove` requests.
+/// Non-blocking: if the cap (`MAX_INFLIGHT_PROVE` permits) is full, shed immediately with 429
+/// (`ProveQueueFull`) rather than queueing. The returned guard must be held for the whole request
+/// so it is released (RAII) on every exit path. Testable seam.
+fn try_enter(waiters: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, ProveError> {
+    waiters
+        .try_acquire_owned()
+        .map_err(|_| ProveError::ProveQueueFull)
+}
+
 pub(crate) async fn prove(
     State(state): State<AppState>,
     request: Request,
@@ -109,20 +232,19 @@ pub(crate) async fn prove(
     let (parts, raw_body) = request.into_parts();
     authorize_origin(&state, &parts.headers).await?;
 
-    let body = axum::body::to_bytes(raw_body, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| {
-            tracing::warn!("Failed to read request body: {e}");
-            ProveError::PayloadTooLarge(e.to_string())
-        })?;
-    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
+    // F-009: cap total in-flight + waiting authorized /prove requests. Held (RAII) for the whole
+    // request; a burst beyond MAX_INFLIGHT_PROVE is shed immediately with 429 instead of queueing
+    // behind slow uploaders and stacking fresh per-request read timeouts.
+    let _inflight = try_enter(state.prove_waiters.clone())?;
 
-    // Limit to one concurrent prove — bb already uses all cores.
-    let _permit = state
-        .prove_semaphore
-        .acquire()
-        .await
-        .map_err(|_| ProveError::ServiceUnavailable)?;
+    // F-009: turn away an honestly-declared oversize body before taking the prove permit.
+    reject_declared_oversize(&parts.headers)?;
+
+    // A1: buffer the body under ONLY the inflight cap (memory bounded to MAX_INFLIGHT_PROVE × 50MB),
+    // NOT the single prove permit — so a slow uploader occupies just an inflight slot for ≤30s and can't
+    // block the prover. The prove permit is acquired later, only around the CPU-bound proof itself.
+    let body = read_body(raw_body, MAX_BODY_SIZE, BODY_READ_TIMEOUT).await?;
+    tracing::debug!(payload_bytes = body.len(), "Prove request payload size");
 
     let requested_version = parts
         .headers
@@ -158,6 +280,9 @@ pub(crate) async fn prove(
                     .as_deref()
                     .unwrap_or(super::DEFAULT_BB_VERSION)
                     .to_string();
+                // F-007: the version we just downloaded is about to be proved — exempt it from this
+                // cleanup so the detached eviction can't delete it out from under `bb::prove`.
+                let in_use_owned = version.as_str().to_string();
                 let on_versions_changed = state.on_versions_changed.clone();
                 tokio::spawn(async move {
                     // q7e3-F-08: the caller parses now; an unparseable bundled (defensive,
@@ -165,7 +290,8 @@ pub(crate) async fn prove(
                     // parse-else-return. The "unknown" sentinel still parses, so eviction semantics
                     // in unknown-bundled builds are unchanged (#352 stays deferred).
                     if let Some(bundled) = versions::AztecVersion::parse(&bundled_owned) {
-                        versions::cleanup_old_versions(&bundled).await;
+                        let in_use = versions::AztecVersion::parse(&in_use_owned);
+                        versions::cleanup_old_versions(&bundled, in_use.as_ref()).await;
                     }
                     if let Some(cb) = on_versions_changed {
                         cb();
@@ -187,6 +313,17 @@ pub(crate) async fn prove(
         }
     }
     let threads = compute_threads(&state);
+
+    // A1: acquire the single prove permit ONLY now — around the CPU-bound proof — not across the body
+    // read + version download above (which ran concurrently under the inflight cap). bb saturates all
+    // cores, so proofs still run strictly one at a time; only the serialized *proving* is gated, not I/O.
+    // Held (RAII) until this function returns.
+    let _permit = state
+        .prove_semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ProveError::ServiceUnavailable)?;
 
     let start = std::time::Instant::now();
     let result = bb::prove(&body, version_for_prove.as_ref(), threads).await;
@@ -220,4 +357,109 @@ pub(crate) async fn prove(
     );
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header::CONTENT_LENGTH, HeaderMap};
+
+    fn content_length(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(CONTENT_LENGTH, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn declared_oversize_rejected_before_permit() {
+        // F-009: an honestly-declared oversize Content-Length is turned away up front.
+        assert!(matches!(
+            reject_declared_oversize(&content_length(&(MAX_BODY_SIZE + 1).to_string())),
+            Err(ProveError::PayloadTooLarge(_))
+        ));
+        // At/under the cap and absent are allowed (still bounded later by to_bytes).
+        assert!(reject_declared_oversize(&content_length(&MAX_BODY_SIZE.to_string())).is_ok());
+        assert!(reject_declared_oversize(&HeaderMap::new()).is_ok());
+        // Comma-list (HTTP/2 duplicate) with an oversize element must NOT slip past.
+        assert!(matches!(
+            reject_declared_oversize(&content_length(&format!("{0}, {0}", MAX_BODY_SIZE + 1))),
+            Err(ProveError::PayloadTooLarge(_))
+        ));
+        // Malformed / empty / partial values are rejected, not silently ignored.
+        for bad in ["not-a-number", "", ",", "1,", ",1", "1 2"] {
+            assert!(
+                matches!(
+                    reject_declared_oversize(&content_length(bad)),
+                    Err(ProveError::PayloadTooLarge(_))
+                ),
+                "must reject malformed Content-Length {bad:?}"
+            );
+        }
+        // Conflicting comma-list values (RFC 7230 §3.3.2) are rejected even when each is under cap.
+        assert!(matches!(
+            reject_declared_oversize(&content_length("10, 20")),
+            Err(ProveError::PayloadTooLarge(_))
+        ));
+        // Agreeing duplicates under the cap are fine.
+        assert!(reject_declared_oversize(&content_length("10, 10")).is_ok());
+    }
+
+    #[test]
+    fn waiter_cap_sheds_excess_with_queue_full() {
+        // F-009: fill the cap; the next entry is shed with ProveQueueFull; a slot frees on drop.
+        let waiters = Arc::new(Semaphore::new(2));
+        let g1 = try_enter(waiters.clone()).expect("slot 1");
+        let _g2 = try_enter(waiters.clone()).expect("slot 2");
+        assert!(matches!(
+            try_enter(waiters.clone()),
+            Err(ProveError::ProveQueueFull)
+        ));
+        drop(g1);
+        assert!(try_enter(waiters.clone()).is_ok(), "slot freed on drop");
+    }
+
+    #[tokio::test]
+    async fn body_read_does_not_hold_the_prove_permit() {
+        // A1: reading the body must NOT depend on or hold the single prove permit — a slow uploader
+        // therefore can't block the prover. With zero prove permits available, a READY body still reads.
+        let sem = Arc::new(Semaphore::new(0)); // no prove permits at all
+        let body = read_body(
+            Body::from(Bytes::from_static(b"ready")),
+            1024,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("body reads without any prove permit");
+        assert_eq!(&body[..], &b"ready"[..]);
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "read_body never touches the prove semaphore"
+        );
+    }
+
+    // (A1: the "permit only around proving" placement in prove() is exercised end-to-end by the
+    // prove-handler integration tests, not a unit test — a standalone semaphore-RAII assertion would only
+    // test tokio, not this code, so it was removed per the re-audit.)
+
+    #[tokio::test]
+    async fn oversized_body_errs() {
+        let res = read_body(
+            Body::from(vec![0u8; 10]),
+            4, // tiny cap to force the length error deterministically
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(matches!(res, Err(ProveError::PayloadTooLarge(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_body_times_out() {
+        // A body whose stream never yields → to_bytes never completes → the read timeout fires.
+        // Under start_paused the virtual clock auto-advances to the only pending timer.
+        let body =
+            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+        let res = read_body(body, 1024, Duration::from_secs(30)).await;
+        assert!(matches!(res, Err(ProveError::BodyReadTimeout)));
+    }
 }
