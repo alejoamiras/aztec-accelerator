@@ -594,12 +594,33 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-tags: true
+      # codex audit #9: pin the tag to the EXACT commit the whole pipeline validated. checkout@v6
+      # defaults to github.sha, but assert it explicitly so the pushed tag can never target a
+      # different HEAD than the one build/smoke/e2e all ran against (shipped-integrity anchor).
+      - name: Verify checkout is the dispatched commit (tag == github.sha)
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::HEAD ($ACTUAL_SHA) != github.sha ($EXPECTED_SHA); refusing to tag a drifted commit"
+            exit 1
+          fi
+          echo "Tagging verified commit $ACTUAL_SHA"
       - name: Create and push tag
         env:
           TAG: ${{ needs.validate.outputs.tag }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping creation"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            # An existing tag MUST already point at github.sha; a tag pinned to a different commit is a
+            # release-integrity red flag (someone pre-created it) — fail rather than silently proceed.
+            EXISTING_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
+            if [ "$EXISTING_SHA" != "$EXPECTED_SHA" ]; then
+              echo "::error::Tag $TAG already exists at $EXISTING_SHA, not github.sha ($EXPECTED_SHA); aborting"
+              exit 1
+            fi
+            echo "Tag $TAG already exists at the expected commit, skipping creation"
           else
             git tag "$TAG"
             git push origin "$TAG"

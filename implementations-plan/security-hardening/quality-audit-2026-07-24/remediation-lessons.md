@@ -14,9 +14,9 @@ tests; frontend build + biome; Playwright/WebDriver are CI-only) and committed.
 | 4 | CWD cache fail-open | ✓ done | `fix(cache): fail closed when home dir is unresolvable` |
 | 5 | Updater rollback-race + bounded streaming | pending | |
 | 6 | win_acl owner not verified | ✓ done | `fix(f-003): set + verify object OWNER == current user` |
-| 7 | C8 rollback destroys recovery | pending | |
+| 7 | C8 rollback destroys recovery | ✓ done | `fix(c8): autostart rollback restores prior recovery + surfaces failures` |
 | 8 | C9 arbiter promote-before-build | ✓ done | `fix(c9): build auth popup before deciding active-slot` |
-| 9 | Release-CI dispatch-ref / tag-verify | pending (infra: commit+validate only, human applies) | |
+| 9 | Release-CI dispatch-ref / tag-verify | ✓ YAML done; repo-settings → owner runbook | `fix(release): pin tag to github.sha + verify pre-existing tag` |
 
 ## Codex consults
 
