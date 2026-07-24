@@ -28,16 +28,16 @@ genuine failure or ambiguity — not on routine gates.
   ├──────────────────────────────────────────────────────────────────────┤
   │  [✓] 1.0  merge resolved ................... 5 conflicts, by hand    │
   │  [✓] 1.0b local gate green ................. bun test 0 + rust 184   │
-  │  [~] 1.1  PR main → security-hardening ..... ⛔ GitHub PR OUTAGE     │
-  │  [ ] 1.2  full CI green on the COMBINATION                           │
-  │  [ ] 1.3  merge the sync                                             │
+  │  [✓] 1.1  PR #403 (after a GitHub PR outage cleared)                 │
+  │  [✓] 1.2  full CI green on the COMBINATION . 32 pass / 0 fail        │
+  │  [✓] 1.3  merged; 5.0.1 parity with main VERIFIED                    │
   └──────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
   ┌──────────────────────────────────────────────────────────────────────┐
   │  PHASE 2 — LAND THE SECURITY WORK ON MAIN                            │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  [ ] 2.1  PR security-hardening → main ..... 24+ commits             │
+  │  [~] 2.1  PR #404 security-hardening → main  183 files               │
   │  [ ] 2.2  CI green                                                   │
   │  [ ] 2.3  merge .......................... unlocks --exclude fix     │
   └──────────────────────────────────────────────────────────────────────┘
