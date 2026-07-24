@@ -1,32 +1,37 @@
 name: _Publish SDK (reusable)
 
+# npm `latest` NEVER moves through this workflow's direct dispatch: the dispatch inputs
+# deliberately omit `latest` and constrain `dist_tag` to a non-latest choice list, and the
+# guard step below hard-fails on anything else (both trigger paths). Promotion is a separate,
+# smoke-gated, tag-only step: promote-latest.yml.
 on:
   workflow_dispatch:
     inputs:
       dist_tag:
-        description: "npm dist-tag (e.g. testnet, nightlies)"
+        description: "npm dist-tag"
         required: true
-        type: string
+        type: choice
+        options:
+          - testnet
+          - nightlies
         default: testnet
-      latest:
-        description: "Also set this version as npm 'latest' and mark GitHub release as --latest"
-        required: false
-        type: boolean
-        default: false
   workflow_call:
     inputs:
       dist_tag:
-        description: "npm dist-tag (e.g. testnet, nightlies)"
+        description: "npm dist-tag (testnet or nightlies — guarded below)"
         required: true
         type: string
-      latest:
-        description: "Also set this version as npm 'latest' and mark GitHub release as --latest"
-        required: false
-        type: boolean
-        default: false
     secrets:
       NPM_TOKEN:
         required: true
+
+# Shared with promote-latest.yml: an in-flight npm mutation is never canceled (a canceled
+# half-done publish strands irreversible state). Caveat (GitHub semantics): at most ONE
+# run waits per group — a newer dispatch replaces a still-queued run; confirm your run
+# started after dispatching.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -37,24 +42,14 @@ jobs:
       id-token: write # needed for --provenance (Sigstore attestation)
       contents: write
     steps:
-      # F-006: reject a malformed dist_tag BEFORE checkout or any token-bearing step. Job perms
-      # (id-token/contents: write) and checkout-persisted git credentials are live from step 1, so
-      # validation must come first. Whole-string bash match (not grep, which would pass a multiline
-      # value with one valid line); must start with a lowercase letter, so no leading '-' (npm
-      # option/argument injection) and no leading digit. Read via env, never interpolated into shell.
-      # (A still-invalid tag like a semver range that slips the regex fails later at npm — not an injection.)
-      - name: Validate dist_tag
+      - name: Guard dist_tag (npm 'latest' moves only via promote-latest.yml)
         env:
           DIST_TAG: ${{ inputs.dist_tag }}
-          LC_ALL: C
         run: |
-          if [[ ! "$DIST_TAG" =~ ^[a-z][a-z0-9._-]*$ ]]; then
-            # Do NOT echo the rejected value: a malformed multiline dist_tag could otherwise inject
-            # ::workflow-commands:: into the log stream. The value is already masked/available to the
-            # operator via the dispatch inputs.
-            echo "::error::Invalid dist_tag (must match ^[a-z][a-z0-9._-]*\$)"
-            exit 1
-          fi
+          case "$DIST_TAG" in
+            testnet|nightlies) echo "dist_tag=$DIST_TAG ok" ;;
+            *) echo "::error::dist_tag '$DIST_TAG' is not allowed here"; exit 1 ;;
+          esac
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -62,12 +57,12 @@ jobs:
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 24.18.0
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version: latest
 
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -105,11 +100,11 @@ jobs:
       - name: Set SDK version and fix exports for npm
         working-directory: packages/sdk
         env:
-          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
+          VERSION: ${{ steps.sdk-version.outputs.version }}
         run: |
           node -e "
             const p = require('./package.json');
-            p.version = process.env.SDK_VERSION;
+            p.version = process.env.VERSION;
             p.main = './dist/index.js';
             p.types = './dist/index.d.ts';
             p.exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } };
@@ -117,31 +112,24 @@ jobs:
             require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
           "
 
+      # If this step fails AFTER npm accepted the publish, never blind-redispatch: check
+      # `npm view @alejoamiras/aztec-accelerator versions` first — a redispatch mints a
+      # `-revision.N` version by design (get-sdk-publish-version.ts).
       - name: Publish to npm
         working-directory: packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DIST_TAG: ${{ inputs.dist_tag }}
-        # --tag="$DIST_TAG" (=-form + quoted): DIST_TAG is validated + inert shell data, and the
-        # =-form stops a value from being parsed as a separate npm option.
-        run: npm publish --provenance --access public --tag="$DIST_TAG" --workspaces=false
-
-      - name: Also tag as 'latest' on npm
-        if: inputs.latest && inputs.dist_tag != 'latest'
-        working-directory: packages/sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
-        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${SDK_VERSION}" latest
+        run: npm publish --provenance --access public --tag "$DIST_TAG" --workspaces=false
 
       - name: Create git tag and GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
+          VERSION: ${{ steps.sdk-version.outputs.version }}
           AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
           DIST_TAG: ${{ inputs.dist_tag }}
         run: |
-          TAG="@alejoamiras/aztec-accelerator@${SDK_VERSION}"
+          TAG="@alejoamiras/aztec-accelerator@${VERSION}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -151,14 +139,12 @@ jobs:
           # `gh release create` below blessed that wrong-commit tag while npm published from HEAD.
           # We query the REMOTE directly with `git ls-remote` (which — unlike `git fetch ... || true` —
           # exits NON-ZERO on network/auth failure, so a masked error can't let a stale local tag pass) and
-          # require any existing remote tag to resolve to the exact commit we publish (HEAD). `set -e` (the
-          # job default) aborts on an ls-remote failure.
+          # require any existing remote tag to resolve to the exact commit we publish (HEAD).
           EXPECTED_SHA="$(git rev-parse HEAD)"
           # Ask for both the ref and its peeled (^{}) form; an annotated tag reports the commit on the
           # `^{}` line, a lightweight tag (what `git tag` creates) reports the commit on the plain line.
           REMOTE_REFS="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
           if [ -n "$REMOTE_REFS" ]; then
-            # Prefer the peeled commit if present (annotated), else the direct SHA (lightweight).
             REMOTE_SHA="$(printf '%s\n' "$REMOTE_REFS" | awk '/\^\{\}$/ {print $1; exit}')"
             [ -z "$REMOTE_SHA" ] && REMOTE_SHA="$(printf '%s\n' "$REMOTE_REFS" | awk 'NR==1 {print $1}')"
             if [ "$REMOTE_SHA" != "$EXPECTED_SHA" ]; then
@@ -171,7 +157,7 @@ jobs:
             git push origin "$TAG"
           fi
 
-          if [ "$SDK_VERSION" = "$AZTEC_VERSION" ]; then
+          if [ "$VERSION" = "$AZTEC_VERSION" ]; then
             NOTES="Aligned with Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
           else
             NOTES="SDK revision for Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
