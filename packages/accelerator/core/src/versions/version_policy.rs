@@ -241,34 +241,36 @@ fn channel(v: &semver::Version) -> Option<&str> {
 /// nightly/devnet dev build. The caller MUST have already normalized an exact-bundled request to the
 /// sidecar path — this function only ever sees NON-bundled requests.
 ///
-/// Policy (safe default — every selectable version must already be safe; refined with codex #3 / r2 #2):
-/// 1. An explicitly owner-vetted older version ([`VETTED_OLDER_VERSIONS`]) is always allowed.
-/// 2. If the BUNDLED baseline does not parse as semver, there is no floor to enforce (the normal
-///    headless case — no shipped bb to downgrade FROM), so allow: the request is already traversal-
-///    validated and the download is digest-verified. Desktop always has a compile-time baseline.
-/// 3. The request must parse as STRICT semver (rejects syntactic aliases the looser [`is_valid_version`]
-///    charset gate lets through) and carry no `+build` metadata (ambiguous precedence).
+/// Policy (safe default — every selectable version must already be safe; codex #3 / r2 #2 / r3 #2 / r4 #1):
+/// 1. The request must parse as STRICT semver (rejects syntactic aliases the looser [`is_valid_version`]
+///    charset gate lets through) and carry no `+build` metadata (ambiguous precedence). Checked FIRST so
+///    it holds for every path below (allowlist / no-baseline included).
+/// 2. An explicitly owner-vetted older version ([`VETTED_OLDER_VERSIONS`]) then bypasses only the
+///    floor/channel (it may be below the floor by design) — never the well-formedness gate.
+/// 3. If the BUNDLED baseline does not parse as semver, there is no floor to enforce (the normal
+///    headless case — no shipped bb to downgrade FROM), so allow: the request is validated above and the
+///    download is digest-verified. Desktop always has a compile-time baseline.
 /// 4. Floor: the request must be STRICTLY NEWER than bundled by SemVer *precedence* (`cmp_precedence`,
 ///    which ignores build metadata — not Rust's total `Ord`). This is the downgrade block. Note SemVer
-///    precedence is a label order, not a chronology/safety order, hence rules 1 & 5 on top of it.
+///    precedence is a label order, not a chronology/safety order, hence rules 2 & 5 on top of it.
 /// 5. Forward target: the request must be stable, OR share the bundled baseline's exact prerelease
 ///    channel. This drops nightly/devnet dev builds, unknown prerelease channels, and stable→prerelease
 ///    unless the shipped baseline is itself on that channel.
 pub fn check_version_selectable(requested: &str, bundled: &str) -> Result<(), VersionRejection> {
     use std::cmp::Ordering;
 
-    // 1. Owner allowlist wins outright (may be below the floor by design).
-    if VETTED_OLDER_VERSIONS.contains(&requested) {
-        return Ok(());
-    }
-    // 2. Validate the REQUEST unconditionally (codex r2 #2 / r3 #2): strict semver + no `+build`
-    //    metadata. These do NOT depend on the baseline, so they must run even when the bundled version
-    //    is unknown — otherwise a headless server (no `AZTEC_BB_VERSION`) could select a syntactic alias
-    //    (`latest`) or a build-metadata version. A real SDK always pins a strict semver, so this only
-    //    rejects garbage earlier.
+    // 1. Validate the REQUEST unconditionally (codex r2 #2 / r3 #2 / r4 #1): strict semver + no `+build`
+    //    metadata. This runs BEFORE the allowlist and the baseline check so the guarantee holds for EVERY
+    //    path — a syntactic alias (`latest`) or a `+build` version is rejected even if it were later
+    //    allowlisted or the bundled version is unknown (headless). A real SDK always pins a strict semver.
     let req = semver::Version::parse(requested).map_err(|_| VersionRejection::NotSemver)?;
     if !req.build.is_empty() {
         return Err(VersionRejection::HasBuildMetadata);
+    }
+    // 2. Owner-vetted older version bypasses only the FLOOR/channel (may be below the floor by design);
+    //    it does NOT bypass the well-formedness gate above.
+    if VETTED_OLDER_VERSIONS.contains(&requested) {
+        return Ok(());
     }
     // 3. No parseable bundled baseline ⇒ NO floor/channel to compare against. This is the normal
     //    headless case (no shipped bb to downgrade FROM), so failing closed would brick its documented
