@@ -225,7 +225,7 @@ guard tests (focus-reset, keyboard, synthetic activation); WebDriver two-origin 
 first pending; click within guard ignored).
 **Validation gate** — lint · `cargo fmt --check && cargo clippy -- -D warnings && cargo test` (src-tauri) · `cargo test --manifest-path packages/accelerator/core/Cargo.toml` · `bun run --cwd packages/accelerator test:e2e:ui` · WebDriver (`bun run --cwd packages/accelerator test:e2e:webdriver`, **CI-only**, timing-sensitive). Pass: exit 0; new reject/arbiter/guard tests green; Playwright + WebDriver popup cases green in CI. Layers: lint · unit(Rust) · integration(Playwright) · e2e(WebDriver, CI).
 
-### Phase 3 — F-003 Windows ACL (prove workspace + leaf TLS key + config.json)
+### Phase 3 — F-003 Windows ACL (prove workspace + leaf TLS key + config.json) — ✓ LOCAL GREEN (Windows cross-check compile+clippy + core Linux 178 + certs Linux-compile; runtime in windows-build CI + codex FFI audit; lessons/phase-3.md)
 Steps: `windows-sys` direct dep (+`Win32_System_Threading`); `win_acl` module (RAII SID/ACL/handle, atomic
 `secure_create_*`, reparse-rejecting `harden_existing`); wire the 5 sites fail-closed; `#[cfg(windows)] #[test]`
 asserting the **effective** DACL (via `GetSecurityInfo`/parse ACEs) — exact owner SID, single FULL ACE, PROTECTED

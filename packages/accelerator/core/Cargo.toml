@@ -41,6 +41,19 @@ url = "2"
 time = "0.3"
 uuid = { version = "1.20.0", features = ["v4"] }
 
+# F-003 Windows tail: owner-only ACLs on the prove workspace + witness + config.json. Promotes the
+# already-transitive windows-sys (via tempfile/tokio) to a DIRECT edge, version-aligned to the resolved
+# 0.61.x — no NEW crate (supply-chain caution; NOT the unmaintained windows-acl). Windows-only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }

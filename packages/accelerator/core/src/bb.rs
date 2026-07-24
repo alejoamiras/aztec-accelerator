@@ -94,8 +94,21 @@ fn prove_tmp_parent() -> Option<PathBuf> {
         // Tighten even if it pre-existed with a looser mode.
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).ok()?;
     }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(&base).ok()?; // %LOCALAPPDATA% is already per-user on Windows
+    #[cfg(windows)]
+    {
+        // F-003 Windows tail: create `prove-tmp` with an owner-only PROTECTED+inheritable DACL, or harden
+        // it if it pre-exists. Fail closed (None → caller must NOT fall back to a shared temp on Windows).
+        if let Some(mid) = base.parent() {
+            std::fs::create_dir_all(mid).ok()?;
+        }
+        match crate::win_acl::secure_create_dir(&base) {
+            Ok(()) => {}
+            Err(_) if base.is_dir() => crate::win_acl::harden_existing_dir(&base).ok()?,
+            Err(_) => return None,
+        }
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    std::fs::create_dir_all(&base).ok()?;
     Some(base)
 }
 
@@ -112,6 +125,22 @@ fn create_prove_tempdir() -> std::io::Result<tempfile::TempDir> {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
+    #[cfg(windows)]
+    {
+        // F-003 (D4/D21): fail closed on Windows — NO OS-`%TEMP%` fallback for the private witness. The
+        // `prove-tmp` parent is owner-only + inheritable, so the child tempdir inherits owner-only AT
+        // creation (no window); harden it explicitly (PROTECTED) too.
+        let parent = prove_tmp_parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no per-user data dir for a private prove workspace (refusing OS-temp fallback)",
+            )
+        })?;
+        let dir = builder.tempdir_in(parent)?;
+        crate::win_acl::harden_existing_dir(dir.path())?;
+        Ok(dir)
+    }
+    #[cfg(not(windows))]
     match prove_tmp_parent() {
         Some(parent) => builder.tempdir_in(parent),
         None => {
@@ -128,15 +157,25 @@ fn create_prove_tempdir() -> std::io::Result<tempfile::TempDir> {
 /// already exists (defends against a pre-planted file/symlink in the workspace).
 fn write_witness(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        // F-003 Windows tail: create the empty witness with an owner-only DACL BEFORE writing bytes
+        // (CREATE_NEW rejects a pre-planted file/symlink), then write.
+        let mut file = crate::win_acl::secure_create_file(path)?;
+        file.write_all(bytes)
     }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)
+    #[cfg(not(windows))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(bytes)
+    }
 }
 
 /// Run `bb prove` on the given IVC inputs (msgpack bytes) and return the proof
@@ -268,6 +307,24 @@ mod tests {
         );
 
         // create_new fails closed on a pre-existing path (no silent overwrite of a planted file).
+        assert!(write_witness(&witness, b"again").is_err());
+    }
+
+    /// F-003 Windows tail (runs in the `windows-build` CI lane). `create_prove_tempdir` / `write_witness`
+    /// apply an owner-only PROTECTED DACL and then READ IT BACK, failing closed if it did not take effect
+    /// (`win_acl::verify_owner_only` — catches FAT/exFAT no-op, foreign/world ACEs). So a successful
+    /// create+write IS the effective-DACL assertion: owner-only, no `BUILTIN\Users`/`Everyone`. Also
+    /// pins reparse/pre-plant rejection (CREATE_NEW / CreateDirectoryW fail if the path already exists).
+    #[cfg(windows)]
+    #[test]
+    fn prove_workspace_and_witness_are_owner_only_windows() {
+        let dir =
+            create_prove_tempdir().expect("secure prove workspace (owner-only DACL verified)");
+        let witness = dir.path().join("ivc-inputs.msgpack");
+        write_witness(&witness, b"secret-witness-bytes")
+            .expect("secure witness (owner-only DACL verified)");
+        assert!(witness.exists());
+        // CREATE_NEW must reject a second write to the same path (planted-file / symlink defense).
         assert!(write_witness(&witness, b"again").is_err());
     }
 
