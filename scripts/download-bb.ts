@@ -488,6 +488,10 @@ export function cleanupOldVersions(protectedVersions: Set<string> = new Set()): 
       const idx = sorted.findIndex((v) => !protectedVersions.has(v));
       if (idx === -1) break;
       const [evict] = sorted.splice(idx, 1);
+      // `idx !== -1` guarantees splice removed one element, but noUncheckedIndexedAccess types it
+      // as possibly-undefined — guard rather than assert so a future refactor can't produce a
+      // `join(base, undefined)` that would rmSync the whole versions dir.
+      if (evict === undefined) break;
       rmSync(join(versionsBaseDir(), evict), { recursive: true, force: true });
       console.log(`  🗑 Evicted ${evict} (${tier} retention: keep ${limit})`);
     }

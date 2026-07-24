@@ -12,7 +12,9 @@ describe("check-windows-bb-pin", () => {
   test("reports the live bb.js version's pin as present, with no network", () => {
     globalThis.fetch = (() => {
       throw new Error("check-windows-bb-pin must not fetch");
-    }) as typeof fetch;
+      // via `unknown`: a throw-only stub deliberately doesn't implement fetch's full surface
+      // (e.g. `preconnect`) — the point is that calling it at all fails the test.
+    }) as unknown as typeof fetch;
     const { version, present, message } = checkWindowsBbPin();
     expect(version).toBe(resolveAztecBb().version); // keys on the gate's version, not argv
     expect(present).toBe(true); // the committed live version has a manual-review pin
@@ -22,7 +24,9 @@ describe("check-windows-bb-pin", () => {
   test("an unpinned version reports MANUAL PIN REQUIRED, with no network", () => {
     globalThis.fetch = (() => {
       throw new Error("check-windows-bb-pin must not fetch");
-    }) as typeof fetch;
+      // via `unknown`: a throw-only stub deliberately doesn't implement fetch's full surface
+      // (e.g. `preconnect`) — the point is that calling it at all fails the test.
+    }) as unknown as typeof fetch;
     const { present, message } = checkWindowsBbPin("9.9.9");
     expect(present).toBe(false);
     expect(message).toContain("MANUAL PIN REQUIRED");

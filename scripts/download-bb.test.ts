@@ -99,7 +99,9 @@ function streamResp(bytes: Uint8Array, o: { status?: number; contentLength?: str
             : o.contentLength
           : null,
     },
-    body: new Response(bytes).body,
+    // `Uint8Array<ArrayBufferLike>` isn't in the current lib's `BodyInit` union even though
+    // Response accepts it at runtime — cast via `unknown` rather than reallocating the buffer.
+    body: new Response(bytes as unknown as BodyInit).body,
   };
 }
 function routeFetch(fn: (url: string) => unknown): void {
