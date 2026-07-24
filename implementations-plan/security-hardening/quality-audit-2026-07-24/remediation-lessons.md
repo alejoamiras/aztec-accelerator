@@ -13,7 +13,7 @@ tests; frontend build + biome; Playwright/WebDriver are CI-only) and committed.
 | 3 | Version-downgrade policy (x-aztec-version) | ✓ done | `fix(prove): enforce a safe-default bb version-downgrade policy` |
 | 4 | CWD cache fail-open | ✓ done | `fix(cache): fail closed when home dir is unresolvable` |
 | 5 | Updater rollback-race + bounded streaming | pending | |
-| 6 | win_acl owner not verified | pending | |
+| 6 | win_acl owner not verified | ✓ done | `fix(f-003): set + verify object OWNER == current user` |
 | 7 | C8 rollback destroys recovery | pending | |
 | 8 | C9 arbiter promote-before-build | ✓ done | `fix(c9): build auth popup before deciding active-slot` |
 | 9 | Release-CI dispatch-ref / tag-verify | pending (infra: commit+validate only, human applies) | |

@@ -81,10 +81,15 @@ where
             disarm_word(disarmed, prior_enabled)
         ));
     }
-    // Step 2 — arm crash recovery. On failure, roll back the plugin enable we just did (unless it was
-    // already on) AND disarm any partial crash-recovery, running both regardless of either's outcome.
+    // Step 2 — arm crash recovery. On failure, roll back to the PRIOR state:
+    // - plugin: disable it only if we turned it on (`!prior_enabled`); if it was already on, keep it.
+    // - crash recovery: codex #7 — do NOT disarm when `prior_enabled`. If autostart was already on before
+    //   this call, crash recovery was armed as part of that prior state, and a failed *idempotent re-arm*
+    //   must RESTORE the prior recovery, not destroy the user's existing recovery path. Only disarm the
+    //   partial recovery we were creating on a fresh enable.
+    // Both sub-rollbacks run regardless of either's outcome (no short-circuit).
     if let Err(e) = crash_arm() {
-        let disarmed = crash_disarm();
+        let disarmed = if prior_enabled { true } else { crash_disarm() };
         let plugin_rolled = if prior_enabled {
             "kept (was already enabled — prior state restored)".to_string()
         } else {
@@ -95,7 +100,7 @@ where
         };
         return Err(format!(
             "autostart enable failed at crash-recovery step: {e}; rollback: crash_disarm={}, plugin={plugin_rolled}",
-            disarm_word(disarmed, false)
+            disarm_word(disarmed, prior_enabled)
         ));
     }
     Ok(())
@@ -560,26 +565,36 @@ mod tests {
     }
 
     #[test]
-    fn enable_transaction_arm_fails_prior_enabled_keeps_plugin() {
+    fn enable_transaction_arm_fails_prior_enabled_keeps_plugin_and_recovery() {
         let disable_called = Cell::new(false);
+        let disarm_called = Cell::new(false);
         let r = enable_transaction(
-            true, // prior ENABLED
+            true, // prior ENABLED (autostart + crash recovery were both already on)
             || Ok(()),
             || Err("arm boom".to_string()),
             || {
                 disable_called.set(true);
                 Ok(())
             },
-            || true,
+            || {
+                disarm_called.set(true);
+                true
+            },
         );
         let msg = r.unwrap_err();
         assert!(
             !disable_called.get(),
             "prior-enabled ⇒ do NOT disable (restore prior state)"
         );
+        // codex #7: the key regression guard — a failed idempotent re-arm must NOT destroy the
+        // pre-existing crash recovery that was armed as part of the prior enabled state.
         assert!(
-            msg.contains("kept"),
-            "error notes the plugin was kept: {msg}"
+            !disarm_called.get(),
+            "prior-enabled ⇒ do NOT disarm the user's pre-existing crash recovery"
+        );
+        assert!(
+            msg.contains("kept") && msg.contains("skipped (prior enabled)"),
+            "error notes plugin kept + disarm skipped: {msg}"
         );
     }
 
