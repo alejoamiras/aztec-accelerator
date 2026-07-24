@@ -37,25 +37,27 @@ genuine failure or ambiguity — not on routine gates.
   ┌──────────────────────────────────────────────────────────────────────┐
   │  PHASE 2 — LAND THE SECURITY WORK ON MAIN                            │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  [ ] 2.1  PR security-hardening → main ..... 24+ commits             │
-  │  [ ] 2.2  CI green                                                   │
-  │  [ ] 2.3  merge .......................... unlocks --exclude fix     │
+  │  [✓] 2.1  PR #404 security-hardening → main  183 files               │
+  │  [✓] 2.2  CI green ......................... 33 pass / 0 fail        │
+  │  [✓] 2.3  MERGED ........................... --exclude fix LIVE      │
   └──────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
   ┌──────────────────────────────────────────────────────────────────────┐
   │  PHASE 3 — DE-RISK THE NEW IAM ROLES  (H4 open question)             │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  [ ] 3.1  dispatch release-accelerator auth_probe=true               │
-  │  [ ] 3.2  confirm AWS trust preflight PASSES                         │
-  │           └─ FAIL ⇒ drop the `workflow` claim from iam.tf, re-apply  │
+  │  [✓] 3.0  deploy-landing dispatched → ci-landing role ASSUMED       │
+  │  [✓] 3.1  release-accelerator auth_probe=true (no side effects)      │
+  │  [✓] 3.2  AWS trust preflight PASSED                                 │
+  │  ★ H4 DISPROVEN: AWS DOES evaluate the `workflow` OIDC claim.        │
+  │    Per-pipeline isolation works as designed. No iam.tf change needed.│
   └──────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
   ┌──────────────────────────────────────────────────────────────────────┐
   │  PHASE 4 — DRY RUN: RELEASE 1.0.7-rc.1   (feed NOT touched)          │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  [ ] 4.1  dispatch release-accelerator version=1.0.7-rc.1            │
+  │  [~] 4.1  dispatched (run 30125371494)                               │
   │  [ ] 4.2  build 3 Tauri + 4 headless, sign, smoke, tag, release      │
   │  [ ] 4.3  verify: prerelease marked, latest.json NOT uploaded        │
   └──────────────────────────────────────────────────────────────────────┘
@@ -101,3 +103,13 @@ Legend: `[✓]` done · `[~]` in progress · `[ ]` pending · `[✗]` failed/blo
   main's new `typecheck:scripts` then caught 4 real type errors in branch scripts — fixed, not
   suppressed. Local gate green. PR creation BLOCKED by a GitHub "Pull Requests: major_outage";
   branch pushed, retry armed.
+- 2026-07-24 — Phases 1-3 complete. Two real problems caught by verifying rather than trusting:
+  (a) the repo is squash-only, so #403's sync never made main's commits ANCESTORS — #404 went
+  CONFLICTING even though content was correct. Fixed with a real merge commit whose tree was
+  verified byte-identical to the branch (pure ancestry repair, pushed direct to
+  security-hardening since another squash would recreate the break). (b) git's auto-merge
+  produced a DUPLICATED `permissions:` block in sdk.yml (invalid YAML) — caught by diffing the
+  merge result instead of trusting "no conflicts".
+  ★ H4 RESOLVED THE OTHER WAY: codex predicted AWS would ignore the `workflow` OIDC claim,
+  making the new roles unassumable. Both roles assumed successfully (deploy-landing + release
+  preflight). AWS DOES support it; the claim stays. Testing beat the prediction.
