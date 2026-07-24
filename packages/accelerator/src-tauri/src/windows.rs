@@ -1,6 +1,6 @@
 //! Window management for Settings, Authorization popup, and Update prompt.
 
-use aztec_accelerator::authorization::AuthorizationManager;
+use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
 use aztec_accelerator::commands;
 use std::sync::Arc;
 use tauri::webview::NewWindowResponse;
@@ -152,7 +152,14 @@ pub fn show_auth_popup_window(
             focus_on_create: is_active,
         },
     ) else {
-        return; // popup already open for this request — don't spawn a duplicate timeout
+        // A per-request auth label is NEVER "already open", so `None` here means the window FAILED TO
+        // BUILD (code-review: resource exhaustion etc.). Don't leave the arbiter's `active` slot held with
+        // no timer — that would stall the whole auth queue until the 600 s backstop. Resolve this request
+        // Deny to release the slot and promote + raise the next queued popup.
+        if let Some(promoted) = auth_manager.resolve(request_id, AuthDecision::Deny) {
+            commands::arm_active_popup(app, auth_manager, &promoted);
+        }
+        return;
     };
 
     // C9 (D14): a user closing the popup WITHOUT deciding must resolve it (Deny) + promote the next queued

@@ -54,7 +54,10 @@ pub const AUTH_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// backstop only bounds the total queued wait — at most `MAX_PENDING_ORIGINS` popups each taking up to
 /// `AUTH_DECISION_TIMEOUT` — so a queued request that somehow never surfaces can't block forever.
 pub const AUTH_QUEUE_BACKSTOP: Duration = Duration::from_secs(
-    AUTH_DECISION_TIMEOUT.as_secs() * crate::authorization::MAX_PENDING_ORIGINS as u64,
+    // `MAX_PENDING_ORIGINS + 1` (not exactly ×MAX): the last-queued request only becomes active after the
+    // MAX-1 ahead of it each drain a full 60 s, so a bare ×MAX would make its /prove backstop coincide with
+    // the END of its own 60 s activation window. The +1 gives it a full window of margin (code-review).
+    AUTH_DECISION_TIMEOUT.as_secs() * (crate::authorization::MAX_PENDING_ORIGINS as u64 + 1),
 );
 
 /// Status surfaced to the tray via the `on_status` callback during a `/prove` request.

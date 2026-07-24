@@ -63,3 +63,10 @@ parity), documented in the plan's Security section.
   (1) misaligned `TOKEN_USER` deref → `addr_of!`+`read_unaligned` for the SID pointer;
   (2) ACE parsed without type/mask verification → `AceType==ACCESS_ALLOWED_ACE_TYPE` (307cabc) + `Mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS`;
   (3) `secure_create_dir` create→open junction race → `reject_if_reparse` (GetFileInformationByHandle) in `apply_and_verify_owner_only`.
+
+## /code-review residual (D) — non-NTFS Windows is fail-closed BY DESIGN
+A finder flagged that F-003 removes the `%TEMP%` fallback, so on a Windows `%LOCALAPPDATA%` that can't hold
+an owner-only DACL (FAT/exFAT/some network-redirected profiles) `create_prove_tempdir` now hard-errors a
+prove that previously worked. This is the APPROVED fail-closed trade-off (D4: security > availability on an
+exotic FS — a witness must never land on a world-readable temp). Documented operational impact: such a user
+needs an NTFS local-app-data path. Not a bug.

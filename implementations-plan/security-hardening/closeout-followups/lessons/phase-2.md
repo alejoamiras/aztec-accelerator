@@ -59,3 +59,20 @@ listener.
   the 1st is pending, and a click within the guard is ignored) is NOT yet added — writing it blind (no local
   WebDriver) is error-prone; add + debug it in the CI loop. The arbiter's server-side guarantee is already
   covered by the 4 Rust unit tests; this would add the observable end-to-end assertion.
+
+## /code-review max --fix (workflow) — outcome
+6 finders → 18 candidates, but the VERIFY pass hit the account **weekly API limit** (resets Jul 27) —
+15/16 verifiers errored, so the workflow's "no findings survived" is NOT trustworthy. Triaged the raw
+finder candidates by hand (main-loop review + `cargo` validation; no subagents/codex available under the
+limit):
+- **FIXED — windows.rs build-failure stall**: a per-request auth label is never "already open", so
+  `open_or_focus_window`→`None` = window BUILD FAILURE. The early `return` left the arbiter's `active` slot
+  held with no timer → whole auth queue stalled until the 600 s backstop. Now: on build failure, resolve the
+  request Deny + promote/raise the next queued popup.
+- **FIXED — AUTH_QUEUE_BACKSTOP zero margin**: was exactly `MAX×60 s`, coinciding with the last-queued
+  request's own 60 s activation-window end → now `(MAX+1)×60 s` for a full window of margin.
+- **DOCUMENTED residual (A)** — the core `server/auth.rs` 600 s backstop path calls `resolve(Deny)` and
+  cannot call `arm_active_popup` (core can't reach the src-tauri window layer). If that backstop ever fires
+  for an active popup with a queue behind it (only after the window-layer 60 s timer ALSO failed — a rare
+  double-failure), the promoted popup isn't auto-raised. Mitigated: its frontend `get_pending_auth` poll
+  sees `active=true` and re-enables its buttons, and its own 600 s backstop bounds it. Fail-safe (denies).
