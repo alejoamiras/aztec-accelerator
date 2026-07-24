@@ -182,9 +182,11 @@ describe("Authorization Flow", () => {
 
     await browser.switchToWindow(authWindowHandle!);
 
-    expect(await browser.getTitle()).toBe("Authorize Site");
-    // C9 (D8/A): wait for the server origin to render + the click-guard to elapse before interacting.
+    // C9 (D8/A): the popup now loads its origin async (get_pending_auth), so wait for the page to render
+    // (server origin) + the click-guard to elapse BEFORE asserting title/content — getTitle() on the
+    // not-yet-loaded page returns "" (this ordering was the CI failure).
     await waitForActivePopup();
+    expect(await browser.getTitle()).toBe("Authorize Site");
     expect(await browser.$("#origin").getText()).toBe(TEST_ORIGIN);
 
     // F-014: "Always allow this site" defaults UNCHECKED — opt in explicitly to persist the origin.
