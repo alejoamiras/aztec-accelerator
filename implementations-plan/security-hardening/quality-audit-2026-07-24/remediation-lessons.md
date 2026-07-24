@@ -74,6 +74,32 @@ Adopted (acting on codex's stronger argument):
   authenticity control). Ed25519 integrity unaffected. Future fix = upstream/pinned-fork byte limits
   inside the plugin's own download+verify loop.
 
+## Round-2 codex re-audit (2026-07-24, gpt-5.6-sol xhigh) — 7 findings, all fixed
+Re-audited the whole remediation diff. Confirmed SOUND: #2 piggyback cap, #4 cache fail-closed,
+#5 updater intent-before-install, #6 win_acl owner, #9 release-CI tag pin. Found + fixed:
+1. **(High)** authorize Remember shipped ENABLED → pre-JS click could pre-check it. Fix: HTML
+   `disabled` attr + JS `.checked=false` on init.
+2. **(High regression)** version policy fail-closed on unparseable bundled BRICKED headless (no
+   `AZTEC_BB_VERSION` → "unknown" → every version 403). Codex caught it. Fix: unparseable bundled ⇒
+   NO floor (headless has no baseline to downgrade from); desktop always has a compile-time baseline.
+   Dropped `BundledUnknown`.
+3. **(Medium)** macOS: re-running the autostart plugin enable recreates the LaunchAgent plist and
+   strips KeepAlive → my round-1 "skip disarm" didn't save it. Fix: `enable_transaction` skips
+   `plugin_enable` entirely when `prior_enabled`.
+4. **(Medium)** `focus_on_create:false` only gated a post-build set_focus; tao builds focused by
+   default → queued popups stole focus. Fix: `.focused(config.focus_on_create)` on the builder.
+5. **(Medium)** updater `rearm_crash_recovery_if_enabled` used `is_enabled().unwrap_or(false)` →
+   a read error after disarm left recovery OFF. Fix: fail SAFE (re-arm on unreadable state).
+6. **(Medium)** settings UI: `get_autostart_enabled` error rejected the whole `Promise.all`, leaving
+   the switch at its false "off" default. Fix: fetch independently; on error disable + hint.
+7. **(Low)** `HasBuildMetadata` 403 unreachable over HTTP (`is_valid_version` rejects `+` → 400).
+   Documented (kept for direct callers).
+
+**Meta-lesson**: codex's round-2 catch of #2 (headless brick) shows round-1's fail-closed was an
+over-application — the fix for a desktop-downgrade threat mustn't brick a baseline-less mode. Also:
+NEVER put backtick-wrapped tokens in a double-quoted `git commit -m` under zsh — they run as command
+substitution and silently gut the message. Use `-F <file>` / heredoc.
+
 ## Notes
 - `semver = "1"` was already a core dependency — no new dep.
 - Only `resolve_version_flags_uncached_for_download` used a default (unknown-bundled) state with a
