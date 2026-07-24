@@ -125,20 +125,20 @@ pub fn show_auth_popup_window(
     // same-origin request that reused the label. Only the first pending request per origin shows a
     // popup (piggyback gate in server/auth.rs), so per-request labels never duplicate a popup.
     let label = format!("auth-{}", commands::sanitize_window_label(request_id));
-    // C9 (D18/D19): peek the arbiter. This popup is ACTIVE (owns the actionable + always-on-top slot)
-    // only if the slot was free; otherwise it is QUEUED — built not-topmost + unfocused + WITHOUT a timer,
-    // gaining focus + its 60 s clock only when promoted (`arm_active_popup`). Exactly one popup is
-    // actionable at a time, and the arbiter (`resolve_active`) enforces that server-side too.
-    let is_active = auth_manager
-        .peek(request_id)
-        .map(|(_, active)| active)
-        .unwrap_or(false);
     // SEC-06: carry the opaque request_id so the popup echoes it back to respond_auth.
     let url = format!(
         "authorize.html?origin={}&requestId={}",
         urlencoding::encode(origin),
         urlencoding::encode(request_id)
     );
+    // C9 (D18/D19, codex #8): BUILD FIRST, unconditionally as NON-active (not topmost, unfocused, no
+    // timer). Whether this request owns the actionable + always-on-top slot is decided AFTER the window
+    // exists (below), never from a peek taken before the build. The old pre-build peek raced promotion:
+    // if the active popup resolved and promoted THIS request during its own build, the build finished
+    // with a stale `is_active=false` (non-topmost, unfocused, no timer) while the resolve path's
+    // `arm_active_popup` had already run against a not-yet-built window — leaving a server-active but
+    // unraised, un-timed popup. Exactly one popup is actionable at a time; `resolve_active` enforces that
+    // server-side regardless of window state.
     let Some(window) = open_or_focus_window(
         app,
         WindowConfig {
@@ -147,9 +147,9 @@ pub fn show_auth_popup_window(
             title: "Authorize Site",
             width: 400.0,
             height: 300.0,
-            always_on_top: is_active,
+            always_on_top: false,
             focus_if_open: false,
-            focus_on_create: is_active,
+            focus_on_create: false,
         },
     ) else {
         // A per-request auth label is NEVER "already open", so `None` here means the window FAILED TO
@@ -168,10 +168,18 @@ pub fn show_auth_popup_window(
     // arbiter helpers live in `commands` (the lib) so both this (bin) and `respond_auth` (lib) share them.
     commands::attach_close_deny_listener(app, auth_manager, &window, request_id);
 
-    // C9 (D18): arm the 60 s auto-deny ONLY for the ACTIVE popup (activation-relative, not enqueue — a
-    // queued popup is not starved of actionable time). A queued popup is armed when promoted.
+    // C9 (D18, codex #8): now that the window EXISTS, raise + arm it iff it currently owns the active
+    // slot. Re-peeking HERE (post-build) covers both "active from the start" and "promoted during the
+    // build". If promotion happens AFTER this, the resolve path's `arm_active_popup` finds the now-built
+    // window. Arming is idempotent: a second 60 s timer for the same id simply no-ops on fire (the id
+    // resolves exactly once), and a redundant raise is harmless. A still-queued popup is left non-topmost
+    // + un-timed and gains focus + its 60 s clock only when promoted.
+    let is_active = auth_manager
+        .peek(request_id)
+        .map(|(_, active)| active)
+        .unwrap_or(false);
     if is_active {
-        commands::spawn_active_deny_timer(app, auth_manager, request_id);
+        commands::arm_active_popup(app, auth_manager, request_id);
     }
 }
 

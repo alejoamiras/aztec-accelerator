@@ -11,7 +11,7 @@ tests; frontend build + biome; Playwright/WebDriver are CI-only) and committed.
 | 1 | C9 authorize Remember unguarded + poll correctness | ✓ done | `fix(c9): gate authorize Remember…` |
 | 2 | /prove per-origin piggyback sender cap | ✓ done | `fix(prove): cap per-origin piggyback senders` |
 | 3 | Version-downgrade policy (x-aztec-version) | ✓ done | `fix(prove): enforce a safe-default bb version-downgrade policy` |
-| 4 | CWD cache fail-open | pending | |
+| 4 | CWD cache fail-open | ✓ done | `fix(cache): fail closed when home dir is unresolvable` |
 | 5 | Updater rollback-race + bounded streaming | pending | |
 | 6 | win_acl owner not verified | pending | |
 | 7 | C8 rollback destroys recovery | pending | |
