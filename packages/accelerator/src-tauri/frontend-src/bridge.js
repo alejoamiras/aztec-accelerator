@@ -35,7 +35,9 @@ if (typeof window !== "undefined") {
   window.addEventListener("focus", rearmInputGuard);
   window.addEventListener("pageshow", rearmInputGuard);
 }
-function inputGuardActive() {
+// Exported so consequential non-button controls (e.g. the authorize "Remember" checkbox) can gate on the
+// same click-steal window — Allow/Deny aren't the only stealable actions.
+export function isClickGuardActive() {
   return now() - inputArmedAt < guardMs();
 }
 
@@ -96,7 +98,7 @@ export function wireButton(id, opts) {
   const btn = document.getElementById(id);
   btn.addEventListener("click", async () => {
     // C9 (A): ignore a click that lands within the guard window after focus (click-steal defense).
-    if (opts.guard && inputGuardActive()) return;
+    if (opts.guard && isClickGuardActive()) return;
     btn.disabled = true;
     const originalText = btn.textContent;
     if (opts.loadingText) btn.textContent = opts.loadingText;

@@ -25,7 +25,10 @@
         <div id="origin" class="origin-line" tabindex="0" dir="ltr" role="group" aria-label="Requesting origin"></div>
       </div>
       <label class="popup-remember">
-        <input type="checkbox" id="remember" />
+        <!-- codex r2 #1: ship DISABLED so a click landing before the deferred module runs cannot pre-check
+             it (a disabled checkbox ignores clicks). authorize.js enables it only once this popup is the
+             active, past-the-click-guard request. -->
+        <input type="checkbox" id="remember" disabled />
         Always allow this site
       </label>
     </div>

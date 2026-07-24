@@ -107,6 +107,8 @@ test("a QUEUED popup keeps its buttons disabled until promoted", async ({ page }
   await page.goto("/authorize.html?requestId=req-abc");
   await expect(page.getByRole("button", { name: "Allow" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Deny" })).toBeDisabled();
+  // C9 (audit fix): Remember is a consequential control too — a queued popup must not let it be pre-armed.
+  await expect(page.locator("#remember")).toBeDisabled();
 });
 
 test("buttons disabled after invoke prevents double-click", async ({ page }) => {

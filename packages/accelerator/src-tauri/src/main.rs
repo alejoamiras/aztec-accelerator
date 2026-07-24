@@ -331,8 +331,14 @@ fn build_tray(
             // → relaunch. Windows-only: mac/linux key on exit code (launchd
             // SuccessfulExit:false / systemd on-failure), so a clean quit is a
             // no-op there and the recovery entry must persist across quit.
+            // codex #7: surface (log) a non-confirmed disarm — an unconfirmed disable here means the
+            // Task Scheduler recovery entry may survive and relaunch the app within ~1 min of this quit.
             #[cfg(target_os = "windows")]
-            aztec_accelerator::crash_recovery::disable_crash_recovery();
+            if !aztec_accelerator::crash_recovery::disable_crash_recovery() {
+                tracing::warn!(
+                    "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
+                );
+            }
             app.exit(0);
         }
         "show_logs" => open_in_browser(&log_dir()),
@@ -513,12 +519,20 @@ fn main() {
             // Check autostart on launch for crash recovery
             {
                 use tauri_plugin_autostart::ManagerExt;
-                if app.autolaunch().is_enabled().unwrap_or(false) {
-                    // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and
-                    // it must NOT be silently swallowed either.
-                    if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
-                        tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and it
+                // must NOT be silently swallowed. codex #7: distinguish a READ ERROR from a confirmed
+                // "off". Treating an is_enabled() error as `false` would silently skip re-arming crash
+                // recovery when autostart was in fact on but momentarily unreadable.
+                match app.autolaunch().is_enabled() {
+                    Ok(true) => {
+                        if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
+                            tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                        }
                     }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(
+                        "could not read autostart state at startup; crash recovery not re-armed: {e}"
+                    ),
                 }
             }
 

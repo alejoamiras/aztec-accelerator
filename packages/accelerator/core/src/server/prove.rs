@@ -88,6 +88,18 @@ pub(crate) fn resolve_version(
         });
     }
 
+    // codex audit #3: `x-aztec-version` is remote-controlled, so a non-bundled request must clear the
+    // downgrade policy BEFORE we download/execute it — otherwise a dApp could force an authentic-but-
+    // -vulnerable OLD bb (or an arbitrary dev build). Every version that survives this gate is one we
+    // consider safe to prove with. The bundled request already returned above.
+    if let Err(rej) = versions::check_version_selectable(&version, bundled) {
+        tracing::warn!(version = %version, bundled = %bundled, reason = rej.reason(), "Refused remote bb version");
+        return Err(ProveError::VersionNotAllowed {
+            version: version.to_string(),
+            reason: rej.reason(),
+        });
+    }
+
     // Re-download when the cache entry is absent OR present-but-marker-invalid (tampered/legacy), not
     // merely when the path is missing — `verify_cached_bb` rehashes the binary against its marker (F-007).
     let needs_download = versions::verify_cached_bb(&version).is_err();

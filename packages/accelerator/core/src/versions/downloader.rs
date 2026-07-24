@@ -44,7 +44,13 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
     // F-007: stage privately, finalize (chmod + macOS codesign), fingerprint the FINAL binary, write
     // the marker, THEN publish fail-closed — so the live dir only ever appears with a codesigned binary
     // + a matching marker.
-    let version_dir = versions_base_dir().join(version.as_str());
+    // codex #4: install ONLY into the trusted home-rooted cache; never fall back to CWD (which an
+    // attacker could pre-own). No resolvable home ⇒ refuse to write a downloaded binary anywhere.
+    let version_dir = versions_base_dir()
+        .ok_or(
+            "SECURITY: home directory unresolved; refusing to install bb to an untrusted location",
+        )?
+        .join(version.as_str());
     install_version_dir(&version_dir, &bytes, version_str, &archive_digest)?;
 
     tracing::info!(version = version_str, "bb cached successfully");
@@ -692,11 +698,16 @@ mod tests {
         let av = AztecVersion::parse(&version).expect("bundled version is valid");
 
         // Delete cached version to force a fresh download
-        let cached_dir = versions_base_dir().join(&version);
+        let cached_dir = versions_base_dir()
+            .expect("home resolvable in the test environment")
+            .join(&version);
         if cached_dir.exists() {
             std::fs::remove_dir_all(&cached_dir).unwrap();
         }
-        assert!(!version_bb_path(&av).exists(), "cache should be cleared");
+        assert!(
+            !version_bb_path(&av).expect("home resolvable").exists(),
+            "cache should be cleared"
+        );
 
         // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
         let bb_path = download_bb(&av)
@@ -704,7 +715,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
 
         // Verify the binary was cached in the right location
-        assert_eq!(bb_path, version_bb_path(&av));
+        assert_eq!(bb_path, version_bb_path(&av).expect("home resolvable"));
         assert!(bb_path.exists(), "bb binary should exist after download");
 
         // Verify it's a real file (not a directory or symlink)

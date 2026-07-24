@@ -1,4 +1,4 @@
-import { invoke, showErrorHint, wireButton } from "./bridge.js";
+import { invoke, isClickGuardActive, showErrorHint, wireButton } from "./bridge.js";
 
 const params = new URLSearchParams(window.location.search);
 // SEC-06: the opaque request id the server issued for this popup — the ONLY value we trust from the URL.
@@ -9,21 +9,36 @@ const requestId = params.get("requestId") || "";
 const originEl = document.getElementById("origin");
 const allowBtn = document.getElementById("allow");
 const denyBtn = document.getElementById("deny");
+const rememberEl = document.getElementById("remember");
 
 let serverOrigin = null; // authoritative origin, once get_pending_auth answers
 let badgeShownFor = null; // origin we've already rendered the verified badge for
-let decided = false; // set once the user acts — stops the poll fighting the button state
-let poll = null;
+let decided = false; // latched ONLY after respond_auth SUCCEEDS — then the window is closing
+let responding = false; // a respond_auth call is in flight — don't let the poll fight the button state
+let poll = null; // active setTimeout id (self-scheduling; never overlaps)
 
-// Never render the query-param origin as authoritative: show a placeholder + disabled buttons until the
+// Never render the query-param origin as authoritative: show a placeholder + disabled controls until the
 // server answers.
 originEl.textContent = "…";
-setButtonsEnabled(false);
+// codex r2 #1: defensively CLEAR the checkbox on init. The HTML ships it `disabled` so a pre-JS click
+// can't check it, but if anything (autofill/restore) left it checked, `disabled` alone wouldn't uncheck
+// it — and Allow reads `.checked`. Reset before enabling any control.
+rememberEl.checked = false;
+setControlsEnabled(false);
 
-function setButtonsEnabled(on) {
-  if (decided) return;
+// C9 (audit fix): the Remember checkbox is a consequential action too — a click-steal can pre-arm
+// persistent authorization before the user later Allows. It is disabled while inactive (below) AND its
+// toggle is refused within the click-steal guard window, exactly like Allow/Deny.
+rememberEl.addEventListener("click", (e) => {
+  if (isClickGuardActive()) e.preventDefault();
+});
+
+function setControlsEnabled(on) {
+  // Don't fight the button state while a decision is in flight or already made.
+  if (decided || responding) return;
   allowBtn.disabled = !on;
   denyBtn.disabled = !on;
+  rememberEl.disabled = !on; // C9 (audit fix): gate Remember on active-state too
 }
 
 function renderVerifiedBadge(origin) {
@@ -41,16 +56,17 @@ function renderVerifiedBadge(origin) {
 }
 
 async function refreshPending() {
-  if (decided) return;
+  if (decided || responding) return;
   let info;
   try {
     info = await invoke("get_pending_auth", { requestId });
   } catch {
-    // A2: transient IPC error — keep Allow/Deny disabled and let the user retry/close.
-    setButtonsEnabled(false);
+    // A2: transient IPC error — keep controls disabled and let the user retry/close.
+    setControlsEnabled(false);
     showErrorHint(allowBtn, "Couldn't reach the accelerator — retrying…");
     return;
   }
+  if (decided || responding) return; // state changed while awaiting — drop this (possibly stale) result
   if (!info) {
     // A2: None ⇒ the request is already resolved/expired (this popup is stale) ⇒ close it.
     stopPolling();
@@ -61,29 +77,43 @@ async function refreshPending() {
   originEl.textContent = info.origin;
   renderVerifiedBadge(info.origin);
   // Only the ACTIVE popup is actionable (the server enforces this too via resolve_active; this merely
-  // reflects it so a queued popup's buttons are visibly disabled until it is promoted).
-  setButtonsEnabled(info.active);
+  // reflects it so a queued popup's controls are visibly disabled until it is promoted).
+  setControlsEnabled(info.active);
 }
 
 function stopPolling() {
   if (poll !== null) {
-    clearInterval(poll);
+    clearTimeout(poll);
     poll = null;
   }
 }
 
-refreshPending();
-// Re-poll so a QUEUED popup enables its buttons when promoted to active (and closes if the request went
-// away). Cheap; stops as soon as the user decides or the popup closes.
-poll = setInterval(refreshPending, 1000);
+// C9 (audit fix): self-scheduling poll (setTimeout, not setInterval) so calls NEVER overlap — a delayed
+// older `active:false` can no longer overwrite a newer `active:true`. Re-polls so a QUEUED popup enables
+// when promoted (and closes if the request went away). Stops on decision/close.
+async function pollLoop() {
+  await refreshPending();
+  if (decided || poll === null) return;
+  poll = setTimeout(pollLoop, 1000);
+}
+
+poll = setTimeout(pollLoop, 0);
 window.addEventListener("beforeunload", stopPolling);
 
-function respond(allowed) {
-  decided = true;
-  stopPolling();
-  const remember = document.getElementById("remember").checked;
-  // Send the server-authoritative origin (respond_auth treats it as diagnostics-only, but keep it honest).
-  return invoke("respond_auth", { requestId, origin: serverOrigin ?? "", allowed, remember });
+async function respond(allowed) {
+  // C9 (audit fix): do NOT latch `decided`/stop polling until respond_auth SUCCEEDS. On failure the poll
+  // must keep running so a resolved/expired request still closes and a promoted one stays truthful, rather
+  // than the popup being left falsely actionable with a stale "try again".
+  responding = true;
+  const remember = rememberEl.checked;
+  try {
+    // Send the server-authoritative origin (respond_auth treats it as diagnostics-only, but keep it honest).
+    await invoke("respond_auth", { requestId, origin: serverOrigin ?? "", allowed, remember });
+    decided = true; // success — the Rust side is closing this window
+    stopPolling();
+  } finally {
+    responding = false;
+  }
 }
 
 wireButton("allow", { disableAlso: "deny", guard: true, onClick: () => respond(true) });

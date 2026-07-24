@@ -5,13 +5,22 @@ use super::release_metadata::current_platform;
 use super::version_policy::AztecVersion;
 use std::path::{Path, PathBuf};
 
-/// Returns the base directory for cached bb versions: `~/.aztec-accelerator/versions/`.
-pub fn versions_base_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".aztec-accelerator")
-        .join("versions")
+/// The base directory for cached bb versions: `~/.aztec-accelerator/versions/`. Returns `None` when
+/// the user home directory cannot be resolved — every caller then FAILS CLOSED (codex audit #4).
+///
+/// The previous `unwrap_or_else(|| ".")` (current-working-directory) fallback was a real hole: the
+/// bb-cache integrity marker is only trustworthy inside a directory the *user* owns. If home
+/// resolution failed and the cache root became the CWD, an attacker who controls the working
+/// directory could preseed `./.aztec-accelerator/versions/<v>/{bb, bb.sha256.json}` with a bb and a
+/// SELF-AUTHORED marker whose digest matches — and `verify_cached_bb` would accept it, bypassing the
+/// download-time verification entirely. No resolvable home ⇒ no trusted cache location ⇒ refuse.
+pub fn versions_base_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".aztec-accelerator").join("versions"))
 }
+
+/// Error returned by the security-critical paths when [`versions_base_dir`] yields `None`.
+const NO_TRUSTED_CACHE_ROOT: &str =
+    "SECURITY: home directory unresolved; refusing to trust any cache location";
 
 /// The bb binary filename on the current platform (`bb.exe` on Windows, `bb` elsewhere).
 pub fn bb_binary_name() -> &'static str {
@@ -25,15 +34,16 @@ pub fn bb_binary_name() -> &'static str {
 /// Returns the path to a cached bb binary for a given version.
 /// q7e3-F-08: takes the validated `&AztecVersion` — an unvalidated string can no longer reach this
 /// path-building sink (the #99 traversal guard holds by construction).
-pub fn version_bb_path(version: &AztecVersion) -> PathBuf {
-    versions_base_dir()
-        .join(version.as_str())
-        .join(bb_binary_name())
+pub fn version_bb_path(version: &AztecVersion) -> Option<PathBuf> {
+    versions_base_dir().map(|b| b.join(version.as_str()).join(bb_binary_name()))
 }
 
-/// List all cached bb versions by scanning `versions_base_dir()`.
+/// List all cached bb versions by scanning `versions_base_dir()`. An unresolvable home ⇒ no trusted
+/// cache ⇒ empty inventory (fail closed: nothing is advertised as cached).
 pub fn list_cached_versions() -> Vec<String> {
-    list_cached_versions_in(&versions_base_dir())
+    versions_base_dir()
+        .map(|b| list_cached_versions_in(&b))
+        .unwrap_or_default()
 }
 
 /// Inner, base-dir-parameterized for testing. A directory counts as a cached version ONLY if its name
@@ -74,9 +84,9 @@ pub(crate) const MARKER_NAME: &str = "bb.sha256.json";
 /// Marker schema tag — `read_bb_marker` rejects anything else (forward-compatible evolution).
 pub(crate) const MARKER_SCHEMA: &str = "aztec-accelerator/bb-cache-marker@1";
 
-/// Path to a cached version's integrity marker.
-pub(crate) fn version_bb_marker_path(version: &AztecVersion) -> PathBuf {
-    versions_base_dir().join(version.as_str()).join(MARKER_NAME)
+/// Path to a cached version's integrity marker. `None` when home is unresolved (fail closed).
+pub(crate) fn version_bb_marker_path(version: &AztecVersion) -> Option<PathBuf> {
+    versions_base_dir().map(|b| b.join(version.as_str()).join(MARKER_NAME))
 }
 
 fn is_hex64(s: &str) -> bool {
@@ -197,14 +207,14 @@ fn verify_bb_entry(
 /// SHA-256 matches its valid marker's `binary_sha256`. Returns the verified path on success. This is the
 /// SINGLE authority the runtime trusts before executing a cached bb over the witness (F-007).
 pub fn verify_cached_bb(version: &AztecVersion) -> Result<PathBuf, String> {
-    let bb_path = version_bb_path(version);
-    verify_bb_entry(
-        &bb_path,
-        &version_bb_marker_path(version),
-        version.as_str(),
-        current_platform(),
-    )
-    .map_err(|e| format!("bb {version}: {e}"))?;
+    // codex #4: resolve the trusted cache root first — a `None` home fails closed here rather than
+    // silently trusting a CWD-rooted (attacker-preseedable) path.
+    let bb_path =
+        version_bb_path(version).ok_or_else(|| format!("bb {version}: {NO_TRUSTED_CACHE_ROOT}"))?;
+    let marker_path = version_bb_marker_path(version)
+        .ok_or_else(|| format!("bb {version}: {NO_TRUSTED_CACHE_ROOT}"))?;
+    verify_bb_entry(&bb_path, &marker_path, version.as_str(), current_platform())
+        .map_err(|e| format!("bb {version}: {e}"))?;
     Ok(bb_path)
 }
 #[cfg(test)]
@@ -214,7 +224,7 @@ mod tests {
     #[test]
     fn version_bb_path_format() {
         let version = AztecVersion::parse("5.0.0-nightly.20260307").unwrap();
-        let path = version_bb_path(&version);
+        let path = version_bb_path(&version).expect("home resolvable in the test environment");
         // Separator-agnostic: compare path components, and use the platform's bb name.
         let tail: std::path::PathBuf = [
             ".aztec-accelerator",

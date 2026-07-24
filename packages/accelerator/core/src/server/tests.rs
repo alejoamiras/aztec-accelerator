@@ -998,14 +998,28 @@ fn resolve_version_flags_uncached_for_download() {
     // (download_bb needs the network); the no-download arm is pinned by
     // `prove_success_path_and_status_sequence`, and prove() emits Downloading/Proving structurally
     // around this flag.
-    let state = AppState::default();
-    let version = Some("5.0.0-rc.1".to_string());
-    let resolved = resolve_version(&state, &version).expect("valid version resolves");
-    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.1"));
+    // codex #3: a non-bundled request must now clear the downgrade policy, so use a bundled FLOOR
+    // strictly below the request on the same rc channel.
+    let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.1".to_string()), None, None);
+    let state = AppState::headless(core);
+    let version = Some("5.0.0-rc.2".to_string());
+    let resolved = resolve_version(&state, &version).expect("valid newer version resolves");
+    assert_eq!(resolved.version.as_deref(), Some("5.0.0-rc.2"));
     assert!(
         resolved.needs_download,
         "uncached non-bundled version must be flagged for download"
     );
+}
+
+#[test]
+fn resolve_version_rejects_downgrade_below_bundled() {
+    // codex #3: a remote x-aztec-version older than the bundled floor is a downgrade → 403, never
+    // downloaded/executed. Bundled is rc.2; requesting the older rc.1 must be refused.
+    let core = HeadlessState::headless("1.0.0", Some("5.0.0-rc.2".to_string()), None, None);
+    let state = AppState::headless(core);
+    let result = resolve_version(&state, &Some("5.0.0-rc.1".to_string()));
+    let err = result.expect_err("a downgrade must be refused");
+    assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
 }
 
 #[test]

@@ -49,7 +49,12 @@ pub fn get_autostart_enabled(
 ) -> Result<bool, String> {
     require_label(window.label(), SETTINGS_LABEL)?;
     use tauri_plugin_autostart::ManagerExt;
-    Ok(app.autolaunch().is_enabled().unwrap_or(false))
+    // codex #7: surface an I/O error rather than reporting `false` (disabled). Reading the launcher entry
+    // can fail (permissions, malformed unit); pretending "off" would mislead the user into thinking
+    // autostart is disabled when its true state is unknown.
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("cannot read autostart state: {e}"))
 }
 
 #[tauri::command]
@@ -80,7 +85,12 @@ pub fn set_autostart(
         // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction. If arming fails
         // after the launcher went on, roll back (disable the launcher unless it was already on, disarm
         // any partial recovery) and surface a combined error — never leave a half-enabled state.
-        let prior_enabled = manager.is_enabled().unwrap_or(false);
+        // codex #7: an unknown current state makes the rollback's "disable unless prior" undecidable
+        // (guess wrong and we either clobber a pre-existing entry or leave a new one on). Fail closed
+        // rather than run the transaction against an unknown baseline.
+        let prior_enabled = manager
+            .is_enabled()
+            .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
         crate::crash_recovery::enable_transaction(
             prior_enabled,
             || manager.enable().map_err(|e| e.to_string()),
@@ -89,8 +99,17 @@ pub fn set_autostart(
             crate::crash_recovery::disable_crash_recovery,
         )?;
     } else {
+        // codex #7: disable the launcher, THEN disarm crash recovery — and surface a non-confirmed disarm.
+        // The bool from disable_crash_recovery was previously ignored, so a failed disarm left the app
+        // able to relaunch on next login while the UI showed autostart as off.
         manager.disable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::disable_crash_recovery();
+        if !crate::crash_recovery::disable_crash_recovery() {
+            return Err(
+                "Autostart launcher disabled, but crash recovery could not be confirmed disarmed — \
+                 the app may still relaunch on next login. Please retry."
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }

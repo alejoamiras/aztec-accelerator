@@ -33,8 +33,9 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     CopySid, EqualSid, GetAce, GetLengthSid, GetTokenInformation, IsWellKnownSid, TokenUser,
     WinBuiltinUsersSid, WinWorldSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TOKEN_USER,
+    DACL_SECURITY_INFORMATION, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY,
+    TOKEN_USER,
 };
 
 /// `ACCESS_ALLOWED_ACE_TYPE` (winnt.h `0x0`) — not re-exported by windows-sys under this path, so pinned
@@ -43,7 +44,7 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
+    FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -162,11 +163,17 @@ unsafe fn apply_and_verify_owner_only(handle: HANDLE, inheritable: bool) -> io::
     let _acl_guard = LocalFreeGuard(acl as *mut _);
 
     // PROTECTED_DACL strips inherited ACEs; handle-based SetSecurityInfo does not follow the name.
+    // codex #6 / F-003: ALSO set the OWNER to the current user. The Windows owner ALWAYS holds implicit
+    // READ_CONTROL + WRITE_DAC, so a foreign owner (e.g. Administrators as the default owner for an
+    // elevated creator) could rewrite our owner-only DACL regardless of the ACEs — set + verify the owner
+    // to close that bypass. Setting the owner to our own token SID needs WRITE_OWNER (requested at open).
     let rc = SetSecurityInfo(
         handle,
         SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-        std::ptr::null_mut(),
+        OWNER_SECURITY_INFORMATION
+            | DACL_SECURITY_INFORMATION
+            | PROTECTED_DACL_SECURITY_INFORMATION,
+        sid.as_mut_ptr() as PSID,
         std::ptr::null_mut(),
         acl,
         std::ptr::null_mut(),
@@ -175,8 +182,46 @@ unsafe fn apply_and_verify_owner_only(handle: HANDLE, inheritable: bool) -> io::
         return Err(io::Error::from_raw_os_error(rc as i32));
     }
 
-    // Fail-closed readback: catches FAT/exFAT / network volumes that silently ignore ACLs.
-    verify_owner_only(handle, &sid)
+    // Fail-closed readback: catches FAT/exFAT / network volumes that silently ignore ACLs, AND a foreign
+    // owner that would retain WRITE_DAC over our DACL.
+    verify_owner_only(handle, &sid)?;
+    verify_owner_sid(handle, &sid)
+}
+
+/// Read the OWNER back off the handle and assert it is the current user. The Windows owner ALWAYS has
+/// implicit `READ_CONTROL` + `WRITE_DAC`, so a non-owner-only DACL is meaningless if a foreign principal
+/// owns the object — it can simply rewrite the DACL. Fail-closed if the owner is absent or foreign
+/// (codex audit #6).
+unsafe fn verify_owner_sid(handle: HANDLE, sid: &[u8]) -> io::Result<()> {
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+    let rc = GetSecurityInfo(
+        handle,
+        SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION,
+        &mut owner,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        &mut sd,
+    );
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    let _sd_guard = LocalFreeGuard(sd);
+    if owner.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "object has no owner after applying owner-only ACL",
+        ));
+    }
+    if EqualSid(owner, sid.as_ptr() as PSID) == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "object owner is not the current user (foreign owner retains WRITE_DAC)",
+        ));
+    }
+    Ok(())
 }
 
 /// Read the effective DACL back off the handle and assert it grants EXACTLY the given SID — no
@@ -266,11 +311,12 @@ pub fn secure_create_dir(path: &Path) -> io::Result<()> {
             // ERROR_ALREADY_EXISTS ⇒ something is already at the path; fail closed.
             return Err(io::Error::from_raw_os_error(e as i32));
         }
-        // Open a handle to the just-created directory to apply the DACL.
+        // Open a handle to the just-created directory to apply the DACL + owner (WRITE_OWNER, codex #6).
         let handle = CreateFileW(
             w.as_ptr(),
             windows_sys::Win32::Storage::FileSystem::WRITE_DAC
-                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
+                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL
+                | WRITE_OWNER,
             0,
             std::ptr::null_mut(),
             OPEN_EXISTING,
@@ -295,7 +341,8 @@ pub fn secure_create_file(path: &Path) -> io::Result<std::fs::File> {
             w.as_ptr(),
             GENERIC_WRITE
                 | windows_sys::Win32::Storage::FileSystem::WRITE_DAC
-                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
+                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL
+                | WRITE_OWNER,
             0, // no sharing
             std::ptr::null_mut(),
             CREATE_NEW,
@@ -338,7 +385,8 @@ fn harden_existing(path: &Path, is_dir: bool) -> io::Result<()> {
         let handle = CreateFileW(
             w.as_ptr(),
             windows_sys::Win32::Storage::FileSystem::WRITE_DAC
-                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
+                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL
+                | WRITE_OWNER,
             0,
             std::ptr::null_mut(),
             OPEN_EXISTING,

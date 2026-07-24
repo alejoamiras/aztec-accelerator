@@ -180,6 +180,118 @@ pub fn versions_to_evict(
     to_evict
 }
 
+/// Older bb versions that are BELOW the bundled floor yet explicitly vetted-safe, so a remote
+/// `x-aztec-version` request for one is still honoured. **EMPTY by default** — the app owner curates
+/// this list after confirming each entry has no known proving-soundness or security defect. It is a
+/// COMPILE-TIME constant on purpose: a remote dApp must never be able to widen the set of selectable
+/// versions at runtime (that would defeat the whole downgrade gate). See CONVERGED-SCOPE "NEEDS THE
+/// OWNER — vetted bb-version policy content".
+pub const VETTED_OLDER_VERSIONS: &[&str] = &[];
+
+/// Why a remote-requested version was refused by [`check_version_selectable`]. Carried into the 403
+/// body + a `warn!` so a legitimate integrator can see WHY their pin was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionRejection {
+    /// Passed the `is_valid_version` charset gate but is not a strict semver — a syntactic alias
+    /// (`latest`, `5`, `5.0`, `5.0.0-alpha_beta`, …). Rejected so only well-formed versions are ever
+    /// floored/compared.
+    NotSemver,
+    /// Carries `+build` metadata. SemVer precedence IGNORES build metadata, so two builds with equal
+    /// precedence are distinct release identities we cannot reason about — refuse them (codex audit #3).
+    /// NOTE: over HTTP this is unreachable — `is_valid_version` rejects `+` first (400 `invalid_version`);
+    /// this arm is for direct/future callers and keeps the policy self-contained (codex r2 #7).
+    HasBuildMetadata,
+    /// Not strictly newer than the bundled baseline (by SemVer *precedence*) — a downgrade/sidegrade to
+    /// a potentially-vulnerable bb. Blocked.
+    BelowFloor,
+    /// A prerelease on a channel the bundled baseline is NOT on (e.g. a `nightly`/`devnet` dev build, or
+    /// any prerelease requested against a stable bundled). Only stable, or the bundled's own prerelease
+    /// channel, is a valid forward target.
+    ChannelNotAllowed,
+}
+
+impl VersionRejection {
+    /// Short, stable reason string for logs + the error body.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotSemver => "not a strict semver version",
+            Self::HasBuildMetadata => "carries build metadata (ambiguous precedence)",
+            Self::BelowFloor => "not strictly newer than the bundled version (downgrade refused)",
+            Self::ChannelNotAllowed => "prerelease channel not selectable for this release",
+        }
+    }
+}
+
+/// The release "channel" of a version, for the forward-target rule. `Stable` = no prerelease; a
+/// prerelease's channel is its FIRST dot-separated prerelease identifier (`rc`, `nightly`, `devnet`,
+/// `aztecnr-rc`, …). Compared verbatim (case-sensitive) so `RC` ≠ `rc`.
+fn channel(v: &semver::Version) -> Option<&str> {
+    if v.pre.is_empty() {
+        None // stable
+    } else {
+        Some(v.pre.as_str().split('.').next().unwrap_or(v.pre.as_str()))
+    }
+}
+
+/// Gate a REMOTE `x-aztec-version` request against a safe-default downgrade policy.
+///
+/// `x-aztec-version` is remote-controlled, and any requested version is downloaded AUTHENTICALLY
+/// (GitHub asset digest-checked). The residual risk is therefore NOT a tampered binary but a remote
+/// dApp forcing a *downgrade* to an authentic-but-known-vulnerable old bb, or coercing an arbitrary
+/// nightly/devnet dev build. The caller MUST have already normalized an exact-bundled request to the
+/// sidecar path — this function only ever sees NON-bundled requests.
+///
+/// Policy (safe default — every selectable version must already be safe; codex #3 / r2 #2 / r3 #2 / r4 #1):
+/// 1. The request must parse as STRICT semver (rejects syntactic aliases the looser [`is_valid_version`]
+///    charset gate lets through) and carry no `+build` metadata (ambiguous precedence). Checked FIRST so
+///    it holds for every path below (allowlist / no-baseline included).
+/// 2. An explicitly owner-vetted older version ([`VETTED_OLDER_VERSIONS`]) then bypasses only the
+///    floor/channel (it may be below the floor by design) — never the well-formedness gate.
+/// 3. If the BUNDLED baseline does not parse as semver, there is no floor to enforce (the normal
+///    headless case — no shipped bb to downgrade FROM), so allow: the request is validated above and the
+///    download is digest-verified. Desktop always has a compile-time baseline.
+/// 4. Floor: the request must be STRICTLY NEWER than bundled by SemVer *precedence* (`cmp_precedence`,
+///    which ignores build metadata — not Rust's total `Ord`). This is the downgrade block. Note SemVer
+///    precedence is a label order, not a chronology/safety order, hence rules 2 & 5 on top of it.
+/// 5. Forward target: the request must be stable, OR share the bundled baseline's exact prerelease
+///    channel. This drops nightly/devnet dev builds, unknown prerelease channels, and stable→prerelease
+///    unless the shipped baseline is itself on that channel.
+pub fn check_version_selectable(requested: &str, bundled: &str) -> Result<(), VersionRejection> {
+    use std::cmp::Ordering;
+
+    // 1. Validate the REQUEST unconditionally (codex r2 #2 / r3 #2 / r4 #1): strict semver + no `+build`
+    //    metadata. This runs BEFORE the allowlist and the baseline check so the guarantee holds for EVERY
+    //    path — a syntactic alias (`latest`) or a `+build` version is rejected even if it were later
+    //    allowlisted or the bundled version is unknown (headless). A real SDK always pins a strict semver.
+    let req = semver::Version::parse(requested).map_err(|_| VersionRejection::NotSemver)?;
+    if !req.build.is_empty() {
+        return Err(VersionRejection::HasBuildMetadata);
+    }
+    // 2. Owner-vetted older version bypasses only the FLOOR/channel (may be below the floor by design);
+    //    it does NOT bypass the well-formedness gate above.
+    if VETTED_OLDER_VERSIONS.contains(&requested) {
+        return Ok(());
+    }
+    // 3. No parseable bundled baseline ⇒ NO floor/channel to compare against. This is the normal
+    //    headless case (no shipped bb to downgrade FROM), so failing closed would brick its documented
+    //    first-request-download mode. The request is already validated above + digest-verified on
+    //    download. The DESKTOP app always has a compile-time `AZTEC_BB_VERSION`, so its floor holds below.
+    let Ok(base) = semver::Version::parse(bundled) else {
+        return Ok(());
+    };
+    // 4. Strictly-newer by PRECEDENCE (ignores build metadata). Exact-bundled is handled upstream, so
+    //    an equal-precedence request here is a sidegrade — refuse it.
+    if req.cmp_precedence(&base) != Ordering::Greater {
+        return Err(VersionRejection::BelowFloor);
+    }
+    // 5. Stable, or the bundled baseline's own prerelease channel — nothing else.
+    match channel(&req) {
+        None => Ok(()), // stable is always a safe forward target
+        Some(req_ch) if channel(&base) == Some(req_ch) => Ok(()),
+        Some(_) => Err(VersionRejection::ChannelNotAllowed),
+    }
+}
+
 /// Validate a version string before it is used to build cache paths or download URLs. THE single
 /// source of truth for both the HTTP ingress (`server::prove::resolve_version`) and the `download_bb`
 /// sink. Rejects path-traversal + injection: non-empty, `<= 128` chars, ASCII alnum/`.`/`-`/`_`,
@@ -205,8 +317,13 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         .iter()
         .filter_map(|s| AztecVersion::parse(s))
         .collect();
+    // codex #4: no resolvable home ⇒ no trusted cache root ⇒ nothing to evict (and never join onto a
+    // CWD fallback). `list_cached_versions` is already empty in this case, but guard the base dir too.
+    let Some(base) = versions_base_dir() else {
+        return;
+    };
     for version in evictions(&cached, bundled, in_use) {
-        let dir = versions_base_dir().join(version.as_str());
+        let dir = base.join(version.as_str());
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
@@ -485,6 +602,120 @@ mod tests {
         // Nightlies: 3, keep 2, evict 1
         assert_eq!(evicted.len(), 1);
         assert!(evicted.contains(&av("5.0.0-nightly.20260301")));
+    }
+
+    // ─── remote version-downgrade policy (codex audit #3) ───────────────────
+
+    #[test]
+    fn version_policy_allows_strictly_newer_same_channel_and_stable() {
+        // Newer rc, same channel as an rc baseline → allowed (the legit "dApp on a newer testnet" case).
+        assert_eq!(check_version_selectable("5.0.0-rc.5", "5.0.0-rc.2"), Ok(()));
+        assert_eq!(check_version_selectable("5.1.0-rc.1", "5.0.0-rc.2"), Ok(()));
+        // Stable is always a safe forward target above the floor, whatever the baseline channel.
+        assert_eq!(check_version_selectable("5.0.0", "5.0.0-rc.2"), Ok(()));
+        assert_eq!(check_version_selectable("5.1.0", "5.0.0"), Ok(()));
+    }
+
+    #[test]
+    fn version_policy_blocks_downgrade_and_sidegrade() {
+        // Older rc, older stable, and the SAME precedence (sidegrade) are all refused.
+        assert_eq!(
+            check_version_selectable("5.0.0-rc.1", "5.0.0-rc.2"),
+            Err(VersionRejection::BelowFloor)
+        );
+        assert_eq!(
+            check_version_selectable("4.9.0", "5.0.0"),
+            Err(VersionRejection::BelowFloor)
+        );
+        // A stable request equals the FINAL release precedence-wise but is strictly greater than its
+        // own rc, so this pair specifically checks the equal-precedence sidegrade guard:
+        assert_eq!(
+            check_version_selectable("5.0.0-rc.2", "5.0.0-rc.2"),
+            Err(VersionRejection::BelowFloor),
+            "exact-bundled is normalized upstream; reaching here with equal precedence is a sidegrade"
+        );
+    }
+
+    #[test]
+    fn version_policy_blocks_dev_and_unknown_channels() {
+        // nightly/devnet dev builds, even when strictly newer, are refused against an rc/stable baseline.
+        assert_eq!(
+            check_version_selectable("5.1.0-nightly.20260307", "5.0.0-rc.2"),
+            Err(VersionRejection::ChannelNotAllowed)
+        );
+        assert_eq!(
+            check_version_selectable("6.0.0-devnet.20260307", "5.0.0"),
+            Err(VersionRejection::ChannelNotAllowed)
+        );
+        // An unknown/foreign prerelease channel above the floor is refused too.
+        assert_eq!(
+            check_version_selectable("6.0.0-alpha.1", "5.0.0-rc.2"),
+            Err(VersionRejection::ChannelNotAllowed)
+        );
+        // …but if the baseline is ITSELF a nightly dev build, a newer nightly on the same channel is fine.
+        assert_eq!(
+            check_version_selectable("5.0.0-nightly.20260310", "5.0.0-nightly.20260307"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn version_policy_rejects_aliases_and_build_metadata() {
+        // Syntactic aliases that pass is_valid_version's charset gate but are not strict semver.
+        for alias in ["latest", "5", "5.0", "5.0.0-alpha_beta"] {
+            assert_eq!(
+                check_version_selectable(alias, "5.0.0-rc.2"),
+                Err(VersionRejection::NotSemver),
+                "alias {alias:?} must be rejected"
+            );
+        }
+        // Build metadata is refused (ambiguous precedence) even when otherwise newer.
+        assert_eq!(
+            check_version_selectable("5.1.0+build9", "5.0.0-rc.2"),
+            Err(VersionRejection::HasBuildMetadata)
+        );
+    }
+
+    #[test]
+    fn version_policy_unknown_bundled_has_no_floor_but_still_validates_request() {
+        // codex r2 #2: a headless server without AZTEC_BB_VERSION has bundled = "unknown" (unparseable).
+        // There is no shipped bb to downgrade FROM, so the policy imposes NO FLOOR/CHANNEL — otherwise
+        // the documented first-request-download mode would be bricked (every real version → 403). Any
+        // strict-semver version (even a nightly / an older one) is allowed.
+        assert_eq!(check_version_selectable("5.0.0", "unknown"), Ok(()));
+        assert_eq!(check_version_selectable("4.0.0", "unknown"), Ok(()));
+        assert_eq!(
+            check_version_selectable("5.0.0-nightly.20260307", "unknown"),
+            Ok(())
+        );
+        // codex r3 #2: but the REQUEST is still validated even without a baseline — aliases and build
+        // metadata are rejected (a headless caller can't select `latest` or a `+build` version).
+        assert_eq!(
+            check_version_selectable("latest", "unknown"),
+            Err(VersionRejection::NotSemver)
+        );
+        assert_eq!(
+            check_version_selectable("5.0.0+build9", "unknown"),
+            Err(VersionRejection::HasBuildMetadata)
+        );
+    }
+
+    #[test]
+    fn version_policy_allowlist_overrides_floor() {
+        // The default allowlist is empty, so an older version is refused…
+        assert!(VETTED_OLDER_VERSIONS.is_empty());
+        assert_eq!(
+            check_version_selectable("4.0.0", "5.0.0"),
+            Err(VersionRejection::BelowFloor)
+        );
+        // …and every allowlist entry (if the owner adds any later) must itself be strict semver so the
+        // exact-match compare is meaningful.
+        for v in VETTED_OLDER_VERSIONS {
+            assert!(
+                semver::Version::parse(v).is_ok(),
+                "VETTED_OLDER_VERSIONS entry {v:?} must be strict semver"
+            );
+        }
     }
 
     /// CHARACTERIZATION (quality-refactor Phase 0 — Q3 guard). Edge cases the AztecVersion refactor
