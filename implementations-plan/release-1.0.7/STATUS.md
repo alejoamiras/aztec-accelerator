@@ -57,9 +57,11 @@ genuine failure or ambiguity — not on routine gates.
   ┌──────────────────────────────────────────────────────────────────────┐
   │  PHASE 4 — DRY RUN: RELEASE 1.0.7-rc.1   (feed NOT touched)          │
   ├──────────────────────────────────────────────────────────────────────┤
-  │  [~] 4.1  dispatched (run 30125371494)                               │
-  │  [ ] 4.2  build 3 Tauri + 4 headless, sign, smoke, tag, release      │
-  │  [ ] 4.3  verify: prerelease marked, latest.json NOT uploaded        │
+  │  [✗] 4.1  dispatched (run 30125371494) → BLOCKED                     │
+  │  [✓] 4.2a linux + windows + 4 headless + WebDriver gate: PASS        │
+  │  [✗] 4.2b macOS x2: notarization 403 — APPLE AGREEMENT EXPIRED       │
+  │  [✓] 4.3  fail-closed: no tag, no release, latest.json untouched     │
+  │  ⛔ OWNER ACTION: accept the pending Apple Developer agreement        │
   └──────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
@@ -113,3 +115,15 @@ Legend: `[✓]` done · `[~]` in progress · `[ ]` pending · `[✗]` failed/blo
   ★ H4 RESOLVED THE OTHER WAY: codex predicted AWS would ignore the `workflow` OIDC claim,
   making the new roles unassumable. Both roles assumed successfully (deploy-landing + release
   preflight). AWS DOES support it; the claim stays. Testing beat the prediction.
+- 2026-07-24 — Phase 4 BLOCKED (owner action required). `1.0.7-rc.1` dry run: Linux, Windows, all
+  4 headless targets and the pre-release WebDriver gate PASSED. Both macOS builds failed at
+  NOTARIZATION with `HTTP 403 — A required agreement is missing or has expired`. Code signing
+  itself succeeded (cert "Alejo Amiras" found, .app + sidecars signed) — only Apple's notary
+  service rejected it, because the Apple Developer Program agreement needs re-accepting by the
+  Account Holder. Not a code defect; nothing in the repo can fix it.
+  The pipeline failed CLOSED: Create Git Tag + Create GitHub Release were SKIPPED, no 1.0.7 tag or
+  release exists, and latest.json was untouched. This is exactly the failure the rc dry-run
+  strategy exists to catch — had we gone straight to 1.0.7 stable we would have had the same
+  outcome, just with more noise.
+  NEXT: owner accepts the agreement at developer.apple.com (Account Holder), then re-dispatch
+  release-accelerator with version=1.0.7-rc.1; no code changes needed.
