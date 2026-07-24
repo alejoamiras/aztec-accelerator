@@ -113,8 +113,19 @@ lines). SOUND: Remember-disable, plugin-enable-skip, popup `.focused`, build-met
 
 Convergence: round-1 remediation (9) → round-2 found 7 → round-3 found 3. Round-4 verifying.
 
+## Round-4 codex re-audit (2026-07-24, gpt-5.6-sol xhigh) — 1 latent Low, fixed
+SOUND: updater state-capture, settings-switch. Found: `VETTED_OLDER_VERSIONS` was checked BEFORE the
+request semver/build-metadata validation → an allowlisted entry could bypass well-formedness (latent;
+allowlist empty). Fix: validate the request FIRST (unconditional), allowlist bypasses only floor/channel.
+Convergence: 9 → 7 → 3 → 1. Round-5 verifying (expected clean).
+
 ## Notes
 - `semver = "1"` was already a core dependency — no new dep.
 - Only `resolve_version_flags_uncached_for_download` used a default (unknown-bundled) state with a
   real version; updated it to a proper bundled floor. No full-path prove test sends a valid
   non-bundled version, so the new 403 path doesn't disturb existing prove tests.
+
+## Round-5 codex re-audit (2026-07-24, gpt-5.6-sol xhigh) — SOUND
+No findings. Well-formedness enforced before every successful path; allowlist bypasses only
+floor/channel; desktop + headless baseline behaviour unchanged. **Codex satisfied — converged
+(9 -> 7 -> 3 -> 1 -> 0).**
