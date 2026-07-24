@@ -32,10 +32,14 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     CopySid, EqualSid, GetAce, GetLengthSid, GetTokenInformation, IsWellKnownSid, TokenUser,
-    WinBuiltinUsersSid, WinWorldSid, ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION,
-    NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-    TOKEN_QUERY, TOKEN_USER,
+    WinBuiltinUsersSid, WinWorldSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TOKEN_USER,
 };
+
+/// `ACCESS_ALLOWED_ACE_TYPE` (winnt.h `0x0`) — not re-exported by windows-sys under this path, so pinned
+/// to its documented value. Only this ACE type has the `SidStart` layout `verify_owner_only` reads.
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
@@ -189,7 +193,16 @@ unsafe fn verify_owner_only(handle: HANDLE, sid: &[u8]) -> io::Result<()> {
         if GetAce(dacl, i, &mut ace) == 0 {
             return Err(last_err());
         }
-        // Every ACE must be an ACCESS_ALLOWED_ACE granting our SID and nobody else.
+        // Verify the ACE TYPE before casting: only ACCESS_ALLOWED_ACE has the SidStart layout we read.
+        // Anything else (a DENY/AUDIT/OBJECT ACE we never set) means the DACL isn't the owner-only ACL we
+        // applied → fail closed rather than misparse a foreign ACE's bytes as a SID.
+        let header = &*(ace as *const ACE_HEADER);
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unexpected ACE type after applying owner-only ACL",
+            ));
+        }
         let allowed = &*(ace as *const ACCESS_ALLOWED_ACE);
         let ace_sid = &allowed.SidStart as *const u32 as PSID;
         if EqualSid(ace_sid, want) == 0 {
