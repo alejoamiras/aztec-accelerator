@@ -19,7 +19,9 @@
     <div class="row">
       <span id="autostart-label">Start on Login</span>
       <label class="toggle">
-        <input type="checkbox" id="autostart" role="switch" aria-labelledby="autostart-label" />
+        <!-- codex r3 #6: ships DISABLED so an unknown state is never presented as an actionable "off".
+             settings.js enables it only after get_autostart_enabled succeeds. -->
+        <input type="checkbox" id="autostart" role="switch" aria-labelledby="autostart-label" disabled />
         <span class="slider"></span>
       </label>
     </div>

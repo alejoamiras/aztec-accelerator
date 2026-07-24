@@ -45,15 +45,16 @@ async function loadSettings() {
 
   CPUS = sysInfo.cpu_count;
 
-  // codex r2 #6: get_autostart_enabled now surfaces a read error (instead of reporting `false`). Fetch it
-  // INDEPENDENTLY so (a) a read failure doesn't fail the whole panel, and (b) an unknown state is NOT
-  // presented as an actionable "off" — disable the switch + show a hint instead.
+  // codex r2 #6 / r3 #6: the autostart switch ships DISABLED (settings.html) and stays disabled until
+  // its true state is CONFIRMED — so an unknown state is never presented as an actionable "off", and a
+  // failure of ANY preceding request (which would throw before this block) still leaves it disabled
+  // rather than at a false default. Fetched independently so a read error doesn't fail the whole panel.
   const autostartEl = document.getElementById("autostart");
   try {
     autostartEl.checked = await invoke("get_autostart_enabled");
+    autostartEl.disabled = false; // known → actionable
   } catch (e) {
     console.error("Failed to read autostart state:", e);
-    autostartEl.disabled = true;
     showErrorHint(autostartEl, "Autostart state unavailable — reopen Settings to retry");
   }
   document.getElementById("auto-update").checked = config.auto_update === true;

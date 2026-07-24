@@ -261,20 +261,22 @@ pub fn check_version_selectable(requested: &str, bundled: &str) -> Result<(), Ve
     if VETTED_OLDER_VERSIONS.contains(&requested) {
         return Ok(());
     }
-    // 2. No parseable bundled baseline ⇒ NO floor to enforce. This is the normal headless case (a
-    //    server launched without `AZTEC_BB_VERSION` has no shipped bb to downgrade FROM), so failing
-    //    closed here would brick its documented first-request-download mode (codex r2 #2). Fall back to
-    //    the existing controls: the request is already `is_valid_version`-validated upstream (traversal
-    //    safe) and every download is GitHub-digest-verified. The DESKTOP app always has a compile-time
-    //    `AZTEC_BB_VERSION`, so its floor is always enforced below.
-    let Ok(base) = semver::Version::parse(bundled) else {
-        return Ok(());
-    };
-    // 3. Strict-semver on the request; no build metadata.
+    // 2. Validate the REQUEST unconditionally (codex r2 #2 / r3 #2): strict semver + no `+build`
+    //    metadata. These do NOT depend on the baseline, so they must run even when the bundled version
+    //    is unknown — otherwise a headless server (no `AZTEC_BB_VERSION`) could select a syntactic alias
+    //    (`latest`) or a build-metadata version. A real SDK always pins a strict semver, so this only
+    //    rejects garbage earlier.
     let req = semver::Version::parse(requested).map_err(|_| VersionRejection::NotSemver)?;
     if !req.build.is_empty() {
         return Err(VersionRejection::HasBuildMetadata);
     }
+    // 3. No parseable bundled baseline ⇒ NO floor/channel to compare against. This is the normal
+    //    headless case (no shipped bb to downgrade FROM), so failing closed would brick its documented
+    //    first-request-download mode. The request is already validated above + digest-verified on
+    //    download. The DESKTOP app always has a compile-time `AZTEC_BB_VERSION`, so its floor holds below.
+    let Ok(base) = semver::Version::parse(bundled) else {
+        return Ok(());
+    };
     // 4. Strictly-newer by PRECEDENCE (ignores build metadata). Exact-bundled is handled upstream, so
     //    an equal-precedence request here is a sidegrade — refuse it.
     if req.cmp_precedence(&base) != Ordering::Greater {
@@ -673,16 +675,26 @@ mod tests {
     }
 
     #[test]
-    fn version_policy_unknown_bundled_has_no_floor() {
+    fn version_policy_unknown_bundled_has_no_floor_but_still_validates_request() {
         // codex r2 #2: a headless server without AZTEC_BB_VERSION has bundled = "unknown" (unparseable).
-        // There is no shipped bb to downgrade FROM, so the policy imposes NO floor — otherwise the
-        // documented first-request-download mode would be bricked (every real version → 403). The
-        // request is still traversal-validated upstream + digest-verified on download.
+        // There is no shipped bb to downgrade FROM, so the policy imposes NO FLOOR/CHANNEL — otherwise
+        // the documented first-request-download mode would be bricked (every real version → 403). Any
+        // strict-semver version (even a nightly / an older one) is allowed.
         assert_eq!(check_version_selectable("5.0.0", "unknown"), Ok(()));
         assert_eq!(check_version_selectable("4.0.0", "unknown"), Ok(()));
         assert_eq!(
             check_version_selectable("5.0.0-nightly.20260307", "unknown"),
             Ok(())
+        );
+        // codex r3 #2: but the REQUEST is still validated even without a baseline — aliases and build
+        // metadata are rejected (a headless caller can't select `latest` or a `+build` version).
+        assert_eq!(
+            check_version_selectable("latest", "unknown"),
+            Err(VersionRejection::NotSemver)
+        );
+        assert_eq!(
+            check_version_selectable("5.0.0+build9", "unknown"),
+            Err(VersionRejection::HasBuildMetadata)
         );
     }
 
