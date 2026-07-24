@@ -109,3 +109,12 @@ Legend: `[✓]` done · `[~]` in progress · `[ ]` pending · `[✗]` failed/blo
   NoSuchEntity for aztec-accelerator-ci-github; the three per-pipeline roles remain; the legacy
   AWS_ROLE_ARN GitHub secret is deleted. The audit's H2 finding (legacy role trusted every workflow
   on main with whole-bucket write, bypassing the landing role's release-feed Deny) is now CLOSED.
+- 2026-07-24 — Retry (run 30128083494) to test whether the agreement had been accepted in the
+  meantime: IDENTICAL failure. `Build Tauri bundle` -> `failed to notarize app: HTTP 403 - A
+  required agreement is missing or has expired`. Cancelled on detection to cap macOS runner spend
+  (10x billing); verified again no partial state (0 tags, 0 releases for 1.0.7). Two independent
+  runs is conclusive — no further retries until the owner confirms the agreement is accepted.
+  STATUS: 5/9 goal items complete. Items 4-7 (rc.1 green -> 1.0.7 stable -> latest.json 200 ->
+  auto-update verified) are gated on an Apple-account action with no in-repo workaround. The only
+  technical bypass would be disabling notarization, which ships macOS builds Gatekeeper blocks on
+  users' machines — deliberately NOT done.
