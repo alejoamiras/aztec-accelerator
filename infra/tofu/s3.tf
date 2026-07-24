@@ -29,6 +29,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "site" {
       days_after_initiation = 1
     }
   }
+
+  # H3 (full-branch audit): versioning (below) keeps every prior copy on overwrite/delete, and CI has no
+  # DeleteObjectVersion — so a compromised deploy token that repeatedly uploads+deletes large objects
+  # would accumulate NONCURRENT versions that stay billable INDEFINITELY (storage-cost exhaustion). Expire
+  # noncurrent versions after a bounded recovery window, and cap how many are retained per object, so the
+  # anti-tamper recovery guarantee is preserved without unbounded cost. Current (live) versions are never
+  # touched by this rule.
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+
+    filter {} # whole bucket
+
+    noncurrent_version_expiration {
+      noncurrent_days           = 30 # 30-day recovery window for an accidental/compromised overwrite
+      newer_noncurrent_versions = 10 # cap retained noncurrent copies per object (bounds churn abuse)
+    }
+  }
 }
 
 # F-005 (Ask A8): versioning so an accidental/compromised site overwrite is recoverable WITHOUT granting

@@ -19,7 +19,7 @@ caller/early-return in another chunk).
 | F2 | ci | Med | **REAL — FIX** | `_publish-sdk.yml:148-149` `|| true` swallows tag failures → a pre-claimed wrong-commit tag gets blessed. Cheap, mine |
 | A1 | auth | Med | **REAL-BOUNDED** | prove permit held during body read → ≤8 slow uploaders 429 others. Bounded by MAX_INFLIGHT_PROVE + 30s timeout. Hardening |
 | B1,B2 | versions | Med | **REAL-BOUNDED** | concurrent stage-reap / cleanup can evict another request's in-use version → proof failure + re-download churn. Availability; needs an approved origin |
-| E1 | tauri | High | **REAL-BOUNDED** | queued auth requests each build a webview + 1s poller. Bounded to MAX_PENDING_ORIGINS (10 windows). Annoyance/resource, not crash |
+| E1 | tauri | High | **REAL-BOUNDED → DOCUMENTED-ACCEPTED** | queued auth requests each build a webview + 1s poller. Bounded to MAX_PENDING_ORIGINS (10 windows), non-crashing, only for UNAPPROVED origins. Proper fix (defer webview to promotion) re-architects the 5-round-converged C9 arbiter across the lib/bin boundary (`arm_active_popup` would need to build windows + reconcile double-arming) — disproportionate + regression-risky for a bounded annoyance. **Recommend NOT fixing in code**; owner may opt into the refactor. See rationale below |
 | G2 | scripts | High | **SUPPLY-CHAIN-INHERENT** | bb archive + its digest both come from the same (mutable) Aztec release. Inherent trust-in-Aztec; `immutable:false` in fixture never checked. Cheap partial: require immutable releases |
 | H3 | infra | Med | **REAL — FIX (tofu, human-applies)** | S3 versioning w/o `noncurrent_version_expiration` → storage-cost exhaustion by a compromised deploy job |
 | H4 | infra | rel-block? | **NEEDS-OWNER-VERIFY** | iam.tf conditions on the `workflow` OIDC claim; codex says AWS won't evaluate it → roles unassumable after cutover. `sub` is load-bearing regardless. Best fix ties to GitHub Environments (owner item #1). Verify at the human-gated cutover |
@@ -30,9 +30,22 @@ Windows ACL surface. The two scary auth findings (A2/A3) were false positives; c
 updater's manifest binding is sound. The real signal is in the **supply-chain surface** (CI/scripts/infra)
 — mostly key-hygiene + integrity items that overlap already-known owner decisions.
 
-## Remediation plan
-- **Fix now (mine, in-code/YAML):** F2 (tag `|| true`), G2-partial (require immutable bb releases).
-- **Fix now (tofu, commit+validate, human applies):** H3 (S3 noncurrent expiration).
-- **Availability hardening (judgment — bounded, approved-origin-only):** A1, B1/B2, E1 — see owner steer.
-- **Owner/infra (known or human-gated):** H1 (accepted), H2/H4 (legacy-role + OIDC cutover), F1/G1 (CI
-  signing-key isolation — pairs with protected environments). Rolled into the release-CI owner runbook.
+## E1 rationale (why documented-accepted, not code-fixed)
+The proper fix — build the auth webview only when its request becomes ACTIVE, keeping queued requests as
+arbiter metadata — requires the promotion path (`arm_active_popup`, in the **lib** `commands.rs`) to
+BUILD a window, which lives in the **bin** (`windows.rs`) behind the lib/bin split. It would also have to
+reconcile its arming with `show_auth_popup_window`'s own active-arming (double-arm risk), and it edits the
+single-active-popup arbiter that took FIVE codex rounds to converge. The impact it defends is BOUNDED
+(≤ `MAX_PENDING_ORIGINS` = 10 windows), non-crashing, and only for UNAPPROVED origins the user is actively
+visiting (they see the popups and simply don't approve). Trading a real regression risk on converged auth
+code for a bounded annoyance is the wrong call — the same proportionality that stopped the version-floor
+brick. **Owner can opt into the refactor** if the popup-flood UX is deemed worth it; otherwise accepted.
+
+## Remediation status (this PR)
+- **FIXED (code/YAML):** F2 (tag `|| true`), G2 (immutable warning + doc), A1 (prove-permit decouple),
+  B1/B2 (age-gated reap/eviction), H3 (S3 noncurrent-version expiration — tofu, human applies).
+- **DOCUMENTED-ACCEPTED:** E1 (bounded popup flood — rationale above), D1/D2 (updater buffer #345/M6),
+  H1 (0-approval branch protection = solo-dev risk-accept).
+- **OWNER RUNBOOK** (`../quality-audit-2026-07-24/release-ci-owner-runbook.md`): F1/G1 (CI signing-key
+  isolation), H2 (legacy-role retirement), H4 (IAM `workflow`-claim / GitHub-Environments cutover).
+- **VERIFIED FALSE POSITIVES:** A2, A3. **CLEAN:** chunk C.
