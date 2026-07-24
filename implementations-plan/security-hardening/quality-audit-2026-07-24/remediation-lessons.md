@@ -100,6 +100,19 @@ over-application — the fix for a desktop-downgrade threat mustn't brick a base
 NEVER put backtick-wrapped tokens in a double-quoted `git commit -m` under zsh — they run as command
 substitution and silently gut the message. Use `-F <file>` / heredoc.
 
+## Round-3 codex re-audit (2026-07-24, gpt-5.6-sol xhigh) — 3 residuals, all fixed
+Re-audited the round-2 fixes (no-explore prompt after the first attempt was infra-killed at 1856
+lines). SOUND: Remember-disable, plugin-enable-skip, popup `.focused`, build-metadata doc. Fixed:
+- **(Medium)** version_policy: my no-floor early-return ALSO skipped request strict-semver +
+  build-metadata validation → headless could pass `latest`/`+build`. Reordered: validate request
+  first (always), skip only floor+channel when bundled is unparseable.
+- **(Low)** updater rearm armed recovery even if autostart was off (is_enabled Err → true). Capture
+  `was_recovery_enabled` ONCE before disarm; all re-arm decisions use that bool (no late re-read).
+- **(Low)** settings autostart switch not disabled while state unknown / a preceding Promise.all
+  reject skipped the catch. Now ships `disabled`, enabled ONLY on get_autostart_enabled success.
+
+Convergence: round-1 remediation (9) → round-2 found 7 → round-3 found 3. Round-4 verifying.
+
 ## Notes
 - `semver = "1"` was already a core dependency — no new dep.
 - Only `resolve_version_flags_uncached_for_download` used a default (unknown-bundled) state with a
