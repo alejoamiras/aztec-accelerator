@@ -41,7 +41,8 @@ use windows_sys::Win32::Security::{
 /// to its documented value. Only this ACE type has the `SidStart` layout `verify_owner_only` reads.
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS,
+    CreateDirectoryW, CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -68,6 +69,23 @@ impl Drop for LocalFreeGuard {
 
 fn last_err() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
+}
+
+/// Reject a handle that refers to a reparse point (junction/symlink). Closes the create→open TOCTOU on
+/// `secure_create_dir` + `harden_existing`: a path swapped for a junction between create and open is opened
+/// as the link itself (FILE_FLAG_OPEN_REPARSE_POINT), so its handle carries FILE_ATTRIBUTE_REPARSE_POINT.
+unsafe fn reject_if_reparse(handle: HANDLE) -> io::Result<()> {
+    let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+    if GetFileInformationByHandle(handle, &mut info) == 0 {
+        return Err(last_err());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "path is a reparse point (junction/symlink) — refusing to apply an owner-only ACL",
+        ));
+    }
+    Ok(())
 }
 
 /// Wide-encode a path with a trailing NUL for the `*W` Win32 APIs.
@@ -98,8 +116,11 @@ fn current_user_sid() -> io::Result<Vec<u8>> {
         if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, len, &mut len) == 0 {
             return Err(last_err());
         }
-        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let sid_ptr: PSID = token_user.User.Sid;
+        // `buf` is a `Vec<u8>` (align 1) but `TOKEN_USER` contains a pointer (align 8) — taking a
+        // `&TOKEN_USER` reference to a possibly-misaligned address is UB. Read the `User.Sid` pointer field
+        // via `addr_of!` + `read_unaligned` (no reference is ever formed). (codex post-impl #1)
+        let tu = buf.as_ptr() as *const TOKEN_USER;
+        let sid_ptr: PSID = std::ptr::addr_of!((*tu).User.Sid).read_unaligned();
         let sid_len = GetLengthSid(sid_ptr);
         let mut sid = vec![0u8; sid_len as usize];
         if CopySid(sid_len, sid.as_mut_ptr() as PSID, sid_ptr) == 0 {
@@ -113,6 +134,10 @@ fn current_user_sid() -> io::Result<Vec<u8>> {
 /// assert it took effect. `inheritable` adds container/object inheritance (for directories, so children are
 /// private at creation).
 unsafe fn apply_and_verify_owner_only(handle: HANDLE, inheritable: bool) -> io::Result<()> {
+    // Close the create/open TOCTOU (codex post-impl #3): if the path was swapped for a junction between
+    // creation and this open, the handle (opened FILE_FLAG_OPEN_REPARSE_POINT) is a reparse point — refuse
+    // rather than secure the link while real accesses follow it to a non-owner-only target.
+    reject_if_reparse(handle)?;
     let mut sid = current_user_sid()?;
 
     // One EXPLICIT_ACCESS: grant full control to the current user, inheritance per `inheritable`.
@@ -218,6 +243,13 @@ unsafe fn verify_owner_only(handle: HANDLE, sid: &[u8]) -> io::Result<()> {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "foreign ACE present after applying owner-only ACL",
+            ));
+        }
+        // Our ACE must grant FULL control — verify the access mask, not just the SID. (codex post-impl #2)
+        if allowed.Mask & FILE_ALL_ACCESS != FILE_ALL_ACCESS {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "owner ACE does not grant full control after applying owner-only ACL",
             ));
         }
     }

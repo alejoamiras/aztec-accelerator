@@ -494,3 +494,8 @@ pass on THIS v2 is the remaining gate.
 | D8 | get_pending_auth + still render query origin | Never render query origin even momentarily; `get_verified_info` still query-keyed | Placeholder until `get_pending_auth` answers; route `get_verified_info` through the server origin; shared `auth_window_label` guard helper. |
 | D9 | click-delay guard ALONE (MED) | Mitigates not defeats; A coupled to C; codex wants serialization | **Guard + single-active-popup arbiter** (user-confirmed): exactly one popup actionable+topmost at a time. |
 | D10 | A2: one policy for None/mismatch/error | Wrong — three cases differ | `None`→close (stale/resolved); mismatch→moot (query ignored); transient IPC error→Allow stays disabled + retry/close. |
+
+## POST-IMPL codex audit (win_acl.rs, tight) — REJECT → all 3 folded
+1. Misaligned TOKEN_USER deref (Vec<u8> align 1 vs pointer align 8) → read Sid via addr_of!+read_unaligned.
+2. ACE parsed without AceType/mask check → AceType==ACCESS_ALLOWED (307cabc) + Mask&FILE_ALL_ACCESS==FILE_ALL_ACCESS.
+3. secure_create_dir create/open reparse race → reject_if_reparse (GetFileInformationByHandle + FILE_ATTRIBUTE_REPARSE_POINT) in apply_and_verify.

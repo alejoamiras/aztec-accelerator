@@ -59,3 +59,7 @@ parity), documented in the plan's Security section.
   not silently skipped.
 - Relaunched **tight**, `win_acl.rs`-only (the highest-risk unsafe FFI), read-only, via stdin — the
   invocation shape that survived during planning. Verdict folded on completion.
+- Tight re-audit COMPLETED (survived): **REJECT, 3 real FFI defects**, all folded + Windows-cross-check+clippy clean:
+  (1) misaligned `TOKEN_USER` deref → `addr_of!`+`read_unaligned` for the SID pointer;
+  (2) ACE parsed without type/mask verification → `AceType==ACCESS_ALLOWED_ACE_TYPE` (307cabc) + `Mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS`;
+  (3) `secure_create_dir` create→open junction race → `reject_if_reparse` (GetFileInformationByHandle) in `apply_and_verify_owner_only`.
