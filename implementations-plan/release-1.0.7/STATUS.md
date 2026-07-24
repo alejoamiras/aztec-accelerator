@@ -101,3 +101,11 @@ Legend: `[✓]` done · `[~]` in progress · `[ ]` pending · `[✗]` failed/blo
   main's new `typecheck:scripts` then caught 4 real type errors in branch scripts — fixed, not
   suppressed. Local gate green. PR creation BLOCKED by a GitHub "Pull Requests: major_outage";
   branch pushed, retry armed.
+- 2026-07-24 — Phase 6 (except the owner's root-key deletion) COMPLETE while Phase 4/5 stay blocked
+  on Apple. R5 smoke finished: publish-testnet exercised ci-playground-testnet for real (success),
+  joining deploy-landing (ci-landing) and the release auth preflight (ci-release-feed). With R5 +
+  R5b both satisfied, R6 executed: PR #406 removed aws_iam_role.ci / aws_iam_role_policy.ci /
+  ci_role_arn; `tofu apply` destroyed exactly 2 resources (0 add/change); AWS confirms
+  NoSuchEntity for aztec-accelerator-ci-github; the three per-pipeline roles remain; the legacy
+  AWS_ROLE_ARN GitHub secret is deleted. The audit's H2 finding (legacy role trusted every workflow
+  on main with whole-bucket write, bypassing the landing role's release-feed Deny) is now CLOSED.
