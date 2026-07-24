@@ -14,13 +14,19 @@
 /// result on Windows (where the updater MUST know the always-armed task is gone before NSIS mutates
 /// files).
 pub trait CrashRecovery {
-    fn enable(&self);
+    /// Arm crash recovery. C8: returns `Err` if the ARMING genuinely failed (so a caller mid-transaction
+    /// can roll back) and `Ok` for an idempotent already-armed state — see each `enable_impl`'s per-exit
+    /// classification in `implementations-plan/security-hardening/closeout-followups/lessons/phase-1.md`.
+    fn enable(&self) -> Result<(), String>;
     fn disable(&self) -> bool;
 }
 
 /// Enable crash recovery for the current platform (thin dispatch to the platform `CrashRecovery`).
-pub fn enable_crash_recovery() {
-    PlatformRecovery.enable();
+/// C8: `Err` on a real arming failure — callers that arm as part of a transaction (`set_autostart`)
+/// roll back on it; the log-and-continue callers (`main.rs` startup rearm, `updater.rs` post-update
+/// rearm) must NOT abort on it.
+pub fn enable_crash_recovery() -> Result<(), String> {
+    PlatformRecovery.enable()
 }
 
 /// Disable crash recovery. See [`CrashRecovery::disable`] for the `bool` contract — callers that must
@@ -35,11 +41,73 @@ pub fn disable_crash_recovery() -> bool {
 pub struct PlatformRecovery;
 
 impl CrashRecovery for PlatformRecovery {
-    fn enable(&self) {
-        enable_impl();
+    fn enable(&self) -> Result<(), String> {
+        enable_impl()
     }
     fn disable(&self) -> bool {
         disable_impl()
+    }
+}
+
+/// C8 (D13/D20): run the autostart-enable transaction with rollback, generic over injected closures so
+/// the ordering + completeness + failure modes are unit-testable on Linux CI without a real `AppHandle`.
+///
+/// Forward: `plugin_enable` (the tauri-plugin-autostart launcher entry) then `crash_arm`
+/// (`enable_crash_recovery`). On ANY forward failure, roll back **failure-observably**:
+/// - run BOTH `crash_disarm` and (only if we changed it — i.e. `!prior_enabled`) `plugin_disable`,
+///   executing both even if one fails (no short-circuit),
+/// - do NOT unconditionally disable: if `prior_enabled` the launcher was already on before this call, so
+///   leave it (restore prior state) rather than clobbering it,
+/// - return a combined `Err` naming the failing step and every rollback sub-result.
+pub fn enable_transaction<E, A, D, R>(
+    prior_enabled: bool,
+    plugin_enable: E,
+    crash_arm: A,
+    plugin_disable: D,
+    crash_disarm: R,
+) -> Result<(), String>
+where
+    E: FnOnce() -> Result<(), String>,
+    A: FnOnce() -> Result<(), String>,
+    D: FnOnce() -> Result<(), String>,
+    R: FnOnce() -> bool,
+{
+    // Step 1 — plugin launcher entry. If this fails the plugin state is unchanged (still `prior`); only
+    // ensure crash recovery is disarmed when we intended a fresh enable, then surface the failure.
+    if let Err(e) = plugin_enable() {
+        let disarmed = if prior_enabled { true } else { crash_disarm() };
+        return Err(format!(
+            "autostart enable failed at plugin step: {e}; rollback: crash_disarm={}",
+            disarm_word(disarmed, prior_enabled)
+        ));
+    }
+    // Step 2 — arm crash recovery. On failure, roll back the plugin enable we just did (unless it was
+    // already on) AND disarm any partial crash-recovery, running both regardless of either's outcome.
+    if let Err(e) = crash_arm() {
+        let disarmed = crash_disarm();
+        let plugin_rolled = if prior_enabled {
+            "kept (was already enabled — prior state restored)".to_string()
+        } else {
+            match plugin_disable() {
+                Ok(()) => "disabled".to_string(),
+                Err(de) => format!("FAILED ({de}) — autostart may still be active"),
+            }
+        };
+        return Err(format!(
+            "autostart enable failed at crash-recovery step: {e}; rollback: crash_disarm={}, plugin={plugin_rolled}",
+            disarm_word(disarmed, false)
+        ));
+    }
+    Ok(())
+}
+
+fn disarm_word(disarmed: bool, skipped_because_prior: bool) -> &'static str {
+    if skipped_because_prior {
+        "skipped (prior enabled)"
+    } else if disarmed {
+        "confirmed"
+    } else {
+        "NOT confirmed"
     }
 }
 
@@ -59,34 +127,27 @@ const SYSTEMD_NAME: &str = "aztec-accelerator";
 /// Previous implementation used `.replace("</dict>", ...)` which replaced ALL occurrences
 /// and could corrupt plists with nested dicts.
 #[cfg(target_os = "macos")]
-fn enable_impl() {
+fn enable_impl() -> Result<(), String> {
     let plist_path = macos_plist_path();
-    match std::fs::read_to_string(&plist_path) {
-        Ok(content) => {
-            if content.contains("<key>KeepAlive</key>") {
-                tracing::debug!("LaunchAgent already has KeepAlive");
-                return;
-            }
-            match patch_plist_with_keepalive(&content) {
-                Some(patched) => {
-                    if let Err(e) = std::fs::write(&plist_path, &patched) {
-                        tracing::warn!("Failed to write patched LaunchAgent plist: {e}");
-                    } else {
-                        tracing::info!("LaunchAgent patched with KeepAlive (crash recovery)");
-                    }
-                }
-                None => {
-                    tracing::warn!("Could not find closing </dict> in LaunchAgent plist");
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %plist_path.display(),
-                "Cannot read LaunchAgent plist (not yet enabled?): {e}"
-            );
-        }
+    // read failure ⇒ the plugin's plist isn't where we expect ⇒ arming did NOT happen ⇒ Err.
+    let content = std::fs::read_to_string(&plist_path).map_err(|e| {
+        format!(
+            "cannot read LaunchAgent plist {}: {e}",
+            plist_path.display()
+        )
+    })?;
+    if content.contains("<key>KeepAlive</key>") {
+        tracing::debug!("LaunchAgent already has KeepAlive");
+        return Ok(()); // idempotent already-armed ⇒ success, NOT a failure (must not trigger rollback).
     }
+    // no closing </dict> ⇒ patch impossible ⇒ arming failed ⇒ Err.
+    let patched = patch_plist_with_keepalive(&content)
+        .ok_or_else(|| "could not find closing </dict> in LaunchAgent plist".to_string())?;
+    // write failure ⇒ arming failed ⇒ Err.
+    std::fs::write(&plist_path, &patched)
+        .map_err(|e| format!("failed to write patched LaunchAgent plist: {e}"))?;
+    tracing::info!("LaunchAgent patched with KeepAlive (crash recovery)");
+    Ok(())
 }
 
 /// Insert KeepAlive and ThrottleInterval keys before the last `</dict>` in a plist string.
@@ -168,39 +229,28 @@ fn systemd_exec_start(exe: &std::path::Path) -> Option<String> {
 /// Create and enable a systemd user service with `Restart=on-failure`.
 /// Call this after `manager.enable()`.
 #[cfg(target_os = "linux")]
-fn enable_impl() {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Cannot determine executable path for systemd service: {e}");
-            return;
-        }
-    };
+fn enable_impl() -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot determine executable path for systemd service: {e}"))?;
 
-    let service_dir = match dirs::config_dir() {
-        Some(d) => d.join("systemd/user"),
-        None => {
-            tracing::warn!("Cannot determine config dir for systemd service");
-            return;
-        }
-    };
+    let service_dir = dirs::config_dir()
+        .ok_or_else(|| "cannot determine config dir for systemd service".to_string())?
+        .join("systemd/user");
 
-    if let Err(e) = std::fs::create_dir_all(&service_dir) {
-        tracing::warn!("Cannot create systemd user dir: {e}");
-        return;
-    }
+    std::fs::create_dir_all(&service_dir)
+        .map_err(|e| format!("cannot create systemd user dir: {e}"))?;
 
     // F-010: build a systemd-escaped ExecStart. An unsafe path (systemd would reject or it could inject
-    // a directive) fails CLOSED — remove any stale unit and bail rather than write a corrupt/injected one.
+    // a directive) fails CLOSED — remove any stale unit and report the failure (Err), never write a
+    // corrupt/injected unit.
     let exec_start = match systemd_exec_start(&exe) {
         Some(v) => v,
         None => {
-            tracing::warn!(
-                "Executable path is not representable as a safe systemd ExecStart; \
-                 skipping crash-recovery unit and removing any stale one"
-            );
             disable_impl();
-            return;
+            return Err(
+                "executable path is not representable as a safe systemd ExecStart; removed any stale unit"
+                    .to_string(),
+            );
         }
     };
 
@@ -221,10 +271,8 @@ fn enable_impl() {
          WantedBy=default.target\n",
     );
 
-    if let Err(e) = std::fs::write(&service_path, &service_content) {
-        tracing::warn!("Failed to write systemd service: {e}");
-        return;
-    }
+    std::fs::write(&service_path, &service_content)
+        .map_err(|e| format!("failed to write systemd service: {e}"))?;
 
     // Reload and enable
     let _ = std::process::Command::new("systemctl")
@@ -237,14 +285,14 @@ fn enable_impl() {
     match result {
         Ok(output) if output.status.success() => {
             tracing::info!("systemd user service enabled (crash recovery)");
+            Ok(())
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("systemctl enable failed: {stderr}");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to run systemctl: {e}");
-        }
+        // `systemctl enable` is the actual arming step — a failure here is Err (D16/cond.3).
+        Ok(output) => Err(format!(
+            "systemctl enable failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        Err(e) => Err(format!("failed to run systemctl: {e}")),
     }
 }
 
@@ -318,16 +366,11 @@ fn schtasks_exe() -> std::path::PathBuf {
 
 /// Register the Task Scheduler crash-recovery task. Call after `manager.enable()`.
 #[cfg(target_os = "windows")]
-fn enable_impl() {
+fn enable_impl() -> Result<(), String> {
     use std::io::Write;
 
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Cannot determine executable path for Task Scheduler: {e}");
-            return;
-        }
-    };
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot determine executable path for Task Scheduler: {e}"))?;
 
     // schtasks /XML expects UTF-16LE with a BOM.
     let mut bytes = vec![0xFFu8, 0xFE];
@@ -338,25 +381,15 @@ fn enable_impl() {
     // Random temp filename (not a predictable %TEMP% path a local user could pre-create or
     // symlink), written + closed before schtasks reads it, auto-deleted when it drops.
     let xml_path = {
-        let mut tmp = match tempfile::Builder::new()
+        let mut tmp = tempfile::Builder::new()
             .prefix("aztec-accel-recovery-")
             .suffix(".xml")
             .tempfile()
-        {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!("Failed to create Task Scheduler XML temp file: {e}");
-                return;
-            }
-        };
-        if let Err(e) = tmp.write_all(&bytes) {
-            tracing::warn!("Failed to write Task Scheduler XML: {e}");
-            return;
-        }
-        if let Err(e) = tmp.flush() {
-            tracing::warn!("Failed to flush Task Scheduler XML: {e}");
-            return;
-        }
+            .map_err(|e| format!("failed to create Task Scheduler XML temp file: {e}"))?;
+        tmp.write_all(&bytes)
+            .map_err(|e| format!("failed to write Task Scheduler XML: {e}"))?;
+        tmp.flush()
+            .map_err(|e| format!("failed to flush Task Scheduler XML: {e}"))?;
         // Close our handle so schtasks can open it; the file persists until this drops.
         tmp.into_temp_path()
     };
@@ -370,12 +403,13 @@ fn enable_impl() {
     match result {
         Ok(output) if output.status.success() => {
             tracing::info!("Task Scheduler crash-recovery task registered");
+            Ok(())
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("schtasks /Create failed: {stderr}");
-        }
-        Err(e) => tracing::warn!("Failed to run schtasks: {e}"),
+        Ok(output) => Err(format!(
+            "schtasks /Create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        Err(e) => Err(format!("failed to run schtasks: {e}")),
     }
 }
 
@@ -465,7 +499,153 @@ fn xml_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use std::path::Path;
+
+    use super::enable_transaction;
+    use std::cell::Cell;
+
+    // C8 (D13/D20): the enable transaction's rollback ordering + completeness + failure-observability,
+    // exercised with injected closures — no real AppHandle / OS calls, so it runs on every platform's CI.
+
+    #[test]
+    fn enable_transaction_happy_path_no_rollback() {
+        let disable_called = Cell::new(false);
+        let disarm_called = Cell::new(false);
+        let r = enable_transaction(
+            false,
+            || Ok(()),
+            || Ok(()),
+            || {
+                disable_called.set(true);
+                Ok(())
+            },
+            || {
+                disarm_called.set(true);
+                true
+            },
+        );
+        assert!(r.is_ok());
+        assert!(!disable_called.get(), "no rollback on success");
+        assert!(!disarm_called.get(), "no rollback on success");
+    }
+
+    #[test]
+    fn enable_transaction_arm_fails_prior_disabled_rolls_back_both() {
+        let disable_called = Cell::new(false);
+        let disarm_called = Cell::new(false);
+        let r = enable_transaction(
+            false, // prior disabled
+            || Ok(()),
+            || Err("arm boom".to_string()),
+            || {
+                disable_called.set(true);
+                Ok(())
+            },
+            || {
+                disarm_called.set(true);
+                true
+            },
+        );
+        let msg = r.unwrap_err();
+        assert!(
+            disable_called.get(),
+            "prior-disabled ⇒ plugin_disable rolls back the enable"
+        );
+        assert!(disarm_called.get(), "crash_disarm always runs on rollback");
+        assert!(
+            msg.contains("arm boom") && msg.contains("plugin=disabled"),
+            "combined error: {msg}"
+        );
+    }
+
+    #[test]
+    fn enable_transaction_arm_fails_prior_enabled_keeps_plugin() {
+        let disable_called = Cell::new(false);
+        let r = enable_transaction(
+            true, // prior ENABLED
+            || Ok(()),
+            || Err("arm boom".to_string()),
+            || {
+                disable_called.set(true);
+                Ok(())
+            },
+            || true,
+        );
+        let msg = r.unwrap_err();
+        assert!(
+            !disable_called.get(),
+            "prior-enabled ⇒ do NOT disable (restore prior state)"
+        );
+        assert!(
+            msg.contains("kept"),
+            "error notes the plugin was kept: {msg}"
+        );
+    }
+
+    #[test]
+    fn enable_transaction_plugin_enable_fails_no_arm_no_disable() {
+        let arm_called = Cell::new(false);
+        let disable_called = Cell::new(false);
+        let disarm_called = Cell::new(false);
+        let r = enable_transaction(
+            false,
+            || Err("plugin boom".to_string()),
+            || {
+                arm_called.set(true);
+                Ok(())
+            },
+            || {
+                disable_called.set(true);
+                Ok(())
+            },
+            || {
+                disarm_called.set(true);
+                true
+            },
+        );
+        let msg = r.unwrap_err();
+        assert!(
+            !arm_called.get(),
+            "crash_arm never runs if the launcher didn't enable"
+        );
+        assert!(
+            !disable_called.get(),
+            "nothing to disable — the enable failed"
+        );
+        assert!(
+            disarm_called.get(),
+            "defensively disarm any stale recovery on a fresh-enable attempt"
+        );
+        assert!(
+            msg.contains("plugin boom") && msg.contains("plugin step"),
+            "error: {msg}"
+        );
+    }
+
+    #[test]
+    fn enable_transaction_rollback_disable_failure_is_surfaced() {
+        let r = enable_transaction(
+            false,
+            || Ok(()),
+            || Err("arm boom".to_string()),
+            || Err("disable boom".to_string()), // rollback disable ALSO fails
+            || false,                           // and disarm not confirmed
+        );
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("disable boom"),
+            "rollback disable failure surfaced: {msg}"
+        );
+        assert!(
+            msg.contains("autostart may still be active"),
+            "warns state may be unclean: {msg}"
+        );
+        assert!(
+            msg.contains("NOT confirmed"),
+            "disarm-not-confirmed surfaced: {msg}"
+        );
+    }
 
     /// F-010: reproduce systemd's ExecStart decode (unquote → strip `:` prefix → specifier-expand `%%`→`%`)
     /// to prove the serializer round-trips exactly to the intended path — i.e. no injection, exact argv0.

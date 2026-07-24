@@ -1,4 +1,4 @@
-use crate::authorization::{AuthDecision, AuthorizationManager};
+use crate::authorization::{AuthDecision, AuthorizationManager, ResolveOutcome};
 use crate::config::{self, AcceleratorConfig};
 use crate::verified_sites::VerifiedSitesRegistry;
 use parking_lot::RwLock;
@@ -77,8 +77,17 @@ pub fn set_autostart(
                     .to_string(),
             );
         }
-        manager.enable().map_err(|e| e.to_string())?;
-        crate::crash_recovery::enable_crash_recovery();
+        // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction. If arming fails
+        // after the launcher went on, roll back (disable the launcher unless it was already on, disarm
+        // any partial recovery) and surface a combined error — never leave a half-enabled state.
+        let prior_enabled = manager.is_enabled().unwrap_or(false);
+        crate::crash_recovery::enable_transaction(
+            prior_enabled,
+            || manager.enable().map_err(|e| e.to_string()),
+            crate::crash_recovery::enable_crash_recovery,
+            || manager.disable().map_err(|e| e.to_string()),
+            crate::crash_recovery::disable_crash_recovery,
+        )?;
     } else {
         manager.disable().map_err(|e| e.to_string())?;
         crate::crash_recovery::disable_crash_recovery();
@@ -168,18 +177,110 @@ pub fn respond_auth(
     } else {
         AuthDecision::Deny
     };
-    // SEC-06: resolve by the opaque `request_id`, NOT the origin. A tampered/guessed payload with a
-    // wrong id is a harmless no-op (it can't resolve a *different* concurrent request, and the old
-    // origin-keyed resolve could); the real request then denies via its 60s timeout.
-    auth.resolve(&request_id, decision);
-
-    // Close the authorization popup window (labelled by `request_id`, not origin — see windows.rs).
-    // `origin` is kept on the payload for diagnostics only.
-    tracing::debug!(origin = %origin, %request_id, allowed, "respond_auth decision");
-    if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.close();
+    // C9 (D19): SERVER-SIDE arbiter enforcement — only the popup that currently owns the ACTIVE slot may
+    // resolve. A queued (non-actionable) popup's webview cannot decide even if coerced into calling
+    // respond_auth; the frontend button-disable is a reflection of this, not the gate. SEC-06: resolution
+    // is still by the opaque `request_id` (a wrong id can't resolve a different request).
+    match auth.resolve_active(&request_id, decision) {
+        ResolveOutcome::Resolved(promoted) => {
+            // Close this popup (labelled by `request_id`; `origin` is diagnostics-only) and promote the
+            // next queued popup into the active slot.
+            tracing::debug!(origin = %origin, %request_id, allowed, "respond_auth decision");
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.close();
+            }
+            if let Some(next) = promoted {
+                arm_active_popup(&app, auth.inner(), &next);
+            }
+            Ok(())
+        }
+        ResolveOutcome::NotActive => {
+            tracing::warn!(%request_id, "respond_auth rejected: not the active authorization popup");
+            Err("not the active authorization request".to_string())
+        }
     }
-    Ok(())
+}
+
+/// DTO for [`get_pending_auth`] — the SERVER-authoritative origin the popup must render (C9 D8), plus
+/// whether this popup currently owns the actionable slot (C9 D15), so a queued popup disables its buttons.
+#[derive(serde::Serialize)]
+pub struct PendingAuthDto {
+    pub origin: String,
+    pub active: bool,
+}
+
+#[tauri::command]
+pub fn get_pending_auth(
+    window: tauri::WebviewWindow,
+    auth: tauri::State<'_, AuthState>,
+    request_id: String,
+) -> Result<Option<PendingAuthDto>, String> {
+    // C9 (D8/D19): bind the caller to ITS OWN request via the SAME exact-label guard respond_auth uses, so
+    // a popup can only peek the origin/active-state of the request it was opened for, never another's.
+    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
+    require_label(window.label(), &label)?;
+    Ok(auth
+        .peek(&request_id)
+        .map(|(origin, active)| PendingAuthDto {
+            origin: origin.to_string(),
+            active,
+        }))
+}
+
+// ── C9 single-active-popup arbiter — window helpers (lib, so both `respond_auth` here and
+//    `windows::show_auth_popup_window` in the bin share one implementation) ──────────────────────────
+
+/// C9 (D14/D18/D19): raise a promoted popup into the ACTIVE slot — topmost + focused — and arm its
+/// activation-relative 60 s auto-deny. Called on every promotion (respond_auth / deny timer / window
+/// close). No-op on the window itself if it was already closed; the arbiter state advanced regardless.
+pub fn arm_active_popup(app: &tauri::AppHandle, auth_manager: &AuthState, request_id: &str) {
+    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(request_id));
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+    }
+    spawn_active_deny_timer(app, auth_manager, request_id);
+}
+
+/// Spawn the ACTIVE popup's 60 s auto-deny. On fire: resolve Deny (which promotes the next queued request,
+/// if any), close the window, then arm the promoted one — the chain drains the queue one active 60 s
+/// window at a time. `resolve` is a no-op if the request was already decided (respond_auth / user close).
+pub fn spawn_active_deny_timer(app: &tauri::AppHandle, auth_manager: &AuthState, request_id: &str) {
+    let app = app.clone();
+    let auth_manager = auth_manager.clone();
+    let request_id = request_id.to_string();
+    let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(crate::server::AUTH_DECISION_TIMEOUT).await;
+        let promoted = auth_manager.resolve(&request_id, AuthDecision::Deny);
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
+        }
+        if let Some(promoted) = promoted {
+            arm_active_popup(&app, &auth_manager, &promoted);
+        }
+    });
+}
+
+/// C9 (D14): resolve-as-Deny + promote-next when the user CLOSES a popup without deciding. Idempotent with
+/// the timer + respond_auth (both resolve first, then close — so the `Destroyed` fired by their own close
+/// is a harmless no-op that promotes nobody).
+pub fn attach_close_deny_listener(
+    app: &tauri::AppHandle,
+    auth_manager: &AuthState,
+    window: &tauri::WebviewWindow,
+    request_id: &str,
+) {
+    let app = app.clone();
+    let auth_manager = auth_manager.clone();
+    let request_id = request_id.to_string();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Some(promoted) = auth_manager.resolve(&request_id, AuthDecision::Deny) {
+                arm_active_popup(&app, &auth_manager, &promoted);
+            }
+        }
+    });
 }
 
 /// Create a unique, collision-free window label from an arbitrary key (an origin or, for auth

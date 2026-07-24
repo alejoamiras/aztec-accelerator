@@ -129,6 +129,19 @@ async function waitForNewWindow(existingHandles: string[]): Promise<string | nul
   return null;
 }
 
+/**
+ * After switching to the (active) auth window: wait until the SERVER origin renders — C9 (D8) sources the
+ * origin from `get_pending_auth`, not the URL, so `#origin` starts as a placeholder and updates async —
+ * AND let the C9 (A) click-steal guard's ~700 ms window elapse so the Allow/Deny clicks aren't ignored.
+ */
+async function waitForActivePopup(): Promise<void> {
+  await browser.waitUntil(async () => (await browser.$("#origin").getText()) === TEST_ORIGIN, {
+    timeout: 8000,
+    timeoutMsg: "auth popup did not render the server origin",
+  });
+  await browser.pause(900); // let the 700ms click-steal guard elapse
+}
+
 describe("Authorization Flow", () => {
   let settingsHandle: string;
   let pendingProve: Promise<Response> | null = null;
@@ -169,11 +182,12 @@ describe("Authorization Flow", () => {
 
     await browser.switchToWindow(authWindowHandle!);
 
-    // Wait for the auth popup page to load before checking title/content
-    const originText = await browser.$("#origin");
-    await originText.waitForExist({ timeout: 5000 });
+    // C9 (D8/A): the popup now loads its origin async (get_pending_auth), so wait for the page to render
+    // (server origin) + the click-guard to elapse BEFORE asserting title/content — getTitle() on the
+    // not-yet-loaded page returns "" (this ordering was the CI failure).
+    await waitForActivePopup();
     expect(await browser.getTitle()).toBe("Authorize Site");
-    expect(await originText.getText()).toBe(TEST_ORIGIN);
+    expect(await browser.$("#origin").getText()).toBe(TEST_ORIGIN);
 
     // F-014: "Always allow this site" defaults UNCHECKED — opt in explicitly to persist the origin.
     const remember = await browser.$("#remember");
@@ -209,10 +223,8 @@ describe("Authorization Flow", () => {
 
     await browser.switchToWindow(authWindowHandle!);
 
-    // Wait for the popup page to render before clicking — the "allow" tests already do this via #origin.
-    // F-012 made the popup load its logic from a bundled ES module (slower first paint on WebKitGTK), so
-    // clicking #deny without waiting raced the DOM and intermittently hit "element not found".
-    await browser.$("#deny").waitForExist({ timeout: 5000 });
+    // C9 (D8/A): wait for the server origin to render (get_pending_auth) + the click-guard to elapse.
+    await waitForActivePopup();
     await clickBy("#deny");
 
     const proveResponse = await pendingProve;
@@ -236,9 +248,9 @@ describe("Authorization Flow", () => {
 
     await browser.switchToWindow(authWindowHandle!);
 
+    // C9 (D8/A): wait for the server origin to render + the click-guard to elapse.
+    await waitForActivePopup();
     // F-014: Remember defaults UNCHECKED — no click needed; a plain Allow is ephemeral ("Allow once").
-    const originText = await browser.$("#origin");
-    await originText.waitForExist({ timeout: 5000 });
     const remember = await browser.$("#remember");
     expect(await remember.isSelected()).toBe(false);
 

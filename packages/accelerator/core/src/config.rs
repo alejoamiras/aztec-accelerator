@@ -168,7 +168,16 @@ pub fn save_to(
             .open(&tmp_path)?;
         file.write_all(json.as_bytes())?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        // F-003 Windows tail: write the temp with an owner-only DACL; the SD travels with the same-volume
+        // rename to `config.json`. Clear any stale temp first so CREATE_NEW succeeds.
+        let _ = std::fs::remove_file(&tmp_path);
+        let mut file = crate::win_acl::secure_create_file(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         std::fs::write(&tmp_path, &json)?;
     }
@@ -370,8 +379,13 @@ mod tests {
     #[test]
     fn de_origins_keeps_canonical() {
         assert_eq!(
-            de_origins(r#"["https://nulo.sh","chrome-extension://abc"]"#),
-            vec![co("https://nulo.sh"), co("chrome-extension://abc")],
+            de_origins(
+                r#"["https://nulo.sh","chrome-extension://abcdefghijklmnopabcdefghijklmnop"]"#
+            ),
+            vec![
+                co("https://nulo.sh"),
+                co("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+            ],
         );
     }
 

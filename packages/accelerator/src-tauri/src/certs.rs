@@ -248,7 +248,15 @@ fn write_pem_file(
                 .mode(0o600)
                 .open(&tmp)?
         };
-        #[cfg(not(unix))]
+        // F-003 Windows tail: the leaf TLS key (localhost.key) is a real private key — write the temp with
+        // an owner-only DACL (the SD travels with the same-volume rename). Clear any stale temp for
+        // CREATE_NEW. Applies to the cert siblings too (harmless — they're per-user files).
+        #[cfg(windows)]
+        let mut file = {
+            let _ = std::fs::remove_file(&tmp);
+            accelerator_core::win_acl::secure_create_file(&tmp)?
+        };
+        #[cfg(all(not(unix), not(windows)))]
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;

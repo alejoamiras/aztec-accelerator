@@ -492,6 +492,7 @@ fn main() {
             commands::remove_approved_origin,
             commands::get_system_info,
             commands::get_verified_info,
+            commands::get_pending_auth,
             commands::respond_auth,
             commands::enable_safari_support,
             commands::disable_safari_support,
@@ -513,7 +514,11 @@ fn main() {
             {
                 use tauri_plugin_autostart::ManagerExt;
                 if app.autolaunch().is_enabled().unwrap_or(false) {
-                    aztec_accelerator::crash_recovery::enable_crash_recovery();
+                    // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and
+                    // it must NOT be silently swallowed either.
+                    if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
+                        tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                    }
                 }
             }
 

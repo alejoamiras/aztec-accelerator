@@ -12,6 +12,33 @@ import { invoke } from "@tauri-apps/api/core";
 
 export { invoke };
 
+// C9 (A / D9): click-steal guard. A button wired with `guard: true` ignores activation for GUARD_MS after
+// the window last gained focus — reset on EVERY native focus/show, not just first paint — so a popup
+// popped under the cursor (or promoted into the active slot) can't catch a click meant for another window.
+// Gating at click ENTRY also covers keyboard Enter/Space (which dispatch a click event).
+const DEFAULT_GUARD_MS = 700;
+function guardMs() {
+  // Overridable ONLY for tests (Playwright mock sets it to 0). Production never sets this global, so the
+  // real 700 ms guard always applies. Read dynamically so an init-script override takes effect.
+  return typeof window !== "undefined" && typeof window.__CLICK_GUARD_MS__ === "number"
+    ? window.__CLICK_GUARD_MS__
+    : DEFAULT_GUARD_MS;
+}
+function now() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+let inputArmedAt = now();
+function rearmInputGuard() {
+  inputArmedAt = now();
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("focus", rearmInputGuard);
+  window.addEventListener("pageshow", rearmInputGuard);
+}
+function inputGuardActive() {
+  return now() - inputArmedAt < guardMs();
+}
+
 /**
  * Show a brief error hint near a control. Disappears after 3 seconds.
  * @param {HTMLElement} anchor — element to show the error near
@@ -62,11 +89,14 @@ export function wireToggle(id, handler) {
  * @param {object} opts
  * @param {string} [opts.disableAlso] — ID of another button to disable during operation
  * @param {string} [opts.loadingText] — text to show while loading (restores original on error)
+ * @param {boolean} [opts.guard] — apply the click-steal guard (ignore activation within GUARD_MS of focus)
  * @param {() => Promise<void>} opts.onClick — async handler
  */
 export function wireButton(id, opts) {
   const btn = document.getElementById(id);
   btn.addEventListener("click", async () => {
+    // C9 (A): ignore a click that lands within the guard window after focus (click-steal defense).
+    if (opts.guard && inputGuardActive()) return;
     btn.disabled = true;
     const originalText = btn.textContent;
     if (opts.loadingText) btn.textContent = opts.loadingText;

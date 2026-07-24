@@ -1,5 +1,5 @@
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -54,10 +54,38 @@ pub fn canonicalize_origin(input: &str) -> Option<String> {
                 return None;
             }
             let id = host.to_ascii_lowercase();
+            // D7 (C9): extension IDs have a FIXED plain-ASCII grammar. `url` treats these as opaque-host
+            // schemes, so (unlike http/https) it applies NO IDNA/punycode — a bidi/zero-width/non-ASCII or
+            // wrong-length host would otherwise survive into the canonical origin as a homograph. Validate
+            // the exact grammar and reject anything else BEFORE it becomes a `CanonicalOrigin`.
+            let valid = match scheme {
+                "chrome-extension" => is_chrome_extension_id(&id),
+                _ => is_extension_uuid(&id), // moz-extension / safari-web-extension use a per-install UUID
+            };
+            if !valid {
+                return None;
+            }
             Some(format!("{scheme}://{id}"))
         }
         _ => None,
     }
+}
+
+/// Chrome/Edge extension ID: exactly 32 chars, each in `a`..=`p` (the "mpdecimal" base-16 alphabet
+/// Chromium uses for extension IDs). Always plain ASCII — no legitimate ID contains anything else.
+fn is_chrome_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'a'..=b'p'))
+}
+
+/// Firefox/Safari web-extension host: a lowercase UUID (`8-4-4-4-12` hex) — the addon's per-install
+/// internal UUID. Reject any non-hex / misplaced-dash / wrong-length value.
+fn is_extension_uuid(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => matches!(c, b'0'..=b'9' | b'a'..=b'f'),
+        })
 }
 
 /// An origin string guaranteed canonical (RFC 6454) **by construction**.
@@ -154,6 +182,15 @@ pub enum AuthDecision {
     Deny,
 }
 
+/// Outcome of [`AuthorizationManager::resolve_active`] — the server-side arbiter gate for a USER decision.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResolveOutcome {
+    /// Resolved; carries the newly-promoted active `request_id` (if a queued popup was promoted).
+    Resolved(Option<String>),
+    /// Rejected — the request is not the currently-active popup (arbiter enforcement).
+    NotActive,
+}
+
 /// Manages pending authorization requests.
 ///
 /// When a `/prove` request arrives from an unknown origin, the handler calls
@@ -161,8 +198,9 @@ pub enum AuthDecision {
 /// shows an authorization popup. Subsequent requests from the same origin
 /// piggyback on the same popup — they all share the decision.
 /// Maximum number of distinct origins that can have pending authorization simultaneously.
-/// Prevents popup/memory spam from a malicious site generating many subdomains.
-const MAX_PENDING_ORIGINS: usize = 10;
+/// Prevents popup/memory spam from a malicious site generating many subdomains. Public so the server's
+/// queue backstop (`AUTH_QUEUE_BACKSTOP`) can bound the worst-case queued wait at `MAX × 60 s` (C9 D18).
+pub const MAX_PENDING_ORIGINS: usize = 10;
 
 /// A pending authorization awaiting the user's decision: its origin (for display + cleanup) and the
 /// receivers of every request piggybacking on it.
@@ -179,33 +217,61 @@ struct PendingState {
     by_origin: HashMap<CanonicalOrigin, String>,
     /// `request_id` → the pending request. Decisions resolve by **id**, not origin (SEC-06).
     by_request: HashMap<String, PendingRequest>,
+    /// C9 (D18/D19): the single-active-popup arbiter. `active` is the ONE `request_id` that owns the
+    /// actionable + always-on-top slot; `queue` is the FIFO of built-but-not-actionable requests. Exactly
+    /// one popup is actionable at a time; on the active one resolving, the head of `queue` is promoted.
+    active: Option<String>,
+    queue: VecDeque<String>,
 }
 
 impl PendingState {
     /// q7e3-F-09: insert a new pending request, updating BOTH indexes. The origin↔request_id coupling
     /// lives here, not hand-synced at each call site, so a future mutator can't update one map and
-    /// forget the other.
+    /// forget the other. C9 (D18): returns whether this new request became the ACTIVE one (slot was free)
+    /// vs. was enqueued (another popup is already active).
     fn insert(
         &mut self,
         origin: CanonicalOrigin,
         request_id: String,
         tx: oneshot::Sender<AuthDecision>,
-    ) {
+    ) -> bool {
         self.by_origin.insert(origin.clone(), request_id.clone());
         self.by_request.insert(
-            request_id,
+            request_id.clone(),
             PendingRequest {
                 origin,
                 senders: vec![tx],
             },
         );
+        if self.active.is_none() {
+            self.active = Some(request_id);
+            true
+        } else {
+            self.queue.push_back(request_id);
+            false
+        }
     }
 
-    /// q7e3-F-09: remove a pending request by id, updating BOTH indexes; returns it if present.
-    fn remove(&mut self, request_id: &str) -> Option<PendingRequest> {
+    /// q7e3-F-09: remove a pending request by id, updating BOTH indexes. C9 (D18/D19): if the removed
+    /// request was the ACTIVE one, promote the head of `queue` to active and return its id (so the caller
+    /// can raise+arm that window); if it was merely queued, drop it from `queue` and return `None`.
+    /// Returns `(request, newly_promoted_active)`.
+    fn remove(&mut self, request_id: &str) -> Option<(PendingRequest, Option<String>)> {
         let req = self.by_request.remove(request_id)?;
         self.by_origin.remove(&req.origin);
-        Some(req)
+        let promoted = if self.active.as_deref() == Some(request_id) {
+            let next = self.queue.pop_front();
+            self.active = next.clone();
+            next
+        } else {
+            self.queue.retain(|q| q != request_id);
+            None
+        };
+        Some((req, promoted))
+    }
+
+    fn is_active(&self, request_id: &str) -> bool {
+        self.active.as_deref() == Some(request_id)
     }
 }
 
@@ -236,17 +302,22 @@ impl AuthorizationManager {
     /// by origin string, so a caller that knows only an origin cannot resolve a concurrent request.
     ///
     /// Returns `Err` if the maximum number of pending requests is exceeded (DoS protection).
+    /// Returns `Ok((receiver, request_id, is_first, is_active))`. `is_first` ⇒ the caller shows a popup
+    /// carrying `request_id`; `is_active` (C9 D18) ⇒ that popup owns the actionable + always-on-top slot
+    /// now (vs. being enqueued behind an already-active popup). For a piggyback (`!is_first`), `is_active`
+    /// reflects the existing request it joined.
     pub fn request(
         &self,
         origin: &CanonicalOrigin,
-    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool), &'static str> {
+    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool, bool), &'static str> {
         let (tx, rx) = oneshot::channel();
         let mut st = self.state.lock();
         // Piggyback on an existing pending request for this origin.
         if let Some(request_id) = st.by_origin.get(origin).cloned() {
+            let is_active = st.is_active(&request_id);
             if let Some(req) = st.by_request.get_mut(&request_id) {
                 req.senders.push(tx);
-                return Ok((rx, request_id, false));
+                return Ok((rx, request_id, false, is_active));
             }
         }
         // New request.
@@ -254,20 +325,53 @@ impl AuthorizationManager {
             return Err("too many pending authorization requests");
         }
         let request_id = uuid::Uuid::new_v4().to_string();
-        st.insert(origin.clone(), request_id.clone(), tx);
-        Ok((rx, request_id, true))
+        let is_active = st.insert(origin.clone(), request_id.clone(), tx);
+        Ok((rx, request_id, true, is_active))
     }
 
-    /// Resolve the pending request identified by `request_id` with `decision`. Sends to every
-    /// piggybacking receiver and clears both maps. A no-op for an unknown/stale id (already resolved,
-    /// or a tampered/guessed id that matches nothing).
-    pub fn resolve(&self, request_id: &str, decision: AuthDecision) {
+    /// Resolve the pending request identified by `request_id` with `decision` (SYSTEM paths: the 60 s
+    /// auto-deny timeout, a user closing the window). Sends to every piggybacking receiver and clears both
+    /// maps. C9 (D18/D19): returns the newly-promoted active `request_id` if the resolved one owned the
+    /// active slot and a queued request was promoted — the caller raises + arms that window. A no-op
+    /// (returns `None`) for an unknown/stale id (already resolved, or a tampered/guessed id).
+    pub fn resolve(&self, request_id: &str, decision: AuthDecision) -> Option<String> {
         let mut st = self.state.lock();
-        if let Some(req) = st.remove(request_id) {
-            for tx in req.senders {
-                let _ = tx.send(decision);
-            }
+        let (req, promoted) = st.remove(request_id)?;
+        for tx in req.senders {
+            let _ = tx.send(decision);
         }
+        promoted
+    }
+
+    /// C9 (D19): resolve a USER decision (from `respond_auth`), enforced SERVER-SIDE — succeeds ONLY if
+    /// `request_id` currently owns the ACTIVE slot, so a queued (non-actionable) popup cannot resolve
+    /// itself even if its webview is coerced into calling `respond_auth`. The `{active}` button-disable in
+    /// the frontend is a reflection of this, NOT the gate. On success behaves like [`resolve`] and returns
+    /// the promoted active id; otherwise [`ResolveOutcome::NotActive`].
+    pub fn resolve_active(&self, request_id: &str, decision: AuthDecision) -> ResolveOutcome {
+        let mut st = self.state.lock();
+        if !st.is_active(request_id) {
+            return ResolveOutcome::NotActive;
+        }
+        match st.remove(request_id) {
+            Some((req, promoted)) => {
+                for tx in req.senders {
+                    let _ = tx.send(decision);
+                }
+                ResolveOutcome::Resolved(promoted)
+            }
+            None => ResolveOutcome::NotActive,
+        }
+    }
+
+    /// C9 (D8/D15): peek a pending request's SERVER-authoritative origin + whether it currently owns the
+    /// active/actionable slot, WITHOUT consuming it. `None` for an unknown/resolved id. Backs
+    /// `get_pending_auth` so the popup renders the origin the server will actually grant and disables its
+    /// buttons while it is merely queued.
+    pub fn peek(&self, request_id: &str) -> Option<(CanonicalOrigin, bool)> {
+        let st = self.state.lock();
+        let origin = st.by_request.get(request_id)?.origin.clone();
+        Some((origin, st.is_active(request_id)))
     }
 
     /// Returns true for localhost origins that should be auto-approved.
@@ -374,11 +478,11 @@ mod tests {
     #[tokio::test]
     async fn request_and_resolve() {
         let mgr = AuthorizationManager::new();
-        let (rx1, id1, is_first1) = mgr.request(&co("https://example.com")).unwrap();
+        let (rx1, id1, is_first1, _) = mgr.request(&co("https://example.com")).unwrap();
         assert!(is_first1);
 
         // A second request for the SAME origin piggybacks on the same request_id.
-        let (rx2, id2, is_first2) = mgr.request(&co("https://example.com")).unwrap();
+        let (rx2, id2, is_first2, _) = mgr.request(&co("https://example.com")).unwrap();
         assert!(!is_first2);
         assert_eq!(id1, id2, "same origin must share one request_id");
 
@@ -391,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_deny() {
         let mgr = AuthorizationManager::new();
-        let (rx, id, _) = mgr.request(&co("https://evil.com")).unwrap();
+        let (rx, id, _, _) = mgr.request(&co("https://evil.com")).unwrap();
         mgr.resolve(&id, AuthDecision::Deny);
         assert_eq!(rx.await.unwrap(), AuthDecision::Deny);
     }
@@ -402,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_ignores_wrong_request_id() {
         let mgr = AuthorizationManager::new();
-        let (mut rx, id, _) = mgr.request(&co("https://example.com")).unwrap();
+        let (mut rx, id, _, _) = mgr.request(&co("https://example.com")).unwrap();
         mgr.resolve("not-the-real-id", AuthDecision::Allow { remember: true });
         assert!(
             rx.try_recv().is_err(),
@@ -423,6 +527,86 @@ mod tests {
         assert!(mgr.request(&co("https://one-too-many.com")).is_err());
         // Piggybacking on an existing origin should still work
         assert!(mgr.request(&co("https://site0.com")).is_ok());
+    }
+
+    // ─── single-active-popup arbiter (C9 D18/D19) ───────────────────────
+
+    #[tokio::test]
+    async fn arbiter_first_is_active_second_is_queued() {
+        let mgr = AuthorizationManager::new();
+        let (_rx1, id1, _first1, active1) = mgr.request(&co("https://a.com")).unwrap();
+        assert!(active1, "first popup owns the active slot");
+        let (_rx2, id2, _first2, active2) = mgr.request(&co("https://b.com")).unwrap();
+        assert!(
+            !active2,
+            "second distinct-origin popup is queued, not active"
+        );
+        assert_eq!(mgr.peek(&id1).map(|(_, a)| a), Some(true));
+        assert_eq!(mgr.peek(&id2).map(|(_, a)| a), Some(false));
+    }
+
+    #[tokio::test]
+    async fn arbiter_resolving_active_promotes_next() {
+        let mgr = AuthorizationManager::new();
+        let (rx1, id1, _, _) = mgr.request(&co("https://a.com")).unwrap();
+        let (_rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
+        // Resolving the active one (system path: timeout / window-close) promotes the queued one.
+        let promoted = mgr.resolve(&id1, AuthDecision::Deny);
+        assert_eq!(
+            promoted.as_deref(),
+            Some(id2.as_str()),
+            "queued b.com is promoted to active"
+        );
+        assert_eq!(rx1.await.unwrap(), AuthDecision::Deny);
+        assert_eq!(
+            mgr.peek(&id2).map(|(_, a)| a),
+            Some(true),
+            "b.com now active"
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_resolving_queued_does_not_promote() {
+        let mgr = AuthorizationManager::new();
+        let (_rx1, id1, _, _) = mgr.request(&co("https://a.com")).unwrap();
+        let (rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
+        // Resolving the QUEUED one (its window was closed) leaves the active one; nobody is promoted.
+        let promoted = mgr.resolve(&id2, AuthDecision::Deny);
+        assert_eq!(promoted, None, "resolving a queued popup promotes nobody");
+        assert_eq!(rx2.await.unwrap(), AuthDecision::Deny);
+        assert_eq!(
+            mgr.peek(&id1).map(|(_, a)| a),
+            Some(true),
+            "a.com remains active"
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_user_resolve_rejects_non_active() {
+        let mgr = AuthorizationManager::new();
+        let (_rx1, id1, _, _) = mgr.request(&co("https://a.com")).unwrap();
+        let (mut rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
+        // A USER decision from the QUEUED (non-active) popup is REJECTED server-side (arbiter enforcement).
+        assert_eq!(
+            mgr.resolve_active(&id2, AuthDecision::Allow { remember: true }),
+            ResolveOutcome::NotActive
+        );
+        assert!(
+            rx2.try_recv().is_err(),
+            "a queued popup's user-decision must not resolve it"
+        );
+        // The ACTIVE popup's user decision succeeds and promotes b.com.
+        match mgr.resolve_active(&id1, AuthDecision::Allow { remember: false }) {
+            ResolveOutcome::Resolved(promoted) => {
+                assert_eq!(promoted.as_deref(), Some(id2.as_str()))
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        assert_eq!(
+            mgr.peek(&id2).map(|(_, a)| a),
+            Some(true),
+            "b.com promoted after active resolved"
+        );
     }
 
     // ─── canonicalize_origin ────────────────────────────────────────────
@@ -553,6 +737,43 @@ mod tests {
     }
 
     #[test]
+    fn canon_extension_accepts_valid_grammar() {
+        // D7: chrome = 32× a..=p; moz/safari = a lowercase UUID (uppercase folds to lowercase).
+        assert_eq!(
+            canonicalize_origin("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+            Some("chrome-extension://abcdefghijklmnopabcdefghijklmnop".to_string()),
+        );
+        assert_eq!(
+            canonicalize_origin("moz-extension://12345678-90ab-cdef-1234-567890abcdef"),
+            Some("moz-extension://12345678-90ab-cdef-1234-567890abcdef".to_string()),
+        );
+        assert_eq!(
+            canonicalize_origin("safari-web-extension://DEADBEEF-0000-1111-2222-333344445555"),
+            Some("safari-web-extension://deadbeef-0000-1111-2222-333344445555".to_string()),
+        );
+    }
+
+    #[test]
+    fn canon_extension_rejects_invalid_grammar() {
+        // D7: a bidi/zero-width/non-ASCII/wrong-length/out-of-alphabet extension host must be REJECTED,
+        // not lowercased into a homograph canonical origin (opaque-host schemes skip url's IDNA).
+        for bad in [
+            "chrome-extension://short",                             // too short
+            "chrome-extension://abcdefghijklmnopabcdefghijklmno",   // 31 chars
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnopq", // 33 chars
+            "chrome-extension://zbcdefghijklmnopabcdefghijklmnop",  // 'z' is out of a..=p
+            "moz-extension://not-a-uuid-at-all-nope-nope-nope-x",   // not a UUID
+            "moz-extension://12345678-1234-1234-1234-1234567890zz", // non-hex tail
+        ] {
+            assert_eq!(
+                canonicalize_origin(bad),
+                None,
+                "must reject invalid extension id: {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn canon_rejects_unknown_scheme() {
         assert!(canonicalize_origin("file:///etc/passwd").is_none());
         assert!(canonicalize_origin("data:text/html,hi").is_none());
@@ -564,7 +785,7 @@ mod tests {
         let cases = [
             "https://nulo.sh",
             "https://nulo.sh:8443",
-            "chrome-extension://abc",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
         ];
         for c in cases {
             let once = canonicalize_origin(c).unwrap();

@@ -414,7 +414,12 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
 fn rearm_crash_recovery_if_enabled(app: &AppHandle) {
     use tauri_plugin_autostart::ManagerExt;
     if app.autolaunch().is_enabled().unwrap_or(false) {
-        crate::crash_recovery::enable_crash_recovery();
+        // C8 (D12): log-and-continue — a post-update rearm hiccup must not abort, but is never swallowed.
+        // NOTE: this only marks the guard "rearmed" on the closure running; a failing rearm is surfaced
+        // here so the operator sees a degraded state rather than a false "rearmed".
+        if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
+            tracing::warn!("post-update crash-recovery rearm failed (autostart on): {e}");
+        }
     }
 }
 
