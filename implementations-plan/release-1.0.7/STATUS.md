@@ -100,3 +100,49 @@ curl -sI https://aztec-accelerator.dev/releases/latest.json   # expect 200
 - Merge hazards caught by verifying rather than trusting: squash-only policy silently broke merge
   ancestry; git auto-merge produced a duplicated `permissions:` block in `sdk.yml`; 4 real type
   errors in branch scripts, one of which could have made `rmSync` delete the whole versions dir.
+
+## 2026-07-25 — Apple unblocked; NEW blocker: Windows updater regression
+
+Owner accepted the Apple agreement. Notarization now succeeds — **all 7 builds pass on every
+platform**, WebDriver gate passes, post-build smoke passes.
+
+Two further issues surfaced, one fixed, one open:
+
+**FIXED (#410)** — all 6 updater smokes failed with
+`error: could not determine executable to run for package tauri`. Root cause: `sign-smoke-feed.sh`
+(new in the security campaign) runs `bunx tauri signer sign`, which only resolves the LOCAL
+@tauri-apps/cli; the linux + macOS smoke jobs set up bun but never ran `bun install`, so bunx fell
+back to an npm package literally named `tauri` (no executable). Windows was unaffected because it
+uses ./.github/actions/setup-accelerator, which installs. Added `bun install --frozen-lockfile` to
+both. This is exactly the audit's G1 finding ("never bunx fallback resolution"). Linux + macOS
+smokes now PASS.
+
+**OPEN — Windows updater smoke regression (BLOCKS 1.0.7 stable).**
+Both Windows modes fail. Proven from the negative-mode assertion:
+`NEGATIVE inconclusive — the updater never downloaded the artifact, so signature rejection wasn't
+exercised.` So on Windows the updater never even ATTEMPTS the download; the positive mode's
+"/health never reported 1.0.7-rc.1" is the same cause.
+
+Established:
+- It is a REGRESSION: `_e2e-updater-windows.yml` existed AND was in `tag.needs` at
+  accelerator-v1.0.6, which released successfully on 2026-06-11.
+- It is WINDOWS-SPECIFIC: linux + macOS updater smokes pass with the same core Rust update path.
+- Root cause NOT yet identified. The ps1's `Dump-Logs` (app log from
+  `%LOCALAPPDATA%\aztec-accelerator\logs`) does not surface in the CI log, so the updater's own
+  reasoning is invisible.
+
+Unproven hypotheses, highest first:
+1. The app may not be starting/serving `/health` at all on Windows (would explain no download, no
+   logs, and both modes failing). Candidate cause: the F-003 `win_acl.rs` work — including the
+   OWNER set+verify added during remediation (`WRITE_OWNER`) — failing at runtime on the
+   installed app and aborting startup. NOTE: `cargo test` on windows-latest passes, so any failure
+   is runtime/installed-context, not compile or unit-test.
+2. An update-gate rejection before download (`running_below_floor` / `candidate_allowed` /
+   `layer_b_gate`) — but these are cross-platform and linux/macOS pass, so less likely.
+
+NEXT DIAGNOSTIC (cheapest first): make the Windows smoke surface the app log unconditionally
+(upload `%LOCALAPPDATA%\aztec-accelerator\logs` as an artifact even on failure), and assert
+`/health` responds AT ALL with the N-1 version before polling for N — that single distinction
+separates hypothesis 1 from 2 in one run.
+
+**1.0.7 stable is NOT dispatched.** The goal gates it on rc.1 being fully green; it is not.
