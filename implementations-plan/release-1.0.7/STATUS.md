@@ -4,7 +4,7 @@
 released + verified; `1.0.7` stable released with `latest.json` live and a real v1.0.6 → v1.0.7
 auto-update confirmed; legacy IAM role retired.
 
-**Status: 5 / 9 goal items COMPLETE. Items 4–7 BLOCKED on an Apple account action.**
+**Status: 9 / 9 goal items COMPLETE. 1.0.7 shipped; update feed restored.**
 
 ## Progress
 
@@ -146,3 +146,43 @@ NEXT DIAGNOSTIC (cheapest first): make the Windows smoke surface the app log unc
 separates hypothesis 1 from 2 in one run.
 
 **1.0.7 stable is NOT dispatched.** The goal gates it on rc.1 being fully green; it is not.
+
+## 2026-07-25 — COMPLETE. 1.0.7 shipped, update feed restored.
+
+Owner accepted the Apple agreement; the remaining phases then ran to completion. Three REAL bugs
+were caught by the rc dry-run before anything reached the live feed:
+
+1. **#410** — `sign-smoke-feed.sh` ran `bunx tauri signer sign` in linux/macOS smoke jobs that never
+   ran `bun install`; bunx fell back to an npm package literally named `tauri` (no executable).
+   Exactly the audit's G1 finding. Added `bun install --frozen-lockfile`.
+2. **#412** — every one of the 9 Windows-smoke failure paths was `Write-Error ...; Dump-Logs; exit 1`.
+   pwsh runs with `$ErrorActionPreference='Stop'`, so Write-Error terminated first and Dump-Logs NEVER
+   ran — the harness discarded the exact evidence it existed to capture. Reordered. This is what made
+   bug 3 findable; without it the leading hypothesis was win_acl, which was WRONG.
+3. **#413 (the substantive one)** — F-004 Layer A bound the signed envelope to the artifact with a RAW
+   STRING compare. tauri parses the feed URL into a `Url`, percent-encoding the space in the Windows
+   NSIS name, so `…/Aztec Accelerator_…` != `…/Aztec%20Accelerator_…` → zero matches →
+   `ArtifactNotUniquelyMatched` → a legitimate, correctly-signed update REFUSED. Fixed by comparing
+   parsed URLs (encoding-normalized, binding NOT loosened; two tests pin both halves).
+
+### Final verification (all against LIVE production)
+- `1.0.7-rc.1`: fully green, `prerelease=true`, and `latest.json` stayed 403 — the dry run never
+  touched the live feed, exactly as designed.
+- `1.0.7` stable: run success, marked Latest.
+- `https://aztec-accelerator.dev/releases/latest.json` → **HTTP 200** (was 403 for ~6 weeks).
+- Live feed run through the PRODUCTION verifier with the pinned pubkey:
+  `OK darwin-aarch64 / darwin-x86_64 / linux-x86_64 / windows-x86_64` — all 4 bound to the signed
+  envelope. This is the exact code path a v1.0.6 client executes.
+- All 4 advertised artifacts downloadable (HTTP 206 on range request).
+- All 6 updater smokes in the stable run passed — real N-1 install → auto-update → `/health == N` on
+  Linux, macOS (both modes) and Windows (both modes).
+- Layer B floor: 1.0.7 > 1.0.6 ⇒ v1.0.6 clients accept the update.
+
+### Root cause of the original dead feed (fixed and shipped)
+`deploy-landing`'s `s3 sync --delete` had no `--exclude "releases*"`, so every landing deploy wiped
+`landing/releases/latest.json`. Now excluded AND the landing IAM role is explicitly DENIED write to
+the release feed — belt and braces.
+
+### Remaining owner action
+⚠️ **Delete the AWS ROOT access key.** All three per-pipeline roles are proven in production; nothing
+in the account needs root credentials.
