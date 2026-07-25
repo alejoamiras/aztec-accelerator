@@ -58,6 +58,14 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # REQUIRED for sign-smoke-feed.sh: it runs `bunx tauri signer sign`, which only resolves the
+      # LOCAL @tauri-apps/cli (a devDependency of packages/accelerator). Without an install, bunx
+      # falls back to fetching an npm package literally named `tauri` — which has no executable, so
+      # the smoke dies with "could not determine executable to run for package tauri". The Windows
+      # smoke never hit this because it uses ./.github/actions/setup-accelerator, which installs.
+      - name: Install dependencies (provides @tauri-apps/cli for feed signing)
+        run: bun install --frozen-lockfile
+
       # FUSE (AppImage runtime) + headless display + tray host + dbus. Running the
       # AppImage natively (via FUSE) sets $APPIMAGE, which the Tauri Linux updater
       # replaces in place — `--appimage-extract-and-run` would NOT, breaking the

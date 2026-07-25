@@ -60,6 +60,14 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # REQUIRED for sign-smoke-feed.sh: it runs `bunx tauri signer sign`, which only resolves the
+      # LOCAL @tauri-apps/cli (a devDependency of packages/accelerator). Without an install, bunx
+      # falls back to fetching an npm package literally named `tauri` — which has no executable, so
+      # the smoke dies with "could not determine executable to run for package tauri". The Windows
+      # smoke never hit this because it uses ./.github/actions/setup-accelerator, which installs.
+      - name: Install dependencies (provides @tauri-apps/cli for feed signing)
+        run: bun install --frozen-lockfile
+
       - name: Download N artifacts (this run)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
