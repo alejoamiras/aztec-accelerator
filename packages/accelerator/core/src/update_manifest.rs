@@ -91,6 +91,26 @@ impl std::fmt::Display for ManifestError {
 }
 impl std::error::Error for ManifestError {}
 
+/// Compare the signed envelope's artifact URL against the plugin-selected download URL
+/// SEMANTICALLY rather than byte-for-byte.
+///
+/// `tauri-plugin-updater` parses the feed's `url` into a `Url` before downloading, which
+/// percent-encodes characters the feed may carry literally — notably the SPACE in a Windows NSIS
+/// artifact name (`Aztec Accelerator_1.0.7_x64-setup.nsis.zip`). A raw `==` therefore compared
+/// `…/Aztec Accelerator_…` against `…/Aztec%20Accelerator_…`, found ZERO matches, and rejected a
+/// legitimate correctly-signed update as `ArtifactNotUniquelyMatched` — which is exactly how the
+/// Windows updater smoke failed.
+///
+/// This does NOT loosen the binding: two parsed `Url`s compare exactly, just in canonical form, so
+/// a different host/path/query still fails. If either side is unparseable we fall back to strict
+/// string equality rather than guessing.
+fn url_matches(signed: &str, selected: &str) -> bool {
+    match (url::Url::parse(signed), url::Url::parse(selected)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => signed == selected,
+    }
+}
+
 fn b64(s: &str, what: &'static str) -> Result<Vec<u8>, ManifestError> {
     base64::engine::general_purpose::STANDARD
         .decode(s.trim())
@@ -183,7 +203,10 @@ pub fn verify_manifest(
 
     // 8. Exactly ONE signed platform entry must match the plugin-selected download URL, and its
     //    signature/size must equal the signed values.
-    let mut matches = env.platforms.values().filter(|p| p.url == download_url);
+    let mut matches = env
+        .platforms
+        .values()
+        .filter(|p| url_matches(&p.url, download_url));
     let selected = matches
         .next()
         .ok_or(ManifestError::ArtifactNotUniquelyMatched)?;
@@ -371,6 +394,43 @@ mod tests {
             ),
             Err(ManifestError::ArtifactNotUniquelyMatched)
         ));
+    }
+
+    /// The Windows updater-smoke regression: the feed carries the artifact URL with a LITERAL space
+    /// (`Aztec Accelerator_..._x64-setup.nsis.zip`), but the plugin parses it into a `Url` and hands
+    /// us the percent-encoded form. A byte-equality check found zero matches and rejected a
+    /// legitimate, correctly-signed update as ArtifactNotUniquelyMatched.
+    #[test]
+    fn percent_encoded_download_url_still_matches() {
+        assert!(
+            url_matches(
+                "https://x.test/releases/download/Aztec Accelerator_1.0.7_x64-setup.nsis.zip",
+                "https://x.test/releases/download/Aztec%20Accelerator_1.0.7_x64-setup.nsis.zip"
+            ),
+            "a space vs %20 is the SAME url — must match"
+        );
+    }
+
+    /// ...but normalizing encoding must NOT loosen the binding: a different host, path, or file is
+    /// still a mismatch, and an unparseable side falls back to strict string equality.
+    #[test]
+    fn url_matching_does_not_loosen_the_binding() {
+        let signed = "https://x.test/releases/download/App_1.0.7.zip";
+        assert!(!url_matches(
+            signed,
+            "https://evil.test/releases/download/App_1.0.7.zip"
+        ));
+        assert!(!url_matches(
+            signed,
+            "https://x.test/releases/download/Other_1.0.7.zip"
+        ));
+        assert!(!url_matches(
+            signed,
+            "https://x.test/releases/download/App_1.0.8.zip"
+        ));
+        // Unparseable → strict equality only.
+        assert!(url_matches("not a url", "not a url"));
+        assert!(!url_matches("not a url", "also not a url"));
     }
 
     #[test]
