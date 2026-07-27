@@ -240,14 +240,35 @@ template settled what could not be settled by argument: `$UpdateMode` is set fro
 `/UPDATE` flag, and forwarded to the old uninstaller only when the installer received it
 (`${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE"`). The in-app updater passes it. A user who
 downloads the installer and double-clicks it — the only upgrade route once auto-update is off — does
-not, so the hook wiped their trust anchor on a routine upgrade. `_?=` IS appended unconditionally on
-that path, and the registered `UninstallString` is a bare `"$INSTDIR\uninstall.exe"`, so it never
-appears on an Add/Remove-Programs run. The guard now requires both.
+not, so the hook wiped their trust anchor on a routine upgrade.
 
-Because a release cannot fix its own uninstaller, this one is not left to a static test. The Windows
+**Then the first fix for it was wrong, and that is the more useful lesson.** `_?=` IS appended
+unconditionally on the install-over path, so the guard searched `$CMDLINE` for it. That guard could
+never fire: **the NSIS stub CONSUMES `_?=`**. Invoked as `uninstall.exe /S _?=C:\dir`, the script sees
+`$CMDLINE = "...\uninstall.exe" /S`. Hours of correct reasoning about `${GetOptions}`'s switch-marker
+parsing and quote handling — all sound, all irrelevant, because the premise that the string was
+*present* went unexamined. Reading the template proved the BUG; it did not prove the FIX, and those
+were treated as one step.
+
+What `_?=` means is observable even though the flag is not: "do not copy yourself to a temp dir".
+So an install-over runs the uninstaller IN PLACE while a real uninstall runs a `~nsu*.tmp` copy —
+`$EXEDIR` vs `$INSTDIR`, canonicalized (`GetFullPathName /SHORT`) because `$INSTDIR` is restored from
+the registry while `$EXEDIR` comes from the launched path, and a textual mismatch would mean "delete",
+the unsafe direction. `$UpdateMode` stays as an independent second guard.
+
+Because a release cannot fix its own uninstaller, this is not left to a static test. The Windows
 `cert-trust` leg builds a real NSIS uninstaller around the ACTUAL hook macro
 (`nsis/harness.test.nsi`) and runs it under all three command lines, using the hook's own `RMDir`
-target as the observable. The static shape test stays as the fast companion.
+target as the observable. It is what caught the wrong fix. The static shape test is the fast companion.
+
+**And the loop that should have existed first:** `scripts/nsis-hook-test.sh`
+(`bun run --cwd packages/accelerator test:nsis`) runs those same three cases under **wine in Docker**
+in ~30s, on Linux, no Windows and no CI push. It reproduced the CI failure exactly, then produced the
+`$EXEDIR`/`$INSTDIR` measurements the real fix is built on. Verified to FAIL on the broken hook. A
+whole CI round-trip was spent arguing about behaviour that a 30-second container could have measured
+— when a platform is unavailable, price emulating it BEFORE reasoning about it, not after.
+(Watch for a false green: `docker run` without `-i` feeds `bash -s` an empty script and exits 0
+having tested nothing.)
 
 **Also worth recording: "can't run locally" was wrong.** The Playwright desktop-ui suite had been
 declared CI-only on this machine twice, because `playwright install` fails on Ubuntu 26.04. The
