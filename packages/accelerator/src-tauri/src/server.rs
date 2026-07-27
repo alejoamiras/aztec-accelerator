@@ -63,3 +63,107 @@ pub fn spawn_https(
     });
     rx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// THE invariant eight rounds of race fixes rest on: the HTTPS bring-up is single-owner. Every
+    /// path that touches cert state (launch gate, Settings/onboarding enable, renewal, trust removal)
+    /// takes this lock, so if it ever stopped excluding, all of those could interleave — concurrently
+    /// writing cert sets, loading a half-renamed one, or committing config over each other.
+    #[tokio::test]
+    async fn concurrent_claims_are_mutually_exclusive() {
+        let state = AppState::default();
+        let inside = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            let inside = inside.clone();
+            let max_concurrent = max_concurrent.clone();
+            handles.push(tokio::spawn(async move {
+                let _guard = claim_https_lifecycle(&state).await;
+                let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                // Hold it long enough that a broken lock would overlap observably.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                inside.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.expect("task");
+        }
+
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            1,
+            "at most ONE path may own the HTTPS bring-up at a time"
+        );
+        assert_eq!(inside.load(Ordering::SeqCst), 0, "all guards released");
+    }
+
+    /// The launch gate uses the non-blocking variant and must NOT barge in while another path owns the
+    /// bring-up — and must be able to claim once that path is done.
+    #[tokio::test]
+    async fn try_claim_fails_while_held_and_succeeds_after_release() {
+        let state = AppState::default();
+
+        let guard = claim_https_lifecycle(&state).await;
+        assert!(
+            try_claim_https_lifecycle(&state).is_none(),
+            "try_claim must decline while another path holds the bring-up"
+        );
+
+        drop(guard);
+        assert!(
+            try_claim_https_lifecycle(&state).is_some(),
+            "try_claim must succeed once the holder released"
+        );
+    }
+
+    /// Guards release on EVERY exit path — including the `?`/early-return cases scattered through
+    /// `enable_https_inner` and `prepare_launch_https`. A leaked guard would wedge HTTPS for the rest
+    /// of the process (no further enable could ever claim), so this pins the RAII behavior.
+    #[tokio::test]
+    async fn guard_releases_on_early_return_and_on_error() {
+        let state = AppState::default();
+
+        async fn early_return(state: &AppState) -> Result<(), String> {
+            let _guard = claim_https_lifecycle(state).await;
+            Err("simulates a failed TLS load / trust install".to_string())?;
+            unreachable!()
+        }
+
+        assert!(early_return(&state).await.is_err());
+        assert!(
+            try_claim_https_lifecycle(&state).is_some(),
+            "an early return must not leak the bring-up lock"
+        );
+    }
+
+    /// A panic while holding the guard must still release it (unwind runs `Drop`), otherwise one
+    /// unexpected panic in the cert path would permanently disable HTTPS enable/renewal/removal.
+    #[tokio::test]
+    async fn guard_releases_on_panic() {
+        let state = AppState::default();
+
+        let panicking = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let _guard = claim_https_lifecycle(&state).await;
+                panic!("boom");
+            })
+        };
+        assert!(panicking.await.is_err(), "task should have panicked");
+
+        assert!(
+            try_claim_https_lifecycle(&state).is_some(),
+            "a panic while holding must not leak the bring-up lock"
+        );
+    }
+}

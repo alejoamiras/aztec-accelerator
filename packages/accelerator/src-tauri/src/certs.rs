@@ -525,6 +525,40 @@ mod tests {
     }
 
     #[test]
+    fn ca_fingerprint_is_stable_and_discriminating() {
+        // The R8 served-identity check is exactly `served_fingerprint != live_ca_fingerprint()`, so it
+        // is only as good as this helper: it must be STABLE for the same cert (or a re-enable would
+        // spuriously demand a restart every time) and DIFFERENT after a rotation (or a listener
+        // serving a since-removed anchor would go undetected).
+        let dir = tempfile::tempdir().unwrap();
+
+        let (ca_a, _k, _l, _lk) = build_test_ca_and_leaf();
+        let path_a = dir.path().join("a.pem");
+        std::fs::write(&path_a, ca_a.pem()).unwrap();
+
+        let first = ca_fingerprint_at(&path_a).expect("fingerprint a");
+        let again = ca_fingerprint_at(&path_a).expect("fingerprint a again");
+        assert_eq!(first, again, "same cert file must fingerprint identically");
+        assert_eq!(first.len(), 64, "sha256 hex");
+
+        // A rotation mints a FRESH keyless CA — the fingerprint must move.
+        let (ca_b, _k2, _l2, _lk2) = build_test_ca_and_leaf();
+        let path_b = dir.path().join("b.pem");
+        std::fs::write(&path_b, ca_b.pem()).unwrap();
+        assert_ne!(
+            first,
+            ca_fingerprint_at(&path_b).expect("fingerprint b"),
+            "a rotated (different) CA must fingerprint differently"
+        );
+
+        // Unreadable / non-PEM → None, so the caller can't mistake garbage for a match.
+        let junk = dir.path().join("junk.pem");
+        std::fs::write(&junk, b"not a certificate").unwrap();
+        assert!(ca_fingerprint_at(&junk).is_none());
+        assert!(ca_fingerprint_at(&dir.path().join("missing.pem")).is_none());
+    }
+
+    #[test]
     fn mismatched_leaf_and_key_fail_to_load() {
         // The consistency mechanism `certs_exist()` now relies on: rustls REJECTS a leaf paired with a
         // key that didn't sign it — exactly the mixed set a non-atomic 3-file rename crash can leave

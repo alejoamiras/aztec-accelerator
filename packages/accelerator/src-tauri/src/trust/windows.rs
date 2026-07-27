@@ -22,6 +22,10 @@ use std::process::Command;
 
 const STORE: &str = "Windows CurrentUser Root";
 const CA_CN: &str = "Aztec Accelerator Local CA";
+/// certutil store names. `Disallowed` (the "Untrusted Certificates" store) OVERRIDES `Root` in Windows
+/// chain building, so trust means "in Root AND not in Disallowed" (see [`live_present`]).
+const ROOT_STORE: &str = "Root";
+const DISALLOWED_STORE: &str = "Disallowed";
 
 /// Absolute path to `certutil.exe` — never a bare-name PATH lookup (a planted `certutil` earlier on
 /// PATH must not win). **Prefers the hardcoded `C:\Windows\System32\certutil.exe`** when it exists, so
@@ -71,29 +75,42 @@ fn is_present_by_cn() -> bool {
         .unwrap_or(false)
 }
 
-/// Is a cert with THIS exact serial present in Root (== trusted)? The LIVE-cert identity check —
-/// unlike CN, which every stale rotation anchor shares, so a CN match could report "trusted" while
-/// the CURRENT leaf chains to an anchor that's actually gone (post-impl codex High, both hunts). Uses
-/// the compact hex serial the rotation delete-by-serial path already depends on.
-fn is_present_by_serial(serial: &str) -> bool {
+/// Is a cert with THIS exact serial present in `store`? Exit-code driven (locale-independent).
+/// The LIVE-cert identity check uses the serial, not the CN: every stale rotation anchor shares the
+/// CN, so a CN match could report "trusted" while the CURRENT leaf chains to an anchor that's actually
+/// gone (post-impl codex High, both hunts). Uses the compact hex serial the rotation delete-by-serial
+/// path already depends on.
+fn is_present_by_serial(store: &str, serial: &str) -> bool {
     Command::new(certutil_exe())
-        .args(["-user", "-store", "Root", serial])
+        .args(["-user", "-store", store, serial])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Whether the cert AT `ca_cert` (by its serial) is trusted in Root. If the serial can't be parsed we
-/// return `false` (can't identify → treat as not-trusted): the launch gate then skips HTTPS and the
-/// app serves plain HTTP, the safe-fail direction — never presenting a cert we can't verify is trusted.
+/// Whether the cert AT `ca_cert` is EFFECTIVELY trusted for chain building on Windows.
+///
+/// Presence in `Root` is not sufficient: the `Disallowed` (Untrusted Certificates) store takes
+/// PRECEDENCE, so a cert in both is rejected by the OS while a naive Root-only check would call it
+/// trusted — the same "reports trusted when it isn't" class as the CN-vs-serial bug, and it would make
+/// the launch gate serve a leaf browsers refuse (post-impl codex Medium). So: present in Root AND not
+/// in Disallowed.
+///
+/// If the serial can't be parsed we return `false` (can't identify → treat as not-trusted): the launch
+/// gate then skips HTTPS and the app serves plain HTTP, the safe-fail direction — never presenting a
+/// cert we can't verify is trusted.
 fn live_present(ca_cert: &Path) -> bool {
-    match cert_serial(ca_cert) {
-        Some(serial) => is_present_by_serial(&serial),
-        None => {
-            tracing::warn!("could not parse CA serial; treating Windows trust as not-present");
-            false
-        }
+    let Some(serial) = cert_serial(ca_cert) else {
+        tracing::warn!("could not parse CA serial; treating Windows trust as not-present");
+        return false;
+    };
+    if is_present_by_serial(DISALLOWED_STORE, &serial) {
+        tracing::warn!(
+            "CA is in the CurrentUser Disallowed store — explicitly distrusted, treating as not-trusted"
+        );
+        return false;
     }
+    is_present_by_serial(ROOT_STORE, &serial)
 }
 
 /// Delete the OLD anchor SPECIFICALLY, by serial — used only during rotation, where old + new share
