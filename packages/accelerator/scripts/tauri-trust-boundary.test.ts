@@ -264,35 +264,47 @@ describe("F-012 P3 — per-window capability ACL", () => {
 //
 // TWO guards are load-bearing, not one. `$UpdateMode` is set from the installer's own `/UPDATE` flag
 // and forwarded to the old uninstaller only when the installer received it — so a manually downloaded
-// installer (the only upgrade route once auto-update is off) leaves it 0. `_?=` is appended on that
-// path unconditionally, and never appears on an Add/Remove-Programs run. Both must be checked.
+// installer (the only upgrade route once auto-update is off) leaves it 0. The second guard is
+// `$EXEDIR` vs `$INSTDIR`: `_?=` means "do not copy yourself to temp", so an install-over runs the
+// uninstaller IN PLACE while a real uninstall runs a `~nsu*.tmp` copy. `_?=` itself is NOT detectable
+// — the NSIS stub strips it from `$CMDLINE` (measured; a guard that searched $CMDLINE for it shipped
+// and failed). Both directories are canonicalized before comparison because a textual mismatch would
+// mean "delete", the unsafe direction.
 describe("NSIS uninstall hook — an upgrade must not wipe trust", () => {
   const HOOKS = path.join(SRC_TAURI, "nsis", "hooks.nsi");
 
-  test("the -delstore Root + cert removal require BOTH $UpdateMode <> 1 and no _?=", async () => {
+  test("the destructive ops require BOTH $UpdateMode <> 1 and $EXEDIR != $INSTDIR", async () => {
     const nsi = await read(HOOKS);
-    const detectInstallOver = nsi.search(/\$\{GetOptions\}\s+\$CMDLINE\s+"_\?="/);
     const guardOpen = nsi.search(/\$\{If\}\s*\$UpdateMode\s*<>\s*1/);
-    const andGuard = nsi.search(/\$\{AndIf\}/);
+    const andGuard = nsi.search(/\$\{AndIf\}\s*\$\d\s*!=\s*\$\d/);
     const delstore = nsi.search(/-delstore\s+Root/i);
     const rmdir = nsi.search(/RMDir\s+\/r/i);
-    // The LAST ${EndIf} closes the destructive block; earlier ones close the _?= detection.
+    // The LAST ${EndIf} closes the destructive block; earlier ones close the path canonicalization.
     const guardClose = nsi.lastIndexOf("${EndIf}");
 
-    expect(
-      detectInstallOver,
-      "the hook must detect the installer-driven uninstall via _?= on $CMDLINE",
-    ).toBeGreaterThanOrEqual(0);
-    expect(detectInstallOver, "_?= must be resolved BEFORE the guard is evaluated").toBeLessThan(
-      guardOpen,
-    );
     expect(guardOpen, "an ${If} $UpdateMode <> 1 guard must exist").toBeGreaterThanOrEqual(0);
-    expect(andGuard, "the _?= result must be ANDed into the SAME condition").toBeGreaterThan(
-      guardOpen,
-    );
+    expect(
+      andGuard,
+      "the in-place-vs-temp-copy result must be ANDed into the SAME condition",
+    ).toBeGreaterThan(guardOpen);
     expect(delstore, "-delstore Root must sit AFTER both guards").toBeGreaterThan(andGuard);
     expect(rmdir, "the cert RMDir must sit AFTER both guards").toBeGreaterThan(andGuard);
     expect(guardClose, "the guard must close AFTER the destructive ops").toBeGreaterThan(delstore);
     expect(guardClose).toBeGreaterThan(rmdir);
+  });
+
+  test("both directories are canonicalized before they are compared", async () => {
+    // Comparing $EXEDIR to $INSTDIR raw would let one directory spelled two ways (casing, trailing
+    // slash, 8.3 short name) read as "different" — i.e. as a real uninstall — and wipe the anchor.
+    const nsi = await read(HOOKS);
+    const normalized = [
+      ...nsi.matchAll(/GetFullPathName\s+\/SHORT\s+\$\d\s+"\$(EXEDIR|INSTDIR)"/g),
+    ];
+    expect(
+      normalized.map((m) => m[1]).sort(),
+      "both $EXEDIR and $INSTDIR must be canonicalized",
+    ).toEqual(["EXEDIR", "INSTDIR"]);
+    // Raw $EXEDIR/$INSTDIR must never be the operands of the guard comparison itself.
+    expect(nsi).not.toMatch(/\$\{AndIf\}\s*"?\$EXEDIR/);
   });
 });

@@ -18,12 +18,20 @@
 ; the only route available once auto-update is off — does NOT, so `$UpdateMode` is 0 all the way down
 ; and the old uninstaller wiped the trust anchor on a plain upgrade (post-impl codex Medium).
 ;
-; `_?=` IS appended unconditionally on that path, and it is a reliable discriminator: the registered
-; UninstallString is a bare `"$INSTDIR\uninstall.exe"`, so an Add/Remove-Programs (or double-clicked
-; uninstall.exe) run never carries it. Present ⟹ an installer is driving us through an install-over.
-; `${GetOptions}` takes the option's FIRST character as the switch marker, so this searches for the
-; literal `_?=` outside quotes — `?` is illegal in Windows paths, so it cannot false-positive on the
-; install directory, and the quoted exe path is skipped by its quote handling.
+; `_?=` IS appended unconditionally on that path — but it CANNOT be detected from `$CMDLINE`. The NSIS
+; stub consumes it: invoked as `uninstall.exe /S _?=C:\dir`, the script sees `$CMDLINE` =
+; `"...\uninstall.exe" /S`. Measured under wine, not assumed (an earlier `${GetOptions} $CMDLINE "_?="`
+; guard shipped on exactly that wrong assumption and CI caught it).
+;
+; What `_?=` actually MEANS is the observable: "do not copy yourself to a temp dir before running".
+; So WHERE the uninstaller is executing from is the discriminator, and it holds in all three cases:
+;
+;   uninstall.exe /S _?=<dir>            $EXEDIR = <dir>              == $INSTDIR   install-over
+;   uninstall.exe /S /UPDATE _?=<dir>    $EXEDIR = <dir>              == $INSTDIR   install-over
+;   uninstall.exe /S   (Add/Remove)      $EXEDIR = ...\~nsu1.tmp      != $INSTDIR   REAL uninstall
+;
+; `$UpdateMode` is kept as a second, independent guard: it costs nothing and still covers a future
+; Tauri that forwards `/UPDATE` without `_?=`.
 ;
 ; Erring toward NOT deleting is the right bias: a leftover anchor is a CA whose private key was
 ; generated per-signature and discarded, never written to disk, and is name-constrained to loopback —
@@ -36,14 +44,23 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   Push $0
   Push $1
-  StrCpy $1 0
+  ; Normalize both to canonical short (8.3) form before comparing. `$INSTDIR` is restored from the
+  ; installer's registry value while `$EXEDIR` is derived from the launched path, so one directory can
+  ; be spelled two ways (casing, trailing slash, long vs short name). A purely textual mismatch would
+  ; read as "real uninstall" and delete — the unsafe direction — so canonicalize first, and fall back
+  ; to the raw value only if the path can no longer be resolved.
   ClearErrors
-  ${GetOptions} $CMDLINE "_?=" $0
-  ${IfNot} ${Errors}
-    StrCpy $1 1 ; an installer is running us as part of an install-over, not a real uninstall
+  GetFullPathName /SHORT $0 "$EXEDIR"
+  ${If} ${Errors}
+    StrCpy $0 "$EXEDIR"
+  ${EndIf}
+  ClearErrors
+  GetFullPathName /SHORT $1 "$INSTDIR"
+  ${If} ${Errors}
+    StrCpy $1 "$INSTDIR"
   ${EndIf}
   ${If} $UpdateMode <> 1
-  ${AndIf} $1 <> 1
+  ${AndIf} $0 != $1
     ; Absolute System32 certutil ($SYSDIR) — never a PATH lookup.
     ExecWait '"$SYSDIR\certutil.exe" -user -delstore Root "Aztec Accelerator Local CA"'
     ; Remove the generated cert material from the user profile.
