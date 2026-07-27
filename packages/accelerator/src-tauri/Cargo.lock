@@ -297,6 +297,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "libc",
  "parking_lot",
  "rcgen",
  "reqwest 0.12.28",

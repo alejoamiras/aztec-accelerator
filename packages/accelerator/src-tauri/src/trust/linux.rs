@@ -32,28 +32,37 @@ fn certutil_bin() -> Option<PathBuf> {
     }
 }
 
-/// True if the resolved binary — or ANY ancestor directory up to `/` — is group- or world-writable,
-/// or if any perm can't be read / the path can't be canonicalized (fail closed). Checking only the
-/// immediate parent was insufficient: `/opt/tools` mode 0777 containing `bin/` 0755 containing
-/// `certutil` let an attacker replace the whole `bin` subtree while passing the old check (post-impl
-/// codex High). Canonicalizing first resolves symlinks + `..` so a safe-looking path can't tunnel
-/// through a writable link to an attacker-controlled target.
+/// True if the resolved binary — or ANY ancestor directory up to `/` — is unsafe to trust as the
+/// source of a privileged `certutil` invocation, i.e. group/world-writable OR owned by a user that is
+/// neither root nor us (so a DIFFERENT user could replace it), OR unreadable / un-canonicalizable
+/// (fail closed). Two prior gaps this closes: checking only the immediate parent let a writable
+/// grandparent (`/opt/tools` 0777 over `bin/` 0755) pass (codex High R1); and a mode-only check
+/// accepted an attacker-OWNED but `0755` tree like `/opt/attacker/bin` (codex High R2) — ownership is
+/// now required. Canonicalizing first resolves symlinks + `..` so a safe-looking path can't tunnel
+/// through a writable/foreign-owned link.
 fn is_writable_by_nonowner(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let writable = |m: &Path| {
-        std::fs::metadata(m)
-            .map(|md| md.permissions().mode() & 0o022 != 0)
-            .unwrap_or(true)
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // SAFETY: geteuid() takes no arguments, has no preconditions, and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let unsafe_component = |m: &Path| match std::fs::metadata(m) {
+        Ok(md) => {
+            let mode_unsafe = md.permissions().mode() & 0o022 != 0;
+            // Owned by neither root (0) nor the current user ⇒ another user can modify it.
+            let owner = md.uid();
+            let owner_unsafe = owner != 0 && owner != euid;
+            mode_unsafe || owner_unsafe
+        }
+        Err(_) => true, // can't stat → fail closed
     };
     let Ok(resolved) = p.canonicalize() else {
         return true; // can't resolve → fail closed
     };
-    if writable(&resolved) {
+    if unsafe_component(&resolved) {
         return true;
     }
     let mut ancestor = resolved.parent();
     while let Some(dir) = ancestor {
-        if writable(dir) {
+        if unsafe_component(dir) {
             return true;
         }
         ancestor = dir.parent();

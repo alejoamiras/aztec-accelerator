@@ -75,3 +75,41 @@ with the exact approach:
 
 The owner will smoke the two consent dialogs (Windows CurrentUser-Root prompt, macOS Keychain password)
 + uninstall on real machines — the irreducibly-manual bit.
+
+## Round-2 codex (ultra Rust + max SDK), PR-scoped — folded
+
+A second PR-scoped pair of hunts (one at **ultra**) found refinements to the round-1 fixes:
+
+**SDK (all fixed + regression-tested):**
+- `/prove` demotion is now generation-aware + per-request: a mid-proof `setAcceleratorConfig` no longer
+  lets the retry POST the witness to the new endpoint (High); concurrent HTTPS failures each fall back
+  on their OWN attempted scheme instead of a shared demote-gate that left the 2nd caller rethrowing.
+- prefer-HTTPS grace gates on the health CONTRACT (`#isHealthy`), not just `response.ok`, so a foreign
+  fast HTTP can't beat a healthy-but-slower HTTPS.
+- `readJsonBounded`: a deadline-cancelled PARTIAL body is no longer parsed as healthy (`timedOut`
+  flag); over-cap `cancel()` is fire-and-forget (no hang); the bodyless fallback clears its timer +
+  measures encoded bytes.
+
+**Rust (fixed):**
+- Linux `certutil` safe-path guard now checks OWNERSHIP (root or self) on the canonical binary + every
+  ancestor, not just mode bits — an attacker-OWNED `0755` tree is rejected (`libc::geteuid`).
+- `renew_cert` only restarts when NO proof is in flight (try-acquires the prove permit and holds it
+  across the diverging restart) — Tauri's `exit(0)` restart would otherwise orphan `bb` + leave the
+  witness temp dir; if a proof is running it defers (old leaf valid ~30 more days).
+- Linux rotates the expiring leaf BEFORE loading/binding TLS, so the fresh leaf is served this session
+  instead of the acceptor holding the old one until it expires.
+- `enable_https_inner` treats `https_bound == true` as success even if its own spawn lost the bind
+  race with the launch gate — no more persisting `https_enabled = false` while HTTPS is actually live.
+
+**Accepted residuals (documented, not fixed — all degrade gracefully):**
+- *macOS removal query-error fails open*: a `find-certificate` that ERRORS mid-removal-postcheck (vs
+  "not found") can report removed. The login keychain is essentially always unlocked while the app
+  runs, and the delete-FAILURE path IS covered; the query-error residual is low. (The CLI conflates
+  "not found" and "error" in its exit code, so a clean fix isn't possible.)
+- *Windows presence ≠ effective trust (Disallowed store precedence)*: a serial in Root is trusted
+  UNLESS the same cert is also in CurrentUser\Disallowed. Self-inflicted; and the SDK's HTTP fallback
+  covers the served-untrusted-leaf case. Not worth an unverifiable-on-Linux Windows chain-policy call.
+- *Linux partial-store renewal*: rotation succeeds if ANY NSS store accepts the new anchor; a store
+  that was trusted but temporarily unavailable during the ~2-year rotation could reject the new chain
+  next launch. Recoverable via "Remove certificate trust" + re-enable. Full prior-coverage tracking
+  wasn't worth the risk to the rotation path.

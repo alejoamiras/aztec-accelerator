@@ -375,15 +375,20 @@ async fn enable_https_inner(
         // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping
         // it after a successful bind is visible to /health — no https_port propagation needed. (Q7)
         let ready = crate::server::spawn_https(shared_state.clone(), tls_config);
-        match ready.await {
-            Ok(true) => {}
-            _ => {
-                return Err(
-                    "Certificates are ready, but the HTTPS server could not start \
-                     (port 59834 may be in use). Please try again."
-                        .to_string(),
-                );
-            }
+        // Success = HTTPS is LIVE, regardless of whether OUR spawn is the one that bound it. The
+        // launch-time gate (running on its own blocking task) and this path can BOTH see
+        // `https_bound == false` and race a spawn; the loser gets AddrInUse and reports `false`, but
+        // the winner bound the port. Treating that as failure would persist `https_enabled = false`
+        // (and, in the wizard, an unnecessary "Retry") while HTTPS is actually up (post-impl codex
+        // Medium). So accept EITHER our own `Ok(true)` OR the shared flag now being set.
+        let bound =
+            matches!(ready.await, Ok(true)) || shared_state.https_bound.load(Ordering::Relaxed);
+        if !bound {
+            return Err(
+                "Certificates are ready, but the HTTPS server could not start \
+                 (port 59834 may be in use). Please try again."
+                    .to_string(),
+            );
         }
     }
 
@@ -604,6 +609,7 @@ pub fn dismiss_onboarding(
 pub async fn renew_cert(
     window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), RENEWAL_LABEL)?;
     crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
@@ -611,12 +617,30 @@ pub async fn renew_cert(
         cfg.last_rotation_prompt_at = Some(now_unix_secs());
     });
     // The running HTTPS listener still serves the OLD leaf from an in-memory TlsAcceptor that isn't
-    // hot-reloaded (see certs::rotate) — the freshly-rotated leaf only takes effect on the next
-    // launch. Rather than let a long-lived app keep serving the old leaf until it eventually expires
-    // (post-impl codex Medium), RESTART now so the new leaf is served immediately. The user
-    // explicitly asked to renew, and a tray app relaunch is near-invisible (it reappears in the tray).
-    tracing::info!("Certificate renewed via consent window — restarting to serve the new leaf");
-    window.app_handle().restart();
+    // hot-reloaded (see certs::rotate) — the freshly-rotated leaf only takes effect on the next launch.
+    // A restart serves it immediately, BUT Tauri's restart calls exit(0), skipping bb's `kill_on_drop`
+    // + the prove-workspace TempDir destructors: restarting mid-proof would orphan `bb` and leave the
+    // witness on disk (post-impl codex High). So only restart when NO proof is in flight — try_acquire
+    // the single prove permit: holding it across the (diverging) restart also prevents a proof from
+    // starting in the gap. If a proof IS running, defer: the old leaf is still valid (renewal runs ~30
+    // days before expiry), so the new one applies on the next natural launch.
+    match shared_state.prove_semaphore.try_acquire() {
+        Ok(_permit) => {
+            tracing::info!(
+                "Certificate renewed via consent window — restarting to serve the new leaf"
+            );
+            window.app_handle().restart();
+        }
+        Err(_) => {
+            tracing::info!(
+                "Certificate renewed while a proof is in flight — the new leaf applies on next launch"
+            );
+            window
+                .close()
+                .map_err(|e| format!("renewed, but the window could not be closed: {e}"))?;
+            Ok(())
+        }
+    }
 }
 
 /// Record that the renewal window was shown/declined (throttles re-prompting).

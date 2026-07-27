@@ -114,6 +114,18 @@ fn try_start_https(state: &AppState) {
         LaunchHttpsGate::Ready => {}
     }
 
+    // Pre-expiry renewal (§7). Linux: SILENT rotation (user NSS needs no prompt) done BEFORE loading +
+    // binding the TLS config, so the FRESH leaf is what we serve. Doing it after the bind (as before)
+    // left the acceptor holding the OLD leaf for the whole session — a long-running tray app would
+    // eventually serve an EXPIRED cert (post-impl codex Medium). `try_start_https` already runs off the
+    // setup thread (spawn_blocking), so this synchronous rotation never blocks launch or the HTTP
+    // server. macOS/Windows do NOT rotate here — the setup closure surfaces a renewal *consent window*
+    // instead of a surprise background OS trust prompt.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = certs::regenerate_leaf_if_expiring() {
+        tracing::warn!("Background leaf renewal: {e}");
+    }
+
     let tls_config = match certs::load_rustls_config() {
         Ok(c) => c,
         Err(e) => {
@@ -126,17 +138,12 @@ fn try_start_https(state: &AppState) {
         }
     };
 
-    aztec_accelerator::server::spawn_https(state.clone(), tls_config);
-
-    // Pre-expiry renewal (§7). Linux: SILENT background rotation — user NSS needs no prompt, and this
-    // runs off the startup path so nothing blocks launch. macOS/Windows: NOT here — the setup closure
-    // surfaces a renewal *consent window* instead of a surprise background OS trust prompt.
-    #[cfg(target_os = "linux")]
-    std::thread::spawn(|| {
-        if let Err(e) = certs::regenerate_leaf_if_expiring() {
-            tracing::warn!("Background leaf renewal: {e}");
-        }
-    });
+    // Launch path is fire-and-forget: it does not await the bind (a dropped receiver just makes
+    // start_https's `ready.send` a no-op). The Settings/onboarding enable path is the one that awaits.
+    drop(aztec_accelerator::server::spawn_https(
+        state.clone(),
+        tls_config,
+    ));
 }
 
 /// Disable HTTPS in config (certs missing/invalid/untrusted) so the user can re-enable to
