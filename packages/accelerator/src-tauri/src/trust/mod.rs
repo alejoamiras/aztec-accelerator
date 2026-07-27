@@ -8,7 +8,8 @@
 //! - **macOS** ([`macos`]): the login Keychain via the absolute-path `security` CLI.
 //! - **Linux** ([`linux`]): user-level NSS databases (`~/.pki/nssdb` + each Firefox profile) via
 //!   `certutil` — NO root, honest per-store reporting when `certutil` is absent.
-//! - **Windows** (Phase 4): CurrentUser Root store; currently a [`stub`] that reports not-installed.
+//! - **Windows** ([`windows`]): the CurrentUser `Root` store via the absolute-path `certutil.exe`;
+//!   live-cert identity by serial (CN reserved for delete-all).
 //!
 //! Security posture (see plan §8): all shell-outs use `Command` + fixed argv (no shell string);
 //! external binaries are resolved to safe absolute paths (a planted `certutil` in a writable PATH
@@ -78,6 +79,24 @@ impl TrustReport {
     /// signal the wizard keys on (a partially-trusted loopback listener is harmless; see plan R3).
     pub fn any_installed(&self) -> bool {
         self.stores.iter().any(|s| s.installed)
+    }
+
+    /// For a REMOVE report: whether any store still reports the anchor trusted OR removal couldn't be
+    /// confirmed (`installed: true` in a remove report means "still there / unconfirmed"). Callers use
+    /// it to FAIL the Settings/CLI removal instead of reporting a clean removal that didn't happen
+    /// (post-impl codex High — the old paths always returned success).
+    pub fn removal_incomplete(&self) -> bool {
+        self.stores.iter().any(|s| s.installed)
+    }
+
+    /// A human-readable reason a removal was incomplete (the first still-trusted store's detail), for
+    /// surfacing to the Settings UI / CLI. `None` when removal is complete.
+    pub fn removal_failure_detail(&self) -> Option<String> {
+        self.stores.iter().find(|s| s.installed).map(|s| {
+            s.detail
+                .clone()
+                .unwrap_or_else(|| format!("{} still trusts the certificate", s.store))
+        })
     }
 }
 

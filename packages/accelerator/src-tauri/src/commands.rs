@@ -449,7 +449,16 @@ pub fn remove_https_trust(
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
     let report = crate::trust::remove_ca_trust(&crate::certs::live_ca_cert_path());
+    // Stop serving the now-to-be-untrusted cert regardless of whether every store could be cleaned.
     mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    // Surface a partial/failed removal instead of reporting success (post-impl codex High): the
+    // Settings action shows the error, so the user knows trust may still be installed.
+    if let Some(detail) = report.removal_failure_detail() {
+        tracing::warn!(%detail, "CA trust removal incomplete");
+        return Err(format!(
+            "HTTPS was turned off, but the certificate trust could not be fully removed: {detail}"
+        ));
+    }
     tracing::info!(
         removed = report.stores.len(),
         "Removed CA trust via Settings"

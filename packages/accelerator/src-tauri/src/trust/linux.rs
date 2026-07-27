@@ -32,8 +32,12 @@ fn certutil_bin() -> Option<PathBuf> {
     }
 }
 
-/// True if `p` (or its parent dir) is group- or world-writable, or its perms can't be read (fail
-/// closed). A writable location means an attacker could have planted the binary.
+/// True if the resolved binary — or ANY ancestor directory up to `/` — is group- or world-writable,
+/// or if any perm can't be read / the path can't be canonicalized (fail closed). Checking only the
+/// immediate parent was insufficient: `/opt/tools` mode 0777 containing `bin/` 0755 containing
+/// `certutil` let an attacker replace the whole `bin` subtree while passing the old check (post-impl
+/// codex High). Canonicalizing first resolves symlinks + `..` so a safe-looking path can't tunnel
+/// through a writable link to an attacker-controlled target.
 fn is_writable_by_nonowner(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let writable = |m: &Path| {
@@ -41,7 +45,20 @@ fn is_writable_by_nonowner(p: &Path) -> bool {
             .map(|md| md.permissions().mode() & 0o022 != 0)
             .unwrap_or(true)
     };
-    writable(p) || p.parent().map(writable).unwrap_or(true)
+    let Ok(resolved) = p.canonicalize() else {
+        return true; // can't resolve → fail closed
+    };
+    if writable(&resolved) {
+        return true;
+    }
+    let mut ancestor = resolved.parent();
+    while let Some(dir) = ancestor {
+        if writable(dir) {
+            return true;
+        }
+        ancestor = dir.parent();
+    }
+    false
 }
 
 /// The DER bytes of a PEM-encoded cert (for a content-stable nickname).
@@ -254,11 +271,18 @@ fn add_to_store(bin: &Path, store: &NssStore, nick: &str, ca_cert: &Path) -> boo
     .unwrap_or(false)
 }
 
-fn is_in_store(bin: &Path, store: &NssStore, nick: &str) -> bool {
+/// Whether `nick` is present AND TRUSTED for SSL-CA usage in the store. `-V -u L` VALIDATES the cert
+/// for the "SSL CA" usage rather than merely confirming it exists (`-L -n`): a cert that is present
+/// but explicitly distrusted, or that lacks the `C` SSL trust flag, fails this — so status reflects
+/// real trust, not bare existence (post-impl codex Medium). Our fresh anchors install with `-t C,,`
+/// and are self-signed + long-lived, so they pass.
+fn is_trusted_in_store(bin: &Path, store: &NssStore, nick: &str) -> bool {
     run_certutil(
         bin,
         &[
-            "-L".as_ref(),
+            "-V".as_ref(),
+            "-u".as_ref(),
+            "L".as_ref(),
             "-n".as_ref(),
             nick.as_ref(),
             "-d".as_ref(),
@@ -267,6 +291,34 @@ fn is_in_store(bin: &Path, store: &NssStore, nick: &str) -> bool {
     )
     .map(|o| o.status.success())
     .unwrap_or(false)
+}
+
+/// Tri-state presence of ANY of our anchors in a store, for the removal post-check. Unlike a bare
+/// bool, this distinguishes "definitely gone" from "couldn't read the DB" — a locked / permission-
+/// denied store returns `Unknown` so removal is reported as UNconfirmed rather than silently
+/// successful (post-impl codex High).
+enum Present {
+    Yes,
+    No,
+    Unknown,
+}
+
+fn our_anchors_present(bin: &Path, store: &NssStore) -> Present {
+    match run_certutil(bin, &["-L".as_ref(), "-d".as_ref(), store.sql().as_ref()]) {
+        Ok(o) if o.status.success() => {
+            let has = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .any(|tok| tok.starts_with(NICK_PREFIX));
+            if has {
+                Present::Yes
+            } else {
+                Present::No
+            }
+        }
+        // Non-zero exit OR spawn error: the DB is unreadable → we cannot confirm removal.
+        _ => Present::Unknown,
+    }
 }
 
 fn delete_from_store(bin: &Path, store: &NssStore, nick: &str) {
@@ -353,12 +405,13 @@ pub fn install(ca_cert: &Path) -> TrustReport {
             if !ensure_db(&bin, store) {
                 return StoreStatus::fail(store.label.clone(), "NSS database unavailable");
             }
-            if add_to_store(&bin, store, &nick, ca_cert) && is_in_store(&bin, store, &nick) {
+            if add_to_store(&bin, store, &nick, ca_cert) && is_trusted_in_store(&bin, store, &nick)
+            {
                 StoreStatus::ok(store.label.clone())
             } else {
                 StoreStatus::fail(
                     store.label.clone(),
-                    "certutil could not add the certificate",
+                    "certutil could not add + trust the certificate",
                 )
             }
         })
@@ -379,7 +432,7 @@ pub fn status(ca_cert: &Path) -> TrustReport {
         .filter(|s| s.dir.join("cert9.db").exists())
         .map(|store| StoreStatus {
             store: store.label.clone(),
-            installed: is_in_store(&bin, store, &nick),
+            installed: is_trusted_in_store(&bin, store, &nick),
             detail: None,
         })
         .collect();
@@ -387,24 +440,38 @@ pub fn status(ca_cert: &Path) -> TrustReport {
     TrustReport { stores }
 }
 
-pub fn remove(ca_cert: &Path) -> TrustReport {
+pub fn remove(_ca_cert: &Path) -> TrustReport {
     let Some(bin) = certutil_bin() else {
-        return missing_certutil_report();
+        // Can't remove without certutil — report trust as possibly-still-present (installed:true) so
+        // the caller FAILS the Settings/CLI action rather than reporting a clean removal it never
+        // performed (post-impl codex High).
+        return TrustReport {
+            stores: vec![StoreStatus {
+                store: "NSS trust stores".into(),
+                installed: true,
+                detail: Some(
+                    "certutil not found — cannot remove trust (install libnss3-tools)".into(),
+                ),
+            }],
+        };
     };
-    // Remove ALL our anchors (live + any left by prior rotations), not just the live nickname.
-    let (Some(nick), Some(home)) = (nickname_for(ca_cert), dirs::home_dir()) else {
+    let Some(home) = dirs::home_dir() else {
         return TrustReport::default();
     };
+    // Remove ALL our anchors (live + any left by prior rotations) from every store, then CONFIRM.
     let stores: Vec<StoreStatus> = discover_stores(&home)
         .iter()
         .filter(|s| s.dir.join("cert9.db").exists())
         .map(|store| {
             delete_all_ours(&bin, store);
+            // Post-check: a DB we couldn't read is "still present" (Unknown → installed:true), so a
+            // locked/denied store fails the removal instead of silently reporting success.
+            let installed = !matches!(our_anchors_present(&bin, store), Present::No);
             StoreStatus {
-                // `installed` reports whether the LIVE anchor is still present after the sweep.
                 store: store.label.clone(),
-                installed: is_in_store(&bin, store, &nick),
-                detail: None,
+                installed,
+                detail: installed
+                    .then(|| "anchor may still be trusted (removal unconfirmed)".to_string()),
             }
         })
         .collect();

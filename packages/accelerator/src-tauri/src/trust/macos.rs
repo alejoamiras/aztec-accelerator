@@ -39,10 +39,17 @@ fn add_trusted_cert(cert_path: &Path) -> Result<(), String> {
 }
 
 /// Whether the given cert verifies as trusted.
+///
+/// `-l` is REQUIRED: our anchor is a CA certificate (BasicConstraints CA=true), and `verify-cert`
+/// verifies its `-c` argument AS A LEAF — which by default rejects a leaf that is itself a CA. Without
+/// `-l` ("the leaf may be a CA"), `verify-cert -c ca.pem` returns non-zero even for a fully-trusted
+/// anchor, so `is_ca_trusted` would false-negative and the launch gate would never bring HTTPS up on
+/// macOS (post-impl codex Critical). `-L` keeps the check offline (no OCSP/CRL network fetch that
+/// could hang the launch path). Trust is content-keyed, so a later atomic file rename doesn't matter.
 fn verify_cert_trusted(cert_path: &Path) -> bool {
     cert_path.exists()
         && Command::new(SECURITY_BIN)
-            .args(["verify-cert", "-c"])
+            .args(["verify-cert", "-l", "-L", "-c"])
             .arg(cert_path)
             .output()
             .map(|o| o.status.success())
@@ -63,18 +70,29 @@ fn keychain_sha1() -> Option<String> {
         .map(|h| h.trim().to_string())
 }
 
-/// Best-effort removal of a trusted cert by SHA-1.
-fn delete_by_sha1(sha1: &str) {
+/// Best-effort removal of a trusted cert by SHA-1. Returns whether the delete reported success.
+///
+/// `-t` ALSO removes the cert's user TRUST SETTINGS, not just the keychain item. Without it, the item
+/// is deleted but its "always trust" setting lingers as an orphaned entry that `find-certificate` can
+/// no longer see (so the remove loop stops early leaving trust behind) — post-impl codex High.
+fn delete_by_sha1(sha1: &str) -> bool {
     match Command::new(SECURITY_BIN)
-        .args(["delete-certificate", "-Z", sha1])
+        .args(["delete-certificate", "-t", "-Z", sha1])
         .arg(login_keychain())
         .output()
     {
-        Ok(o) if o.status.success() => tracing::info!(sha1, "Removed CA anchor"),
-        Ok(o) => {
-            tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr), "Could not remove CA anchor (left in keychain)")
+        Ok(o) if o.status.success() => {
+            tracing::info!(sha1, "Removed CA anchor + trust settings");
+            true
         }
-        Err(e) => tracing::warn!(error = %e, "Could not run delete-certificate"),
+        Ok(o) => {
+            tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr), "Could not remove CA anchor (left in keychain)");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not run delete-certificate");
+            false
+        }
     }
 }
 
@@ -100,22 +118,38 @@ pub fn status(ca_cert: &Path) -> TrustReport {
     }
 }
 
-pub fn remove(ca_cert: &Path) -> TrustReport {
+pub fn remove(_ca_cert: &Path) -> TrustReport {
     // Remove ALL our anchors by CN — the live one AND any left by prior rotations (post-impl review).
-    // Loop deleting the first CN match until none remain (bounded — a handful at most). `find` returns
-    // the first; each delete removes exactly it.
-    for _ in 0..16 {
+    // Loop deleting the first CN match until none remain (bounded). `find` returns the first; each
+    // delete removes exactly it. Stop on a failed delete so an undeletable anchor doesn't spin.
+    let mut delete_failed = false;
+    for _ in 0..64 {
         match keychain_sha1() {
-            Some(sha1) => delete_by_sha1(&sha1),
+            Some(sha1) => {
+                if !delete_by_sha1(&sha1) {
+                    delete_failed = true;
+                    break;
+                }
+            }
             None => break,
         }
     }
-    let still = verify_cert_trusted(ca_cert);
+    // `installed` = whether ANY of our CN anchors is still present (catches stale rotation anchors,
+    // not just the live cert — codex Low: the old live-cert-only check reported success while a
+    // same-CN anchor remained). The caller fails the Settings/CLI action when this stays true.
+    let remaining = keychain_sha1().is_some();
+    let detail = if remaining {
+        Some("a CA anchor is still trusted after the removal attempt".to_string())
+    } else if delete_failed {
+        Some("delete-certificate reported a failure".to_string())
+    } else {
+        None
+    };
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: still,
-            detail: still.then(|| "anchor still trusted after removal attempt".to_string()),
+            installed: remaining || delete_failed,
+            detail,
         }],
     }
 }
@@ -135,6 +169,6 @@ pub fn trust_new_anchor(staged_ca: &Path) -> Result<(), String> {
 
 pub fn remove_anchor(old: AnchorRef) {
     if let Some(sha1) = old.0 {
-        delete_by_sha1(&sha1);
+        let _ = delete_by_sha1(&sha1);
     }
 }

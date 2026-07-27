@@ -4,12 +4,13 @@
 //! established shell-out-by-absolute-path pattern, cf. `crash_recovery::schtasks_exe`). Everything is
 //! exit-code-driven (locale-independent), never stdout-scraping.
 //!
-//! Presence/trust (`install` verify, `status`, `is_ca_trusted`, `remove`) is matched by **CN**
-//! (`-store`/`-delstore Root "Aztec Accelerator Local CA"`) — the store holds no foreign cert with our
-//! CN, so a CN match is unambiguous, and this keeps the common paths independent of certutil's exact
-//! serial-string format. The **serial** (parsed from the PEM via `x509-parser`) is used ONLY where CN
-//! is ambiguous: rotation's delete-the-OLD-anchor (old + new briefly share the CN — D4). That serial
-//! path is exercised by the manual release runbook, not headless CI.
+//! Live-cert IDENTITY (`install` verify, `status`, `is_ca_trusted`, `trust_new_anchor`, rotation's
+//! delete-old) is matched by **serial** (`-store`/`-delstore Root <serial>`, parsed from the PEM via
+//! `x509-parser`) — CN alone can't tell the CURRENT leaf's anchor from a stale rotation anchor that
+//! shares the CN, so a CN check could report "trusted" while the live leaf chains to an absent root
+//! (post-impl codex High, both hunts). **CN** (`-delstore Root "Aztec Accelerator Local CA"`) is
+//! reserved for the ONE place we want "match all of ours": remove/uninstall, which deletes the live
+//! anchor plus every rotation leftover. The serial paths are exercised by the manual release runbook.
 //!
 //! Consent: `certutil -user -addstore Root` raises the Windows root-CA trust dialog (that IS the
 //! user's consent), so the CI integration test seeds non-interactively via PowerShell
@@ -60,16 +61,39 @@ fn add_store(ca_cert: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Is OUR anchor present in the store, matched by CN (exit code only — locale-independent). The Root
-/// store means trusted, so presence == trusted. Uses CN (not serial) so the common paths don't depend
-/// on the exact certutil serial-string format; the store is empty of foreign "Aztec Accelerator Local
-/// CA" certs, so a CN match is unambiguous for the "is it there" question.
+/// Is ANY anchor with our CN present? Used ONLY by the remove/uninstall path, which deletes every
+/// same-CN anchor (live + rotation leftovers) — the one place CN's "match all of ours" is what we want.
 fn is_present_by_cn() -> bool {
     Command::new(certutil_exe())
         .args(["-user", "-store", "Root", CA_CN])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Is a cert with THIS exact serial present in Root (== trusted)? The LIVE-cert identity check —
+/// unlike CN, which every stale rotation anchor shares, so a CN match could report "trusted" while
+/// the CURRENT leaf chains to an anchor that's actually gone (post-impl codex High, both hunts). Uses
+/// the compact hex serial the rotation delete-by-serial path already depends on.
+fn is_present_by_serial(serial: &str) -> bool {
+    Command::new(certutil_exe())
+        .args(["-user", "-store", "Root", serial])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the cert AT `ca_cert` (by its serial) is trusted in Root. If the serial can't be parsed we
+/// return `false` (can't identify → treat as not-trusted): the launch gate then skips HTTPS and the
+/// app serves plain HTTP, the safe-fail direction — never presenting a cert we can't verify is trusted.
+fn live_present(ca_cert: &Path) -> bool {
+    match cert_serial(ca_cert) {
+        Some(serial) => is_present_by_serial(&serial),
+        None => {
+            tracing::warn!("could not parse CA serial; treating Windows trust as not-present");
+            false
+        }
+    }
 }
 
 /// Delete the OLD anchor SPECIFICALLY, by serial — used only during rotation, where old + new share
@@ -89,7 +113,9 @@ fn delete_by_cn() {
 }
 
 pub fn install(ca_cert: &Path) -> TrustReport {
-    let ok = add_store(ca_cert) && is_present_by_cn();
+    // Verify by the INSTALLED cert's serial — a stale same-CN anchor must not read as "the new one
+    // landed" (post-impl codex High).
+    let ok = add_store(ca_cert) && live_present(ca_cert);
     let status = if ok {
         StoreStatus::ok(STORE)
     } else {
@@ -103,11 +129,12 @@ pub fn install(ca_cert: &Path) -> TrustReport {
     }
 }
 
-pub fn status(_ca_cert: &Path) -> TrustReport {
+pub fn status(ca_cert: &Path) -> TrustReport {
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: is_present_by_cn(),
+            // The LIVE cert's identity (by serial), so a stale same-CN anchor can't report it trusted.
+            installed: live_present(ca_cert),
             detail: None,
         }],
     }
@@ -116,11 +143,15 @@ pub fn status(_ca_cert: &Path) -> TrustReport {
 pub fn remove(_ca_cert: &Path) -> TrustReport {
     // Uninstall: delete ALL our anchors by CN (covers rotation leftovers too).
     delete_by_cn();
+    // `installed` reports whether ANY of our anchors remain — the caller fails the Settings/CLI
+    // removal when trust is still present (or certutil couldn't delete it).
+    let remaining = is_present_by_cn();
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: is_present_by_cn(),
-            detail: None,
+            installed: remaining,
+            detail: remaining
+                .then(|| "a CA anchor is still trusted after the removal attempt".to_string()),
         }],
     }
 }
@@ -135,11 +166,11 @@ pub fn trust_new_anchor(staged_ca: &Path) -> Result<(), String> {
     if !add_store(staged_ca) {
         return Err("certutil -addstore failed for the new anchor".into());
     }
-    // Just-added anchor is present (by CN — the new one is among the matches).
-    if is_present_by_cn() {
+    // Verify the STAGED cert specifically, by its serial (CN would match the still-present old anchor).
+    if live_present(staged_ca) {
         Ok(())
     } else {
-        Err("new anchor not present in CurrentUser Root after add".into())
+        Err("new anchor not present in CurrentUser Root after add (by serial)".into())
     }
 }
 

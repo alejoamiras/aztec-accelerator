@@ -36,6 +36,32 @@ fn leaf_chain_validates(nssdb: &Path, leaf_pem: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The nickname of OUR installed anchor (prefix `aztec-accelerator-ca-`), read back from `certutil -L`.
+fn our_anchor_nick(nssdb: &Path) -> String {
+    let out = Command::new("/usr/bin/certutil")
+        .args(["-L", "-d", &sql(nssdb)])
+        .output()
+        .expect("certutil -L");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .find(|t| t.starts_with("aztec-accelerator-ca-"))
+        .expect("our anchor nickname must be present after install")
+        .to_string()
+}
+
+fn set_trust_flags(nssdb: &Path, nick: &str, flags: &str) {
+    let m = Command::new("/usr/bin/certutil")
+        .args(["-M", "-n", nick, "-t", flags, "-d", &sql(nssdb)])
+        .output()
+        .expect("run certutil -M");
+    assert!(
+        m.status.success(),
+        "certutil -M {flags} failed: {}",
+        String::from_utf8_lossy(&m.stderr)
+    );
+}
+
 #[test]
 #[ignore = "needs libnss3-tools (certutil); run in CI with --ignored"]
 fn nss_install_verify_chain_remove() {
@@ -55,22 +81,43 @@ fn nss_install_verify_chain_remove() {
         "install should land in >=1 store; report = {report:?}"
     );
 
-    // 3. is_ca_trusted must now see it (certutil -L found the nickname).
+    // 3. is_ca_trusted must now see it (certutil -V -u L validates it as a trusted SSL CA).
     assert!(
         aztec_accelerator::trust::is_ca_trusted(&ca),
         "anchor should read as trusted"
     );
 
-    // 4. Chain-validate a leaf through the name-constrained anchor (R9/M-3).
     let nssdb: PathBuf = home.path().join(".pki/nssdb");
+
+    // 3b. presence != trust (post-impl codex Medium): mark our PRESENT anchor as a plain peer (drop the
+    // `C` SSL-CA trust flag). is_ca_trusted must now be FALSE — proving it validates trust (`-V -u L`),
+    // not mere existence (`-L -n`). Restore `C,,` afterwards so the rest of the test sees a normal install.
+    let nick = our_anchor_nick(&nssdb);
+    set_trust_flags(&nssdb, &nick, "p,,");
+    assert!(
+        !aztec_accelerator::trust::is_ca_trusted(&ca),
+        "a present-but-distrusted anchor must NOT read as trusted"
+    );
+    set_trust_flags(&nssdb, &nick, "C,,");
+    assert!(
+        aztec_accelerator::trust::is_ca_trusted(&ca),
+        "restoring the C trust flag should make it trusted again"
+    );
+
+    // 4. Chain-validate a leaf through the name-constrained anchor (R9/M-3).
     let leaf_pem = home.path().join(".aztec-accelerator/certs/localhost.pem");
     assert!(
         leaf_chain_validates(&nssdb, &leaf_pem),
         "the localhost leaf must validate through the trusted name-constrained anchor"
     );
 
-    // 5. Remove trust → anchor must no longer read as trusted.
-    let _ = aztec_accelerator::trust::remove_ca_trust(&ca);
+    // 5. Remove trust → the report must CONFIRM removal (not just report success blindly), and the
+    // anchor must no longer read as trusted (post-impl codex High: removal-error propagation).
+    let remove_report = aztec_accelerator::trust::remove_ca_trust(&ca);
+    assert!(
+        !remove_report.removal_incomplete(),
+        "remove must confirm the anchor is gone from every readable store: {remove_report:?}"
+    );
     assert!(
         !aztec_accelerator::trust::is_ca_trusted(&ca),
         "anchor should be gone after remove_ca_trust"

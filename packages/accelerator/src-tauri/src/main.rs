@@ -463,6 +463,13 @@ fn main() {
                 }
             );
         }
+        // Exit NON-ZERO if any store still trusts the anchor (or removal couldn't be confirmed) so a
+        // scripted uninstall / NSIS hook can detect the failure instead of always seeing success
+        // (post-impl codex High).
+        if report.removal_incomplete() {
+            eprintln!("error: CA trust removal was incomplete — see the per-store lines above");
+            std::process::exit(1);
+        }
         return;
     }
 
