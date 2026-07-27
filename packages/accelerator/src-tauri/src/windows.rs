@@ -132,8 +132,10 @@ pub fn show_onboarding_window(app: &AppHandle) {
             // content, so the pre-Start layout lands between the two. 560 clears it with a little
             // breathing room. The taller post-Start state (three result lines + Retry) is handled by
             // `body.scrollable` rather than by sizing the window for a state it holds for seconds.
-            // NOTE: this could not be measured here — Playwright refuses to install a browser on
-            // Ubuntu 26.04 — so it is a judgement call; see the README note on measuring it exactly.
+            // Since measured: the pre-Start card is 536px, so 560 clears it by ~24px. The desktop-ui
+            // specs now size the page to THIS value (e2e/window-sizes.ts, pinned to this file by a
+            // drift guard) and fail if the card stops fitting — that is what makes the number a
+            // constraint instead of a guess. Adding a row here means re-checking that test.
             height: 560.0,
             always_on_top: false,
             focus_if_open: true,

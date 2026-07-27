@@ -1,5 +1,6 @@
 import path from "node:path";
 import { expect, type Page, test } from "@playwright/test";
+import { WINDOW_SIZES } from "./window-sizes.js";
 
 const MOCK_PATH = path.join(import.meta.dirname, "tauri-mock.js");
 
@@ -188,4 +189,54 @@ test("the wizard offers no Skip affordance", async ({ page }) => {
   // dismissal, and closing the window (marker unset → wizard returns) is the intended escape.
   await page.goto("/onboarding.html");
   await expect(page.locator("#skip")).toHaveCount(0);
+});
+
+// ── Layout at the REAL window size ──
+//
+// The wizard's height was set twice by owner feedback ("huge margin" at 600, "too short" at 510)
+// because it could not be measured here: Playwright ran at 1280x720, where a 560px-tall window's
+// overflow does not exist. Sized to the real window, the clipping is observable.
+async function overflow(page: Page) {
+  return page.evaluate(() => ({
+    content: document.documentElement.scrollHeight,
+    window: document.documentElement.clientHeight,
+    canScroll: getComputedStyle(document.body).overflowY !== "hidden",
+  }));
+}
+
+test("the pre-Start wizard fits its window without needing to scroll", async ({ page }) => {
+  // The state the user sees on first launch, and the one the 560px height was chosen for. If this
+  // starts overflowing, the height is wrong again — or a row was added without revisiting it.
+  await page.setViewportSize(WINDOW_SIZES.onboarding);
+  await page.goto("/onboarding.html");
+
+  const { content, window } = await overflow(page);
+  expect(content, `pre-Start content is ${content}px in a ${window}px window`).toBeLessThanOrEqual(
+    window,
+  );
+  await expect(page.locator("#start")).toBeInViewport({ ratio: 1 });
+});
+
+test("the taller post-Start state stays reachable by scrolling", async ({ page }) => {
+  // Three result lines plus Retry legitimately exceed the window. That is handled by scrolling
+  // rather than by sizing the window for a state it holds for seconds — but it MUST scroll.
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("complete_onboarding", () => ({
+      https: { Err: "certutil not found" },
+      autostart: { Ok: null },
+      auto_update: { Ok: null },
+      completed: false,
+    }));
+  });
+  await page.setViewportSize(WINDOW_SIZES.onboarding);
+  await page.goto("/onboarding.html");
+  await page.locator("#start").click();
+  await expect(page.locator("#https-retry")).toBeVisible();
+
+  const { content, window, canScroll } = await overflow(page);
+  if (content > window) {
+    expect(canScroll, "post-Start content overflows but the page cannot scroll").toBe(true);
+  }
+  await page.locator("#start").scrollIntoViewIfNeeded();
+  await expect(page.locator("#start")).toBeInViewport({ ratio: 1 });
 });

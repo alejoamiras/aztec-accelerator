@@ -1,5 +1,6 @@
 import path from "node:path";
 import { expect, type Page, test } from "@playwright/test";
+import { WINDOW_SIZES } from "./window-sizes.js";
 
 const MOCK_PATH = path.join(import.meta.dirname, "tauri-mock.js");
 
@@ -344,4 +345,73 @@ test("speed error shows hint and reloads settings", async ({ page }) => {
 
   await expect(page.locator(".error-hint")).toBeVisible();
   await expect(page.locator(".error-hint")).toHaveText("Failed to save");
+});
+
+// ── Layout at the REAL window size ──
+//
+// These specs exist because two clipping bugs shipped to the owner: the speed slider cut off by the
+// Settings window's bottom edge, and the onboarding wizard sized wrong twice in a row. Neither could
+// fail here, because Playwright sets no viewport and so ran at 1280x720 while these windows are
+// 500x600 and 520x560 — the overflow simply wasn't there to find. Sizing the page to the real window
+// is what turns "looks fine in a browser" into a test of the thing the user actually sees.
+//
+// The assertion is deliberately "nothing is unreachable", not "everything fits": `body.scrollable`
+// makes overflow legitimate. What is NOT acceptable is content past the fold with no way to reach it.
+async function expectReachable(page: Page, selector: string) {
+  const target = page.locator(selector);
+  await expect(target).toBeAttached();
+  await target.scrollIntoViewIfNeeded();
+  const verdict = await target.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      top: Math.round(r.top),
+      bottom: Math.round(r.bottom),
+      viewportHeight: document.documentElement.clientHeight,
+      // Overflow is fine; overflow the page refuses to scroll is not.
+      scrollable:
+        document.documentElement.scrollHeight <= document.documentElement.clientHeight ||
+        getComputedStyle(document.body).overflowY !== "hidden",
+    };
+  });
+  expect(verdict.scrollable, `${selector}: page overflows but cannot be scrolled`).toBe(true);
+  expect(
+    verdict.bottom,
+    `${selector}: bottom edge (${verdict.bottom}) is past the ${verdict.viewportHeight}px window even after scrolling`,
+  ).toBeLessThanOrEqual(verdict.viewportHeight);
+  expect(verdict.top, `${selector}: top edge is above the window`).toBeGreaterThanOrEqual(0);
+}
+
+test("at the real window size the speed control is reachable with the certificate section open", async ({
+  page,
+}) => {
+  // The exact regression the owner hit: opening "Manage certificate" pushes the speed section down,
+  // and at the old 520px height it was clipped with no scroll.
+  await page.setViewportSize(WINDOW_SIZES.settings);
+  await page.goto("/settings.html");
+  await page.locator("#cert-details summary").click();
+
+  await expectReachable(page, ".speed-section");
+  await expectReachable(page, "#speed-desc");
+});
+
+test("at the real window size the default Settings view fits with no scrolling at all", async ({
+  page,
+}) => {
+  // Stricter than `expectReachable` on purpose. The collapsed view is the DEFAULT state, and "the
+  // proving speed gets cut, like the setting has a fixed height" is exactly what happened when it
+  // didn't fit — `body.scrollable` makes that merely scrollable, not correct. A reachability-only
+  // assertion passes on the old 520px height, so it would not have caught the bug it exists for.
+  // (Scrolling IS the accepted answer once the certificate disclosure is open — see the test above.)
+  await page.setViewportSize(WINDOW_SIZES.settings);
+  await page.goto("/settings.html");
+
+  const fit = await page.evaluate(() => ({
+    content: document.documentElement.scrollHeight,
+    window: document.documentElement.clientHeight,
+  }));
+  expect(
+    fit.content,
+    `the default Settings view is ${fit.content}px in a ${fit.window}px window — raise the height in windows.rs or drop a row`,
+  ).toBeLessThanOrEqual(fit.window);
+  await expect(page.locator(".speed-section")).toBeInViewport({ ratio: 1 });
 });

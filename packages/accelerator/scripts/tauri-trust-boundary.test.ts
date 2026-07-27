@@ -308,3 +308,39 @@ describe("NSIS uninstall hook — an upgrade must not wipe trust", () => {
     expect(nsi).not.toMatch(/\$\{AndIf\}\s*"?\$EXEDIR/);
   });
 });
+
+// The desktop-ui layout specs size the page to the REAL Tauri window, because Playwright's default
+// 1280x720 viewport made every clipping bug invisible — the speed slider cut off at the window's
+// bottom edge and the onboarding height both had to be caught by hand. Those specs are only as
+// truthful as their constants, so pin them to windows.rs.
+describe("desktop-ui layout specs use the real window sizes", () => {
+  test("e2e/window-sizes.ts matches src-tauri/src/windows.rs", async () => {
+    const rs = await read(path.join(SRC_TAURI, "src", "windows.rs"));
+    const ts = await read(path.join(SRC_TAURI, "..", "e2e", "window-sizes.ts"));
+
+    // Each WindowConfig literal: label (or the auth popup's `&label`), then width/height. Comments sit
+    // between the fields, so match non-greedily across them.
+    const configs = [
+      ...rs.matchAll(
+        /label:\s*(?:"(?<label>[a-z-]+)"|&label)[\s\S]*?width:\s*(?<w>[\d.]+)[\s\S]*?height:\s*(?<h>[\d.]+)/g,
+      ),
+    ].map((m) => ({
+      // The auth popup's label is built per request (`auth-<id>`); the specs key it as "authorize".
+      label: m.groups?.label ?? "authorize",
+      width: Number(m.groups?.w),
+      height: Number(m.groups?.h),
+    }));
+    expect(configs.length, "should find every WindowConfig in windows.rs").toBeGreaterThanOrEqual(
+      5,
+    );
+
+    for (const { label, width, height } of configs) {
+      const entry = ts.match(
+        new RegExp(`"?${label}"?:\\s*\\{\\s*width:\\s*(\\d+),\\s*height:\\s*(\\d+)`),
+      );
+      expect(entry, `window-sizes.ts is missing "${label}"`).not.toBeNull();
+      expect(Number(entry?.[1]), `${label} width`).toBe(width);
+      expect(Number(entry?.[2]), `${label} height`).toBe(height);
+    }
+  });
+});
