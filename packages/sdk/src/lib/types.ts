@@ -24,10 +24,17 @@ export interface AcceleratorPhaseData {
 export interface AcceleratorConfig {
   /** Port the accelerator listens on (HTTP). Default: 59833. */
   port?: number;
-  /** Port the accelerator listens on (HTTPS, for Safari). Default: 59834. */
+  /** Port the accelerator listens on (HTTPS — required for Safari; preferred elsewhere when trusted). Default: 59834. */
   httpsPort?: number;
   /** Host the accelerator binds to. Default: "127.0.0.1". */
   host?: string;
+  /**
+   * Strict transport policy: talk to the accelerator over HTTPS ONLY. The SDK never probes or POSTs
+   * to the `http://` endpoint and never falls back to it — an unreachable HTTPS accelerator reports
+   * as offline (→ WASM fallback). Off by default (the SDK prefers HTTPS when healthy but still uses
+   * HTTP otherwise). Also settable via `AZTEC_ACCELERATOR_HTTPS_ONLY=1`. Default: false.
+   */
+  httpsOnly?: boolean;
 }
 
 export interface AcceleratorProverOptions {

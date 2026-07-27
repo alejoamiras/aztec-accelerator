@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Certificate Renewal</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="renewal.css" />
+    <script type="module" src="assets/renewal.js"></script>
+  </head>
+  <body>
+    <div class="r">
+      <h1>Renew your encrypted-connection certificate</h1>
+      <p>
+        The local certificate that lets your browser reach the accelerator over HTTPS is about to
+        expire. Renewing installs a fresh one, and your OS will ask you to confirm. If you skip, HTTPS
+        keeps working until the certificate expires, and you'll be reminded again.
+      </p>
+      <div class="cta">
+        <button type="button" class="primary" id="renew">Renew now</button>
+        <button type="button" class="ghost" id="later">Later</button>
+      </div>
+    </div>
+  </body>
+</html>

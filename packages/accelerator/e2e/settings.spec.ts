@@ -1,5 +1,6 @@
 import path from "node:path";
 import { expect, type Page, test } from "@playwright/test";
+import { WINDOW_SIZES } from "./window-sizes.js";
 
 const MOCK_PATH = path.join(import.meta.dirname, "tauri-mock.js");
 
@@ -55,21 +56,24 @@ test("shows approved origins list", async ({ page }) => {
   await expect(page.getByText("https://example.com")).toBeVisible();
 
   // Empty state should be hidden
-  await expect(page.getByText("No approved sites yet.")).not.toBeVisible();
+  await expect(page.getByText("No approved sites yet")).not.toBeVisible();
 });
 
 test("shows empty state when no origins", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({
       config_version: 1,
-      safari_support: false,
+      https_enabled: false,
       approved_origins: [],
       speed: "full",
     }));
   });
   await page.goto("/settings.html");
 
-  await expect(page.getByText("No approved sites yet.")).toBeVisible();
+  await expect(page.getByText("No approved sites yet")).toBeVisible();
+  // Regression guard: the message must sit INSIDE the bordered well. It used to render below an
+  // unbordered fixed-height list, which read as a black void with a stranded caption.
+  await expect(page.locator(".well #origins-empty")).toHaveCount(1);
 });
 
 test("remove origin calls invoke and re-renders", async ({ page }) => {
@@ -80,7 +84,7 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
       callCount++;
       return {
         config_version: 1,
-        safari_support: false,
+        https_enabled: false,
         approved_origins: callCount === 1 ? ["https://example.com"] : [],
         speed: "full",
       };
@@ -92,7 +96,9 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
   await expect(page.getByText("https://example.com")).toBeVisible();
 
   // Click Remove
-  await page.getByRole("button", { name: "Remove" }).click();
+  // Scoped to the list: the certificate action is also named "Remove" (inside a closed disclosure),
+  // so an unscoped role query would be ambiguous under Playwright strict mode.
+  await page.locator("#origins").getByRole("button", { name: "Remove" }).click();
 
   // Should call remove_approved_origin then reload settings
   const removeCalls = await callsFor(page, "remove_approved_origin");
@@ -100,7 +106,7 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
   expect(removeCalls[0].args).toEqual({ origin: "https://example.com" });
 
   // After re-render, empty state should show
-  await expect(page.getByText("No approved sites yet.")).toBeVisible();
+  await expect(page.getByText("No approved sites yet")).toBeVisible();
 });
 
 test("speed slider input event updates label without IPC", async ({ page }) => {
@@ -171,12 +177,12 @@ test("toggle error reverts checkbox and shows hint", async ({ page }) => {
   await expect(page.locator(".error-hint")).toHaveText("Failed — try again");
 });
 
-test("safari row visible on macOS", async ({ page }) => {
+test("Encrypted Connection section visible on macOS", async ({ page }) => {
   await page.goto("/settings.html");
-  await expect(page.locator("#safari-row")).toBeVisible();
+  await expect(page.locator("#https-section")).toBeVisible();
 });
 
-test("safari row hidden on Linux", async ({ page }) => {
+test("Encrypted Connection section visible on Linux (NSS trust backend)", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
       platform: "linux",
@@ -185,27 +191,113 @@ test("safari row hidden on Linux", async ({ page }) => {
   });
   await page.goto("/settings.html");
 
-  await expect(page.locator("#safari-row")).not.toBeVisible();
+  await expect(page.locator("#https-section")).toBeVisible();
 });
 
-test("safari toggle calls enable/disable commands", async ({ page }) => {
+test("Encrypted Connection section visible on Windows (CurrentUser Root trust backend)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
+      platform: "windows",
+      cpu_count: 8,
+    }));
+  });
   await page.goto("/settings.html");
 
-  // Enable safari — should call enable_safari_support
-  await page.locator("#safari").evaluate((el: HTMLInputElement) => {
+  await expect(page.locator("#https-section")).toBeVisible();
+});
+
+test("the certificate action is collapsed behind a disclosure, not sitting in the open", async ({
+  page,
+}) => {
+  // It IS a real action (the documented recovery path for a partially-trusted install), but it must
+  // not compete with the toggles for attention or invite a stray click.
+  await page.goto("/settings.html");
+  const details = page.locator("#cert-details");
+  await expect(details).toBeVisible();
+  await expect(details).not.toHaveAttribute("open", "");
+  await expect(page.locator("#remove-trust")).toBeHidden();
+
+  await details.locator("summary").click();
+  await expect(page.locator("#remove-trust")).toBeVisible();
+});
+
+test("https toggle calls enable/disable commands", async ({ page }) => {
+  await page.goto("/settings.html");
+
+  // Enable HTTPS — should call enable_https
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
     el.checked = true;
     el.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  const enableCalls = await callsFor(page, "enable_safari_support");
+  const enableCalls = await callsFor(page, "enable_https");
   expect(enableCalls.length).toBe(1);
 
-  // Disable safari — should call disable_safari_support
-  await page.locator("#safari").evaluate((el: HTMLInputElement) => {
+  // Disable HTTPS — should call disable_https
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
     el.checked = false;
     el.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  const disableCalls = await callsFor(page, "disable_safari_support");
+  const disableCalls = await callsFor(page, "disable_https");
   expect(disableCalls.length).toBe(1);
+});
+
+test("a failed enable_https shows the persisted state, not the failure", async ({ page }) => {
+  // The restart-required path: `enable_https` persists `https_enabled = true` and STILL returns Err
+  // ("restart to finish enabling"). An optimistic revert showed the switch OFF while the config — and
+  // the next launch — said ON, and re-toggling only reproduced the error. The panel must re-read.
+  await page.addInitScript(() => {
+    let enabled = false;
+    (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({
+      config_version: 1,
+      https_enabled: enabled,
+      approved_origins: [],
+      speed: "full",
+    }));
+    (window as any).__TAURI_MOCK__.setHandler("enable_https", () => {
+      enabled = true; // committed...
+      throw "HTTPS is set up, but the running server is still using a previous certificate."; // ...then failed
+    });
+  });
+  await page.goto("/settings.html");
+  await expect(page.locator("#https")).not.toBeChecked();
+
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
+    el.checked = true;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  // Reflects what the backend actually stored...
+  await expect(page.locator("#https")).toBeChecked();
+  // ...and says why, in the backend's own words — "Failed — try again" would hide the restart.
+  await expect(page.getByText("still using a previous certificate")).toBeVisible();
+});
+
+test("the certificate action and the https toggle disable each other while one runs", async ({
+  page,
+}) => {
+  // Both routes into the same Rust lifecycle mutex. It serializes them correctly, but leaving the
+  // other control live let the user queue an operation against state they could no longer see.
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler(
+      "enable_https",
+      () => new Promise((resolve) => setTimeout(() => resolve(null), 300)),
+    );
+  });
+  await page.goto("/settings.html");
+  await page.locator("#cert-details summary").click();
+
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
+    el.checked = true;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  await expect(page.locator("#remove-trust")).toBeDisabled();
+  await expect(page.locator("#https")).toBeDisabled();
+  // Both come back once the operation settles.
+  await expect(page.locator("#remove-trust")).toBeEnabled();
+  await expect(page.locator("#https")).toBeEnabled();
 });
 
 test("auto-update toggle calls set_auto_update", async ({ page }) => {
@@ -253,4 +345,73 @@ test("speed error shows hint and reloads settings", async ({ page }) => {
 
   await expect(page.locator(".error-hint")).toBeVisible();
   await expect(page.locator(".error-hint")).toHaveText("Failed to save");
+});
+
+// ── Layout at the REAL window size ──
+//
+// These specs exist because two clipping bugs shipped to the owner: the speed slider cut off by the
+// Settings window's bottom edge, and the onboarding wizard sized wrong twice in a row. Neither could
+// fail here, because Playwright sets no viewport and so ran at 1280x720 while these windows are
+// 500x600 and 520x560 — the overflow simply wasn't there to find. Sizing the page to the real window
+// is what turns "looks fine in a browser" into a test of the thing the user actually sees.
+//
+// The assertion is deliberately "nothing is unreachable", not "everything fits": `body.scrollable`
+// makes overflow legitimate. What is NOT acceptable is content past the fold with no way to reach it.
+async function expectReachable(page: Page, selector: string) {
+  const target = page.locator(selector);
+  await expect(target).toBeAttached();
+  await target.scrollIntoViewIfNeeded();
+  const verdict = await target.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      top: Math.round(r.top),
+      bottom: Math.round(r.bottom),
+      viewportHeight: document.documentElement.clientHeight,
+      // Overflow is fine; overflow the page refuses to scroll is not.
+      scrollable:
+        document.documentElement.scrollHeight <= document.documentElement.clientHeight ||
+        getComputedStyle(document.body).overflowY !== "hidden",
+    };
+  });
+  expect(verdict.scrollable, `${selector}: page overflows but cannot be scrolled`).toBe(true);
+  expect(
+    verdict.bottom,
+    `${selector}: bottom edge (${verdict.bottom}) is past the ${verdict.viewportHeight}px window even after scrolling`,
+  ).toBeLessThanOrEqual(verdict.viewportHeight);
+  expect(verdict.top, `${selector}: top edge is above the window`).toBeGreaterThanOrEqual(0);
+}
+
+test("at the real window size the speed control is reachable with the certificate section open", async ({
+  page,
+}) => {
+  // The exact regression the owner hit: opening "Manage certificate" pushes the speed section down,
+  // and at the old 520px height it was clipped with no scroll.
+  await page.setViewportSize(WINDOW_SIZES.settings);
+  await page.goto("/settings.html");
+  await page.locator("#cert-details summary").click();
+
+  await expectReachable(page, ".speed-section");
+  await expectReachable(page, "#speed-desc");
+});
+
+test("at the real window size the default Settings view fits with no scrolling at all", async ({
+  page,
+}) => {
+  // Stricter than `expectReachable` on purpose. The collapsed view is the DEFAULT state, and "the
+  // proving speed gets cut, like the setting has a fixed height" is exactly what happened when it
+  // didn't fit — `body.scrollable` makes that merely scrollable, not correct. A reachability-only
+  // assertion passes on the old 520px height, so it would not have caught the bug it exists for.
+  // (Scrolling IS the accepted answer once the certificate disclosure is open — see the test above.)
+  await page.setViewportSize(WINDOW_SIZES.settings);
+  await page.goto("/settings.html");
+
+  const fit = await page.evaluate(() => ({
+    content: document.documentElement.scrollHeight,
+    window: document.documentElement.clientHeight,
+  }));
+  expect(
+    fit.content,
+    `the default Settings view is ${fit.content}px in a ${fit.window}px window — raise the height in windows.rs or drop a row`,
+  ).toBeLessThanOrEqual(fit.window);
+  await expect(page.locator(".speed-section")).toBeInViewport({ ratio: 1 });
 });

@@ -44,12 +44,19 @@ impl CertPaths {
         }
     }
 
-    /// The staged set (`*.new`) under `dir`, written + (macOS) trusted before the atomic swap.
+    /// The staged set under `dir`, written + trusted (per-OS via [`crate::trust`]) before the atomic
+    /// swap. Staging names are unique PER PROCESS (`.new.<pid>`), not the fixed `*.new` they used to
+    /// be: the lifecycle mutex only serializes rotations WITHIN one process, and a second resident
+    /// instance (the crash-recovery relaunch can briefly overlap the outgoing one) would otherwise
+    /// stage over the same three paths — interleaving two rotations into a mixed CA/leaf/key set and
+    /// corrupting HTTPS (post-impl codex High). Distinct names make the worst case two independent
+    /// stagings, one of which simply loses the swap.
     fn staged(dir: &std::path::Path) -> Self {
+        let pid = std::process::id();
         Self {
-            ca_cert: dir.join("ca.pem.new"),
-            leaf_cert: dir.join("localhost.pem.new"),
-            leaf_key: dir.join("localhost.key.new"),
+            ca_cert: dir.join(format!("ca.pem.new.{pid}")),
+            leaf_cert: dir.join(format!("localhost.pem.new.{pid}")),
+            leaf_key: dir.join(format!("localhost.key.new.{pid}")),
         }
     }
 
@@ -58,10 +65,8 @@ impl CertPaths {
         self.ca_cert.exists() && self.leaf_cert.exists() && self.leaf_key.exists()
     }
 
-    /// Best-effort remove all three (used to discard a failed staging).
-    /// Only the macOS trust-failure path discards a staged set, so this is
-    /// macOS-only — gating it keeps Linux/Windows clippy `-D warnings` clean.
-    #[cfg(target_os = "macos")]
+    /// Best-effort remove all three (used to discard a failed staging on any platform whose trust
+    /// install rejected the new anchor).
     fn remove(&self) {
         let _ = std::fs::remove_file(&self.ca_cert);
         let _ = std::fs::remove_file(&self.leaf_cert);
@@ -127,12 +132,56 @@ fn leaf_params(
     Ok(p)
 }
 
-/// Whether a usable cert set exists: the CA anchor + leaf cert/key are present AND the leaf parses
-/// and is not expired. Validity-checked (not just `.exists()`) so a corrupt/expired/half-written leaf
-/// triggers regeneration instead of being skipped forever. Note: `ca.key` is intentionally NOT
-/// required — it is never written.
+/// Whether a usable cert set exists: the CA anchor + leaf cert/key are present, the leaf parses and is
+/// not expired, AND the leaf+key are a matching pair (they load into a rustls `ServerConfig`).
+/// Validity- AND consistency-checked (not just `.exists()`) so a corrupt/expired/half-written OR
+/// mismatched set triggers regeneration instead of being skipped forever. The cross-file rename swap
+/// (`swap_into`) isn't atomic across all three files, so a crash / Windows file-lock mid-swap can
+/// leave a NEW leaf next to an OLD key (a mismatched pair) — `with_single_cert` rejects that, so this
+/// returns `false` and the set is regenerated on the next enable, rather than `generate_and_save`
+/// refusing forever and HTTPS being unrecoverable (post-impl codex High). `ca.pem` is not part of the
+/// served identity (`load_rustls_config` uses only the leaf + key), so a lone stale `ca.pem` doesn't
+/// gate here; it's re-installed on the next enable. `ca.key` is intentionally NOT required — never written.
 pub fn certs_exist() -> bool {
-    CertPaths::live().exists() && leaf_cert_days_remaining().map(|d| d > 0).unwrap_or(false)
+    // Check the raw seconds-remaining, NOT days: `days > 0` truncates a leaf with <24h left to 0 and
+    // would wrongly report a still-valid cert as unusable (post-impl review). `> 0` on seconds is exact.
+    CertPaths::live().exists()
+        && leaf_secs_remaining().map(|s| s > 0).unwrap_or(false)
+        && load_rustls_config().is_ok()
+        && leaf_matches_ca()
+}
+
+/// Is the live leaf actually SIGNED BY the live CA?
+///
+/// `load_rustls_config()` proves leaf↔key, and nothing more. `swap_into` renames three files in
+/// sequence, so a crash (or a Windows file lock) between them can leave `ca = B` with `leaf/key = A` —
+/// a set that passes every other check while chaining to an anchor that isn't installed. The listener
+/// then records B's fingerprint and, after a trust removal + re-enable installs only B, the app
+/// reports success while serving untrusted A (post-impl codex High). Verifying the signature is what
+/// makes a partial swap detectable, so `generate_and_save` regenerates instead of adopting it.
+fn leaf_matches_ca() -> bool {
+    let live = CertPaths::live();
+    let Ok(leaf_pem) = std::fs::read(&live.leaf_cert) else {
+        return false;
+    };
+    let Ok(ca_pem) = std::fs::read(&live.ca_cert) else {
+        return false;
+    };
+    let (Ok((_, leaf_pem)), Ok((_, ca_pem))) = (
+        x509_parser::pem::parse_x509_pem(&leaf_pem),
+        x509_parser::pem::parse_x509_pem(&ca_pem),
+    ) else {
+        return false;
+    };
+    let (Ok((_, leaf)), Ok((_, ca))) = (
+        x509_parser::parse_x509_certificate(&leaf_pem.contents),
+        x509_parser::parse_x509_certificate(&ca_pem.contents),
+    ) else {
+        return false;
+    };
+    // Fail closed: an unverifiable pair is treated as mismatched, so we regenerate rather than serve
+    // something we cannot prove chains correctly.
+    leaf.verify_signature(Some(ca.public_key())).is_ok()
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
@@ -291,10 +340,9 @@ pub fn load_rustls_config(
 
 /// Approximate days remaining on the leaf certificate.
 /// Uses file modification time as a proxy for creation date.
-/// Parse the leaf certificate's notAfter field and return days until expiry.
-/// Uses the actual X.509 certificate, not file mtime (which can be wrong if
-/// the file is copied, restored from backup, or touched).
-pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+/// Seconds until the live leaf's notAfter (negative if already expired). Parsed from the actual X.509
+/// certificate (not file mtime, which can be wrong after copy/restore/touch).
+fn leaf_secs_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     let pem_bytes = std::fs::read(CertPaths::live().leaf_cert)?;
     let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_bytes)?;
     let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)?;
@@ -303,7 +351,13 @@ pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Sen
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    Ok((not_after - now) / 86400)
+    Ok(not_after - now)
+}
+
+/// Days until the live leaf expires (floor of the seconds-based value). For logging + the rotation
+/// window; validity checks use [`leaf_secs_remaining`] directly to avoid the sub-day truncation.
+pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(leaf_secs_remaining()? / 86400)
 }
 
 /// Rotate ~30 days before the leaf expires — while the old leaf still serves, leaving a window to
@@ -311,7 +365,9 @@ pub fn leaf_cert_days_remaining() -> Result<i64, Box<dyn std::error::Error + Sen
 const ROTATE_BEFORE_DAYS: i64 = 30;
 
 /// Rotate the cert identity if the served leaf is within the pre-expiry window (≤30 days). Delegates
-/// to `rotate()`, which is safe + non-silent.
+/// to `rotate()`, which is safe + non-silent. Used for the **silent** background rotation on Linux
+/// (user NSS needs no prompt); macOS/Windows instead surface a renewal consent window (see
+/// [`leaf_is_expiring`] + the `renew_cert` command).
 pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match leaf_cert_days_remaining() {
         Ok(days) if days > ROTATE_BEFORE_DAYS => {
@@ -324,13 +380,35 @@ pub fn regenerate_leaf_if_expiring() -> Result<(), Box<dyn std::error::Error + S
     rotate()
 }
 
+/// Whether the served leaf is within the pre-expiry rotation window (≤30 days). Drives the
+/// macOS/Windows renewal consent window (§7) — a `true` here means the app should offer "Renew now"
+/// rather than silently raising the OS trust dialog from a background thread.
+pub fn leaf_is_expiring() -> bool {
+    matches!(leaf_cert_days_remaining(), Ok(days) if days <= ROTATE_BEFORE_DAYS)
+}
+
+/// Public entry to rotate the cert identity now (the renewal window's "Renew now" button). Raises the
+/// OS trust dialog with context (the user asked for it), unlike a surprise background prompt.
+pub fn rotate_now() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    rotate()
+}
+
 /// Rotate the whole cert identity. The previous CA's key was discarded (never on disk), so we cannot
 /// re-sign under it — we generate a FRESH keyless CA + leaf.
 ///
-/// **Fail-closed + non-silent:** the new set is STAGED (`*.new`), then (macOS) trusted + verified
-/// BEFORE it replaces the live certs. A cancelled/failed trust prompt discards the staging and leaves
-/// the old, still-valid certs serving — no outage, never an untrusted cert. Sequence:
-/// stage → add-new-anchor (prompt) → verify → atomic swap → remove-old-anchor (by SHA-1).
+/// **Fail-closed + non-silent:** the new set is STAGED (`*.new`), then trusted + verified BEFORE it
+/// replaces the live certs. A cancelled/failed trust discards the staging and leaves the old,
+/// still-valid certs serving — no outage, never an untrusted cert. Per-OS trust lives in
+/// [`crate::trust`].
+///
+/// **The OLD anchor is deliberately NOT removed here** (post-impl codex High). Rotation runs while
+/// the HTTPS listener is already serving the OLD leaf from an in-memory `TlsAcceptor` that is not
+/// reloaded — the rotated set only takes effect on the NEXT launch. Removing the old anchor now would
+/// leave the still-served old leaf with no trusted anchor, breaking HTTPS until restart. So both
+/// anchors stay trusted. The old anchor is **keyless** (can sign nothing) and **name-constrained to
+/// loopback**, so a stale one is harmless; at most one accrues per rotation (~every 2 years — the
+/// 824-day leaf minus the 30-day window), so lifetime accumulation is a handful. "Remove certificate
+/// trust" (Settings) and the uninstaller clear them all by CN.
 fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = certs_dir();
     std::fs::create_dir_all(&dir)?;
@@ -338,128 +416,67 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     write_new_cert_set(&staged)?;
 
-    // Capture the OLD anchor's SHA-1 before touching the keychain, for removal after the swap.
-    #[cfg(target_os = "macos")]
-    let old_sha1 = ca_keychain_sha1();
-
-    // macOS: trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
-    #[cfg(target_os = "macos")]
-    if add_trusted_cert(&staged.ca_cert).is_err() || !verify_cert_trusted(&staged.ca_cert) {
+    // Trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
+    if let Err(e) = crate::trust::trust_new_anchor(&staged.ca_cert) {
         staged.remove();
-        return Err("new CA cert could not be trusted — kept the existing certs".into());
+        return Err(
+            format!("new CA cert could not be trusted — kept the existing certs: {e}").into(),
+        );
     }
 
     // Atomic swap: the new set replaces the live certs. Trust is content-keyed, so rename keeps it.
     staged.swap_into(&CertPaths::live())?;
 
-    // Remove the OLD anchor now that the NEW one is live + trusted (no keyless-anchor accumulation).
-    #[cfg(target_os = "macos")]
-    if let Some(sha1) = old_sha1 {
-        remove_trusted_cert_by_sha1(&sha1);
-    }
-
-    tracing::info!("Rotated cert identity (fresh keyless CA + leaf); trust re-installed");
+    tracing::info!(
+        "Rotated cert identity (fresh keyless CA + leaf); new anchor trusted, takes effect next launch"
+    );
     Ok(())
 }
 
-// ── macOS trust management ──
+// ── Trust management (delegates to the per-OS `crate::trust` backend) ──
 
-// ── macOS trust management ──
-
-#[cfg(target_os = "macos")]
-fn login_keychain() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/Keychains/login.keychain-db")
-}
-
-/// Add a cert as a trusted root in the macOS login Keychain (prompts the user). Used for both the
-/// initial Safari-enable and rotation (the new keyless CA anchor). Trust is keyed to the cert's
-/// content, so a later atomic rename of the file does not invalidate it.
-#[cfg(target_os = "macos")]
-fn add_trusted_cert(
-    cert_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let output = std::process::Command::new("security")
-        .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
-        .arg(login_keychain())
-        .arg(cert_path)
-        .output()?;
-    if output.status.success() {
-        tracing::info!("CA certificate installed in macOS login Keychain");
+/// Install the live CA cert (`ca.pem`) as a trusted root in the platform's browser stores. `Err` iff
+/// no store accepted it (the message carries the first store's failure detail — e.g. certutil missing).
+pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let report = crate::trust::install_ca_trust(&CertPaths::live().ca_cert);
+    if report.any_installed() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(%stderr, "Failed to install CA trust");
-        Err(format!("security add-trusted-cert failed: {stderr}").into())
+        let detail = report
+            .stores
+            .iter()
+            .find_map(|s| s.detail.clone())
+            .unwrap_or_else(|| "certificate trust could not be installed".to_string());
+        Err(detail.into())
     }
 }
 
-/// Whether the given cert verifies as trusted.
-#[cfg(target_os = "macos")]
-fn verify_cert_trusted(cert_path: &std::path::Path) -> bool {
-    cert_path.exists()
-        && std::process::Command::new("security")
-            .args(["verify-cert", "-c"])
-            .arg(cert_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-}
-
-/// SHA-1 of the currently-installed "Aztec Accelerator Local CA" anchor (if any) — captured before
-/// rotation so the OLD anchor can be removed after the NEW one is installed (keyless anchors must not
-/// accumulate). Returns the first match.
-#[cfg(target_os = "macos")]
-fn ca_keychain_sha1() -> Option<String> {
-    let output = std::process::Command::new("security")
-        .args(["find-certificate", "-Z", "-c", "Aztec Accelerator Local CA"])
-        .arg(login_keychain())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("SHA-1 hash:"))
-        .map(|h| h.trim().to_string())
-}
-
-/// Best-effort removal of a trusted cert by SHA-1 (the old anchor, after rotation swapped in the new).
-#[cfg(target_os = "macos")]
-fn remove_trusted_cert_by_sha1(sha1: &str) {
-    match std::process::Command::new("security")
-        .args(["delete-certificate", "-Z", sha1])
-        .arg(login_keychain())
-        .output()
-    {
-        Ok(o) if o.status.success() => tracing::info!(sha1, "Removed old CA anchor after rotation"),
-        Ok(o) => {
-            tracing::warn!(stderr = %String::from_utf8_lossy(&o.stderr), "Could not remove old CA anchor (left in keychain)")
-        }
-        Err(e) => tracing::warn!(error = %e, "Could not run delete-certificate for the old anchor"),
-    }
-}
-
-/// Install the live CA cert (`ca.pem`) as a trusted root. Public entry for the initial Safari-enable.
-#[cfg(target_os = "macos")]
-pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    add_trusted_cert(&CertPaths::live().ca_cert)
-}
-
-/// Whether the live CA cert is still trusted in the macOS Keychain.
-#[cfg(target_os = "macos")]
+/// Whether the live CA cert is trusted in at least one platform store.
 pub fn is_ca_trusted() -> bool {
-    verify_cert_trusted(&CertPaths::live().ca_cert)
+    crate::trust::is_ca_trusted(&CertPaths::live().ca_cert)
 }
 
-// Non-macOS stubs — trust management is macOS-only.
-#[cfg(not(target_os = "macos"))]
-pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    Err("CA trust installation is only supported on macOS".into())
+/// The live CA cert path — so callers (Settings "remove trust", the uninstall CLI) can hand it to the
+/// trust backend without reaching into `CertPaths`.
+pub fn live_ca_cert_path() -> PathBuf {
+    CertPaths::live().ca_cert
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn is_ca_trusted() -> bool {
-    false
+/// Content fingerprint (SHA-256 hex of the DER) of the CA cert currently ON DISK. `None` if it can't
+/// be read or parsed.
+///
+/// Used to answer a question `https_bound` cannot: *is the running listener still serving the CURRENT
+/// cert identity?* A rotation swaps the files but the in-memory `TlsAcceptor` keeps serving the OLD
+/// leaf until relaunch, so "bound" does not imply "serving what's on disk" (post-impl codex Medium).
+pub fn live_ca_fingerprint() -> Option<String> {
+    ca_fingerprint_at(&CertPaths::live().ca_cert)
+}
+
+fn ca_fingerprint_at(path: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    let (_, pem) = x509_parser::pem::parse_x509_pem(&bytes).ok()?;
+    Some(hex::encode(Sha256::digest(&pem.contents)))
 }
 
 #[cfg(test)]
@@ -545,6 +562,101 @@ mod tests {
             .with_no_client_auth()
             .with_single_cert(certs, key);
         assert!(config.is_ok(), "rustls config should build successfully");
+    }
+
+    #[test]
+    fn ca_fingerprint_is_stable_and_discriminating() {
+        // The R8 served-identity check is exactly `served_fingerprint != live_ca_fingerprint()`, so it
+        // is only as good as this helper: it must be STABLE for the same cert (or a re-enable would
+        // spuriously demand a restart every time) and DIFFERENT after a rotation (or a listener
+        // serving a since-removed anchor would go undetected).
+        let dir = tempfile::tempdir().unwrap();
+
+        let (ca_a, _k, _l, _lk) = build_test_ca_and_leaf();
+        let path_a = dir.path().join("a.pem");
+        std::fs::write(&path_a, ca_a.pem()).unwrap();
+
+        let first = ca_fingerprint_at(&path_a).expect("fingerprint a");
+        let again = ca_fingerprint_at(&path_a).expect("fingerprint a again");
+        assert_eq!(first, again, "same cert file must fingerprint identically");
+        assert_eq!(first.len(), 64, "sha256 hex");
+
+        // A rotation mints a FRESH keyless CA — the fingerprint must move.
+        let (ca_b, _k2, _l2, _lk2) = build_test_ca_and_leaf();
+        let path_b = dir.path().join("b.pem");
+        std::fs::write(&path_b, ca_b.pem()).unwrap();
+        assert_ne!(
+            first,
+            ca_fingerprint_at(&path_b).expect("fingerprint b"),
+            "a rotated (different) CA must fingerprint differently"
+        );
+
+        // Unreadable / non-PEM → None, so the caller can't mistake garbage for a match.
+        let junk = dir.path().join("junk.pem");
+        std::fs::write(&junk, b"not a certificate").unwrap();
+        assert!(ca_fingerprint_at(&junk).is_none());
+        assert!(ca_fingerprint_at(&dir.path().join("missing.pem")).is_none());
+    }
+
+    #[test]
+    fn leaf_signature_check_detects_a_partial_swap() {
+        // `swap_into` renames three files in sequence, so a crash between them can leave `ca = B` with
+        // `leaf/key = A`. That set loads into rustls perfectly well (leaf↔key still match), which is
+        // why the leaf↔CA SIGNATURE is the only thing that can catch it (post-impl codex High).
+        let (ca_a, _ka, leaf_a, _la) = build_test_ca_and_leaf();
+        let (ca_b, _kb, _leaf_b, _lb) = build_test_ca_and_leaf();
+
+        let parse = |pem: &str| {
+            let (_, p) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+            p
+        };
+        let (pa, pb, pl) = (parse(&ca_a.pem()), parse(&ca_b.pem()), parse(&leaf_a.pem()));
+        let (_, ca_a_cert) = x509_parser::parse_x509_certificate(&pa.contents).unwrap();
+        let (_, ca_b_cert) = x509_parser::parse_x509_certificate(&pb.contents).unwrap();
+        let (_, leaf_a_cert) = x509_parser::parse_x509_certificate(&pl.contents).unwrap();
+
+        assert!(
+            leaf_a_cert
+                .verify_signature(Some(ca_a_cert.public_key()))
+                .is_ok(),
+            "a matched leaf/CA pair must verify"
+        );
+        assert!(
+            leaf_a_cert
+                .verify_signature(Some(ca_b_cert.public_key()))
+                .is_err(),
+            "leaf A against CA B (a half-completed swap) must NOT verify"
+        );
+    }
+
+    #[test]
+    fn mismatched_leaf_and_key_fail_to_load() {
+        // The consistency mechanism `certs_exist()` now relies on: rustls REJECTS a leaf paired with a
+        // key that didn't sign it — exactly the mixed set a non-atomic 3-file rename crash can leave
+        // (new leaf next to old key). So `certs_exist()` returns false for such a set and it is
+        // regenerated on the next enable, instead of `generate_and_save` refusing forever and HTTPS
+        // being unrecoverable (post-impl codex High).
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (_ca, _ca_key, leaf_cert, _leaf_key) = build_test_ca_and_leaf();
+        // A fresh, UNRELATED key — not the one that signed `leaf_cert`.
+        let wrong_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+
+        let cert_pem = leaf_cert.pem();
+        let key_pem = wrong_key.serialize_pem();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut BufReader::new(key_pem.as_bytes()))
+            .unwrap()
+            .unwrap();
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key);
+        assert!(
+            config.is_err(),
+            "a leaf paired with the WRONG key must not build a rustls config (drives certs_exist=false)"
+        );
     }
 
     #[test]

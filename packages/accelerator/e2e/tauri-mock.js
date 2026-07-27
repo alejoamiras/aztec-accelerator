@@ -24,9 +24,10 @@ const handlers = {};
 const defaults = {
   get_config: () => ({
     config_version: 1,
-    safari_support: false,
+    https_enabled: false,
     approved_origins: ["https://example.com"],
     speed: "full",
+    onboarding_version: 1,
     // auto_update intentionally omitted — matches Rust None serialization
   }),
   get_autostart_enabled: () => false,
@@ -40,8 +41,25 @@ const defaults = {
   // Default = an active popup for example.com; per-test overrides set specific origins / queued state.
   get_pending_auth: () => ({ origin: "https://example.com", active: true }),
   respond_update_prompt: () => null,
-  enable_safari_support: () => null,
-  disable_safari_support: () => null,
+  enable_https: () => null,
+  disable_https: () => null,
+  get_trust_status: () => ({
+    stores: [{ store: "macOS Keychain", installed: true, detail: null }],
+  }),
+  remove_https_trust: () => null,
+  get_onboarding_state: () => ({
+    platform: "macos",
+    https_default: true,
+  }),
+  // Default: everything succeeds and the marker is set.
+  complete_onboarding: () => ({
+    https: { Ok: null },
+    autostart: { Ok: null },
+    auto_update: { Ok: null },
+    completed: true,
+  }),
+  renew_cert: () => null,
+  record_renewal_prompt: () => null,
 };
 
 window.__TAURI_MOCK__ = {
@@ -66,4 +84,6 @@ window.__TAURI_INTERNALS__ = {
     if (!handler) throw new Error("Unmocked command: " + cmd);
     return handler(args, callIndex);
   },
+  // No window API: pages never close themselves (F-012 — windows are closed from Rust, and the
+  // capabilities grant no core:window permissions). Specs assert on invoke calls + button state.
 };

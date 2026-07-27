@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "renewal",
+  "description": "F-012: the certificate-renewal consent window (label renewal, macOS/Windows only) may invoke ONLY its own commands. No plugin/core grants — renewal rotates the cert via a Rust wrapper and the window is closed from Rust.",
+  "local": true,
+  "platforms": ["macOS", "windows"],
+  "windows": ["renewal"],
+  "permissions": ["allow-renew-cert", "allow-record-renewal-prompt"]
+}

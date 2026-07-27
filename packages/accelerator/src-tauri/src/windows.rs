@@ -107,9 +107,59 @@ pub fn open_settings_window(app: &AppHandle) {
             url: "settings.html".to_string(),
             title: "Aztec Accelerator Settings",
             width: 500.0,
-            height: 520.0,
+            // 600, not 520: the Encrypted Connection section adds rows, and at 520 the speed slider
+            // was clipped by the bottom edge.
+            height: 600.0,
             always_on_top: false,
             focus_if_open: true,
+            focus_on_create: true,
+        },
+    );
+}
+
+/// Open or focus the first-run onboarding wizard (shown once on first launch, and re-openable via the
+/// Settings "Run setup again" action). Single-card layout — see `onboarding.html`.
+pub fn show_onboarding_window(app: &AppHandle) {
+    open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "onboarding",
+            url: "onboarding.html".to_string(),
+            title: "Welcome to Aztec Accelerator",
+            width: 520.0,
+            // Bracketed from real feedback, not computed: 600 left an obvious dead band under the
+            // button (it was sized around a footer that no longer exists) and 510 clipped the
+            // content, so the pre-Start layout lands between the two. 560 clears it with a little
+            // breathing room. The taller post-Start state (three result lines + Retry) is handled by
+            // `body.scrollable` rather than by sizing the window for a state it holds for seconds.
+            // Since measured: the pre-Start card is 536px, so 560 clears it by ~24px. The desktop-ui
+            // specs now size the page to THIS value (e2e/window-sizes.ts, pinned to this file by a
+            // drift guard) and fail if the card stops fitting — that is what makes the number a
+            // constraint instead of a guess. Adding a row here means re-checking that test.
+            height: 560.0,
+            always_on_top: false,
+            focus_if_open: true,
+            // Standalone window (not part of the C9 auth-popup arbiter) — create it focused.
+            focus_on_create: true,
+        },
+    );
+}
+
+/// Show the certificate-renewal consent window (macOS/Windows, §7). Replaces a surprise background OS
+/// trust prompt with an explained, user-initiated one when the leaf is within the pre-expiry window.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn show_renewal_window(app: &AppHandle) {
+    open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "renewal",
+            url: "renewal.html".to_string(),
+            title: "Certificate Renewal",
+            width: 420.0,
+            height: 260.0,
+            always_on_top: false,
+            focus_if_open: true,
+            // Standalone window (not part of the C9 auth-popup arbiter) — create it focused.
             focus_on_create: true,
         },
     );

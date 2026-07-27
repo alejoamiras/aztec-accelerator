@@ -54,7 +54,14 @@ export function showErrorHint(anchor, message) {
   const hint = document.createElement("span");
   hint.className = "error-hint";
   hint.textContent = message;
-  anchor.closest(".row, .speed-section, .popup-container")?.appendChild(hint);
+  // `.wiz` / `.r` are the wizard and renewal containers. Without them `closest()` returned null for
+  // every button on those two pages, so a failed renewal, config save, or window close silently
+  // re-enabled the controls and showed the user NOTHING (post-impl codex Medium). Fall back to the
+  // button's own parent so a future page can never lose its errors the same way.
+  const host =
+    anchor.closest(".row, .speed-section, .popup-container, .wiz .cta, .r .cta") ??
+    anchor.parentElement;
+  host?.appendChild(hint);
   setTimeout(() => hint.remove(), 3000);
 }
 

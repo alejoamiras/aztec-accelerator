@@ -26,7 +26,13 @@ const PKG_JSON = path.join(ROOT, "package.json");
 const LOCKFILE = path.join(ROOT, "..", "..", "bun.lock");
 
 // Per-page entrypoints (bridge.js is shared and pulled into each bundle, not an entry of its own).
-const ENTRIES = ["authorize.js", "settings.js", "update-prompt.js"] as const;
+const ENTRIES = [
+  "authorize.js",
+  "settings.js",
+  "update-prompt.js",
+  "onboarding.js",
+  "renewal.js",
+] as const;
 
 /**
  * SHA-256 over raw bytes → lowercase hex. `build.rs` recomputes it identically (sha2 crate) so the guard

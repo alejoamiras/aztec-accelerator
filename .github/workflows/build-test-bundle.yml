@@ -1,0 +1,90 @@
+name: Build Test Bundle
+
+# Dispatch-only: build an INSTALLABLE desktop bundle from any ref and upload it as an artifact, so a
+# human can smoke-test a branch on real hardware before it merges. Deliberately NOT a release:
+#   - no version patching, no tag, no GitHub release, no S3/updater feed, no `latest.json`;
+#   - no signing/notarization secrets (see the Gatekeeper note in the summary step) — this exists to
+#     exercise flows that only a real OS can (the macOS Keychain trust dialog, the Windows root-CA
+#     consent dialog, uninstall), not to ship anything.
+# The real release path stays `release-accelerator.yml`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Which bundle to build"
+        required: true
+        type: choice
+        default: macos-arm64
+        options:
+          - macos-arm64
+          - macos-x86_64
+          - linux-x86_64
+          - windows-x86_64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-test-bundle-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ inputs.platform }}
+    runs-on: ${{ fromJSON('{"macos-arm64":"macos-latest","macos-x86_64":"macos-15-intel","linux-x86_64":"ubuntu-latest","windows-x86_64":"windows-latest"}')[inputs.platform] }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-target: ${{ fromJSON('{"macos-arm64":"aarch64-apple-darwin","macos-x86_64":"x86_64-apple-darwin","linux-x86_64":"x86_64-unknown-linux-gnu","windows-x86_64":"x86_64-pc-windows-msvc"}')[inputs.platform] }}
+          rust-cache-key: accelerator-desktop-${{ fromJSON('{"macos-arm64":"aarch64-apple-darwin","macos-x86_64":"x86_64-apple-darwin","linux-x86_64":"x86_64-unknown-linux-gnu","windows-x86_64":"x86_64-pc-windows-msvc"}')[inputs.platform] }}
+          rust-workspaces: packages/accelerator/src-tauri -> target
+          rust-components: ""
+
+      - name: Build bundle (unsigned)
+        shell: bash
+        working-directory: packages/accelerator
+        env:
+          TARGET: ${{ fromJSON('{"macos-arm64":"aarch64-apple-darwin","macos-x86_64":"x86_64-apple-darwin","linux-x86_64":"x86_64-unknown-linux-gnu","windows-x86_64":"x86_64-pc-windows-msvc"}')[inputs.platform] }}
+        run: bunx tauri build --target "$TARGET"
+
+      - name: Collect bundles
+        shell: bash
+        working-directory: packages/accelerator
+        env:
+          TARGET: ${{ fromJSON('{"macos-arm64":"aarch64-apple-darwin","macos-x86_64":"x86_64-apple-darwin","linux-x86_64":"x86_64-unknown-linux-gnu","windows-x86_64":"x86_64-pc-windows-msvc"}')[inputs.platform] }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../../dist-test
+          BUNDLE="src-tauri/target/$TARGET/release/bundle"
+          # Copy whatever this platform produced (dmg/app.tar.gz, deb/AppImage, msi/exe).
+          find "$BUNDLE" -maxdepth 2 \
+            \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.deb' -o -name '*.AppImage' \
+               -o -name '*.msi' -o -name '*.exe' \) -exec cp {} ../../dist-test/ \;
+          ls -la ../../dist-test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aztec-accelerator-${{ inputs.platform }}-${{ github.sha }}
+          path: dist-test/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Install notes
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'NOTES'
+          ### Test bundle — ${{ inputs.platform }}
+
+          Built from `${{ github.ref_name }}` @ `${{ github.sha }}`. Download it from this run's **Artifacts**.
+
+          **This build is UNSIGNED** (no release secrets here), so the OS will object on first launch:
+
+          - **macOS**: drag to Applications, then `xattr -dr com.apple.quarantine "/Applications/Aztec Accelerator.app"` and open it. (Right-click → Open also works.)
+          - **Windows**: SmartScreen → *More info* → *Run anyway*.
+
+          Signing does not affect what this build is for — the OS trust prompts it exercises (macOS Keychain password, Windows root-CA consent) behave identically.
+          NOTES

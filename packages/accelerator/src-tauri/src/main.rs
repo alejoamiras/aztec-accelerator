@@ -52,9 +52,9 @@ fn open_in_browser(target: &impl AsRef<Path>) {
 /// reset-vs-skip asymmetry (the audit's most-fragile point) is unit-testable with zero mocks.
 #[derive(Debug, PartialEq, Eq)]
 enum LaunchHttpsGate {
-    /// Safari Support is off — do nothing.
+    /// HTTPS is off — do nothing.
     Disabled,
-    /// Enabled but certs are missing/invalid — reset `safari_support` so the user re-enables.
+    /// Enabled but certs are missing/invalid — reset `https_enabled` so the user re-enables.
     MissingCertsReset,
     /// Certs present but the CA isn't trusted in the Keychain — skip WITHOUT reset (keep the opt-in).
     UntrustedSkip,
@@ -63,15 +63,15 @@ enum LaunchHttpsGate {
 }
 
 /// Classify the launch HTTPS gate. `certs_exist` and `ca_trusted` are thunks so the original
-/// short-circuit holds exactly: `certs_exist` is not evaluated unless `safari_support`, and
+/// short-circuit holds exactly: `certs_exist` is not evaluated unless `https_enabled`, and
 /// `ca_trusted` not unless `certs_exist` too. Trust is only ever VERIFIED at launch (the thunk wraps
 /// `is_ca_trusted`), never installed — launch must never raise the macOS Keychain prompt.
 fn classify_launch_https(
-    safari_support: bool,
+    https_enabled: bool,
     certs_exist: impl FnOnce() -> bool,
     ca_trusted: impl FnOnce() -> bool,
 ) -> LaunchHttpsGate {
-    if !safari_support {
+    if !https_enabled {
         LaunchHttpsGate::Disabled
     } else if !certs_exist() {
         LaunchHttpsGate::MissingCertsReset
@@ -82,59 +82,116 @@ fn classify_launch_https(
     }
 }
 
-/// Try to start the HTTPS server if Safari Support is configured and certs are valid + trusted.
-/// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
-/// `start_https` flips the shared `https_bound` flag once the listener actually binds, so `/health`
-/// advertises `https_port` from the real bind state rather than the config flag.
-fn try_start_https(state: &AppState) {
+/// The BLOCKING half of the launch-time HTTPS bring-up: classify the gate, rotate (Linux), load TLS.
+///
+/// **Must be called while holding the HTTPS lifecycle lock.** Every cert read and write in here —
+/// `certs_exist`, `is_ca_trusted`, the rotation's `swap_into`, the TLS load — has to be serialized
+/// against the enable and renewal paths, or launch can observe a MIXED new-leaf/old-key set mid-swap
+/// and then reset `https_enabled` over an enable that just succeeded (post-impl codex Medium).
+/// `None` ⇒ don't start a listener.
+fn prepare_launch_https(
+    state: &AppState,
+) -> Option<std::sync::Arc<tokio_rustls::rustls::ServerConfig>> {
     let cfg = config::load();
-    // q7e3-F-01: the pre-load gate is now a tested pure classifier; the load-failure reset stays below
+    // q7e3-F-01: the pre-load gate is a tested pure classifier; the load-failure reset stays below
     // (it depends on load_rustls_config's Result, not on these three booleans).
-    match classify_launch_https(cfg.safari_support, certs::certs_exist, certs::is_ca_trusted) {
-        LaunchHttpsGate::Disabled => return,
+    //
+    // Linux (plan R3): trust is inherently per-browser/partial, and a bound-but-untrusted loopback
+    // listener is harmless — browsers fast-fail the HTTPS probe and the SDK falls back to HTTP. So
+    // serve whenever certs are valid, decoupled from trust (which the *wizard* still checks). macOS
+    // and Windows keep the verify-trust gate (they'd otherwise present an untrusted cert with a real
+    // dialog behind it).
+    #[cfg(target_os = "linux")]
+    let ca_trusted = || true;
+    #[cfg(not(target_os = "linux"))]
+    let ca_trusted = certs::is_ca_trusted;
+    match classify_launch_https(cfg.https_enabled, certs::certs_exist, ca_trusted) {
+        LaunchHttpsGate::Disabled => return None,
         LaunchHttpsGate::MissingCertsReset => {
-            tracing::warn!("Safari Support enabled but certs missing/invalid — resetting config");
-            reset_safari_support(state);
-            return;
+            tracing::warn!("HTTPS enabled but certs missing/invalid — resetting config");
+            reset_https_enabled(state);
+            return None;
         }
         LaunchHttpsGate::UntrustedSkip => {
             tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
-            return;
+            return None;
         }
         LaunchHttpsGate::Ready => {}
     }
 
-    let tls_config = match certs::load_rustls_config() {
-        Ok(c) => c,
+    // Pre-expiry renewal (§7). Linux: SILENT rotation (user NSS needs no prompt) done BEFORE loading +
+    // binding the TLS config, so the FRESH leaf is what we serve. Doing it after the bind left the
+    // acceptor holding the OLD leaf for the whole session — a long-running tray app would eventually
+    // serve an EXPIRED cert (post-impl codex Medium). macOS/Windows do NOT rotate here — the setup
+    // closure surfaces a renewal *consent window* instead of a surprise background OS trust prompt.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = certs::regenerate_leaf_if_expiring() {
+        tracing::warn!("Background leaf renewal: {e}");
+    }
+
+    match certs::load_rustls_config() {
+        Ok(c) => Some(c),
         Err(e) => {
             // A broken/mismatched cert set (e.g. a crash mid-rotation leaving a new leaf with the old
-            // key) must NOT silently wedge HTTPS. Reset Safari Support so the user re-enables and a
+            // key) must NOT silently wedge HTTPS. Reset https_enabled so the user re-enables and a
             // fresh, matched, trusted set is generated, instead of HTTPS being dead every launch.
-            tracing::warn!("Failed to load TLS config ({e}) — resetting Safari Support to recover");
-            reset_safari_support(state);
-            return;
+            tracing::warn!("Failed to load TLS config ({e}) — resetting https_enabled to recover");
+            reset_https_enabled(state);
+            None
         }
-    };
-
-    aztec_accelerator::server::spawn_https(state.clone(), tls_config);
-
-    // Pre-expiry auto-renewal runs OFF the startup path (a background thread) so the macOS trust
-    // prompt can never block/hang launch. The running server keeps its already-loaded config; a
-    // rotated set takes effect on the next launch.
-    std::thread::spawn(|| {
-        if let Err(e) = certs::regenerate_leaf_if_expiring() {
-            tracing::warn!("Background leaf renewal: {e}");
-        }
-    });
+    }
 }
 
-/// Disable Safari Support in config (certs missing/invalid/untrusted) so the user can re-enable to
+/// Launch-time HTTPS bring-up, fully serialized against the enable and renewal paths.
+///
+/// Runs entirely off the setup thread. It **waits** for the HTTPS lifecycle lock rather than standing
+/// down on a failed try-lock: renewal can own that lock without ever binding a listener, so standing
+/// down would leave HTTPS unstarted for the whole session (post-impl codex Medium). After acquiring
+/// it, re-check `https_bound` — an enable path may have completed the entire bring-up while we waited.
+/// The blocking cert work then runs on a blocking thread so it never occupies an async worker.
+async fn launch_https(state: AppState) {
+    // Cheap config read — no lock needed to learn HTTPS is simply off.
+    if !config::load().https_enabled {
+        return;
+    }
+
+    let guard = aztec_accelerator::server::claim_https_lifecycle(&state).await;
+
+    if state.https_bound.load(Ordering::Relaxed) {
+        tracing::debug!("HTTPS already bound by another path — launch gate has nothing to do");
+        return; // `guard` drops here
+    }
+
+    let prep_state = state.clone();
+    let tls_config =
+        match tauri::async_runtime::spawn_blocking(move || prepare_launch_https(&prep_state)).await
+        {
+            Ok(Some(tls)) => tls,
+            Ok(None) => return, // gate said no (or reset) — `guard` drops
+            Err(e) => {
+                tracing::error!("HTTPS prepare task failed: {e}");
+                return;
+            }
+        };
+
+    // Await the bind while still HOLDING the guard, so no other path can start a competing bring-up
+    // or mutate the cert set while our listener is coming up. `guard` drops at end of scope,
+    // releasing the lock for enable/renewal/removal; the serving loop itself runs unlocked.
+    let ready = aztec_accelerator::server::spawn_https(state, tls_config);
+    match ready.await {
+        Ok(true) => tracing::info!("HTTPS listener started at launch"),
+        _ => tracing::warn!("HTTPS listener did not bind at launch — continuing HTTP-only"),
+    }
+    drop(guard);
+}
+
+/// Disable HTTPS in config (certs missing/invalid/untrusted) so the user can re-enable to
 /// regenerate a fresh, trusted cert set.
-fn reset_safari_support(state: &AppState) {
+fn reset_https_enabled(state: &AppState) {
     if let Some(ref cfg_lock) = state.config {
         // q7e3-F-13: shared core helper; swallow the save error (best-effort reset, unchanged policy).
         let _ = config::lock_mutate_save(cfg_lock, |cfg| {
-            cfg.safari_support = false;
+            cfg.https_enabled = false;
             true
         });
     }
@@ -426,6 +483,32 @@ fn build_desktop_state(
 }
 
 fn main() {
+    // `--remove-ca-trust`: remove the local CA from every browser trust store, then exit WITHOUT
+    // starting the GUI. Used by scripted cleanup and the Windows NSIS uninstaller (Phase 6). Runs
+    // before anything else so it never spins up a tray/server.
+    if std::env::args().any(|a| a == "--remove-ca-trust") {
+        let report = aztec_accelerator::trust::remove_ca_trust(&certs::live_ca_cert_path());
+        for s in &report.stores {
+            println!(
+                "{}: {}",
+                s.store,
+                if s.installed {
+                    "still trusted"
+                } else {
+                    "removed / absent"
+                }
+            );
+        }
+        // Exit NON-ZERO if any store still trusts the anchor (or removal couldn't be confirmed) so a
+        // scripted uninstall / NSIS hook can detect the failure instead of always seeing success
+        // (post-impl codex High).
+        if report.removal_incomplete() {
+            eprintln!("error: CA trust removal was incomplete — see the per-store lines above");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
     // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -500,8 +583,13 @@ fn main() {
             commands::get_verified_info,
             commands::get_pending_auth,
             commands::respond_auth,
-            commands::enable_safari_support,
-            commands::disable_safari_support,
+            commands::enable_https,
+            commands::disable_https,
+            commands::remove_https_trust,
+            commands::get_onboarding_state,
+            commands::complete_onboarding,
+            commands::renew_cert,
+            commands::record_renewal_prompt,
             commands::set_auto_update,
             commands::respond_update_prompt,
         ])
@@ -561,15 +649,24 @@ fn main() {
             // ── HTTPS startup ──
             // One-time migration: delete any legacy on-disk CA private key (older installs) — it was
             // a readable mint-any-cert primitive. SEC-08 fail-closed: if it CANNOT be removed, do NOT
-            // bring up Safari HTTPS — a live HTTPS server next to a readable mint-any-cert key + its
+            // bring up HTTPS — a live HTTPS server next to a readable mint-any-cert key + its
             // still-trusted anchor is the exposure we're closing. HTTP is unaffected. Idempotent.
             match certs::migrate_legacy_ca_key() {
-                Ok(()) => try_start_https(&state),
+                Ok(()) => {
+                    // Run the HTTPS bring-up OFF the setup thread. It waits on the lifecycle lock and
+                    // then does SYNCHRONOUS trust-store queries (`is_ca_trusted` shells out to
+                    // `security`/`certutil`) with no timeout — on its own blocking thread, so the setup
+                    // thread still reaches the HTTP-server spawn below regardless. HTTP is the critical
+                    // path and must never be blocked by a slow/hung HTTPS trust query (post-impl codex
+                    // Medium). HTTPS binds a different port, so there's no race with the HTTP listener.
+                    let https_state = state.clone();
+                    tauri::async_runtime::spawn(launch_https(https_state));
+                }
                 Err(e) => tracing::error!(error = %e,
-                    "SECURITY: legacy ca.key could not be removed — Safari HTTPS NOT started (HTTP unaffected)"),
+                    "SECURITY: legacy ca.key could not be removed — HTTPS NOT started (HTTP unaffected)"),
             }
 
-            // Manage the shared state for Tauri commands (e.g. enable_safari_support). It shares the
+            // Manage the shared state for Tauri commands (e.g. enable_https). It shares the
             // Arc'd https_bound flag with the HTTP server's state, so start_https flipping it after a
             // successful bind is visible to /health (no separate https_port propagation needed). (Q7)
             app.manage::<SharedAppState>(Arc::new(state.clone()));
@@ -583,6 +680,41 @@ fn main() {
                 tracing::warn!("bb binary not found at startup");
                 let _ = status_for_diagnostics.set_text("Warning: bb not found");
                 let _ = tray_for_diagnostics.set_tooltip(Some("Warning: bb not found"));
+            }
+
+            // ── First-run onboarding wizard ──
+            // Shown once when the config's onboarding_version is behind — new installs AND existing
+            // upgraders (whose config lacks the marker → 0). Gated off for webdriver builds, which
+            // bootstrap the Settings window as their browsing context (the wizard E2E drives it
+            // explicitly instead of relying on auto-show, so the existing specs stay unaffected).
+            #[cfg(not(feature = "webdriver"))]
+            if config_state.read().onboarding_version < config::ONBOARDING_VERSION {
+                windows::show_onboarding_window(app.handle());
+            }
+
+            // ── Certificate renewal consent (macOS/Windows, §7) ──
+            // When the leaf is within the pre-expiry window, offer renewal via a consent window rather
+            // than a silent background OS trust prompt (Linux rotates silently in try_start_https).
+            // Throttled by `last_rotation_prompt_at` so clicking "Later" suppresses the re-prompt for a
+            // day even across quick restarts (it still reappears on later launches until expiry).
+            #[cfg(all(any(target_os = "macos", target_os = "windows"), not(feature = "webdriver")))]
+            {
+                const RENEWAL_THROTTLE_SECS: i64 = 20 * 3600;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let cfg = config::load();
+                let recently_prompted = cfg
+                    .last_rotation_prompt_at
+                    .is_some_and(|t| now.saturating_sub(t) < RENEWAL_THROTTLE_SECS);
+                if cfg.https_enabled
+                    && !recently_prompted
+                    && certs::certs_exist()
+                    && certs::leaf_is_expiring()
+                {
+                    windows::show_renewal_window(app.handle());
+                }
             }
 
             // ── WebDriver: open Settings window so WebDriver has a browsing context ──
@@ -649,8 +781,8 @@ mod tests {
         assert_eq!(
             classify_launch_https(
                 false,
-                || panic!("certs_exist must not be checked when safari is off"),
-                || panic!("trust must not be checked when safari is off"),
+                || panic!("certs_exist must not be checked when https is off"),
+                || panic!("trust must not be checked when https is off"),
             ),
             LaunchHttpsGate::Disabled
         );

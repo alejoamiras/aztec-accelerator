@@ -64,54 +64,7 @@ pub fn set_autostart(
     enabled: bool,
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    if enabled {
-        // F-010: refuse autostart entirely if this executable's path could inject into ANY OS launcher
-        // serializer (systemd unit / .desktop / plist / Run-key) — BEFORE invoking the plugin (which would
-        // otherwise serialize the unsafe path itself). Fail closed: leave a clean disabled state + surface
-        // the refusal to the UI. (The webview cannot bypass this by calling the raw plugin enable — the
-        // `autostart:allow-enable` capability grant is removed; only this gated command can enable.)
-        let exe =
-            std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
-        if !crate::crash_recovery::autostart_path_is_safe(&exe) {
-            let _ = manager.disable();
-            crate::crash_recovery::disable_crash_recovery();
-            return Err(
-                "Executable path is unsafe for autostart (control/newline/non-UTF-8); refusing to enable."
-                    .to_string(),
-            );
-        }
-        // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction. If arming fails
-        // after the launcher went on, roll back (disable the launcher unless it was already on, disarm
-        // any partial recovery) and surface a combined error — never leave a half-enabled state.
-        // codex #7: an unknown current state makes the rollback's "disable unless prior" undecidable
-        // (guess wrong and we either clobber a pre-existing entry or leave a new one on). Fail closed
-        // rather than run the transaction against an unknown baseline.
-        let prior_enabled = manager
-            .is_enabled()
-            .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
-        crate::crash_recovery::enable_transaction(
-            prior_enabled,
-            || manager.enable().map_err(|e| e.to_string()),
-            crate::crash_recovery::enable_crash_recovery,
-            || manager.disable().map_err(|e| e.to_string()),
-            crate::crash_recovery::disable_crash_recovery,
-        )?;
-    } else {
-        // codex #7: disable the launcher, THEN disarm crash recovery — and surface a non-confirmed disarm.
-        // The bool from disable_crash_recovery was previously ignored, so a failed disarm left the app
-        // able to relaunch on next login while the UI showed autostart as off.
-        manager.disable().map_err(|e| e.to_string())?;
-        if !crate::crash_recovery::disable_crash_recovery() {
-            return Err(
-                "Autostart launcher disabled, but crash recovery could not be confirmed disarmed — \
-                 the app may still relaunch on next login. Please retry."
-                    .to_string(),
-            );
-        }
-    }
-    Ok(())
+    set_autostart_inner(&app, enabled)
 }
 
 #[tauri::command]
@@ -320,13 +273,17 @@ pub fn sanitize_window_label(key: &str) -> String {
 /// Fixed window labels the caller-label guard checks against (must match `windows.rs`).
 pub const SETTINGS_LABEL: &str = "settings";
 pub const UPDATE_PROMPT_LABEL: &str = "update-prompt";
+/// The first-run onboarding wizard window (its own capability file grants only its commands).
+pub const ONBOARDING_LABEL: &str = "onboarding";
+/// The certificate-renewal consent window (macOS/Windows §7).
+pub const RENEWAL_LABEL: &str = "renewal";
 const AUTH_LABEL_PREFIX: &str = "auth-";
 
 /// F-012 (D6) — the PRIMARY, framework-independent caller-label check behind the per-window capability
 /// ACL. Even if a capability were ever mis-scoped, a command still refuses to act for the wrong window.
 /// `actual` is the real invoking window's label, which Tauri resolves from the native IPC message — JS
 /// cannot spoof it. On mismatch: log (generic) and return a generic error that leaks no window topology.
-fn require_label(actual: &str, expected: &str) -> Result<(), String> {
+pub fn require_label(actual: &str, expected: &str) -> Result<(), String> {
     if actual == expected {
         Ok(())
     } else {
@@ -360,74 +317,398 @@ fn require_auth_window(actual: &str) -> Result<(), String> {
     }
 }
 
-/// Enable Safari Support: generate certs, install trust, save config, start HTTPS.
-/// The macOS Keychain trust prompt (native password dialog) is triggered by `security add-trusted-cert`.
-#[cfg(target_os = "macos")]
+/// Enable the encrypted (HTTPS) connection: generate certs, install browser trust, save config, start
+/// HTTPS. Cross-platform via [`crate::trust`] — macOS raises the Keychain password dialog, Linux
+/// installs into user NSS stores silently, Windows lands in a later phase (its trust backend errors
+/// until then). Succeeds iff trust landed in ≥1 store (`install_ca_trust` errors otherwise), so on
+/// Linux a missing `certutil` surfaces as an enable failure the wizard can show with a Retry (R3).
 #[tauri::command]
-pub async fn enable_safari_support(
+pub async fn enable_https(
     window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
+    enable_https_inner(&config, &shared_state).await
+}
+
+/// The shared enable-HTTPS routine, callable outside a Tauri command (the onboarding wizard reuses
+/// it). Generate certs → install browser trust → ensure the listener is LIVE → save config. Errors if
+/// trust lands in zero stores (R3) or the HTTPS listener can't bind, so the wizard renders HTTPS as
+/// failed-with-Retry. `async` because it AWAITS the real bind before persisting `https_enabled`.
+async fn enable_https_inner(
+    config: &ConfigState,
+    shared_state: &crate::server::AppState,
+) -> Result<(), String> {
     use crate::certs;
+    use std::sync::atomic::Ordering;
+
+    // Take the HTTPS bring-up lock FIRST — before ANY cert inspection or write. `certs_exist()` reads
+    // the leaf+key and `generate_and_save()` writes a whole new set; running either while the launch
+    // gate is mid-rotation could observe a MIXED new-leaf/old-key set and then write a third set over
+    // it, corrupting the live one and failing both starts (post-impl codex Medium). Waiting here is
+    // correct and unbounded-by-design: the owner may be showing an OS trust dialog or shelling out to
+    // certutil per NSS store, so there is no honest fixed timeout. The guard releases on every exit
+    // path below (including `?`), and moves into `spawn_https` when we get that far.
+    let lifecycle = crate::server::claim_https_lifecycle(shared_state).await;
+    // The owner we waited for may have completed the whole bring-up. Re-read the live bind state
+    // rather than assuming what we saw before the wait.
+    //
+    let already_bound = shared_state.https_bound.load(Ordering::Relaxed);
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
-    // Safari HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
+    // HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
     // the condition the startup gate closes. Fail closed: if the legacy key cannot be removed, refuse
-    // to enable (surfaced to the Settings UI). HTTP is unaffected.
+    // to enable (surfaced to the Settings UI). HTTP is unaffected. (No-op on installs that never had
+    // an on-disk CA key, i.e. every non-macOS install.)
     certs::migrate_legacy_ca_key().map_err(|e| {
-        format!("Legacy CA key could not be removed; refusing to enable Safari HTTPS: {e}")
+        format!("Legacy CA key could not be removed; refusing to enable HTTPS: {e}")
     })?;
 
-    certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
-
-    certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
-
-    // Save config
-    {
-        mutate_config(&config, |cfg| cfg.safari_support = true)?;
+    // Generate + install trust ONLY when needed. Already set up (valid certs + trusted anchor)? Skip
+    // the (re-)install and its OS prompt (post-impl review) — but STILL ensure the listener is running
+    // below. The old short-circuit RETURNED here without spawning, so after disable→restart→re-enable
+    // (certs kept, trusted, but the launch gate didn't start HTTPS because config was off) HTTPS never
+    // served until yet another restart (post-impl codex High).
+    if !(certs::certs_exist() && certs::is_ca_trusted()) {
+        certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
+        certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
+    } else {
+        tracing::info!("Certs already present + trusted — skipping re-install");
     }
 
-    // Start HTTPS server with the full shared state (includes auth, config, popup callback)
-    let tls_config =
-        certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
-    // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping it
-    // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
-    crate::server::spawn_https((**shared_state).clone(), tls_config);
+    // Is the RUNNING listener still serving the identity that's now on disk? Computed HERE, after the
+    // cert work above, not before it: `generate_and_save()` may have just minted a new set, so a
+    // fingerprint sampled earlier would compare against the pre-regeneration files and wrongly report
+    // "still current" (post-impl codex High). `https_bound` alone can't answer this — the acceptor is
+    // fixed for the life of the serving loop, so after any rotation the files no longer describe what
+    // we serve, and committing "enabled" over that would present a cert whose anchor may be gone.
+    let serving_stale_identity =
+        already_bound && *shared_state.served_ca_fingerprint.read() != certs::live_ca_fingerprint();
 
-    tracing::info!("Safari Support enabled via Settings");
+    // Ensure the HTTPS listener is LIVE. If launch already bound it, don't double-spawn; otherwise
+    // spawn and AWAIT the real bind, persisting `https_enabled = true` ONLY once the listener is up
+    // (post-impl codex High: a swallowed bind failure used to report success while Safari/strict
+    // users silently fell back / failed).
+    // We hold the bring-up lock, so no other path can be binding right now: `already_bound` (sampled
+    // after the wait) is authoritative. If HTTPS isn't up yet, WE bring it up and await the real bind.
+    if !already_bound {
+        // The guard drops (releasing the lock) if this load fails.
+        let tls_config =
+            certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
+        // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping
+        // it after a successful bind is visible to /health. (Q7) We keep holding `lifecycle` across
+        // the bind AND the `https_enabled = true` commit below — releasing at the bind would let
+        // "Remove certificate trust" slip in between, remove the anchor and save `false`, only for our
+        // `true` to overwrite it, leaving "enabled" HTTPS with an untrusted CA (post-impl codex).
+        let ready = crate::server::spawn_https(shared_state.clone(), tls_config);
+        if !matches!(ready.await, Ok(true)) {
+            return Err(
+                "Certificates are ready, but the HTTPS server could not start \
+                 (port 59834 may be in use). Please try again."
+                    .to_string(),
+            );
+        }
+    }
+
+    // A listener serving a stale identity can't be fixed in-process — the acceptor is fixed for the
+    // life of the loop and the port is held by us, so there is nothing to rebind. Persist the enable
+    // (the certs + trust ARE set up) and tell the user a restart finishes it, rather than silently
+    // reporting success while HTTPS presents an untrusted cert.
+    if serving_stale_identity {
+        mutate_config(config, |cfg| cfg.https_enabled = true)?;
+        tracing::warn!("HTTPS is running with a previous certificate — restart required");
+        drop(lifecycle);
+        return Err(
+            "HTTPS is set up, but the running server is still using a previous \
+                    certificate. Restart Aztec Accelerator to finish enabling it."
+                .to_string(),
+        );
+    }
+
+    mutate_config(config, |cfg| cfg.https_enabled = true)?;
+    tracing::info!("HTTPS enabled");
+    // `lifecycle` drops HERE — after the config commit, so the whole transaction (certs → trust →
+    // bind → `https_enabled = true`) is atomic with respect to removal/renewal/launch.
+    drop(lifecycle);
     Ok(())
 }
 
-/// Disable Safari Support: save config. HTTPS stops on next restart.
-#[cfg(target_os = "macos")]
+/// Shared autostart toggle (used by the outer `set_autostart` Settings command + the onboarding
+/// wizard). Window-agnostic — the caller-label guard lives in `set_autostart`; `complete_onboarding`
+/// calls this from the onboarding window. Carries main's F-010 executable-path safety + the C8
+/// crash-recovery `enable_transaction` rollback so a partial failure never leaves a half-enabled state.
+fn set_autostart_inner(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if enabled {
+        // F-010: refuse autostart if this executable's path could inject into any OS launcher serializer
+        // (systemd unit / .desktop / plist / Run-key) — BEFORE the plugin serializes it. Fail closed.
+        let exe =
+            std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
+        if !crate::crash_recovery::autostart_path_is_safe(&exe) {
+            let _ = manager.disable();
+            crate::crash_recovery::disable_crash_recovery();
+            return Err(
+                "Executable path is unsafe for autostart (control/newline/non-UTF-8); refusing to enable."
+                    .to_string(),
+            );
+        }
+        // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction; on a partial
+        // failure roll back against a known baseline. An unknown current state is undecidable → fail closed.
+        let prior_enabled = manager
+            .is_enabled()
+            .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
+        crate::crash_recovery::enable_transaction(
+            prior_enabled,
+            || manager.enable().map_err(|e| e.to_string()),
+            crate::crash_recovery::enable_crash_recovery,
+            || manager.disable().map_err(|e| e.to_string()),
+            crate::crash_recovery::disable_crash_recovery,
+        )?;
+    } else {
+        // Disable the launcher, THEN disarm crash recovery — surface a non-confirmed disarm rather than
+        // leaving the app able to relaunch on next login while the UI shows autostart as off.
+        manager.disable().map_err(|e| e.to_string())?;
+        if !crate::crash_recovery::disable_crash_recovery() {
+            return Err(
+                "Autostart launcher disabled, but crash recovery could not be confirmed disarmed — \
+                 the app may still relaunch on next login. Please retry."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Disable the encrypted (HTTPS) connection: save config off. HTTPS stops on next restart. Trust
+/// anchors are left in place (removing them is the separate [`remove_https_trust`] action, so a
+/// re-enable doesn't re-prompt — D5/A4).
 #[tauri::command]
-pub fn disable_safari_support(
+pub async fn disable_https(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
+) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
+    // Every OTHER HTTPS state transition takes this lock; disable skipping it was the hole. Trigger:
+    // disable while another window's enable is parked on an OS trust dialog — disable reports success,
+    // then the older enable finishes and overwrites `https_enabled` back to true (post-impl codex).
+    let _lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
+    mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    tracing::info!("HTTPS disabled via Settings (HTTPS stops on next restart)");
+    Ok(())
+}
+
+/// Explicitly remove the local CA from every browser trust store (the "Remove certificate trust"
+/// Settings action — D5). Also flips HTTPS off so the app stops presenting a now-untrusted cert.
+#[tauri::command]
+pub async fn remove_https_trust(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
+) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
+    // Removal MUTATES trust state, so it joins the same serialization as launch/enable/renewal. The
+    // Settings window offers this button and the HTTPS toggle at once (and enable can sit on a
+    // Keychain dialog), so without the lock a removal could delete every anchor and report success
+    // while a concurrent enable/renewal installed a new one — or interleave with enable's final
+    // config commit and leave "enabled" HTTPS with an untrusted CA (post-impl codex Medium). Held
+    // across BOTH the removal and the `https_enabled = false` write, mirroring enable's transaction.
+    let _lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
+    let report = crate::trust::remove_ca_trust(&crate::certs::live_ca_cert_path());
+    // Stop serving the now-to-be-untrusted cert regardless of whether every store could be cleaned.
+    mutate_config(&config, |cfg| cfg.https_enabled = false)?;
+    // Surface a partial/failed removal instead of reporting success (post-impl codex High): the
+    // Settings action shows the error, so the user knows trust may still be installed.
+    if let Some(detail) = report.removal_failure_detail() {
+        tracing::warn!(%detail, "CA trust removal incomplete");
+        return Err(format!(
+            "HTTPS was turned off, but the certificate trust could not be fully removed: {detail}"
+        ));
+    }
+    tracing::info!(
+        removed = report.stores.len(),
+        "Removed CA trust via Settings"
+    );
+    Ok(())
+}
+
+// ── First-run onboarding wizard ──
+
+/// Prefill state for the onboarding wizard. `https_default` is ALWAYS `true` — the HTTPS toggle is
+/// pre-checked for everyone, including upgraders who never had it, to move the whole installed base
+/// onto the encrypted path (A9 / plan §2.1). Autostart + auto-update reflect current state so the
+/// wizard shows an upgrader their real settings.
+#[derive(serde::Serialize)]
+pub struct OnboardingState {
+    pub platform: String,
+    /// HTTPS is pre-checked for everyone incl. upgraders (A9/§2.1). Start-on-Login + Auto-Update
+    /// default to the recommended YES in the wizard UI (not reflected here — the wizard is a
+    /// "recommended setup", and computing OS/config state for the toggle defaults would only let an
+    /// upgrader's prior opt-out silently re-enable on Start).
+    pub https_default: bool,
+}
+
+#[tauri::command]
+pub fn get_onboarding_state(window: tauri::WebviewWindow) -> Result<OnboardingState, String> {
+    require_label(window.label(), ONBOARDING_LABEL)?;
+    // Intentionally cheap + side-effect-free: the per-OS certificate copy is chosen from `platform`;
+    // no autostart/config/trust probing (the wizard defaults all toggles to YES).
+    Ok(OnboardingState {
+        platform: std::env::consts::OS.to_string(),
+        https_default: true,
+    })
+}
+
+/// Per-action result of the wizard's "Start". Each action runs INDEPENDENTLY — a failure in one
+/// (e.g. the cert install) does not abort the others. `Result<(),String>` serializes as
+/// `{"Ok":null}` / `{"Err":"…"}` for the frontend to render per-row ✓/✗.
+#[derive(serde::Serialize)]
+pub struct OnboardingResult {
+    pub https: Result<(), String>,
+    pub autostart: Result<(), String>,
+    pub auto_update: Result<(), String>,
+    /// Whether the once-per-version onboarding marker was set (true iff every requested action ok).
+    pub completed: bool,
+}
+
+/// Execute the wizard's choices. Each runs independently; the onboarding marker is set ONLY when all
+/// requested actions succeed (marker discipline, R4). A failed HTTPS leaves the marker unset so the
+/// wizard returns next launch.
+///
+/// This is the wizard's ONLY exit that sets the marker. There is deliberately no separate "skip"
+/// command: unchecking the toggles and pressing the primary button expresses the same outcome more
+/// deliberately, and it keeps the marker tied to an actual decision. Closing the window instead leaves
+/// the marker unset, so the wizard reappears — the reversible escape hatch.
+#[tauri::command]
+pub async fn complete_onboarding(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
+    https: bool,
+    autostart: bool,
+    auto_update: bool,
+) -> Result<OnboardingResult, String> {
+    require_label(window.label(), ONBOARDING_LABEL)?;
+    let https_res = if https {
+        enable_https_inner(&config, &shared_state).await
+    } else {
+        // Explicit opt-out: persist HTTPS OFF (post-impl codex High — the old `Ok(())` no-op left
+        // `https_enabled` at whatever it was, so unchecking HTTPS on "Run setup again" from an
+        // already-on install silently kept it on). A fresh install is already `false`; this makes the
+        // decline authoritative in every case.
+        mutate_config(&config, |cfg| cfg.https_enabled = false)
+    };
+    // If the user REQUESTED HTTPS but it failed, don't leave a stale `true` from a prior enable —
+    // reflect the real (off) state so Settings and the next launch agree.
+    if https && https_res.is_err() {
+        let _ = mutate_config(&config, |cfg| cfg.https_enabled = false);
+    }
+    let autostart_res = set_autostart_inner(&app, autostart);
+    let auto_update_res = mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update));
+
+    let all_ok = https_res.is_ok() && autostart_res.is_ok() && auto_update_res.is_ok();
+    let completed = all_ok
+        && mutate_config(&config, |cfg| {
+            cfg.onboarding_version = crate::config::ONBOARDING_VERSION
+        })
+        .is_ok();
+
+    // F-012 convention: windows are closed from RUST, never by the page (no core:window JS grants).
+    // On full success the wizard is done — close it; on partial failure it stays open for Retry.
+    // A failed native close propagates as Err so wireButton re-enables the controls (merge-audit
+    // Low): every completed action is idempotent, so the user just clicks Start again.
+    if completed {
+        window
+            .close()
+            .map_err(|e| format!("setup completed, but the window could not be closed: {e}"))?;
+    }
+
+    Ok(OnboardingResult {
+        https: https_res,
+        autostart: autostart_res,
+        auto_update: auto_update_res,
+        completed,
+    })
+}
+
+// ── Certificate renewal (macOS/Windows renewal consent window — §7) ──
+
+/// "Renew now" from the renewal consent window: rotate the cert identity (raises the OS trust dialog
+/// with context, unlike a surprise background prompt). Records the prompt time for throttling.
+/// `async` (like `enable_https`/`complete_onboarding`) so the blocking subprocess + modal OS dialog
+/// don't freeze the webview event loop / the "Renewing…" spinner (post-impl review).
+#[tauri::command]
+pub async fn renew_cert(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
+) -> Result<(), String> {
+    require_label(window.label(), RENEWAL_LABEL)?;
+
+    // Claim the prove permit BEFORE rotating, not after.
+    //
+    // Rotating is only useful if we can then restart: the running listener serves the OLD leaf from an
+    // in-memory TlsAcceptor that is never hot-reloaded, so a rotation without a restart leaves the new
+    // leaf unused — and, because we would also record the prompt throttle, unprompted. Renewal then
+    // reported success while changing nothing observable, and the old leaf could expire with the tray
+    // app still open (post-impl codex High).
+    //
+    // Rotating first and *then* discovering we cannot restart is the bug; deciding first is the fix.
+    // The permit is held across the (diverging) restart, which also stops a proof from starting in the
+    // gap — Tauri's restart calls exit(0), skipping bb's `kill_on_drop` and the prove-workspace
+    // TempDir destructors, so restarting mid-proof would orphan `bb` and leave the witness on disk.
+    let Ok(_prove_permit) = shared_state.prove_semaphore.try_acquire() else {
+        tracing::info!("Renewal requested while a proof is in flight — asking the user to retry");
+        return Err(
+            "A proof is running right now. Renewing restarts the app, so please try again in a \
+             moment — your certificate is still valid."
+                .to_string(),
+        );
+    };
+
+    // Renewal MUTATES the cert set (`rotate_now` stages a new CA/leaf/key, trusts it, then swaps), so
+    // it takes the same bring-up lock as launch + enable. The renewal and onboarding windows can be
+    // open at once; without this a rotation could swap the files while another path reads or writes
+    // them, recreating exactly the MIXED-set corruption the lock exists to prevent.
+    let lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
+    crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
+    drop(lifecycle);
+
+    let _ = mutate_config(&config, |cfg| {
+        cfg.last_rotation_prompt_at = Some(now_unix_secs());
+    });
+
+    tracing::info!("Certificate renewed via consent window — restarting to serve the new leaf");
+    window.app_handle().restart();
+}
+
+/// Record that the renewal window was shown/declined (throttles re-prompting).
+#[tauri::command]
+pub fn record_renewal_prompt(
     window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
 ) -> Result<(), String> {
-    require_label(window.label(), SETTINGS_LABEL)?;
-    mutate_config(&config, |cfg| cfg.safari_support = false)?;
-    tracing::info!("Safari Support disabled via Settings (HTTPS stops on next restart)");
+    require_label(window.label(), RENEWAL_LABEL)?;
+    mutate_config(&config, |cfg| {
+        cfg.last_rotation_prompt_at = Some(now_unix_secs());
+    })?;
+    // "Later" dismisses the window — closed from Rust (F-012); a failed close propagates so
+    // wireButton re-enables the button (merge-audit Low).
+    window
+        .close()
+        .map_err(|e| format!("recorded, but the window could not be closed: {e}"))?;
     Ok(())
 }
 
-/// Stub for non-macOS platforms.
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-pub async fn enable_safari_support(window: tauri::WebviewWindow) -> Result<(), String> {
-    require_label(window.label(), SETTINGS_LABEL)?;
-    Err("Safari Support is only available on macOS".to_string())
-}
-
-/// Stub for non-macOS platforms.
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-pub fn disable_safari_support(window: tauri::WebviewWindow) -> Result<(), String> {
-    require_label(window.label(), SETTINGS_LABEL)?;
-    Err("Safari Support is only available on macOS".to_string())
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Toggle auto-update preference from Settings.

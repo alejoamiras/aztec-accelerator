@@ -59,10 +59,12 @@ async function loadSettings() {
   }
   document.getElementById("auto-update").checked = config.auto_update === true;
 
-  if (sysInfo.platform === "macos") {
-    // F-012: was `.style.display = ""`; the row is `hidden` in markup + `.row[hidden]` in CSS.
-    document.getElementById("safari-row").hidden = false;
-    document.getElementById("safari").checked = config.safari_support;
+  // The Encrypted Connection section (toggle + the disclosed certificate action) shows on all three
+  // desktop OSes — each now has a trust backend (macOS Keychain / Linux user NSS / Windows
+  // CurrentUser Root). F-012: hidden via the `hidden` attribute, never an inline style.
+  if (["macos", "linux", "windows"].includes(sysInfo.platform)) {
+    document.getElementById("https-section").hidden = false;
+    document.getElementById("https").checked = config.https_enabled;
   }
 
   const idx = speedToIndex(config.speed || "full");
@@ -106,9 +108,52 @@ function renderOrigins(origins) {
 // Toggles — all use wireToggle from the shared bridge.
 wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
 wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
-wireToggle("safari", (checked) => ({
-  cmd: checked ? "enable_safari_support" : "disable_safari_support",
-}));
+
+// HTTPS does NOT use wireToggle's optimistic-flip-then-revert-on-error. That pattern assumes a
+// command either fully applies or fully doesn't, which is true for autostart/auto-update and FALSE
+// here: `enable_https` persists `https_enabled = true` and STILL returns Err when the running
+// listener is serving a superseded certificate (the restart-required path). Reverting the checkbox
+// there showed "off" while the config — and therefore the next launch — said on, and re-toggling
+// just reproduced the same error with no account of the real state (post-impl codex Medium).
+// Both HTTPS controls instead re-read the persisted config after every attempt, so the panel always
+// shows what the backend actually stored, and they disable EACH OTHER while one is in flight: the
+// Rust lifecycle mutex already serializes them correctly, but an un-disabled second control let the
+// user queue an operation against state they could no longer see.
+const httpsEls = () => [document.getElementById("https"), document.getElementById("remove-trust")];
+
+async function runHttpsOp(anchor, op) {
+  const controls = httpsEls();
+  for (const el of controls) el.disabled = true;
+  try {
+    await op();
+  } catch (err) {
+    console.error("HTTPS operation failed:", err);
+    // Surface the backend's own message: "restart to finish enabling" and "a proof is running" are
+    // both actionable, and a generic "Failed — try again" would throw that away.
+    showErrorHint(anchor, typeof err === "string" ? err : "Failed — try again");
+  } finally {
+    // Authoritative refresh — never infer the resulting state from whether the call threw.
+    try {
+      const config = await invoke("get_config");
+      document.getElementById("https").checked = config.https_enabled === true;
+    } catch (e) {
+      console.error("Failed to re-read config after an HTTPS operation:", e);
+    }
+    for (const el of controls) el.disabled = false;
+  }
+}
+
+document.getElementById("https").addEventListener("change", (e) => {
+  const wanted = e.target.checked;
+  runHttpsOp(e.target, () => invoke(wanted ? "enable_https" : "disable_https"));
+});
+
+// Removing the certificate (D5) — takes the local CA out of every browser store and turns HTTPS off.
+// Lives behind the "Manage certificate" disclosure: it is the documented recovery path for a
+// partially-trusted install, not an everyday control.
+document.getElementById("remove-trust").addEventListener("click", (e) => {
+  runHttpsOp(e.target, () => invoke("remove_https_trust"));
+});
 
 // Speed slider
 const speedSlider = document.getElementById("speed");

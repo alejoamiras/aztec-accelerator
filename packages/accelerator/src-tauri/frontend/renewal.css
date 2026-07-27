@@ -1,0 +1,32 @@
+/* Certificate-renewal consent window. Externalized from an inline <style> so the app's strict
+   `style-src 'self'` CSP (no unsafe-inline) doesn't block it (F-012 frontend architecture).
+   Colours come from style.css's tokens — one accent across every window. An earlier version invented
+   `--muted` / `--line` (which do not exist, so it fell back to LIGHT-theme greys on a dark ground)
+   and hardcoded an orange primary that fought the lime `--accent`. */
+.r { padding: 20px 22px; }
+.r h1 { font-size: 1.15rem; margin: 2px 0 8px; }
+.r p { color: var(--text-muted); font-size: 0.9rem; margin: 0 0 16px; line-height: 1.5; }
+.r .cta { display: flex; gap: 10px; }
+.r .cta button {
+  border: none;
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.r .cta .primary {
+  flex: 1;
+  background: var(--accent);
+  color: var(--accent-on-dark);
+}
+.r .cta .primary:hover:not(:disabled) { background: var(--accent-dim); }
+.r .cta .ghost {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.r .cta .ghost:hover:not(:disabled) { background: var(--surface); }
+.r .cta button:disabled { opacity: 0.5; cursor: default; }
+.r .cta button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

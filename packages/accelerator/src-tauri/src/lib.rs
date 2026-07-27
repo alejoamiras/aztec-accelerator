@@ -11,5 +11,6 @@ pub mod certs;
 pub mod commands;
 pub mod crash_recovery;
 pub mod server;
+pub mod trust;
 pub mod updater;
 pub mod verified_sites;

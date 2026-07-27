@@ -48,7 +48,9 @@ APP_PID=""
 
 log() { echo "── $* ──"; }
 
-# shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT`
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via `trap cleanup EXIT`; SC2317 is only
+# emitted by shellcheck < 0.10 (the CI runner's), which doesn't trace trap targets — every command
+# in the body reads as unreachable there. Harmless on newer shellcheck, so pin both codes.
 cleanup() {
   set +e
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null

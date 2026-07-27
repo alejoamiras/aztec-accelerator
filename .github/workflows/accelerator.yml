@@ -110,6 +110,111 @@ jobs:
       # accelerator-core's own unit tests (113) — not exercised by `cargo test` in src-tauri.
       - run: cargo test --manifest-path ../core/Cargo.toml
 
+  cert-trust:
+    name: Cert Trust (${{ matrix.platform }})
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ${{ matrix.runner }}
+    # 30, not 20: a cold Windows Rust build (this leg has its own cache key) can run ~15-18 min before
+    # the fast read-only trust test even starts.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            test: trust_linux
+            rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            platform: windows
+            test: trust_windows
+            rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+          - runner: macos-latest
+            platform: macos
+            test: trust_macos
+            rust-cache-key: accelerator-desktop-aarch64-apple-darwin
+    defaults:
+      run:
+        working-directory: packages/accelerator/src-tauri
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: ${{ matrix.rust-cache-key }}
+          rust-workspaces: |
+            packages/accelerator/src-tauri -> target
+            packages/accelerator/core -> target
+          rust-components: ""
+      # Linux drives certutil against a throwaway $HOME NSS db (install/verify/chain-validate/remove).
+      - name: Install libnss3-tools (certutil)
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
+      # Tier-1 certainty: an in-process TLS handshake against the REAL generated cert set (no OS store,
+      # no browser). Runs on ALL three OSes here so a cert-generation regression (bad SANs / key usage /
+      # name constraints / mismatched key) fails fast on macOS + Windows too, not just the Linux `test`
+      # job. Cheap + needs no certutil/keychain, so it's safe on every matrix leg.
+      - run: cargo test --test tls_handshake -- --nocapture
+      # Real trust-store test per OS. Windows: CurrentUser Root add/verify/remove (spike I3 — expected
+      # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
+      # interactive auth — spike I7, covered by the manual runbook, NOT here).
+      - run: cargo test --test ${{ matrix.test }} -- --ignored --nocapture
+      # Tier-3: run the REAL NSIS uninstall hook on real Windows under each command line it has to tell
+      # apart. This guard cannot be fixed after the fact — a release cannot fix its own uninstaller —
+      # and getting it wrong deletes the user's trust anchor on a routine upgrade. `$UpdateMode` alone
+      # does not cover the manual-download upgrade (the only route once auto-update is off): the Tauri
+      # template forwards `/UPDATE` to the old uninstaller only when the INSTALLER got it, while `_?=`
+      # is appended unconditionally on that path. Both must be treated as "not a real uninstall".
+      # The hook's `RMDir` target is the observable: a seeded marker survives iff the guard held.
+      - name: NSIS uninstall-hook guard (upgrade must not wipe trust)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        working-directory: packages/accelerator/src-tauri/nsis
+        run: |
+          $ErrorActionPreference = "Stop"
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) { choco install nsis -y --no-progress | Out-Null }
+          & $makensis /V2 harness.test.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
+
+          $setup  = Join-Path $PWD "hooks-harness-setup.exe"
+          $dir    = Join-Path $env:TEMP "aztec-hooks-harness"
+          $certs  = Join-Path $env:USERPROFILE ".aztec-accelerator\certs"
+          $marker = Join-Path $certs "marker.txt"
+
+          $cases = @(
+            @{ args = "/S _?=$dir";         survives = $true;
+               desc = "manual-download upgrade: installer runs the old uninstaller WITHOUT /UPDATE" },
+            @{ args = "/S /UPDATE _?=$dir"; survives = $true;
+               desc = "in-app updater: /UPDATE is forwarded" },
+            @{ args = "/S";                 survives = $false;
+               desc = "genuine uninstall: Add/Remove Programs, no _?=" }
+          )
+
+          foreach ($case in $cases) {
+            & $setup /S | Out-Null
+            New-Item -ItemType Directory -Force -Path $certs | Out-Null
+            Set-Content -Path $marker -Value "seeded"
+
+            Start-Process -FilePath (Join-Path $dir "uninstall.exe") `
+                          -ArgumentList $case.args -Wait
+            # Without _?= NSIS relaunches a temp copy and the parent returns immediately, so give the
+            # deletion a chance to land before reading the verdict. A guard that SHOULD delete but is
+            # merely slow would otherwise read as a (passing) survival.
+            if (-not $case.survives) {
+              $deadline = (Get-Date).AddSeconds(15)
+              while ((Test-Path $marker) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+            }
+
+            $survived = Test-Path $marker
+            if ($survived -ne $case.survives) {
+              throw "FAIL [$($case.desc)]: marker survived=$survived, expected=$($case.survives)"
+            }
+            Write-Host "ok [$($case.desc)]: marker survived=$survived"
+
+            Remove-Item -Recurse -Force $certs, $dir -ErrorAction SilentlyContinue
+          }
+
   # F-004: full updater-feed sign/verify round-trip with a THROWAWAY key (no prod secret). Guards the
   # version-binding property end-to-end against tauri-CLI drift and any change to the update-manifest
   # tool: happy path (envelope -> tauri signer sign -> splice -> verify) must pass, and the F-004 splice
@@ -506,6 +611,7 @@ jobs:
         changes,
         clippy,
         test,
+        cert-trust,
         updater-feed-e2e,
         lint,
         smoke,
@@ -522,7 +628,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.e2e-webdriver-builtdebug.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.cert-trust.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.e2e-webdriver-builtdebug.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

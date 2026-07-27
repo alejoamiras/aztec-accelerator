@@ -58,7 +58,13 @@ fn verify_frontend_bundles() {
         .unwrap_or_else(|| panic!("F-012: {manifest_path} has no `outputs` object — {hint}"));
 
     // Emitted bundles: exact set + content match (catches a post-build swap).
-    let bundles = ["authorize.js", "settings.js", "update-prompt.js"];
+    let bundles = [
+        "authorize.js",
+        "settings.js",
+        "update-prompt.js",
+        "onboarding.js",
+        "renewal.js",
+    ];
     if outputs.len() != bundles.len() {
         panic!(
             "F-012: manifest lists {} output bundles, expected {} — {hint}",
@@ -144,8 +150,13 @@ fn main() {
         "get_verified_info",
         "get_pending_auth",
         "respond_auth",
-        "enable_safari_support",
-        "disable_safari_support",
+        "enable_https",
+        "disable_https",
+        "remove_https_trust",
+        "get_onboarding_state",
+        "complete_onboarding",
+        "renew_cert",
+        "record_renewal_prompt",
         "set_auto_update",
         "respond_update_prompt",
     ];

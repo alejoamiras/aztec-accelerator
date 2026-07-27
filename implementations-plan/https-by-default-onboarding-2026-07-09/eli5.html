@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — HTTPS by Default + Onboarding Wizard</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1, h2, h3 { font-weight: 600; }
+    h1 { font-size: 1.8rem; margin-bottom: 1rem; }
+    h2 { font-size: 1.3rem; margin-top: 2.5rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #444; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.1rem 0; padding: .8rem 1.1rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .phase .g { color:#555; font-size:.88rem; margin-top:.35rem; }
+    .seeds { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #eee; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .warning { color: #b45309; font-weight: 600; margin: 1rem 0; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    .crit { background:#fff1f0; border-left:3px solid #c0392b; padding:.6rem 1rem; margin:1rem 0; }
+    a { color: #0366d6; }
+    .muted { color: #666; font-size: 0.9rem; }
+    table { border-collapse: collapse; width:100%; font-size:.9rem; margin:.6rem 0; }
+    th, td { border:1px solid #e3e6ea; padding:.4rem .6rem; text-align:left; vertical-align:top; }
+    th { background:#f6f7f9; }
+    .rubric td:last-child { font-weight:600; }
+  </style>
+</head>
+<body>
+  <h1>HTTPS by Default + First-Run Onboarding Wizard</h1>
+  <p>Right now the accelerator only speaks encrypted HTTPS to your browser if you're on a Mac and dig into Settings to switch on "Safari Support." This plan makes an <b>encrypted connection the default on all three operating systems</b>, and adds a friendly <b>first-launch setup screen</b> that walks you through three choices — turn on HTTPS, start the app on login, keep it auto-updated — with one <b>Start</b> button that does all of it. You stay in control: you can decline the certificate and everything else still applies. Under the hood it teaches the little proving app how to install its own local certificate into your browsers' trust stores on Windows and Linux (not just macOS), and teaches the SDK that dApps use to prefer the encrypted channel when it's actually working.</p>
+
+  <h2>Why this tier was chosen (deep)</h2>
+  <p>The blueprint rubric counts six risk dimensions. Three came back HIGH, which forces <code>deep</code> (three independent plans, double audit, contradiction-check, final pass):</p>
+  <table class="rubric">
+    <tr><th>Dimension</th><th>Level</th></tr>
+    <tr><td>Novelty — first-ever cross-OS browser-trust install in this repo</td><td>HIGH</td></tr>
+    <tr><td>Blast radius — every desktop user + every dApp that uses the SDK</td><td>HIGH</td></tr>
+    <tr><td>Security sensitivity — we install a browser-trusted certificate authority on 3 OSes</td><td>HIGH</td></tr>
+    <tr><td>External coupling — depends on NSS / CryptoAPI / Keychain quirks</td><td>MED</td></tr>
+    <tr><td>Irreversibility / Migration cost</td><td>LOW–MED</td></tr>
+  </table>
+  <p class="muted">Process run: 3 parallel planning legs (main + codex + fable) → consolidated into one plan with a decision ledger → a contradiction-check + a fresh hostile audit (both "conditional approve") → all High/Critical findings folded → a final fresh-context codex pass ("conditional approve", no High/Critical survived, its Med fixes folded too). Full trail in <a href="plan.md">plan.md</a> §6, §9, §12. All 13 audit resolutions are R1–R13.</p>
+
+  <div class="crit">
+    <b>The catch the audits caught (worth knowing):</b> the Windows uninstaller hook that removes the certificate would have fired <i>on every auto-update</i> (Tauri runs the old uninstaller when installing over itself), silently breaking HTTPS after each update. It's now guarded so it only runs on a real uninstall — and that guard has to be correct in the very first release that ships it, because a release can't fix its own uninstaller after the fact.
+  </div>
+
+  <h2>What "HTTPS by default" really buys (no overclaim)</h2>
+  <p>Honest framing, because it drove the design: Chrome and Firefox already reach the app fine over plain HTTP on localhost, so for them the encrypted channel is mostly about parity and positioning. The real security gain is narrow — it stops a <i>different, non-admin user on the same machine</i> from impersonating the accelerator and harvesting your transaction's private data, and only dApps that opt into the strict <code>httpsOnly</code> mode get that guarantee enforced. A same-user attacker is still game-over (they can read the key file directly). So the wizard copy promises an "encrypted, authenticated local channel," never "your traffic is now safe."</p>
+
+  <h2>Phases</h2>
+  <div class="phase"><h3>Phase 1 — Rename & config migration</h3><p><code>safari_support</code> becomes <code>https_enabled</code>; old configs load unchanged; a new marker remembers whether you've seen the wizard. No behavior change yet.</p><p class="g">Proves itself by: migration unit tests (old key loads, new key saves) + lint + typecheck, all green.</p></div>
+  <div class="phase"><h3>Phase 2 — SDK prefers HTTPS (safely)</h3><p>The SDK now prefers the encrypted channel — but only when it answers healthily — and adds a strict <code>httpsOnly</code> mode for dApps. Proven not to add any delay when HTTPS isn't there.</p><p class="g">Proves itself by: SDK unit tests including a wall-clock assertion that the no-HTTPS path is as fast as today + a "broken HTTPS must not win over healthy HTTP" test.</p></div>
+  <div class="phase"><h3>Phase 3 — Linux trust + first real cert-trust CI</h3><p>Install the certificate into Linux browser trust stores (system NSS + every Firefox profile), no root needed, honest per-browser status. First CI job that runs <i>real</i> certutil and validates a full certificate chain.</p><p class="g">Proves itself by: a Linux CI job that installs, chain-validates, rotates, and removes a real cert in a throwaway store.</p></div>
+  <div class="phase"><h3>Phase 4 — Windows trust + renewal UI + 3-OS cert CI</h3><p>Same for Windows (CurrentUser Root). Replaces today's context-free background password prompt with a friendly "renew your certificate" window. Cert-trust CI extends to Windows + macOS.</p><p class="g">Proves itself by: real add/verify/remove cert tests green on all 3 OS runners (with a spike first for the macOS/Windows CI quirks).</p></div>
+  <div class="phase"><h3>Phase 5 — The onboarding wizard</h3><p>The actual first-launch screen: three toggles, one Start, honest partial-failure handling (if the cert step fails, HTTPS stays off with a Retry and the other choices still apply). New installs and existing users both see it once.</p><p class="g">Proves itself by: Playwright mock tests for every wizard state + a real WebDriver wizard test on all 3 OSes.</p></div>
+  <div class="phase"><h3>Phase 6 — Packaging & safe uninstall</h3><p>The <code>.deb</code> pulls in the NSS tool; the Windows uninstaller cleans up the certificate (guarded so it never fires on update); AppImage degrades gracefully.</p><p class="g">Proves itself by: build smokes green + the critical "certificate survives an auto-update" assertion.</p></div>
+  <div class="phase"><h3>Phase 7 — Docs & closeout</h3><p>Fix the stale docs (they still claim Windows is unsupported), document the per-OS trust/uninstall story, update both READMEs and CLAUDE.md.</p><p class="g">Proves itself by: full test + actionlint green; no stray "safari_support" left in code.</p></div>
+
+  <h2>Human context</h2>
+  <p>Browsers don't share one trust store. macOS has the Keychain; Windows has its own cert store; Linux browsers each read their own little database (and the tool to write it, <code>certutil</code>, isn't always installed). That's why "install a certificate everywhere" is genuinely a multi-week, three-codepath job and not a checkbox — and why Linux gets a totally silent install (no OS password dialog exists there) while macOS pops the familiar password prompt. The certificate we install is deliberately toothless: the signing key is destroyed the instant it's used, so even though browsers trust it, it can't be abused to forge certificates for other websites.</p>
+
+  <h2>Open questions for you (the plan's Asks)</h2>
+  <ul>
+    <li><b>A1 — Naming & wizard layout.</b> I propose "Encrypted Connection (HTTPS)". Four wizard layouts are mocked up — please pick a direction: <a href="ux-variants.html">ux-variants.html</a> (Single-card / Stepped / Recommended-default / Choices+live-consequence).</li>
+    <li><b>A8 (new, from audit) — Linux has no OS consent dialog.</b> On Linux, one click on a pre-checked toggle silently installs the cert into every browser. Keep it checked-by-default with clear copy, default it <i>unchecked</i> on Linux, or add an explicit confirm step?</li>
+    <li><b>A9 (new, from audit) — Existing users see the wizard once</b> on their next update (pre-filled from their current settings). Good as the consent moment for the new default, or restrict the wizard to brand-new installs only?</li>
+    <li><b>A4 — Turning HTTPS off:</b> should "disable" also remove the trust anchor immediately, or just stop the listener and leave the (harmless) anchor?</li>
+    <li><b>A2 — AppImage:</b> confirm "detect certutil and degrade gracefully" rather than bundling it (bundling risks corrupting your browser DBs).</li>
+    <li class="muted">Resolved during audit and no longer open: A5 (delete-old-cert-by-serial, zero new deps).</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope &amp; exclusions (headless server stays TLS-free; HTTP listener stays; SDK default mode still allows HTTP).</li>
+      <li>Confirm tier: <code>deep</code>.</li>
+      <li>Confirm the validation plan: fast layers (clippy/biome/unit) every phase; WebDriver E2E ×3 OS + real cert-trust CI ×3 OS + Playwright mocks at the phases that add UI/trust code.</li>
+      <li>Answer A1, A8, A9, A4, A2 above (A8/A9 are the two that most change what gets built).</li>
+      <li><code>/harden security</code> at release time? Recommended — this touches trust boundaries and installs a CA on 3 OSes. Not auto-scheduled.</li>
+      <li>Approve · conditionally approve (with conditions) · reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section class="seeds">
+    <h2>Implementation seeds (draft — finalized after approval)</h2>
+    <p><code>/goal</code> keeps a session working until a condition holds and survives <code>claude --resume</code>; <code>/loop</code> re-fires on an interval. Completion here is transcript-observable (phase ✓ in plan.md + gates), so <code>/goal</code> is recommended.</p>
+    <p class="warning">Use exactly ONE per session — they don't compose; setting one replaces the other. Start the session in the permission mode you intend (a loop silently stalls on permission prompts).</p>
+
+    <div class="phase recommended">
+      <h3>Recommended for this plan: /goal</h3>
+      <pre><code>/goal All phases ✓ in implementations-plan/https-by-default-onboarding-2026-07-09/plan.md, each ✓ backed by its Validation gate reported passing in the transcript; for each phase `LESSONS_FILE=implementations-plan/https-by-default-onboarding-2026-07-09/lessons/phase-N.md` printed; `/code-review max --fix` applied+committed; codex post-impl audit done with high/critical addressed; `bun run test` and `bun run lint:actions` both exit 0 in the transcript.</code></pre>
+    </div>
+
+    <h3>Alternative: /loop 15m</h3>
+    <pre><code>/loop 15m Drive implementations-plan/https-by-default-onboarding-2026-07-09 forward. Never idle. Each firing: reality-check plan.md + lessons/ + `git status` + `gh pr checks` (no --watch); pick the next pending phase step; after each edit run the fast layers (bun run lint + bun run test for touched packages); commit → push; on a decision call /codex xhigh and log the verdict; same step failing 5× → stop &amp; reassess; phase green (its gate passes) → mark ✓ + file lessons + print LESSONS_FILE=…; all phases ✓ → /code-review max --fix, codex post-impl audit, wrap-up report. Never merge to main, publish, or expand scope.</code></pre>
+  </section>
+
+  <p class="muted"><a href="plan.md">Full plan.md</a> · <a href="ux-variants.html">Wizard UX variants</a> · <a href="audit-codex.md">codex audit</a> · <a href="audit-fable.md">fable audit</a> · <a href="./lessons/">Lessons logs</a></p>
+</body>
+</html>

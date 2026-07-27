@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Onboarding Wizard — UX Variants</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1c1e21; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #f0a020; --accent-ink: #7a4d00;
+    --ok: #178a4e; --bad: #c0392b; --chip: #eef1f5; --shadow: 0 10px 40px rgba(0,0,0,.14);
+    --toggle-off: #cbd2da; --code-bg: #f6f7f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --panel: #212429; --ink: #e9ebee; --muted: #9aa2ad;
+      --line: #333842; --accent: #f0a020; --accent-ink: #ffdca0;
+      --ok: #4ade80; --bad: #f87171; --chip: #2a2e35; --shadow: 0 10px 40px rgba(0,0,0,.5);
+      --toggle-off: #4a515b; --code-bg: #191c20;
+    }
+  }
+  :root[data-theme="light"] { --bg:#f4f5f7;--panel:#fff;--ink:#1c1e21;--muted:#6b7280;--line:#e3e6ea;--accent:#f0a020;--accent-ink:#7a4d00;--ok:#178a4e;--bad:#c0392b;--chip:#eef1f5;--shadow:0 10px 40px rgba(0,0,0,.14);--toggle-off:#cbd2da;--code-bg:#f6f7f9; }
+  :root[data-theme="dark"] { --bg:#16181c;--panel:#212429;--ink:#e9ebee;--muted:#9aa2ad;--line:#333842;--accent:#f0a020;--accent-ink:#ffdca0;--ok:#4ade80;--bad:#f87171;--chip:#2a2e35;--shadow:0 10px 40px rgba(0,0,0,.5);--toggle-off:#4a515b;--code-bg:#191c20; }
+
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; line-height:1.5; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.5rem; margin:.2rem 0 .4rem; }
+  .lede { color:var(--muted); max-width: 72ch; margin:.2rem 0 1.4rem; }
+  .lede code { background:var(--code-bg); padding:.05rem .35rem; border-radius:4px; font-size:.85em; }
+  .tabs { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1.5rem; }
+  .tab { border:1px solid var(--line); background:var(--panel); color:var(--ink); padding:.5rem .9rem; border-radius:999px; cursor:pointer; font-size:.9rem; font-weight:600; }
+  .tab[aria-selected="true"] { background:var(--accent); color:#231a06; border-color:var(--accent); }
+  .variant { display:none; }
+  .variant.active { display:block; }
+  .variant > .caption { color:var(--muted); max-width:74ch; margin:.2rem 0 1.4rem; }
+  .stage { display:flex; flex-wrap:wrap; gap:1.5rem; align-items:flex-start; }
+
+  /* desktop window chrome */
+  .win { width: 520px; max-width:100%; background:var(--panel); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); overflow:hidden; }
+  .win.wide { width: 640px; }
+  .titlebar { height:34px; display:flex; align-items:center; gap:8px; padding:0 12px; border-bottom:1px solid var(--line); background:linear-gradient(var(--panel),var(--bg)); }
+  .dot { width:11px; height:11px; border-radius:50%; }
+  .r{background:#ff5f57}.y{background:#febc2e}.g{background:#28c840}
+  .titlebar .t { font-size:.78rem; color:var(--muted); margin-left:6px; font-weight:600; }
+  .body { padding: 22px 24px 20px; }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .logo { width:30px; height:30px; border-radius:7px; background:linear-gradient(135deg,var(--accent),#d97706); display:grid; place-items:center; font-weight:800; color:#231a06; font-size:.95rem; }
+  .h { font-size:1.18rem; font-weight:700; margin:10px 0 2px; }
+  .sub { color:var(--muted); font-size:.9rem; margin:0 0 16px; }
+
+  .row { display:flex; gap:12px; padding:14px 0; border-top:1px solid var(--line); }
+  .row:first-of-type { border-top:none; }
+  .row .ic { width:26px; flex:0 0 26px; text-align:center; font-size:1.1rem; padding-top:1px; }
+  .row .meta { flex:1; }
+  .row .name { font-weight:650; font-size:.98rem; display:flex; align-items:center; gap:8px; }
+  .row .desc { color:var(--muted); font-size:.85rem; margin-top:3px; }
+  .row .desc.warn { color:var(--accent-ink); }
+  @media (prefers-color-scheme: dark){ .row .desc.warn{ color:var(--accent);} }
+
+  /* toggle */
+  .tg { flex:0 0 auto; align-self:center; }
+  .sw { position:relative; width:42px; height:24px; border-radius:999px; background:var(--toggle-off); cursor:pointer; transition:background .15s; }
+  .sw.on { background:var(--ok); }
+  .sw::after { content:""; position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%; background:#fff; transition:left .15s; box-shadow:0 1px 3px rgba(0,0,0,.3); }
+  .sw.on::after { left:20px; }
+
+  .pill { font-size:.68rem; font-weight:700; padding:.1rem .45rem; border-radius:999px; background:var(--chip); color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .pill.rec { background:rgba(240,160,32,.16); color:var(--accent-ink); }
+  @media (prefers-color-scheme: dark){ .pill.rec{ color:var(--accent);} }
+
+  .cta { margin-top:20px; display:flex; gap:10px; align-items:center; }
+  .btn { border:none; border-radius:8px; padding:.62rem 1.1rem; font-size:.93rem; font-weight:700; cursor:pointer; }
+  .btn.primary { background:var(--accent); color:#231a06; flex:1; }
+  .btn.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+  .foot { color:var(--muted); font-size:.76rem; margin-top:12px; text-align:center; }
+  .foot a { color:var(--accent-ink); } @media (prefers-color-scheme: dark){ .foot a{color:var(--accent);} }
+
+  /* stepper */
+  .steps { display:flex; gap:6px; margin-bottom:16px; }
+  .step { flex:1; height:4px; border-radius:2px; background:var(--line); }
+  .step.done { background:var(--ok); } .step.cur { background:var(--accent); }
+  .stepnum { color:var(--muted); font-size:.76rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+
+  /* right column (variant D + status) */
+  .aside { flex:1; min-width:260px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+  .card h4 { margin:0 0 10px; font-size:.95rem; }
+  .st { display:flex; align-items:center; gap:8px; font-size:.85rem; padding:5px 0; color:var(--muted); }
+  .st .s { font-weight:700; } .st .s.ok{color:var(--ok)} .st .s.bad{color:var(--bad)} .st .s.pend{color:var(--muted)}
+  .note { font-size:.82rem; color:var(--muted); margin-top:10px; padding-top:10px; border-top:1px dashed var(--line); }
+
+  /* review list (variant B final + C) */
+  .review .row { padding:10px 0; }
+  .osbadge { display:inline-block; font-size:.72rem; font-weight:700; padding:.12rem .5rem; border-radius:6px; background:var(--chip); color:var(--muted); margin-bottom:12px; }
+
+  .legend { margin-top:1rem; color:var(--muted); font-size:.85rem; }
+  .themer { float:right; }
+  .themer button { background:var(--panel); border:1px solid var(--line); color:var(--ink); border-radius:8px; padding:.35rem .6rem; cursor:pointer; font-size:.8rem; }
+  details.copy { margin-top:1.2rem; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:.6rem 1rem; }
+  details.copy summary { cursor:pointer; font-weight:650; }
+  details.copy p { color:var(--muted); font-size:.88rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="themer">
+    <button onclick="document.documentElement.setAttribute('data-theme', document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark')">◐ theme</button>
+  </div>
+  <h1>First-run onboarding wizard — 4 layout variants</h1>
+  <p class="lede">Static mockups for the Aztec Accelerator's first-launch setup screen. All four cover the same three consented choices — <b>Encrypted Connection (HTTPS)</b>, <b>Start on Login</b>, <b>Auto-Update</b> — but differ in flow and altitude. The HTTPS toggle is the consequential one: turning it on installs a local certificate into your browsers' trust stores, which raises a native OS dialog (macOS keychain password / Windows security prompt; silent on Linux). Pick a direction, or mix. Copy shown is real, not lorem.</p>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" onclick="pick(0)">A · Single card</button>
+    <button class="tab" role="tab" aria-selected="false" onclick="pick(1)">B · Stepped</button>
+    <button class="tab" role="tab" aria-selected="false" onclick="pick(2)">C · Recommended default</button>
+    <button class="tab" role="tab" aria-selected="false" onclick="pick(3)">D · Choices + live consequence</button>
+  </div>
+
+  <!-- ============ VARIANT A ============ -->
+  <section class="variant active">
+    <p class="caption"><b>A · Single card.</b> Exactly what you described: all three toggles on one screen, each with a one-line explanation, one <b>Start</b> CTA. Lowest friction, everything visible at once. Best when we trust users to read three lines. This is the recommended baseline.</p>
+    <div class="stage">
+      <div class="win">
+        <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="t">Aztec Accelerator — Setup</span></div>
+        <div class="body">
+          <div class="brand"><div class="logo">A</div><div><div style="font-weight:700">Aztec Accelerator</div><div class="sub" style="margin:0">Native proving for Aztec dApps</div></div></div>
+          <div class="h">Let's get you set up</div>
+          <p class="sub">Three quick choices. You can change any of these later in Settings.</p>
+
+          <div class="row">
+            <div class="ic">🔒</div>
+            <div class="meta">
+              <div class="name">Encrypted Connection (HTTPS) <span class="pill rec">Recommended</span></div>
+              <div class="desc">Lets browsers talk to the accelerator over an encrypted channel — and is required for Safari.</div>
+              <div class="desc warn">⚠ Installs a local certificate into your browsers. macOS asks for your password; on Windows &amp; Linux this happens when you click Start (no separate prompt is guaranteed).</div>
+            </div>
+            <div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+          </div>
+
+          <div class="row">
+            <div class="ic">🚀</div>
+            <div class="meta">
+              <div class="name">Start on Login</div>
+              <div class="desc">Runs quietly in your menu bar so proving is instant when a dApp needs it — no manual launch.</div>
+            </div>
+            <div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+          </div>
+
+          <div class="row">
+            <div class="ic">⬆️</div>
+            <div class="meta">
+              <div class="name">Auto-Update</div>
+              <div class="desc">Installs signed updates in the background so you always have the latest proving speed and fixes.</div>
+            </div>
+            <div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+          </div>
+
+          <div class="cta">
+            <button class="btn primary">Start</button>
+            <button class="btn ghost">Skip for now</button>
+          </div>
+          <div class="foot">Encryption protects the channel between your browser and this app. <a href="#">Learn what it does & doesn't do</a></div>
+        </div>
+      </div>
+      <div class="aside">
+        <div class="card">
+          <h4>Why this layout</h4>
+          <div class="st"><span class="s ok">+</span> Everything on one screen; one decision moment.</div>
+          <div class="st"><span class="s ok">+</span> Fastest for the 90% who accept defaults.</div>
+          <div class="st"><span class="s bad">−</span> The HTTPS warning competes with two mundane toggles.</div>
+          <div class="note">Partial-failure state (if the cert install is declined or fails) is shown in variant D's right panel — it applies to all four.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ VARIANT B ============ -->
+  <section class="variant">
+    <p class="caption"><b>B · Stepped.</b> One decision per screen (HTTPS → Start on Login → Auto-Update → Review & Start). More screens, but each choice gets full attention and room for honest copy — especially the HTTPS trade-off. Best if we want the certificate decision to feel deliberate rather than bundled. Shown: step 1 (HTTPS) + the final review.</p>
+    <div class="stage">
+      <div class="win">
+        <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="t">Aztec Accelerator — Setup (1 of 4)</span></div>
+        <div class="body">
+          <div class="steps"><div class="step cur"></div><div class="step"></div><div class="step"></div><div class="step"></div></div>
+          <div class="stepnum">Step 1 · Security</div>
+          <div class="h">Turn on Encrypted Connection?</div>
+          <p class="sub">Recommended. Your browser will reach the accelerator over HTTPS instead of plain HTTP — and it's required for Safari to connect at all.</p>
+          <div class="card" style="margin:6px 0 4px;">
+            <div class="st"><span class="s ok">✓</span> Encrypted, authenticated channel on localhost</div>
+            <div class="st"><span class="s ok">✓</span> Works in Safari (Chrome & Firefox work either way)</div>
+            <div class="st"><span class="s pend">•</span> Installs a local certificate into your browser trust store</div>
+          </div>
+          <div class="row" style="border:none;padding-top:12px;">
+            <div class="ic">🔒</div>
+            <div class="meta">
+              <div class="name">Enable HTTPS</div>
+              <div class="desc warn">⚠ macOS asks for your password once · Windows/Linux install on Start with no separate prompt — the Start click is your consent</div>
+            </div>
+            <div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+          </div>
+          <div class="cta">
+            <button class="btn primary">Continue →</button>
+            <button class="btn ghost">Not now</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="win">
+        <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="t">Aztec Accelerator — Setup (4 of 4)</span></div>
+        <div class="body">
+          <div class="steps"><div class="step done"></div><div class="step done"></div><div class="step done"></div><div class="step cur"></div></div>
+          <div class="stepnum">Step 4 · Review</div>
+          <div class="h">Ready to finish</div>
+          <p class="sub">Here's what will happen when you click Start.</p>
+          <div class="review">
+            <div class="row"><div class="ic">🔒</div><div class="meta"><div class="name">Encrypted Connection <span class="pill">on</span></div><div class="desc">Will prompt for the certificate now</div></div></div>
+            <div class="row"><div class="ic">🚀</div><div class="meta"><div class="name">Start on Login <span class="pill">on</span></div></div></div>
+            <div class="row"><div class="ic">⬆️</div><div class="meta"><div class="name">Auto-Update <span class="pill">on</span></div></div></div>
+          </div>
+          <div class="cta"><button class="btn primary">Start</button><button class="btn ghost">← Back</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ VARIANT C ============ -->
+  <section class="variant">
+    <p class="caption"><b>C · Recommended default.</b> A hero "Recommended setup" with all three pre-selected and collapsed — one big <b>Get started</b> button for the majority, and a quiet <b>Customize</b> to expand the toggles. Optimizes hard for the accept-defaults path while keeping control one click away. Shown: collapsed hero + expanded state.</p>
+    <div class="stage">
+      <div class="win">
+        <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="t">Aztec Accelerator — Welcome</span></div>
+        <div class="body" style="text-align:center;">
+          <div class="logo" style="margin:8px auto 14px; width:44px; height:44px; font-size:1.3rem;">A</div>
+          <div class="h" style="font-size:1.35rem;">Welcome to Aztec Accelerator</div>
+          <p class="sub">We'll set you up with the recommended configuration:</p>
+          <div class="card" style="text-align:left; margin:0 0 6px;">
+            <div class="st"><span class="s ok">✓</span> <b>Encrypted Connection (HTTPS)</b> — secure, Safari-ready</div>
+            <div class="st"><span class="s ok">✓</span> <b>Start on Login</b> — always ready in your menu bar</div>
+            <div class="st"><span class="s ok">✓</span> <b>Auto-Update</b> — signed updates in the background</div>
+            <div class="note" style="text-align:left;">Enabling HTTPS installs a local certificate — your OS will ask you to confirm.</div>
+          </div>
+          <div class="cta" style="flex-direction:column; gap:8px;">
+            <button class="btn primary" style="width:100%;">Get started</button>
+            <button class="btn ghost" style="width:100%;" onclick="document.getElementById('c-custom').style.display='block'; this.style.display='none';">Customize…</button>
+          </div>
+          <div id="c-custom" style="display:none; text-align:left; margin-top:14px; border-top:1px solid var(--line); padding-top:6px;">
+            <div class="row"><div class="ic">🔒</div><div class="meta"><div class="name">Encrypted Connection (HTTPS)</div><div class="desc warn">⚠ Installs a certificate — macOS prompts for your password; Windows/Linux install on Start</div></div><div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+            <div class="row"><div class="ic">🚀</div><div class="meta"><div class="name">Start on Login</div></div><div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+            <div class="row"><div class="ic">⬆️</div><div class="meta"><div class="name">Auto-Update</div></div><div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="aside">
+        <div class="card">
+          <h4>Why this layout</h4>
+          <div class="st"><span class="s ok">+</span> One button for almost everyone.</div>
+          <div class="st"><span class="s ok">+</span> Reads as reassuring, not a form to fill.</div>
+          <div class="st"><span class="s bad">−</span> Hides the HTTPS cert consequence behind "Customize" — some will click Get started without registering the certificate step (the OS dialog still catches them, but the surprise is worse).</div>
+          <div class="note">Mitigation: keep the one-line "installs a local certificate" note visible even when collapsed (shown above).</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ VARIANT D ============ -->
+  <section class="variant">
+    <p class="caption"><b>D · Choices + live consequence.</b> Two columns: toggles on the left, a right panel that spells out exactly what will happen and — after Start — shows per-browser trust status and any partial failure. Most transparent and the best home for the honest Linux per-browser story and the retry-on-failure flow. Heavier, more technical. Shown mid-flow with a simulated partial failure.</p>
+    <div class="stage">
+      <div class="win wide">
+        <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="t">Aztec Accelerator — Setup</span></div>
+        <div class="body">
+          <span class="osbadge">Detected: Linux · Firefox + Chrome found</span>
+          <div class="stage" style="gap:20px;">
+            <div style="flex:1; min-width:240px;">
+              <div class="h" style="font-size:1.1rem;">Choose your setup</div>
+              <div class="row"><div class="ic">🔒</div><div class="meta"><div class="name">HTTPS <span class="pill rec">Rec</span></div><div class="desc">Encrypted channel; required for Safari</div></div><div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+              <div class="row"><div class="ic">🚀</div><div class="meta"><div class="name">Start on Login</div></div><div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+              <div class="row"><div class="ic">⬆️</div><div class="meta"><div class="name">Auto-Update</div></div><div class="tg"><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+              <div class="cta"><button class="btn primary">Start</button><button class="btn ghost">Skip</button></div>
+            </div>
+            <div class="aside">
+              <div class="card">
+                <h4>What will happen</h4>
+                <div class="st"><span class="s ok">✓</span> Certificate → system NSS store</div>
+                <div class="st"><span class="s ok">✓</span> Certificate → Firefox (default profile)</div>
+                <div class="st"><span class="s bad">✕</span> Snap Firefox — <b>certutil not found</b></div>
+                <div class="st"><span class="s pend">…</span> Start on Login</div>
+                <div class="st"><span class="s pend">…</span> Auto-Update</div>
+                <div class="note"><b>One store needs attention.</b> Install <code>libnss3-tools</code> to cover Snap Firefox, then <button class="btn ghost" style="padding:.2rem .5rem; font-size:.78rem;">Retry</button>. Everything else will still be applied.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:1rem; max-width:640px;">
+      <h4>Partial-failure behavior (applies to every variant)</h4>
+      <div class="st" style="color:var(--ink)">If the certificate step fails or is declined, HTTPS is left <b>off</b> with a Retry, and the other choices (Start on Login, Auto-Update) are still applied. The wizard never rolls everything back because one step failed.</div>
+    </div>
+  </section>
+
+  <details class="copy">
+    <summary>Naming decision this asks you to make (plan Ask A1)</summary>
+    <p>The mockups use <b>"Encrypted Connection (HTTPS)"</b> as the primary label (config key <code>https_enabled</code>, commands <code>enable_https</code>/<code>disable_https</code>). Alternatives considered: "Enable HTTPS" (clearer for failure states, per codex, but jargon-y as a headline) and "Encrypted Communication" (rejected as vague). The recommendation is the compromise: friendly label, plain command names. Tell me if you'd rather lead with "Enable HTTPS".</p>
+  </details>
+
+  <p class="legend">Mockups only — toggles and buttons are illustrative (toggles flip; Customize expands). No real IPC. Open alongside <a href="plan.md">plan.md</a>.</p>
+</div>
+<script>
+  function pick(i){
+    document.querySelectorAll('.tab').forEach((t,n)=>t.setAttribute('aria-selected', n===i?'true':'false'));
+    document.querySelectorAll('.variant').forEach((v,n)=>v.classList.toggle('active', n===i));
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+</script>
+</body>
+</html>

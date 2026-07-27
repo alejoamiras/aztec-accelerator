@@ -29,7 +29,13 @@ const REQUIRED_CSP: Record<string, string> = {
   "worker-src": "'none'",
 };
 
-const PAGES = ["authorize.html", "settings.html", "update-prompt.html"] as const;
+const PAGES = [
+  "authorize.html",
+  "settings.html",
+  "update-prompt.html",
+  "onboarding.html",
+  "renewal.html",
+] as const;
 
 async function read(p: string): Promise<string> {
   return await Bun.file(p).text();
@@ -141,12 +147,15 @@ const WINDOW_MATRIX: Record<string, string[]> = {
     "set_autostart",
     "set_auto_update",
     "set_speed",
-    "enable_safari_support",
-    "disable_safari_support",
+    "enable_https",
+    "disable_https",
+    "remove_https_trust",
     "remove_approved_origin",
   ],
   authorize: ["get_verified_info", "get_pending_auth", "respond_auth"],
   "update-prompt": ["respond_update_prompt"],
+  onboarding: ["get_onboarding_state", "complete_onboarding"],
+  renewal: ["renew_cert", "record_renewal_prompt"],
 };
 const snakeToPerm = (cmd: string) => `allow-${cmd.replace(/_/g, "-")}`;
 
@@ -162,10 +171,12 @@ describe("F-012 P3 — per-window capability ACL", () => {
     return out;
   }
 
-  test("exactly the 3 scoped capabilities exist — no default.json, no extras", async () => {
+  test("exactly the 5 scoped capabilities exist — no default.json, no extras", async () => {
     const files = await capFiles();
     expect(Object.keys(files).sort()).toEqual([
       "authorize.json",
+      "onboarding.json",
+      "renewal.json",
       "settings.json",
       "update-prompt.json",
     ]);
@@ -211,10 +222,14 @@ describe("F-012 P3 — per-window capability ACL", () => {
     expect(commandsBlock, "build.rs COMMANDS block").toBeTruthy();
     const buildCommands = [...commandsBlock![1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).sort();
 
-    // main.rs: the generate_handler! command list.
+    // main.rs: the generate_handler! command list. Every entry is `commands::<name>,` today, but a
+    // command defined in main.rs itself would appear bare — so match an optional `commands::` prefix
+    // and require the trailing comma every entry has.
     const handlerBlock = mainRs.match(/generate_handler!\[([\s\S]*?)\]/);
     expect(handlerBlock, "main.rs generate_handler!").toBeTruthy();
-    const handlers = [...handlerBlock![1].matchAll(/commands::([a-z_]+)/g)].map((m) => m[1]).sort();
+    const handlers = [...handlerBlock![1].matchAll(/(?:commands::)?([a-z_]+)\s*,/g)]
+      .map((m) => m[1])
+      .sort();
 
     // union of every capability's granted commands (perm → snake).
     const files = await capFiles();
@@ -226,15 +241,106 @@ describe("F-012 P3 — per-window capability ACL", () => {
 
     expect(buildCommands).toEqual(handlers); // declared surface == registered surface
     expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
-    expect(handlers.length).toBe(13);
+    expect(handlers.length).toBe(18);
   });
 
-  test("tauri.conf.json pins the capability allowlist to exactly the 3", async () => {
+  test("tauri.conf.json pins the capability allowlist to exactly the 5", async () => {
     const c = JSON.parse(await read(TAURI_CONF));
     expect([...(c.app?.security?.capabilities ?? [])].sort()).toEqual([
       "authorize",
+      "onboarding",
+      "renewal",
       "settings",
       "update-prompt",
     ]);
+  });
+});
+
+// Tier-4 (audit R1 / C-1): the Windows NSIS uninstall hook must NEVER wipe the CA trust + certs during
+// an UPGRADE — Tauri runs the previous version's uninstaller when installing over an existing install.
+// The Windows leg of the `cert-trust` CI job now runs the real hook under all three command lines
+// (nsis/harness.test.nsi); this static test is the cheap companion that pins the SHAPE, so a refactor
+// that drops a guard fails on every platform in milliseconds rather than only in the Windows leg.
+//
+// TWO guards are load-bearing, not one. `$UpdateMode` is set from the installer's own `/UPDATE` flag
+// and forwarded to the old uninstaller only when the installer received it — so a manually downloaded
+// installer (the only upgrade route once auto-update is off) leaves it 0. The second guard is
+// `$EXEDIR` vs `$INSTDIR`: `_?=` means "do not copy yourself to temp", so an install-over runs the
+// uninstaller IN PLACE while a real uninstall runs a `~nsu*.tmp` copy. `_?=` itself is NOT detectable
+// — the NSIS stub strips it from `$CMDLINE` (measured; a guard that searched $CMDLINE for it shipped
+// and failed). Both directories are canonicalized before comparison because a textual mismatch would
+// mean "delete", the unsafe direction.
+describe("NSIS uninstall hook — an upgrade must not wipe trust", () => {
+  const HOOKS = path.join(SRC_TAURI, "nsis", "hooks.nsi");
+
+  test("the destructive ops require BOTH $UpdateMode <> 1 and $EXEDIR != $INSTDIR", async () => {
+    const nsi = await read(HOOKS);
+    const guardOpen = nsi.search(/\$\{If\}\s*\$UpdateMode\s*<>\s*1/);
+    const andGuard = nsi.search(/\$\{AndIf\}\s*\$\d\s*!=\s*\$\d/);
+    const delstore = nsi.search(/-delstore\s+Root/i);
+    const rmdir = nsi.search(/RMDir\s+\/r/i);
+    // The LAST ${EndIf} closes the destructive block; earlier ones close the path canonicalization.
+    const guardClose = nsi.lastIndexOf("${EndIf}");
+
+    expect(guardOpen, "an ${If} $UpdateMode <> 1 guard must exist").toBeGreaterThanOrEqual(0);
+    expect(
+      andGuard,
+      "the in-place-vs-temp-copy result must be ANDed into the SAME condition",
+    ).toBeGreaterThan(guardOpen);
+    expect(delstore, "-delstore Root must sit AFTER both guards").toBeGreaterThan(andGuard);
+    expect(rmdir, "the cert RMDir must sit AFTER both guards").toBeGreaterThan(andGuard);
+    expect(guardClose, "the guard must close AFTER the destructive ops").toBeGreaterThan(delstore);
+    expect(guardClose).toBeGreaterThan(rmdir);
+  });
+
+  test("both directories are canonicalized before they are compared", async () => {
+    // Comparing $EXEDIR to $INSTDIR raw would let one directory spelled two ways (casing, trailing
+    // slash, 8.3 short name) read as "different" — i.e. as a real uninstall — and wipe the anchor.
+    const nsi = await read(HOOKS);
+    const normalized = [
+      ...nsi.matchAll(/GetFullPathName\s+\/SHORT\s+\$\d\s+"\$(EXEDIR|INSTDIR)"/g),
+    ];
+    expect(
+      normalized.map((m) => m[1]).sort(),
+      "both $EXEDIR and $INSTDIR must be canonicalized",
+    ).toEqual(["EXEDIR", "INSTDIR"]);
+    // Raw $EXEDIR/$INSTDIR must never be the operands of the guard comparison itself.
+    expect(nsi).not.toMatch(/\$\{AndIf\}\s*"?\$EXEDIR/);
+  });
+});
+
+// The desktop-ui layout specs size the page to the REAL Tauri window, because Playwright's default
+// 1280x720 viewport made every clipping bug invisible — the speed slider cut off at the window's
+// bottom edge and the onboarding height both had to be caught by hand. Those specs are only as
+// truthful as their constants, so pin them to windows.rs.
+describe("desktop-ui layout specs use the real window sizes", () => {
+  test("e2e/window-sizes.ts matches src-tauri/src/windows.rs", async () => {
+    const rs = await read(path.join(SRC_TAURI, "src", "windows.rs"));
+    const ts = await read(path.join(SRC_TAURI, "..", "e2e", "window-sizes.ts"));
+
+    // Each WindowConfig literal: label (or the auth popup's `&label`), then width/height. Comments sit
+    // between the fields, so match non-greedily across them.
+    const configs = [
+      ...rs.matchAll(
+        /label:\s*(?:"(?<label>[a-z-]+)"|&label)[\s\S]*?width:\s*(?<w>[\d.]+)[\s\S]*?height:\s*(?<h>[\d.]+)/g,
+      ),
+    ].map((m) => ({
+      // The auth popup's label is built per request (`auth-<id>`); the specs key it as "authorize".
+      label: m.groups?.label ?? "authorize",
+      width: Number(m.groups?.w),
+      height: Number(m.groups?.h),
+    }));
+    expect(configs.length, "should find every WindowConfig in windows.rs").toBeGreaterThanOrEqual(
+      5,
+    );
+
+    for (const { label, width, height } of configs) {
+      const entry = ts.match(
+        new RegExp(`"?${label}"?:\\s*\\{\\s*width:\\s*(\\d+),\\s*height:\\s*(\\d+)`),
+      );
+      expect(entry, `window-sizes.ts is missing "${label}"`).not.toBeNull();
+      expect(Number(entry?.[1]), `${label} width`).toBe(width);
+      expect(Number(entry?.[2]), `${label} height`).toBe(height);
+    }
   });
 });

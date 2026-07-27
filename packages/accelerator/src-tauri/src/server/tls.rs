@@ -12,12 +12,20 @@ use accelerator_core::server::{bind_with_retry, router_for_port, AppState, HTTPS
 
 /// Start an HTTPS listener using the provided TLS config.
 /// Runs independently from HTTP — errors are logged but never crash the app.
+///
+/// `ready` is signalled EXACTLY once with the bind outcome: `true` after the listener actually binds,
+/// `false` if the port is unavailable past the retry budget. The Settings/onboarding enable path
+/// awaits it so it persists `https_enabled = true` only once HTTPS is genuinely live (post-impl codex
+/// High: bind failure used to be swallowed as success, silently breaking Safari/strict users). The
+/// launch-time caller ignores the receiver.
 pub async fn start_https(
     state: AppState,
     tls_config: Arc<tokio_rustls::rustls::ServerConfig>,
+    ready: tokio::sync::oneshot::Sender<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Capture the shared bind-state flag before `router_for_port` consumes `state`.
+    // Capture the shared bind-state flag + served-cert slot before `router_for_port` consumes `state`.
     let https_bound = state.https_bound.clone();
+    let state_fingerprint = state.served_ca_fingerprint.clone();
     // Pass HTTPS_PORT so the loopback-Host guard accepts `127.0.0.1:59834` (Safari) and rejects a
     // `:59833` authority replayed onto the HTTPS listener.
     let app = router_for_port(state, HTTPS_PORT);
@@ -30,11 +38,20 @@ pub async fn start_https(
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("HTTPS port {HTTPS_PORT} unavailable: {e} — continuing HTTP-only");
+            let _ = ready.send(false);
             return Ok(());
         }
     };
-    // The listener bound — mark HTTPS live so /health advertises https_port (Q7).
+    // The listener bound — mark HTTPS live so /health advertises https_port (Q7). The CALLER owns the
+    // lifecycle lock and holds it until it has finished committing state (e.g. `https_enabled = true`);
+    // it releases once this `ready` signal resolves, so the endless serving loop below runs unlocked.
+    //
+    // Record WHICH cert identity this listener holds: the acceptor is fixed for the life of the loop,
+    // so after a later rotation the files on disk no longer describe what we serve. A re-enable
+    // consults this to avoid committing "enabled" over a listener serving a since-untrusted cert.
+    *state_fingerprint.write() = crate::certs::live_ca_fingerprint();
     https_bound.store(true, Ordering::Relaxed);
+    let _ = ready.send(true);
 
     let acceptor = TlsAcceptor::from(tls_config);
     tracing::info!("HTTPS server listening on {addr}");

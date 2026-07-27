@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Aztec Accelerator</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="onboarding.css" />
+    <script type="module" src="assets/onboarding.js"></script>
+  </head>
+  <body class="scrollable">
+    <div class="wiz">
+      <h1>Let's get you set up</h1>
+      <p class="sub">Three quick choices, all changeable later in Settings. Skipping changes nothing.</p>
+
+      <div class="opt">
+        <div class="ic">🔒</div>
+        <div class="meta">
+          <div class="name">Encrypted Connection (HTTPS)</div>
+          <div class="desc" id="https-desc">Lets your browser talk to the accelerator over an encrypted channel. Required for Safari.</div>
+          <div class="desc warn" id="https-warn"></div>
+          <div class="result" id="https-result"></div>
+          <button type="button" class="retry" id="https-retry">Retry</button>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="opt-https" role="switch" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="opt">
+        <div class="ic">🚀</div>
+        <div class="meta">
+          <div class="name">Start on Login</div>
+          <div class="desc">Runs quietly in your menu bar so proving is instant, with no manual launch.</div>
+          <div class="result" id="autostart-result"></div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="opt-autostart" role="switch" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="opt">
+        <div class="ic">⬆️</div>
+        <div class="meta">
+          <div class="name">Auto-Update</div>
+          <div class="desc">Installs signed updates in the background so you always have the latest proving speed and fixes.</div>
+          <div class="result" id="auto-update-result"></div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="opt-auto-update" role="switch" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="cta">
+        <button type="button" class="primary" id="start">Start</button>
+      </div>
+    </div>
+  </body>
+</html>

@@ -30,6 +30,25 @@ body {
   user-select: none;
 }
 
+/* Windows whose content can legitimately outgrow the frame: Settings when the certificate
+   disclosure opens, the wizard when per-row results appear. Sizing the window for the tallest
+   possible state would leave dead space in the common one, so these scroll instead. The popups keep
+   `overflow: hidden` — they manage their own inner scroll so their buttons stay pinned (F-014). */
+body.scrollable {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+body.scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+
+body.scrollable::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
 h2 {
   font-size: 14px;
   font-weight: 600;
@@ -113,13 +132,80 @@ h2 {
   opacity: 0.5;
 }
 
-/* Origin list — fixed height ~3 rows, scrolls if more */
+/* A bordered container that HUGS its content and only scrolls past ~3 rows. A fixed height left
+   dead space under the last row (read as a stray margin) and, when empty, an unbordered void with the
+   caption stranded below it. The empty state now lives INSIDE this well. */
+.well {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+
+/* Origin list — grows with content, scrolls past ~3 rows */
 .origin-list {
   list-style: none;
-  height: 108px;
+  max-height: 108px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+}
+
+/* No trailing gap between the last row and the well's edge. */
+.origin-item:last-child {
+  margin-bottom: 0;
+}
+
+/* Two-line rows: label above, consequence in muted text below. */
+.row-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.row-sub {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* Disclosure for actions that are real but not everyday (certificate removal). */
+.disclosure > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  list-style: none;
+  user-select: none;
+}
+
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure > summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s;
+}
+
+.disclosure[open] > summary {
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.disclosure[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .origin-list::-webkit-scrollbar {
@@ -144,14 +230,18 @@ h2 {
   font-family: monospace;
 }
 
+/* Match the row's own line box so the label and the button sit on the same optical centre —
+   the origin text is 11px monospace, so a 13px system-font button rode high. */
 .origin-item button {
   background: none;
   border: none;
   color: var(--danger);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 11px;
+  line-height: 1.5;
   padding: 2px 6px;
   border-radius: 4px;
+  flex: 0 0 auto;
 }
 
 .origin-item button:hover {
@@ -362,6 +452,33 @@ h2 {
 
 .btn-secondary:hover {
   background: var(--surface-raised);
+}
+
+/* Destructive, in-row action (certificate removal). Quiet until hovered — it is a real recovery
+   path, not an everyday control, so it should never compete with the toggles for attention. */
+.btn-danger {
+  padding: 5px 12px;
+  font-size: 12px;
+  background: var(--surface-raised);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  flex: 0 0 auto;
+}
+
+.btn-danger:hover {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .popup-remember {

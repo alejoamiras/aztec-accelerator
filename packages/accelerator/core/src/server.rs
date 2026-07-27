@@ -114,8 +114,26 @@ pub struct HeadlessState {
     /// `true` once `start_https` has actually bound the HTTPS listener. Shared (Arc'd atomic) across
     /// the HTTP + HTTPS servers so `/health` advertises `https_port` from the REAL bind state — not
     /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
-    /// (HTTPS skipped, but `safari_support` config stays on). (Q7)
+    /// (HTTPS skipped, but `https_enabled` config stays on). (Q7)
     pub https_bound: Arc<AtomicBool>,
+    /// Serializes the ENTIRE HTTPS bring-up: cert-set inspection/generation/trust-install, the
+    /// pre-expiry rotation, the TLS load, and the bind. The launch gate and the Settings/onboarding
+    /// enable path can both decide to start HTTPS at the same moment; without one owner they raced in
+    /// three separate ways (post-impl codex): two listeners fighting for the port with the loser
+    /// reporting failure while HTTPS was live; one path loading the cert set mid-`swap_into` and
+    /// getting a MIXED leaf/key; and two paths concurrently WRITING cert sets, leaving the live set
+    /// corrupt. An async mutex (not an atomic flag) so a waiter blocks exactly as long as the owner
+    /// takes — cert generation can raise an OS trust dialog and NSS rotation shells out per store, so
+    /// no fixed timeout can bound it correctly. Held only until the bind resolves; the serving loop
+    /// runs unlocked (see the GUI's `start_https`).
+    pub https_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    /// Fingerprint of the CA the RUNNING listener is actually serving (set when it binds). `https_bound`
+    /// only says a listener exists — it cannot say *which* cert identity that listener holds, because a
+    /// rotation swaps the files while the in-memory `TlsAcceptor` keeps the old leaf until relaunch. A
+    /// re-enable that skips rebinding on `https_bound` alone could therefore commit "HTTPS enabled"
+    /// while the listener serves a cert whose anchor was since removed (post-impl codex Medium).
+    /// Compared against `certs::live_ca_fingerprint()` to detect exactly that.
+    pub served_ca_fingerprint: Arc<RwLock<Option<String>>>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
@@ -152,6 +170,8 @@ impl Default for HeadlessState {
             bundled_version: None,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             https_bound: Arc::new(AtomicBool::new(false)),
+            https_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            served_ca_fingerprint: Arc::new(RwLock::new(None)),
             config: None,
             auth_manager: None,
             prove_semaphore: Arc::new(Semaphore::new(1)),
@@ -174,6 +194,8 @@ impl HeadlessState {
             app_version: app_version.into(),
             bundled_version,
             https_bound: Arc::new(AtomicBool::new(false)),
+            https_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            served_ca_fingerprint: Arc::new(RwLock::new(None)),
             config,
             auth_manager,
             prove_semaphore: Arc::new(Semaphore::new(1)),
@@ -318,9 +340,9 @@ async fn health(
     });
 
     // Advertise https_port only when the HTTPS listener actually bound (set by start_https after a
-    // successful bind), NOT when the config merely requests Safari support. Keying off the config flag
+    // successful bind), NOT when the config merely requests HTTPS. Keying off the config flag
     // would point the SDK at a dead port on the untrusted-CA startup path (HTTPS skipped, config still
-    // on). The shared Arc'd flag also reflects a runtime enable_safari_support without a restart. (Q7)
+    // on). The shared Arc'd flag also reflects a runtime enable_https without a restart. (Q7)
     if state.https_bound.load(Ordering::Relaxed) {
         body["https_port"] = json!(HTTPS_PORT);
     }

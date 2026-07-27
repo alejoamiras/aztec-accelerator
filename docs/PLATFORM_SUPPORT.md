@@ -7,21 +7,46 @@
 | **macOS 13+** (Ventura) | Apple Silicon (arm64) | Supported | Primary development platform |
 | **macOS 13+** (Ventura) | Intel (x86_64) | Supported | Built and tested in CI |
 | **Linux** | x86_64 | Supported | .deb and .AppImage provided |
-| **Windows** | — | Not supported | No build target configured |
+| **Windows** | x86_64 | Supported | NSIS installer (per-user) |
+
+## Encrypted Connection (HTTPS)
+
+HTTPS between the browser and the accelerator is **default-on**, consented through the first-run
+onboarding wizard, on **all three** desktop OSes (it was previously a macOS-only "Safari Support"
+toggle). It gives an encrypted, authenticated loopback channel; Safari *requires* it (Safari blocks
+plain HTTP from an HTTPS page), while Chrome/Firefox/Edge use it when the local certificate is trusted
+and otherwise fall back to HTTP with no added latency.
+
+The certificate is a **keyless local CA** (the CA signing key is generated in memory, signs one
+`localhost` leaf, and is discarded — never written to disk, so the trusted anchor can mint nothing)
+constrained to `127.0.0.1`, `::1`, and `localhost` via X.509 Name Constraints. The leaf is auto-renewed
+within 30 days of expiry.
+
+| OS | Trust store | Consent | Rotation re-trust | Uninstall |
+|----|-------------|---------|-------------------|-----------|
+| **macOS** | login Keychain (`security`) | password dialog on install | renewal consent window → password | Settings "Remove certificate trust"; or Keychain Access |
+| **Windows** | CurrentUser `Root` (`certutil.exe`) | the wizard's *Start* click (no separate dialog is guaranteed) | renewal consent window | NSIS uninstaller removes it; or Settings "Remove certificate trust" |
+| **Linux** | user NSS DBs — `~/.pki/nssdb` (Chrome/Chromium/Brave/Edge) + each Firefox profile — via `certutil` | the wizard's *Start* click (no OS dialog exists) | silent (user DBs need no auth) | Settings "Remove certificate trust"; or `aztec-accelerator --remove-ca-trust` |
+
+**Linux notes.** Requires `certutil` (the `.deb` depends on `libnss3-tools`; the AppImage detects it and
+degrades with an install hint if absent). Per-store trust status is shown honestly in the wizard/Settings.
+**Sandboxed (snap/flatpak) Chromium keeps a private, confined trust store the app cannot reach** — it is
+disclaimed, not silently claimed as covered. Firefox must be restarted to pick up a newly added anchor.
 
 ## macOS Details
 
 - **Code-signed and notarized** via Apple Developer ID
 - **Auto-update** via Ed25519-signed artifacts (tauri-plugin-updater)
-- **Safari support** available: local HTTPS server with auto-generated CA certificate trusted via Keychain
+- **Encrypted connection (HTTPS)** via the login Keychain — see [Encrypted Connection (HTTPS)](#encrypted-connection-https) above (this is what Safari requires)
 - **System tray** app — no Dock icon by default (Accessory activation policy)
 - **Start on Login** via LaunchAgent plist with crash recovery (KeepAlive + ThrottleInterval)
 
-### Safari HTTPS Support
+## Windows Details
 
-Safari blocks mixed content (HTTP from HTTPS pages). The accelerator can generate a local CA certificate, trust it in the macOS Keychain (requires password), and run an HTTPS server on port 59834. Enable via Settings > Safari Support.
-
-The CA certificate is constrained to `127.0.0.1`, `::1`, and `localhost` via X.509 Name Constraints. Leaf certificates are auto-renewed when expiring within 30 days.
+- **NSIS installer** (per-user, `installMode: currentUser`)
+- **Auto-update** via Ed25519-signed artifacts (tauri-plugin-updater)
+- **Encrypted connection (HTTPS)** via the CurrentUser `Root` store — see [Encrypted Connection (HTTPS)](#encrypted-connection-https). The NSIS uninstaller removes the trust anchor on a real uninstall (guarded so it never fires during an auto-update)
+- **Start on Login** via the autostart Run key; crash recovery via a Task Scheduler repeating trigger
 
 ## Linux Details
 
@@ -29,7 +54,7 @@ The CA certificate is constrained to `127.0.0.1`, `::1`, and `localhost` via X.5
 - **.AppImage** for other distros (self-contained, no install needed)
 - **System tray** requires a tray implementation (most desktop environments provide one; Wayland compositors may vary)
 - **Crash recovery** via systemd user service with `Restart=on-failure`
-- **No HTTPS support** — Safari is not available on Linux. Firefox and Chrome on Linux handle localhost HTTP correctly.
+- **Encrypted connection (HTTPS)** via user NSS databases (no root) — see [Encrypted Connection (HTTPS)](#encrypted-connection-https). Requires `certutil` (`.deb` depends on `libnss3-tools`)
 
 ### Wayland
 

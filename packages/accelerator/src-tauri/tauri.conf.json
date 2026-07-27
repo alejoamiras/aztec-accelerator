@@ -14,7 +14,9 @@
       "capabilities": [
         "authorize",
         "settings",
-        "update-prompt"
+        "update-prompt",
+        "onboarding",
+        "renewal"
       ]
     }
   },
@@ -45,7 +47,8 @@
     ],
     "linux": {
       "deb": {
-        "desktopTemplate": "main.desktop"
+        "desktopTemplate": "main.desktop",
+        "depends": ["libnss3-tools"]
       }
     },
     "macOS": {
@@ -56,7 +59,8 @@
         "type": "downloadBootstrapper"
       },
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./nsis/hooks.nsi"
       }
     }
   }

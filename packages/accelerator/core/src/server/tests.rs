@@ -106,12 +106,12 @@ async fn health_advertises_https_port_when_https_bound() {
 }
 
 #[tokio::test]
-async fn health_hides_https_port_when_safari_configured_but_not_bound() {
-    // The untrusted-CA startup path: safari_support stays ON in config, but HTTPS never bound
+async fn health_hides_https_port_when_https_configured_but_not_bound() {
+    // The untrusted-CA startup path: https_enabled stays ON in config, but HTTPS never bound
     // (https_bound = false). /health must NOT advertise https_port, or the SDK probes a dead
     // port. Regression guard for the Q7 health-signal fix.
     let cfg = crate::config::AcceleratorConfig {
-        safari_support: true,
+        https_enabled: true,
         ..Default::default()
     };
     let state = AppState {
@@ -140,7 +140,7 @@ async fn health_hides_https_port_when_safari_configured_but_not_bound() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
         json.get("https_port").is_none(),
-        "https_port must be absent when HTTPS hasn't bound, even if safari_support is configured"
+        "https_port must be absent when HTTPS hasn't bound, even if https_enabled is configured"
     );
 }
 
