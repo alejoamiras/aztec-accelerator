@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { AcceleratorTransport } from "./accelerator-transport.js";
+import { AcceleratorTransport, isRecognizedHealthBody } from "./accelerator-transport.js";
 import type { AcceleratorStatus } from "./types.js";
 
 const offlineStatus: AcceleratorStatus = { available: false, reason: "offline" };
+/** The minimal body the real accelerator always serves (server.rs — both minimal + detailed). */
+const HEALTHY = { status: "ok", api_version: 1 };
 
 describe("AcceleratorTransport", () => {
   describe("baseUrl / protocol negotiation", () => {
@@ -36,12 +38,14 @@ describe("AcceleratorTransport", () => {
   });
 
   describe("status cache", () => {
-    let realNow: typeof Date.now;
+    // The cache clock is performance.now() (monotonic — a wall-clock step backwards must not
+    // extend the TTL), so the TTL tests patch performance.now, not Date.now.
+    let realNow: typeof performance.now;
     beforeEach(() => {
-      realNow = Date.now;
+      realNow = performance.now.bind(performance);
     });
     afterEach(() => {
-      Date.now = realNow;
+      performance.now = realNow;
     });
 
     test("returns a cached status within the TTL, null once it expires", () => {
@@ -52,7 +56,7 @@ describe("AcceleratorTransport", () => {
       expect(t.getFreshCachedStatus()).toEqual(offlineStatus); // fresh hit
 
       // Advance past the 10s TTL → stale → re-probe required
-      Date.now = () => realNow() + 11_000;
+      performance.now = () => realNow() + 11_000;
       expect(t.getFreshCachedStatus()).toBeNull();
     });
 
@@ -176,7 +180,7 @@ describe("AcceleratorTransport", () => {
         const url: string = typeof input === "string" ? input : input.url;
         // HTTP answers immediately; HTTPS answers a bit later but well within the grace.
         if (url.startsWith("https://")) await new Promise((r) => setTimeout(r, 15));
-        return json({ status: "ok" });
+        return json(HEALTHY);
       }) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
@@ -188,7 +192,7 @@ describe("AcceleratorTransport", () => {
       globalThis.fetch = mock(async (input: any) => {
         const url: string = typeof input === "string" ? input : input.url;
         if (url.startsWith("https://")) throw new TypeError("connection refused");
-        return json({ status: "ok" });
+        return json(HEALTHY);
       }) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
@@ -205,7 +209,7 @@ describe("AcceleratorTransport", () => {
         const url: string = typeof input === "string" ? input : input.url;
         // HTTPS is bound but stalls far past the grace; HTTP is healthy immediately.
         if (url.startsWith("https://")) await new Promise((r) => setTimeout(r, 1_000));
-        return json({ status: "ok" });
+        return json(HEALTHY);
       }) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
@@ -222,7 +226,7 @@ describe("AcceleratorTransport", () => {
       globalThis.fetch = mock(async (input: any) => {
         const url: string = typeof input === "string" ? input : input.url;
         if (url.startsWith("https://")) return json({ error: "boom" }, 500);
-        return json({ status: "ok" });
+        return json(HEALTHY);
       }) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
@@ -236,7 +240,7 @@ describe("AcceleratorTransport", () => {
         // A 200 whose body is NOT parseable JSON — reachable via a foreign server on the HTTPS port.
         if (url.startsWith("https://"))
           return new Response("<html>not json</html>", { status: 200 });
-        return json({ status: "ok" });
+        return json(HEALTHY);
       }) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
@@ -244,14 +248,131 @@ describe("AcceleratorTransport", () => {
       expect(protocol).toBe("http");
     });
 
-    test("healthy HTTPS still readable by the caller after the winner-selection clone", async () => {
-      globalThis.fetch = mock(async () => json({ aztec_version: "5.0.0" })) as any;
+    test("the winning probe carries its parsed body (read once, no clone)", async () => {
+      const detailed = { ...HEALTHY, aztec_version: "5.0.0" };
+      globalThis.fetch = mock(async () => json(detailed)) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
-      const { response, protocol } = await t.probeHealth();
+      const { body, protocol } = await t.probeHealth();
       expect(protocol).toBe("https");
-      // #isHealthy cloned the response for its peek, so the original body is still consumable here.
-      expect(await response.json()).toEqual({ aztec_version: "5.0.0" });
+      // The transport consumed the stream exactly once (bounded) and hands the caller the parsed
+      // body — the caller never re-reads the response.
+      expect(body).toEqual(detailed);
+    });
+
+    test("HTTPS 200 with foreign-but-valid JSON loses to healthy HTTP (recognized-shape gate)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        // Squatter shapes that USED to pass the old field-presence check — none carry the real
+        // contract (status:"ok" AND api_version:1), so none may steal the pin.
+        if (url.startsWith("https://")) return json({ status: false, api_version: 99 });
+        return json(HEALTHY);
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const { protocol } = await t.probeHealth();
+      expect(protocol).toBe("http");
+    });
+
+    test("HTTPS 200 that stalls its body forever cannot hang the probe (bounded body read)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        if (url.startsWith("https://")) {
+          // Headers arrive, the body starts JSON and then never finishes — the old clone().json()
+          // hung on this indefinitely.
+          const stalled = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"status":"ok",'));
+              // never close, never enqueue again
+            },
+          });
+          return new Response(stalled, { status: 200 });
+        }
+        return json(HEALTHY);
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const start = performance.now();
+      const { protocol } = await t.probeHealth();
+      // Healthy HTTP wins after the grace; the stalled HTTPS neither wins nor blocks resolution.
+      expect(protocol).toBe("http");
+      expect(performance.now() - start).toBeLessThan(1_500);
+    });
+  });
+
+  describe("isRecognizedHealthBody (mirrors core probe.rs::is_healthy_aztec_response)", () => {
+    test("accepts exactly the accelerator contract", () => {
+      expect(isRecognizedHealthBody({ status: "ok", api_version: 1 })).toBe(true);
+      expect(isRecognizedHealthBody({ status: "ok", api_version: 1, version: "1.2.3" })).toBe(true);
+    });
+
+    test("rejects foreign / wrong / malformed shapes", () => {
+      expect(isRecognizedHealthBody({ status: "ok", api_version: 2 })).toBe(false);
+      expect(isRecognizedHealthBody({ status: "error", api_version: 1 })).toBe(false);
+      expect(isRecognizedHealthBody({ api_version: 1 })).toBe(false);
+      expect(isRecognizedHealthBody({ status: "ok" })).toBe(false);
+      expect(isRecognizedHealthBody({ status: false })).toBe(false);
+      expect(isRecognizedHealthBody({ hello: "world" })).toBe(false);
+      expect(isRecognizedHealthBody({})).toBe(false);
+      expect(isRecognizedHealthBody([])).toBe(false);
+      expect(isRecognizedHealthBody("not even an object")).toBe(false);
+      expect(isRecognizedHealthBody(null)).toBe(false);
+      expect(isRecognizedHealthBody(undefined)).toBe(false);
+    });
+  });
+
+  describe("configuration generation guard", () => {
+    test("a commit from a probe started before configure() is discarded (no pin, no cache)", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const staleGen = t.generation;
+      t.configure({ port: 12345 }); // reconfigured while the probe was in flight
+      const status: AcceleratorStatus = {
+        available: true,
+        needsDownload: false,
+        protocol: "https",
+      };
+      // The stale probe completes and tries to commit: must be a no-op.
+      t.commitStatus(status, { pin: "set", protocol: "https" }, staleGen);
+      expect(t.baseUrl).toBe("http://127.0.0.1:12345"); // NOT https — stale pin discarded
+      expect(t.getFreshCachedStatus()).toBeNull(); // NOT cached
+    });
+
+    test("a commit with the current generation applies normally", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const gen = t.generation;
+      const status: AcceleratorStatus = {
+        available: true,
+        needsDownload: false,
+        protocol: "https",
+      };
+      t.commitStatus(status, { pin: "set", protocol: "https" }, gen);
+      expect(t.baseUrl).toBe("https://127.0.0.1:59834");
+      expect(t.getFreshCachedStatus()).toEqual(status);
+    });
+  });
+
+  describe("demoteHttpsPin", () => {
+    test("clears an https pin (and the cache) outside strict mode", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.setProtocol("https");
+      t.cacheStatus({ available: true, needsDownload: false, protocol: "https" });
+      expect(t.demoteHttpsPin()).toBe(true);
+      expect(t.baseUrl).toBe("http://127.0.0.1:59833");
+      expect(t.getFreshCachedStatus()).toBeNull();
+    });
+
+    test("no-op when the pin is not https", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.setProtocol("http");
+      expect(t.demoteHttpsPin()).toBe(false);
+      expect(t.baseUrl).toBe("http://127.0.0.1:59833");
+    });
+
+    test("no-op in strict httpsOnly mode (never demote to a plaintext URL)", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      t.setProtocol("https");
+      expect(t.demoteHttpsPin()).toBe(false);
+      expect(t.baseUrl).toBe("https://127.0.0.1:59834");
     });
   });
 
@@ -269,7 +390,7 @@ describe("AcceleratorTransport", () => {
       globalThis.fetch = mock(async (input: any) => {
         const url: string = typeof input === "string" ? input : input.url;
         urls.push(url);
-        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        return new Response(JSON.stringify(HEALTHY), { status: 200 });
       }) as any;
 
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);

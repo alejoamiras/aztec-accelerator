@@ -17,17 +17,94 @@ const PROBE_RETRY_DELAY_MS = 1_000;
  * nothing (see {@link AcceleratorTransport.probeHealth}).
  */
 const HTTPS_GRACE_MS = 250;
+/**
+ * Deadline + byte cap for reading a `/health` BODY. Ky's `timeout` only bounds time-to-headers — a
+ * responder that returns `200` and then stalls (or streams forever) would otherwise hang the probe
+ * indefinitely and buffer unbounded bytes (post-impl codex High). The real body is <2 KB.
+ */
+const HEALTH_BODY_TIMEOUT_MS = 2_000;
+const HEALTH_BODY_MAX_BYTES = 64 * 1024;
 /** /prove is long-running (native bb proof) — generous timeout. */
 const PROVE_TIMEOUT_MS = ms("10 min");
 
-/** A settled `/health` probe: the {@link Response} and which protocol reached it. */
-type ProbeResult = { response: Response; protocol: AcceleratorProtocol };
+/**
+ * A settled `/health` probe: the {@link Response}, which protocol reached it, and the response body
+ * parsed ONCE under {@link HEALTH_BODY_TIMEOUT_MS}/{@link HEALTH_BODY_MAX_BYTES} (`undefined` =
+ * unparseable, over-cap, or stalled). The body stream is consumed here — callers use `body`, never
+ * `response.json()`.
+ */
+type ProbeResult = { response: Response; protocol: AcceleratorProtocol; body: unknown };
 
 /** q7e3-F-06: the three protocol-pin transitions {@link AcceleratorTransport.commitStatus} can apply. */
 export type ProtocolTransition =
   | { pin: "set"; protocol: AcceleratorProtocol }
   | { pin: "clear" }
   | { pin: "keep" };
+
+/**
+ * The exact health-body contract the accelerator has always served (`{"status":"ok","api_version":1}`
+ * on both the minimal and detailed `/health`). Mirrors the app's OWN redundant-instance classifier
+ * (`core/src/server/probe.rs::is_healthy_aztec_response`) — anything weaker let a foreign 200-JSON
+ * responder on the fixed HTTPS port win the protocol pin by merely *having* a recognizable field
+ * (post-impl codex High: pin poisoning → witness exfiltration). Field-presence is NOT identity;
+ * this shape check is collision resistance, not authentication — see the `httpsOnly` docs.
+ */
+export function isRecognizedHealthBody(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+  const b = body as Record<string, unknown>;
+  return b.status === "ok" && b.api_version === 1;
+}
+
+/**
+ * Read + JSON-parse a response body with a hard deadline and byte cap. Consumes the body (no
+ * `clone()` — a clone tees the stream and can buffer an unbounded pending branch). Returns
+ * `undefined` on any failure: non-JSON, over-cap, deadline, or stream error.
+ */
+async function readJsonBounded(response: Response): Promise<unknown> {
+  try {
+    const stream = response.body;
+    if (!stream) {
+      // No stream (exotic environments / test doubles): deadline-race a plain text() read.
+      const text = await Promise.race([
+        response.text(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("health body deadline")), HEALTH_BODY_TIMEOUT_MS),
+        ),
+      ]);
+      if (text.length > HEALTH_BODY_MAX_BYTES) return undefined;
+      return JSON.parse(text);
+    }
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    // On deadline, cancel the reader: the pending read() resolves `done`, the partial buffer fails
+    // JSON.parse below, and the probe settles as unhealthy instead of hanging.
+    const deadline = setTimeout(() => void reader.cancel().catch(() => {}), HEALTH_BODY_TIMEOUT_MS);
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > HEALTH_BODY_MAX_BYTES) {
+          await reader.cancel().catch(() => {});
+          return undefined;
+        }
+        chunks.push(value);
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.byteLength;
+    }
+    return JSON.parse(new TextDecoder().decode(merged));
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Owns all network I/O to the local accelerator: endpoint/URL construction, the
@@ -48,7 +125,15 @@ export class AcceleratorTransport {
   #httpsOnly: boolean;
   /** Protocol that last reached `/health`; pins which endpoint `/prove` uses. `null` = not yet negotiated. */
   #protocol: AcceleratorProtocol | null = null;
+  /** Cache timestamps use performance.now() — a wall-clock (Date.now) step backwards must not extend the TTL. */
   #statusCache: { result: AcceleratorStatus; timestamp: number } | null = null;
+  /**
+   * Endpoint-configuration generation. Bumped by {@link configure} so a probe that was in flight
+   * against the OLD endpoint cannot commit its result (pin + cache) against the NEW one — a stale
+   * commit would route `/prove` (and the witness in it) to an endpoint that was never probed
+   * (post-impl codex High).
+   */
+  #generation = 0;
 
   constructor(host: string, port: number, httpsPort: number, httpsOnly = false) {
     this.#host = host;
@@ -58,9 +143,8 @@ export class AcceleratorTransport {
   }
 
   /**
-   * Update connection settings. Resets BOTH the negotiated protocol and the status
-   * cache — each is keyed to the old endpoint, so a stale hit would report the wrong
-   * host/port for up to the TTL.
+   * Update connection settings. Resets the negotiated protocol and the status cache — each is keyed
+   * to the old endpoint — and bumps the generation so any in-flight probe's commit is discarded.
    */
   configure(config: { port?: number; httpsPort?: number; host?: string; httpsOnly?: boolean }) {
     if (config.port !== undefined) this.#port = config.port;
@@ -69,11 +153,35 @@ export class AcceleratorTransport {
     if (config.httpsOnly !== undefined) this.#httpsOnly = config.httpsOnly;
     this.#protocol = null;
     this.#statusCache = null;
+    this.#generation++;
+  }
+
+  /** The current configuration generation — capture before a probe, pass to {@link commitStatus}. */
+  get generation(): number {
+    return this.#generation;
+  }
+
+  /** Whether strict HTTPS-only mode is on (no HTTP URL is ever constructed). */
+  get httpsOnly(): boolean {
+    return this.#httpsOnly;
   }
 
   /** Pin (or clear, with `null`) the protocol that `/prove` should use. */
   setProtocol(protocol: AcceleratorProtocol | null) {
     this.#protocol = protocol;
+  }
+
+  /**
+   * Drop an HTTPS pin after a network-level `/prove` failure so the retry (and the next probe) can
+   * use HTTP. No-op in strict mode or when the pin isn't `https`. Also invalidates the status cache —
+   * it described an endpoint that just failed at the transport layer. Returns whether a demotion
+   * happened (the caller uses this to decide on an HTTP retry).
+   */
+  demoteHttpsPin(): boolean {
+    if (this.#httpsOnly || this.#protocol !== "https") return false;
+    this.#protocol = null;
+    this.#statusCache = null;
+    return true;
   }
 
   /**
@@ -84,8 +192,17 @@ export class AcceleratorTransport {
    * - `"clear"` — malformed-JSON or offline → unpin (a misbehaving/absent responder must not drive `/prove`).
    * - `"keep"`  — a non-OK status (`!response.ok`) → leave any EXISTING pin untouched (a fast error,
    *               e.g. an HTTPS cert failure, must not repin and must not clear a good pin).
+   *
+   * When `generation` is given and no longer current (the endpoint was reconfigured while this
+   * probe was in flight), the commit is DISCARDED — neither pin nor cache mutates — and the stale
+   * status is returned to its caller only.
    */
-  commitStatus(status: AcceleratorStatus, transition: ProtocolTransition): AcceleratorStatus {
+  commitStatus(
+    status: AcceleratorStatus,
+    transition: ProtocolTransition,
+    generation?: number,
+  ): AcceleratorStatus {
+    if (generation !== undefined && generation !== this.#generation) return status;
     if (transition.pin === "set") this.#protocol = transition.protocol;
     else if (transition.pin === "clear") this.#protocol = null;
     // "keep" → #protocol unchanged.
@@ -106,7 +223,10 @@ export class AcceleratorTransport {
 
   /** The cached status if still within the TTL, else `null`. */
   getFreshCachedStatus(): AcceleratorStatus | null {
-    if (this.#statusCache && Date.now() - this.#statusCache.timestamp < STATUS_CACHE_TTL_MS) {
+    if (
+      this.#statusCache &&
+      performance.now() - this.#statusCache.timestamp < STATUS_CACHE_TTL_MS
+    ) {
       return this.#statusCache.result;
     }
     return null;
@@ -114,7 +234,7 @@ export class AcceleratorTransport {
 
   /** Store a freshly-computed status and return it (call-site convenience). */
   cacheStatus(status: AcceleratorStatus): AcceleratorStatus {
-    this.#statusCache = { result: status, timestamp: Date.now() };
+    this.#statusCache = { result: status, timestamp: performance.now() };
     return status;
   }
 
@@ -122,16 +242,22 @@ export class AcceleratorTransport {
    * Probe `/health`, **preferring HTTPS only when it's healthy**. One retry after
    * {@link PROBE_RETRY_DELAY_MS} if both fail the first time.
    *
-   * Selection (see plan §4 / audit R2): HTTPS wins iff it fulfills with `response.ok` AND a
-   * parseable JSON body — a fulfilled-but-non-OK or 200-but-malformed HTTPS (possible via a foreign
-   * server squatting the fixed HTTPS port, since `throwHttpErrors:false`) does NOT beat a healthy
-   * HTTP responder. Otherwise the HTTP result decides. If HTTP answers OK while HTTPS is still
-   * pending, HTTPS gets at most {@link HTTPS_GRACE_MS} to preempt; a refused HTTPS resolves in ~0ms
-   * so the common no-HTTPS path adds no latency.
+   * Selection (plan §4 / audit R2, hardened post-impl): HTTPS wins iff it fulfills with
+   * `response.ok` AND a body matching the accelerator's own health contract
+   * ({@link isRecognizedHealthBody}: `status:"ok"`, `api_version:1`) — a fulfilled-but-non-OK,
+   * 200-but-malformed, or 200-but-foreign-JSON HTTPS (possible via a server squatting the fixed
+   * HTTPS port, since `throwHttpErrors:false`) does NOT beat a healthy HTTP responder. Otherwise the
+   * HTTP result decides. If HTTP answers OK while HTTPS is still pending, HTTPS gets at most
+   * {@link HTTPS_GRACE_MS} to preempt; a refused HTTPS resolves in ~0ms so the common no-HTTPS path
+   * adds no latency.
    *
-   * Resolves with the winning {@link Response} + protocol; rejects only if BOTH probes fail twice
-   * (caller maps that to `reason: "offline"`). `throwHttpErrors:false` so a non-2xx still *resolves*
-   * (caller maps it to `reason: "error"`); `retry:0` so `ky` doesn't stack its own retries.
+   * Every settled probe's body is read exactly once under a deadline + byte cap
+   * ({@link readJsonBounded}) and returned as `body` — a `200` that stalls its body can neither hang
+   * the probe nor buffer unbounded memory.
+   *
+   * Resolves with the winning {@link ProbeResult}; rejects only if BOTH probes fail twice (caller
+   * maps that to `reason: "offline"`). `throwHttpErrors:false` so a non-2xx still *resolves* (caller
+   * maps it to `reason: "error"`); `retry:0` so `ky` doesn't stack its own retries.
    *
    * In strict {@link AcceleratorTransport.#httpsOnly} mode, only the HTTPS endpoint is ever probed
    * (no `http://` URL is constructed); an unreachable HTTPS ⇒ rejects ⇒ caller maps to `offline`.
@@ -141,7 +267,7 @@ export class AcceleratorTransport {
 
     const fire = (url: string, protocol: AcceleratorProtocol): Promise<ProbeResult> =>
       ky(url, { retry: 0, throwHttpErrors: false, timeout: HEALTH_PROBE_TIMEOUT_MS }).then(
-        (response) => ({ response, protocol }),
+        async (response) => ({ response, protocol, body: await readJsonBounded(response) }),
       );
 
     const probe = () => {
@@ -161,29 +287,9 @@ export class AcceleratorTransport {
     }
   }
 
-  /**
-   * "Healthy" for winner-selection: a 2xx response with a parseable JSON *object* body. Uses
-   * `response.clone()` so the caller can still read the original body (audit R2 — never consume the
-   * body the prover needs for its own classification). A 200 with a non-JSON / non-object body is
-   * NOT healthy, so it can't preempt a healthy HTTP responder.
-   */
-  async #isHealthy(response: Response): Promise<boolean> {
-    if (!response.ok) return false;
-    try {
-      const body: unknown = await response.clone().json();
-      // Must be a JSON *object* — `typeof [] === "object"` too, so exclude arrays explicitly.
-      if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
-      // Require a recognizable `/health` shape so a foreign 200-JSON responder squatting the fixed
-      // HTTPS port can't trivially masquerade as the accelerator and steal the pin. (A deliberate
-      // same-user attacker who mimics the schema is already past the SEC-04 line — dApps that need a
-      // hard guarantee should set `httpsOnly`.)
-      const b = body as Record<string, unknown>;
-      return (
-        "status" in b || "api_version" in b || "aztec_version" in b || "available_versions" in b
-      );
-    } catch {
-      return false;
-    }
+  /** "Healthy" for winner-selection: 2xx + the recognized accelerator health-body contract. */
+  #isHealthy(r: ProbeResult): boolean {
+    return r.response.ok && isRecognizedHealthBody(r.body);
   }
 
   /**
@@ -191,8 +297,9 @@ export class AcceleratorTransport {
    * contract. Structured so: (a) a healthy HTTPS wins the instant it appears — even before HTTP
    * settles — but a non-healthy HTTPS never preempts a still-pending HTTP; (b) once HTTP settles OK,
    * HTTPS gets a bounded {@link HTTPS_GRACE_MS} grace, and a HTTPS that already settled (refused /
-   * unhealthy) is not waited on; (c) if HTTP isn't OK, a healthy HTTPS is awaited fully, else any
-   * fulfilled response is returned for the caller to map, else both-failed throws.
+   * unhealthy) is not waited on; (c) if HTTP isn't OK, a healthy HTTPS is awaited fully — safe now
+   * that the body read is deadline-bounded, so `httpsHealthy` always settles — else any fulfilled
+   * response is returned for the caller to map, else both-failed throws.
    */
   async #probePreferHttps(
     httpsP: Promise<ProbeResult>,
@@ -202,8 +309,9 @@ export class AcceleratorTransport {
     const delay = (msTimeout: number) => new Promise((r) => setTimeout(r, msTimeout));
 
     // Resolves to the HTTPS ProbeResult iff it's healthy, else null (on unhealthy OR rejected).
+    // Settlement is guaranteed: fire() bounds both headers (ky timeout) and body (readJsonBounded).
     const httpsHealthy: Promise<ProbeResult | null> = httpsP.then(
-      async (r) => ((await this.#isHealthy(r.response)) ? r : null),
+      (r) => (this.#isHealthy(r) ? r : null),
       () => null,
     );
     // Non-throwing views for the fallback decision.
@@ -227,7 +335,7 @@ export class AcceleratorTransport {
     if (first.kind === "https") return first.r;
 
     const httpRes = first.r;
-    if (httpRes && httpRes.response.ok) {
+    if (httpRes?.response.ok) {
       // HTTP answered OK. Prefer HTTPS only if it becomes healthy within the grace window; a HTTPS
       // that already settled (refused/unhealthy → null) short-circuits the wait.
       const graced = await Promise.race<ProbeResult | null | "timeout">([

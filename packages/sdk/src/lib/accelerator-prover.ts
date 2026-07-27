@@ -4,7 +4,7 @@ import { type PrivateExecutionStep, serializePrivateExecutionSteps } from "@azte
 import { ChonkProofWithPublicInputs } from "@aztec/stdlib/proofs";
 import { HTTPError } from "ky";
 import sdkPkg from "../../package.json" with { type: "json" };
-import { AcceleratorTransport } from "./accelerator-transport.js";
+import { AcceleratorTransport, isRecognizedHealthBody } from "./accelerator-transport.js";
 import { logger } from "./logger.js";
 // q7e3-F-02: published types now live in ./types.ts (a neutral module); index.ts re-exports them.
 import type {
@@ -153,29 +153,47 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   /**
    * Probe the local accelerator's `/health` endpoint and return its status.
    * Use it to show "Accelerator connected" / "Offline" in your UI before a prove call.
+   *
+   * Single-flight: concurrent callers share one in-flight probe (per configuration generation), so
+   * overlapping health checks can't race each other's pin commits.
    */
   async checkAcceleratorStatus(): Promise<AcceleratorStatus> {
     // Return cached result if still fresh — avoids re-probing on every proof call
     // and eliminates the 1s retry delay when the accelerator is offline.
     const cached = this.#transport.getFreshCachedStatus();
     if (cached) return cached;
-    return this.#probeAndParseHealth();
+    // Reuse an in-flight probe ONLY if it targets the current endpoint configuration.
+    const gen = this.#transport.generation;
+    if (this.#inflightProbe && this.#inflightProbe.gen === gen) {
+      return this.#inflightProbe.promise;
+    }
+    const promise = this.#probeAndParseHealth(gen).finally(() => {
+      if (this.#inflightProbe?.promise === promise) this.#inflightProbe = null;
+    });
+    this.#inflightProbe = { gen, promise };
+    return promise;
   }
 
+  /** The in-flight `/health` probe, keyed to the transport generation it was started against. */
+  #inflightProbe: { gen: number; promise: Promise<AcceleratorStatus> } | null = null;
+
   /**
-   * Probe the accelerator's `/health` (dual HTTP/HTTPS, one retry) and parse the response into an
-   * {@link AcceleratorStatus}, caching the result. Extracted from {@link AcceleratorProver.checkAcceleratorStatus}
-   * (Q5) — behavior-identical; the status-cache fast-path stays in the caller.
+   * Probe the accelerator's `/health` (dual HTTP/HTTPS, one retry) and parse the result into an
+   * {@link AcceleratorStatus}, caching the result. `gen` is the configuration generation this probe
+   * was started against — every commit passes it, so a probe that raced a `setAcceleratorConfig`
+   * cannot pin/cache against the NEW endpoint (post-impl codex High).
    */
-  async #probeAndParseHealth(): Promise<AcceleratorStatus> {
+  async #probeAndParseHealth(gen: number): Promise<AcceleratorStatus> {
     const sdkAztecVersion = this.#getAztecVersion();
 
     try {
-      // Probe HTTP + HTTPS (one retry after 1s), preferring HTTPS when it's healthy (ok + parseable).
-      // Chrome/Firefox with HTTPS trusted: HTTPS wins → encrypted channel. HTTPS absent/untrusted:
-      // it rejects fast → HTTP wins with no added latency. Safari: HTTP blocked (mixed content) →
-      // HTTPS is the only responder. Both offline twice: probeHealth throws → caught → offline.
-      const { response, protocol } = await this.#transport.probeHealth();
+      // Probe HTTP + HTTPS (one retry after 1s), preferring HTTPS when it's healthy (ok + the
+      // recognized health contract). Chrome/Firefox with HTTPS trusted: HTTPS wins → encrypted
+      // channel. HTTPS absent/untrusted: it rejects fast → HTTP wins with no added latency. Safari:
+      // HTTP blocked (mixed content) → HTTPS is the only responder. Both offline twice: throws → offline.
+      // The transport already read the body ONCE, bounded (deadline + byte cap) — use `body`, never
+      // `response.json()`.
+      const { response, protocol, body } = await this.#transport.probeHealth();
 
       if (!response.ok) {
         // q7e3-F-06: non-OK → KEEP any existing pin. A fast error (e.g. an HTTPS cert failure)
@@ -183,35 +201,35 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         return this.#transport.commitStatus(
           { available: false, reason: "error", sdkAztecVersion, protocol },
           { pin: "keep" },
+          gen,
         );
       }
 
-      let data: { aztec_version?: string; available_versions?: string[] };
-      try {
-        data = (await response.json()) as {
-          aztec_version?: string;
-          available_versions?: string[];
-        };
-      } catch {
-        // Reachable but unparseable JSON — "error" (the host answered), NOT "offline" (both probes
-        // failed). q7e3-F-06: CLEAR the pin — a misbehaving responder shouldn't drive /prove.
+      // Reachable but not the accelerator's health contract (unparseable, stalled-body, or a
+      // foreign/malformed JSON shape — enforced in BOTH normal and httpsOnly modes): "error", NOT
+      // "offline". q7e3-F-06: CLEAR the pin — a misbehaving responder must not drive /prove.
+      if (!isRecognizedHealthBody(body)) {
         return this.#transport.commitStatus(
           { available: false, reason: "error", sdkAztecVersion, protocol },
           { pin: "clear" },
+          gen,
         );
       }
+      const data = body as { aztec_version?: string; available_versions?: string[] };
 
-      // q7e3-F-05: the version-policy decision is a pure function — a reachable, parsed /health
+      // q7e3-F-05: the version-policy decision is a pure function — a reachable, recognized /health
       // always pins the winning protocol (`set`); only the available/needsDownload/mismatch shape varies.
-      return this.#transport.commitStatus(this.#classifyHealth(data, protocol, sdkAztecVersion), {
-        pin: "set",
-        protocol,
-      });
+      return this.#transport.commitStatus(
+        this.#classifyHealth(data, protocol, sdkAztecVersion),
+        { pin: "set", protocol },
+        gen,
+      );
     } catch {
       // q7e3-F-06: both probes failed → offline; CLEAR the pin.
       return this.#transport.commitStatus(
         { available: false, reason: "offline", sdkAztecVersion },
         { pin: "clear" },
+        gen,
       );
     }
   }
@@ -299,7 +317,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
   /**
    * q7e3-F-11: the accelerated proving path — serialize, POST `/prove`, decode. A `403` (origin denied
-   * or auth timeout) emits `"denied"` and falls back to WASM; other errors propagate. Extracted from
+   * or auth timeout) emits `"denied"` and falls back to WASM. A NETWORK-level failure (no HTTP
+   * response at all — TLS/refused/timeout) while pinned to HTTPS demotes the pin and retries once
+   * over HTTP, then falls back to WASM (in strict `httpsOnly` mode: straight to WASM — the witness
+   * never goes plaintext). Without this, preferring HTTPS at `/health` made a later trust/listener
+   * change fail the whole prove despite a healthy HTTP path (post-impl codex High). Other HTTP-level
+   * errors (the accelerator answered, e.g. 500) still propagate. Extracted from
    * {@link AcceleratorProver.createChonkProof}; only reached when the accelerator is available.
    */
   async #proveRemote(executionSteps: PrivateExecutionStep[]): Promise<ChonkProofWithPublicInputs> {
@@ -333,6 +356,42 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         });
         this.#onPhase?.("denied");
         return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
+      }
+      // Network-level failure: no HTTP response at all (TLS handshake/cert failure, connection
+      // refused, timeout). The HTTPS listener/trust may have changed since /health pinned it.
+      if (!(err instanceof HTTPError)) {
+        if (this.#transport.demoteHttpsPin()) {
+          // Non-strict + was pinned https → the HTTP endpoint may still be healthy. Retry ONCE.
+          logger.warn("HTTPS /prove failed at the network layer; retrying once over HTTP", {
+            error: String(err),
+          });
+          try {
+            res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion);
+            return this.#decodeProof(res, start);
+          } catch (retryErr) {
+            if (retryErr instanceof HTTPError && retryErr.response.status === 403) {
+              this.#onPhase?.("denied");
+              return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
+            }
+            logger.warn("HTTP retry also failed, falling back to WASM", {
+              error: String(retryErr),
+            });
+            return this.#fallbackToWasm(
+              executionSteps,
+              "Local proof completed after transport failure",
+            );
+          }
+        }
+        if (this.#transport.httpsOnly) {
+          // Strict mode: never retry over HTTP — degrade to WASM instead of failing the dApp.
+          logger.warn("HTTPS /prove failed in httpsOnly mode, falling back to WASM", {
+            error: String(err),
+          });
+          return this.#fallbackToWasm(
+            executionSteps,
+            "Local proof completed after transport failure",
+          );
+        }
       }
       throw err;
     }

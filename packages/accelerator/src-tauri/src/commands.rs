@@ -527,8 +527,12 @@ pub async fn complete_onboarding(
 
     // F-012 convention: windows are closed from RUST, never by the page (no core:window JS grants).
     // On full success the wizard is done — close it; on partial failure it stays open for Retry.
+    // A failed native close propagates as Err so wireButton re-enables the controls (merge-audit
+    // Low): every completed action is idempotent, so the user just clicks Start again.
     if completed {
-        let _ = window.close();
+        window
+            .close()
+            .map_err(|e| format!("setup completed, but the window could not be closed: {e}"))?;
     }
 
     Ok(OnboardingResult {
@@ -551,8 +555,11 @@ pub fn dismiss_onboarding(
         cfg.onboarding_version = crate::config::ONBOARDING_VERSION
     })?;
     tracing::info!("Onboarding dismissed (marker set)");
-    // F-012: closed from Rust (the page has no core:window grant).
-    let _ = window.close();
+    // F-012: closed from Rust (the page has no core:window grant); a failed close propagates so
+    // wireButton re-enables Skip (merge-audit Low). The marker set above is idempotent on retry.
+    window
+        .close()
+        .map_err(|e| format!("dismissed, but the window could not be closed: {e}"))?;
     Ok(())
 }
 
@@ -573,9 +580,12 @@ pub async fn renew_cert(
         cfg.last_rotation_prompt_at = Some(now_unix_secs());
     });
     tracing::info!("Certificate renewed via consent window");
-    // F-012: closed from Rust on success (the page has no core:window grant); a failure leaves the
-    // window open with the wireButton error hint.
-    let _ = window.close();
+    // F-012: closed from Rust on success (the page has no core:window grant); a failed close
+    // propagates so wireButton re-enables the buttons (merge-audit Low) — rotate_now is idempotent
+    // enough for a retry (it mints another fresh set).
+    window
+        .close()
+        .map_err(|e| format!("renewed, but the window could not be closed: {e}"))?;
     Ok(())
 }
 
@@ -589,8 +599,11 @@ pub fn record_renewal_prompt(
     mutate_config(&config, |cfg| {
         cfg.last_rotation_prompt_at = Some(now_unix_secs());
     })?;
-    // "Later" dismisses the window — closed from Rust (F-012).
-    let _ = window.close();
+    // "Later" dismisses the window — closed from Rust (F-012); a failed close propagates so
+    // wireButton re-enables the button (merge-audit Low).
+    window
+        .close()
+        .map_err(|e| format!("recorded, but the window could not be closed: {e}"))?;
     Ok(())
 }
 

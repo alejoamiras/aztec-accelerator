@@ -170,24 +170,36 @@ If the user denies your site at step 3 (or authorization times out), the SDK emi
 ### Protocol preference (HTTP vs HTTPS)
 
 The SDK probes both endpoints in parallel and **prefers HTTPS when it's healthy** — a `/health` that
-responds `200` with a parseable body. Concretely:
+responds `200` with the accelerator's health contract (`status: "ok"`, `api_version: 1`, the same
+check the accelerator itself uses to recognize a sibling instance). Concretely:
 
 - If HTTPS answers healthy, it wins (encrypted channel) — even if HTTP answered first.
 - If HTTPS is absent or its certificate isn't trusted in this browser, its probe fails fast and
   **HTTP wins with no added latency** (the common Chrome/Firefox path is unchanged).
-- A HTTPS endpoint that answers non-`2xx` or with a malformed body does **not** win over a healthy
-  HTTP endpoint (guards against another process answering on the HTTPS port).
+- A HTTPS endpoint that answers non-`2xx`, with a malformed body, or with JSON that doesn't match
+  the health contract does **not** win over a healthy HTTP endpoint (guards against another process
+  answering on the HTTPS port). Health bodies are read under a hard deadline and size cap, so a
+  stalled responder can't hang detection.
 - Safari blocks HTTP-from-HTTPS, so HTTPS is the only responder there.
 
-The pinned protocol also drives the subsequent `/prove` request.
+The pinned protocol also drives the subsequent `/prove` request. If a pinned-HTTPS `/prove` later
+fails at the network layer (trust removed, listener stopped), the SDK drops the pin and retries once
+over HTTP before falling back to WASM — a broken HTTPS path never fails proving outright.
 
-**Strict mode (`httpsOnly`).** dApps that require an encrypted, authenticated channel can force it:
-the SDK then probes and POSTs over HTTPS **only**, never constructing an `http://` URL and never
-falling back — an unreachable/untrusted HTTPS accelerator simply reports offline (→ WASM fallback).
+**Strict mode (`httpsOnly`).** dApps that require an encrypted channel can force it: the SDK then
+probes and POSTs over HTTPS **only**, never constructing an `http://` URL — an unreachable/untrusted
+HTTPS accelerator (or a mid-proof network failure) degrades to the WASM fallback instead.
 
 ```typescript
 const prover = new AcceleratorProver({ accelerator: { httpsOnly: true } });
 ```
+
+> **What `httpsOnly` does and doesn't guarantee.** It guarantees the witness never leaves the page
+> over plaintext, and TLS + the name-constrained local CA authenticate that the endpoint presented a
+> certificate your browser trusts for `127.0.0.1`. It is **not** cryptographic pairing with a
+> specific accelerator install: any same-machine process that obtained a browser-trusted certificate
+> for localhost and squats the HTTPS port is past this line. The health-contract check is collision
+> resistance against accidental squatters, not authentication of a deliberate one.
 
 ### Environment Variables
 
