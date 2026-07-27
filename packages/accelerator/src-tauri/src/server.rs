@@ -8,46 +8,32 @@ pub use accelerator_core::server::*;
 mod tls;
 pub use tls::start_https;
 
-/// Exclusive claim on the HTTPS lifecycle — held across the WHOLE rotate → load-TLS → bind sequence,
-/// not just the bind (post-impl codex). Claiming only at spawn time left a window where the launch
-/// gate was mid-rotation while the enable path loaded the pre-rotation (or, between `swap_into`'s
-/// sequential renames, a MIXED leaf/key) set and won the bind — serving a stale leaf for the whole
-/// session, or failing to load and resetting `https_enabled`.
+/// Exclusive ownership of the HTTPS bring-up, held across the WHOLE sequence: cert
+/// inspect/generate/trust → rotate → load TLS → bind. Anything narrower has raced (post-impl codex):
+/// claiming only at spawn time let the other path load a mid-`swap_into` MIXED leaf/key set, and
+/// claiming only after the cert checks let both paths WRITE cert sets concurrently and corrupt the
+/// live one.
 ///
-/// Releases on `Drop`, so every early return in the claim-holding caller (a failed rotation, a failed
-/// TLS load) frees the slot automatically — a missed manual release would wedge HTTPS for the rest of
-/// the process. Ownership moves into [`spawn_https`]'s task, which drops it only when the listener
-/// exits (a successful serving loop never returns, so a live listener keeps the claim — harmless,
-/// since `https_bound` short-circuits every later attempt before it tries to claim).
-pub struct HttpsStartClaim {
-    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+/// It is a `tokio::sync::Mutex` guard, not an atomic flag, because a waiter must block for exactly as
+/// long as the owner takes — the owner may raise an OS trust dialog (unbounded: the user is typing a
+/// password) or shell out to `certutil` per NSS store, so any fixed polling budget would either give
+/// up early (reporting a spurious failure while the owner is still working) or stall needlessly.
+///
+/// Released as soon as the bind RESOLVES — the serving loop then runs unlocked, so a later enable can
+/// always take the lock. Dropping it on any early return is automatic.
+pub type HttpsLifecycleGuard = tokio::sync::OwnedMutexGuard<()>;
+
+/// Take the HTTPS-lifecycle lock, waiting as long as the current owner needs. Async — the
+/// Settings/onboarding path uses this. Call it BEFORE touching the cert set.
+pub async fn claim_https_lifecycle(state: &AppState) -> HttpsLifecycleGuard {
+    state.https_lifecycle.clone().lock_owned().await
 }
 
-impl Drop for HttpsStartClaim {
-    fn drop(&mut self) {
-        self.flag.store(false, std::sync::atomic::Ordering::Release);
-        tracing::debug!("HTTPS lifecycle claim released");
-    }
-}
-
-/// Try to take the exclusive HTTPS-lifecycle claim. `None` ⇒ another task is already starting HTTPS;
-/// that caller must wait on `https_bound` rather than concluding failure. Call this BEFORE rotating or
-/// loading the cert set, so the whole sequence is single-owner.
-pub fn try_claim_https_start(state: &AppState) -> Option<HttpsStartClaim> {
-    use std::sync::atomic::Ordering;
-    // `Acquire`/`Release` so the winner's subsequent writes (and the `https_bound` flip inside
-    // start_https) are visible to a waiter that observes the flag.
-    if state
-        .https_starting
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        tracing::debug!("HTTPS start already in flight — not claiming");
-        return None;
-    }
-    Some(HttpsStartClaim {
-        flag: state.https_starting.clone(),
-    })
+/// Non-blocking variant for the synchronous launch gate (it runs on a blocking task and must never
+/// stall). `None` ⇒ the enable path already owns the bring-up, so launch simply stands down: that
+/// path will finish the job, including the bind.
+pub fn try_claim_https_lifecycle(state: &AppState) -> Option<HttpsLifecycleGuard> {
+    state.https_lifecycle.clone().try_lock_owned().ok()
 }
 
 /// Spawn the GUI-side HTTPS server with `tls_config`, logging any error. Shared by the two callers
@@ -55,25 +41,24 @@ pub fn try_claim_https_start(state: &AppState) -> Option<HttpsStartClaim> {
 /// spawn+error-log wrapper is unified; each caller keeps its own (intentionally divergent) TLS-load
 /// and failure-handling preamble upstream. (F-09)
 ///
-/// Requires the caller's [`HttpsStartClaim`] (proof it owns the lifecycle) and moves it into the
-/// spawned task. Returns a receiver resolving to the BIND outcome (`true` = listener live, `false` =
-/// port unavailable). The enable path awaits it before persisting `https_enabled`; the launch path
-/// drops it (a dropped receiver just makes `start_https`'s `send` a no-op — it does not cancel).
+/// Takes the caller's [`HttpsLifecycleGuard`] (proof it owns the bring-up) and hands it to
+/// `start_https`, which releases it the instant the bind resolves — so the lock covers the bind but
+/// NOT the serving loop. Returns a receiver resolving to that bind outcome (`true` = listener live,
+/// `false` = port unavailable). The enable path awaits it before persisting `https_enabled`; the
+/// launch path drops it (a dropped receiver just makes the `send` a no-op — it does not cancel).
 pub fn spawn_https(
     state: AppState,
     tls_config: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
-    claim: HttpsStartClaim,
+    guard: HttpsLifecycleGuard,
 ) -> tokio::sync::oneshot::Receiver<bool> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = start_https(state, tls_config, tx).await {
+        if let Err(e) = start_https(state, tls_config, tx, guard).await {
             // start_https only returns Err before it can send `ready`; the dropped `tx` makes the
             // awaiting receiver observe a bind failure (RecvError), which the caller treats as such.
+            // The guard it owns is dropped with it, releasing the lock.
             tracing::error!("HTTPS server error: {e}");
         }
-        // Reached ONLY when the listener is not running (bind failure or a fatal error) — the serving
-        // loop never returns. Dropping the claim here frees the slot for a later retry.
-        drop(claim);
     });
     rx
 }

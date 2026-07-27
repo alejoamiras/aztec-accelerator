@@ -120,7 +120,7 @@ fn try_start_https(state: &AppState) {
     // leaf/key) while we rotate, and win the bind — serving a stale leaf all session or failing to
     // load. `None` ⇒ an enable path is already starting HTTPS; nothing for launch to do. The claim
     // releases on drop, so every early return below frees it.
-    let Some(claim) = aztec_accelerator::server::try_claim_https_start(state) else {
+    let Some(claim) = aztec_accelerator::server::try_claim_https_lifecycle(state) else {
         tracing::debug!("HTTPS already being started elsewhere — launch gate stands down");
         return;
     };

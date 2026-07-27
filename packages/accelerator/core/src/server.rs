@@ -116,13 +116,17 @@ pub struct HeadlessState {
     /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
     /// (HTTPS skipped, but `https_enabled` config stays on). (Q7)
     pub https_bound: Arc<AtomicBool>,
-    /// `true` while an HTTPS start attempt is IN FLIGHT (set by a compare-and-swap in the GUI's
-    /// `spawn_https`, cleared when that attempt's listener exits / fails to bind). The launch gate and
-    /// the Settings/onboarding enable path can both decide to start HTTPS at the same moment; without
-    /// this, both spawn, one loses the port with `AddrInUse`, and the loser reports failure even though
-    /// HTTPS is live (post-impl codex Medium). The CAS makes exactly one attempt run; the other waits
-    /// on `https_bound`.
-    pub https_starting: Arc<AtomicBool>,
+    /// Serializes the ENTIRE HTTPS bring-up: cert-set inspection/generation/trust-install, the
+    /// pre-expiry rotation, the TLS load, and the bind. The launch gate and the Settings/onboarding
+    /// enable path can both decide to start HTTPS at the same moment; without one owner they raced in
+    /// three separate ways (post-impl codex): two listeners fighting for the port with the loser
+    /// reporting failure while HTTPS was live; one path loading the cert set mid-`swap_into` and
+    /// getting a MIXED leaf/key; and two paths concurrently WRITING cert sets, leaving the live set
+    /// corrupt. An async mutex (not an atomic flag) so a waiter blocks exactly as long as the owner
+    /// takes — cert generation can raise an OS trust dialog and NSS rotation shells out per store, so
+    /// no fixed timeout can bound it correctly. Held only until the bind resolves; the serving loop
+    /// runs unlocked (see the GUI's `start_https`).
+    pub https_lifecycle: Arc<tokio::sync::Mutex<()>>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
@@ -159,7 +163,7 @@ impl Default for HeadlessState {
             bundled_version: None,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             https_bound: Arc::new(AtomicBool::new(false)),
-            https_starting: Arc::new(AtomicBool::new(false)),
+            https_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             config: None,
             auth_manager: None,
             prove_semaphore: Arc::new(Semaphore::new(1)),
@@ -182,7 +186,7 @@ impl HeadlessState {
             app_version: app_version.into(),
             bundled_version,
             https_bound: Arc::new(AtomicBool::new(false)),
-            https_starting: Arc::new(AtomicBool::new(false)),
+            https_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             config,
             auth_manager,
             prove_semaphore: Arc::new(Semaphore::new(1)),

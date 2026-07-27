@@ -22,6 +22,7 @@ pub async fn start_https(
     state: AppState,
     tls_config: Arc<tokio_rustls::rustls::ServerConfig>,
     ready: tokio::sync::oneshot::Sender<bool>,
+    lifecycle: super::HttpsLifecycleGuard,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Capture the shared bind-state flag before `router_for_port` consumes `state`.
     let https_bound = state.https_bound.clone();
@@ -38,12 +39,16 @@ pub async fn start_https(
         Err(e) => {
             tracing::warn!("HTTPS port {HTTPS_PORT} unavailable: {e} — continuing HTTP-only");
             let _ = ready.send(false);
+            // `lifecycle` drops here, releasing the bring-up lock so a later enable can retry.
             return Ok(());
         }
     };
     // The listener bound — mark HTTPS live so /health advertises https_port (Q7).
     https_bound.store(true, Ordering::Relaxed);
     let _ = ready.send(true);
+    // The bring-up is COMPLETE: release the lifecycle lock before entering the (endless) serving loop.
+    // Holding it here would deadlock every later `claim_https_lifecycle().await`.
+    drop(lifecycle);
 
     let acceptor = TlsAcceptor::from(tls_config);
     tracing::info!("HTTPS server listening on {addr}");

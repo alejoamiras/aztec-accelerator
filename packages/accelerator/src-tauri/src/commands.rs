@@ -343,6 +343,18 @@ async fn enable_https_inner(
     use crate::certs;
     use std::sync::atomic::Ordering;
 
+    // Take the HTTPS bring-up lock FIRST — before ANY cert inspection or write. `certs_exist()` reads
+    // the leaf+key and `generate_and_save()` writes a whole new set; running either while the launch
+    // gate is mid-rotation could observe a MIXED new-leaf/old-key set and then write a third set over
+    // it, corrupting the live one and failing both starts (post-impl codex Medium). Waiting here is
+    // correct and unbounded-by-design: the owner may be showing an OS trust dialog or shelling out to
+    // certutil per NSS store, so there is no honest fixed timeout. The guard releases on every exit
+    // path below (including `?`), and moves into `spawn_https` when we get that far.
+    let lifecycle = crate::server::claim_https_lifecycle(shared_state).await;
+    // The owner we waited for may have completed the whole bring-up. Re-read the live bind state
+    // rather than assuming what we saw before the wait.
+    let already_bound = shared_state.https_bound.load(Ordering::Relaxed);
+
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
     // HTTPS next to a readable legacy mint-any-cert key on upgraded installs — reopening exactly
@@ -369,24 +381,17 @@ async fn enable_https_inner(
     // spawn and AWAIT the real bind, persisting `https_enabled = true` ONLY once the listener is up
     // (post-impl codex High: a swallowed bind failure used to report success while Safari/strict
     // users silently fell back / failed).
-    if !shared_state.https_bound.load(Ordering::Relaxed) {
-        // Success = HTTPS is LIVE, not "our spawn is the one that bound it". Claim the lifecycle
-        // BEFORE loading the cert set so the load can't race the launch gate's rotation / a partially
-        // renamed set (post-impl codex); `None` ⇒ someone else owns the sequence, so wait on the
-        // shared flag instead of racing a second bind into AddrInUse and wrongly reporting failure.
-        let bound = match crate::server::try_claim_https_start(shared_state) {
-            Some(claim) => {
-                // The claim drops (releasing the slot) if the TLS load fails below.
-                let tls_config = certs::load_rustls_config()
-                    .map_err(|e| format!("Failed to load TLS config: {e}"))?;
-                // The clone shares the Arc'd https_bound flag with the managed state, so start_https
-                // flipping it after a successful bind is visible to /health. (Q7)
-                let ready = crate::server::spawn_https(shared_state.clone(), tls_config, claim);
-                matches!(ready.await, Ok(true))
-            }
-            None => wait_for_https_bound(shared_state).await,
-        };
-        if !bound {
+    // We hold the bring-up lock, so no other path can be binding right now: `already_bound` (sampled
+    // after the wait) is authoritative. If HTTPS isn't up yet, WE bring it up and await the real bind.
+    if !already_bound {
+        // The guard drops (releasing the lock) if this load fails.
+        let tls_config =
+            certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
+        // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping
+        // it after a successful bind is visible to /health. (Q7) The guard moves into the spawned
+        // task, which releases it as soon as the bind resolves.
+        let ready = crate::server::spawn_https(shared_state.clone(), tls_config, lifecycle);
+        if !matches!(ready.await, Ok(true)) {
             return Err(
                 "Certificates are ready, but the HTTPS server could not start \
                  (port 59834 may be in use). Please try again."
@@ -398,34 +403,6 @@ async fn enable_https_inner(
     mutate_config(config, |cfg| cfg.https_enabled = true)?;
     tracing::info!("HTTPS enabled");
     Ok(())
-}
-
-/// Wait (bounded) for an HTTPS start attempt owned by ANOTHER task to bind. Used when `spawn_https`
-/// declines because a start is already in flight — polling the shared `https_bound` flag is what lets
-/// the enable path report the TRUE outcome instead of a spurious failure. Returns as soon as the
-/// listener is live, or `false` once the attempt has finished without binding / the budget expires.
-async fn wait_for_https_bound(state: &crate::server::AppState) -> bool {
-    use std::sync::atomic::Ordering;
-    // The budget MUST outlast `bind_with_retry`'s own 5s AddrInUse budget (core/src/server/bind.rs) —
-    // a shorter wait would time out while the owner is still legitimately retrying a briefly-held port
-    // (an in-place update relaunch) and report a false failure, which is the very bug this closes. 10s
-    // gives that 5s plus margin. It is only ever paid in the pathological case: the normal failure path
-    // exits early below the instant the owner releases `https_starting` without binding.
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-    const ATTEMPTS: u32 = 200;
-    for _ in 0..ATTEMPTS {
-        if state.https_bound.load(Ordering::Acquire) {
-            return true;
-        }
-        // The owner released the slot without binding ⇒ it failed; stop early rather than wait out
-        // the whole budget. (Re-check `https_bound` first — it may have bound just before releasing
-        // in a future refactor.)
-        if !state.https_starting.load(Ordering::Acquire) {
-            return state.https_bound.load(Ordering::Acquire);
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    state.https_bound.load(Ordering::Acquire)
 }
 
 /// Shared autostart toggle (used by the outer `set_autostart` Settings command + the onboarding
