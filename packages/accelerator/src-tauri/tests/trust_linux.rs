@@ -65,6 +65,10 @@ fn set_trust_flags(nssdb: &Path, nick: &str, flags: &str) {
 #[test]
 #[ignore = "needs libnss3-tools (certutil); run in CI with --ignored"]
 fn nss_install_verify_chain_remove() {
+    // certs_exist() (via generate_and_save) validates the leaf+key into a rustls ServerConfig, which
+    // needs a process CryptoProvider (installed in the real app's main(); idempotent here).
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let home = tempfile::tempdir().expect("temp HOME");
     // SAFETY: single-threaded ignored test; isolates all HOME-derived paths off the real profile.
     std::env::set_var("HOME", home.path());

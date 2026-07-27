@@ -12,6 +12,11 @@
 #[test]
 #[ignore = "Windows trust read paths (add needs the interactive Root dialog — see module docs); CI runs with --ignored"]
 fn read_paths_are_headless_safe() {
+    // certs_exist() (called by generate_and_save) now validates the leaf+key load into a rustls
+    // ServerConfig, which needs a process CryptoProvider — the real app installs it in main(); tests
+    // must too (idempotent).
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let home = tempfile::tempdir().expect("temp HOME");
     // SAFETY: single-threaded ignored test; isolates generated certs under a throwaway profile.
     std::env::set_var("USERPROFILE", home.path());

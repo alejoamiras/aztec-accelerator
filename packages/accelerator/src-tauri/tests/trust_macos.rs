@@ -12,6 +12,10 @@
 #[test]
 #[ignore = "macOS trust query (install needs interactive auth — see module docs); CI runs with --ignored"]
 fn generate_and_status_query_are_headless_safe() {
+    // certs_exist() (via generate_and_save) validates the leaf+key into a rustls ServerConfig, which
+    // needs a process CryptoProvider (installed in the real app's main(); idempotent here).
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let home = tempfile::tempdir().expect("temp HOME");
     // SAFETY: single-threaded ignored test; isolates the generated certs under a throwaway profile.
     std::env::set_var("HOME", home.path());
