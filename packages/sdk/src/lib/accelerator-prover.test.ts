@@ -817,6 +817,66 @@ describe("AcceleratorProver", () => {
       serSpy.mockRestore();
     });
 
+    test("a proof reconfigured mid-flight does NOT retry against the new endpoint (WASM instead)", async () => {
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const { fetchedUrls } = mockFetch({
+        // HTTP health refused → HTTPS pinned.
+        "http://127.0.0.1:59833/health": () => {
+          throw new TypeError("refused");
+        },
+        "https://127.0.0.1:59834/health": () => healthyBody(),
+        // HTTPS /prove: reconfigure the endpoint (bump generation) THEN fail at the network layer.
+        "https://127.0.0.1:59834/prove": () => {
+          prover.setAcceleratorConfig({ port: 51337, httpsPort: 51338 });
+          throw new TypeError("TLS handshake failed");
+        },
+      });
+
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test", // WASM fallback WAS reached
+      );
+      // The witness must NEVER have been POSTed to the reconfigured endpoint B (codex High).
+      expect(fetchedUrls.some((u) => u.includes("51337") || u.includes("51338"))).toBe(false);
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
+    test("two concurrent proofs failing over the pinned HTTPS BOTH fall back (neither left with the raw error)", async () => {
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      mockFetch({
+        "http://127.0.0.1:59833/health": () => {
+          throw new TypeError("refused");
+        },
+        "https://127.0.0.1:59834/health": () => healthyBody(),
+        "https://127.0.0.1:59834/prove": () => {
+          throw new TypeError("TLS handshake failed");
+        },
+        // The HTTP retry also fails → both must degrade to WASM.
+        "http://127.0.0.1:59833/prove": () => {
+          throw new TypeError("refused");
+        },
+      });
+
+      const results = await Promise.allSettled([
+        prover.createChonkProof([fakeStep]),
+        prover.createChonkProof([fakeStep]),
+      ]);
+      // codex Medium: the old demote-as-gate left the SECOND caller rethrowing the raw TLS error.
+      // Both must reach the WASM fallback (mock throws this), decided per-request not by the shared pin.
+      for (const r of results) {
+        expect(r.status).toBe("rejected");
+        expect(String((r as PromiseRejectedResult).reason)).toContain(
+          "local prover not available in test",
+        );
+      }
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
     test("a probe raced by setAcceleratorConfig cannot pin the new endpoint (generation guard)", async () => {
       // Slow /health against endpoint A; reconfigure to B mid-flight; A's late result must not
       // pin/cache anything for B.

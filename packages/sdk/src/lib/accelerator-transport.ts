@@ -64,29 +64,41 @@ async function readJsonBounded(response: Response): Promise<unknown> {
   try {
     const stream = response.body;
     if (!stream) {
-      // No stream (exotic environments / test doubles): deadline-race a plain text() read.
+      // No stream (exotic environments / test doubles): deadline-race a plain text() read, ALWAYS
+      // clearing the timer so it can't keep the event loop alive past the read (codex Low).
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const text = await Promise.race([
         response.text(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("health body deadline")), HEALTH_BODY_TIMEOUT_MS),
-        ),
-      ]);
-      if (text.length > HEALTH_BODY_MAX_BYTES) return undefined;
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("health body deadline")),
+            HEALTH_BODY_TIMEOUT_MS,
+          );
+        }),
+      ]).finally(() => clearTimeout(timer));
+      // Measure ENCODED bytes, not UTF-16 code units (codex Low).
+      if (new TextEncoder().encode(text).length > HEALTH_BODY_MAX_BYTES) return undefined;
       return JSON.parse(text);
     }
     const reader = stream.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
-    // On deadline, cancel the reader: the pending read() resolves `done`, the partial buffer fails
-    // JSON.parse below, and the probe settles as unhealthy instead of hanging.
-    const deadline = setTimeout(() => void reader.cancel().catch(() => {}), HEALTH_BODY_TIMEOUT_MS);
+    // A deadline that fires mid-body cancels the reader → the pending read() resolves `done` with a
+    // PARTIAL buffer. Track that it fired so a truncated-but-coincidentally-valid body is NOT parsed as
+    // healthy (codex Medium). Cancellation is fire-and-forget — a never-settling `cancel()` must not
+    // hang us (codex Medium).
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      void reader.cancel().catch(() => {});
+    }, HEALTH_BODY_TIMEOUT_MS);
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
         if (total > HEALTH_BODY_MAX_BYTES) {
-          await reader.cancel().catch(() => {});
+          void reader.cancel().catch(() => {}); // fire-and-forget — do not await a possibly-stuck cancel
           return undefined;
         }
         chunks.push(value);
@@ -94,6 +106,7 @@ async function readJsonBounded(response: Response): Promise<unknown> {
     } finally {
       clearTimeout(deadline);
     }
+    if (timedOut) return undefined; // partial body from a deadline cancel — never "healthy"
     const merged = new Uint8Array(total);
     let offset = 0;
     for (const c of chunks) {
@@ -335,9 +348,12 @@ export class AcceleratorTransport {
     if (first.kind === "https") return first.r;
 
     const httpRes = first.r;
-    if (httpRes?.response.ok) {
-      // HTTP answered OK. Prefer HTTPS only if it becomes healthy within the grace window; a HTTPS
-      // that already settled (refused/unhealthy → null) short-circuits the wait.
+    // Only a HEALTHY HTTP (recognized contract) gets to win via the short grace — a foreign 2xx that
+    // merely settled first must NOT beat a healthy-but-slightly-slower HTTPS (codex Medium: the old
+    // check was just `response.ok`). An unhealthy/foreign HTTP falls through to await HTTPS fully.
+    if (httpRes && this.#isHealthy(httpRes)) {
+      // Prefer HTTPS only if it becomes healthy within the grace window; a HTTPS that already settled
+      // (refused/unhealthy → null) short-circuits the wait.
       const graced = await Promise.race<ProbeResult | null | "timeout">([
         httpsHealthy,
         delay(HTTPS_GRACE_MS).then(() => "timeout" as const),
@@ -346,8 +362,10 @@ export class AcceleratorTransport {
       return httpRes;
     }
 
-    // HTTP rejected / non-OK. Wait fully for a healthy HTTPS; else return any fulfilled response so
-    // the caller maps it (non-OK → "error"); else both failed → throw (caller maps to "offline").
+    // HTTP rejected, non-OK, OR ok-but-not-the-health-contract. Wait FULLY for a healthy HTTPS (the
+    // body read is bounded, so it always settles) — a healthy HTTPS must win here; else return any
+    // fulfilled response so the caller maps it (unrecognized → "error"); else both failed → throw
+    // (caller maps to "offline").
     const healthy = await httpsHealthy;
     if (healthy) return healthy;
     if (httpRes) return httpRes;
@@ -356,15 +374,26 @@ export class AcceleratorTransport {
     throw new Error("both /health probes failed");
   }
 
+  /** The `/prove` URL for an EXPLICIT protocol, independent of the current pin — used by the demotion
+   * retry so a mid-proof `configure()` (generation change) can't redirect the retried witness. */
+  proveUrlFor(protocol: AcceleratorProtocol): string {
+    return protocol === "https"
+      ? `https://${this.#host}:${this.#httpsPort}/prove`
+      : `http://${this.#host}:${this.#port}/prove`;
+  }
+
   /**
-   * POST serialized execution steps to `/prove` on the negotiated endpoint. Throws
-   * `ky`'s `HTTPError` on a non-2xx response (the caller maps `403` → origin denial).
+   * POST serialized execution steps to `/prove` on the negotiated endpoint (`baseUrl`), or — when
+   * `url` is given — to that EXACT url (the demotion retry passes an explicit `http://` url so it
+   * targets the endpoint THIS attempt was made against, not a since-reconfigured pin). Throws `ky`'s
+   * `HTTPError` on a non-2xx response (the caller maps `403` → origin denial).
    */
   async postProve(
     body: Uint8Array<ArrayBuffer>,
     aztecVersion: string | undefined,
+    url?: string,
   ): Promise<Response> {
-    return ky.post(`${this.baseUrl}/prove`, {
+    return ky.post(url ?? `${this.baseUrl}/prove`, {
       body,
       timeout: PROVE_TIMEOUT_MS,
       retry: 0,

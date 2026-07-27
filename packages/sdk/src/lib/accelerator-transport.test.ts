@@ -274,6 +274,24 @@ describe("AcceleratorTransport", () => {
       expect(protocol).toBe("http");
     });
 
+    test("a foreign fast HTTP does NOT beat a healthy-but-slower HTTPS (grace gates on health, not just ok)", async () => {
+      globalThis.fetch = mock(async (input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        // Healthy HTTPS answers at 400ms — PAST the 250ms grace. Foreign HTTP 200 answers instantly.
+        if (url.startsWith("https://")) {
+          await new Promise((r) => setTimeout(r, 400));
+          return json(HEALTHY);
+        }
+        return json({ hello: "world" }); // 200 but NOT the health contract
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const { protocol } = await t.probeHealth();
+      // The old `httpRes.response.ok` grace shortcut returned the foreign HTTP at ~250ms; now an
+      // unhealthy HTTP falls through and the healthy HTTPS wins even though it was slower.
+      expect(protocol).toBe("https");
+    });
+
     test("HTTPS 200 that stalls its body forever cannot hang the probe (bounded body read)", async () => {
       globalThis.fetch = mock(async (input: any) => {
         const url: string = typeof input === "string" ? input : input.url;
@@ -401,6 +419,27 @@ describe("AcceleratorTransport", () => {
       // baseUrl for /prove is https even before any pin, and never the http endpoint.
       expect(t.baseUrl).toBe("https://127.0.0.1:59834");
     });
+
+    test("a body that streams COMPLETE valid JSON but never closes is NOT accepted as healthy", async () => {
+      // codex Medium: the deadline cancels the reader, read() reports `done` with the fully-buffered
+      // (but stream-never-closed) bytes; parsing those as EOF would accept a timed-out body as healthy.
+      // The `timedOut` flag must force `undefined`. httpsOnly so this HTTPS body is the deciding probe.
+      globalThis.fetch = mock(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(JSON.stringify({ status: "ok", api_version: 1 })),
+            );
+            // Full valid JSON emitted — but never close(): the stream stays open past the deadline.
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const { body } = await t.probeHealth();
+      expect(body).toBeUndefined(); // deadline fired → undefined, NOT the parsed {status:ok}
+    }, 10_000);
 
     test("unreachable HTTPS rejects (→ caller maps to offline), never touching http", async () => {
       const urls: string[] = [];

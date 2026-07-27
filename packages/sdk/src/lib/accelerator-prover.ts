@@ -326,6 +326,14 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    * {@link AcceleratorProver.createChonkProof}; only reached when the accelerator is available.
    */
   async #proveRemote(executionSteps: PrivateExecutionStep[]): Promise<ChonkProofWithPublicInputs> {
+    // Snapshot the endpoint this attempt targets: the transport's config GENERATION and the scheme of
+    // the URL we're about to POST to. A `setAcceleratorConfig` mid-proof bumps the generation; the
+    // network-failure handler below refuses to demote/retry against a since-reconfigured endpoint
+    // (codex High), and it decides the fallback from THIS request's own scheme rather than a shared,
+    // mutable pin (so concurrent failures each fall back correctly — codex Medium).
+    const attemptGen = this.#transport.generation;
+    const attemptWasHttps = this.#transport.baseUrl.startsWith("https:");
+
     logger.info("Accelerator available, proving natively", {
       url: this.#transport.baseUrl,
     });
@@ -360,13 +368,32 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       // Network-level failure: no HTTP response at all (TLS handshake/cert failure, connection
       // refused, timeout). The HTTPS listener/trust may have changed since /health pinned it.
       if (!(err instanceof HTTPError)) {
-        if (this.#transport.demoteHttpsPin()) {
-          // Non-strict + was pinned https → the HTTP endpoint may still be healthy. Retry ONCE.
+        // The endpoint was reconfigured while this proof was in flight — do NOT touch the new endpoint
+        // (don't demote its pin, don't POST the witness to it). Degrade to WASM (codex High).
+        if (this.#transport.generation !== attemptGen) {
+          logger.warn("Endpoint reconfigured during a failing proof; falling back to WASM", {
+            error: String(err),
+          });
+          return this.#fallbackToWasm(
+            executionSteps,
+            "Local proof completed after endpoint change",
+          );
+        }
+        // This request went over HTTPS in non-strict mode → the HTTP endpoint may still be healthy.
+        // Retry THIS request explicitly over HTTP (independent of the shared pin, so a concurrent
+        // failure that already cleared the pin doesn't stop us). `demoteHttpsPin()` only hints FUTURE
+        // probes to re-check; the retry itself targets the http URL for this attempt's generation.
+        if (attemptWasHttps && !this.#transport.httpsOnly) {
+          this.#transport.demoteHttpsPin();
           logger.warn("HTTPS /prove failed at the network layer; retrying once over HTTP", {
             error: String(err),
           });
           try {
-            res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion);
+            res = await this.#transport.postProve(
+              new Uint8Array(msgpack),
+              aztecVersion,
+              this.#transport.proveUrlFor("http"),
+            );
             return this.#decodeProof(res, start);
           } catch (retryErr) {
             if (retryErr instanceof HTTPError && retryErr.response.status === 403) {
@@ -382,16 +409,16 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             );
           }
         }
-        if (this.#transport.httpsOnly) {
-          // Strict mode: never retry over HTTP — degrade to WASM instead of failing the dApp.
-          logger.warn("HTTPS /prove failed in httpsOnly mode, falling back to WASM", {
-            error: String(err),
-          });
-          return this.#fallbackToWasm(
-            executionSteps,
-            "Local proof completed after transport failure",
-          );
-        }
+        // Strict httpsOnly (never retry plaintext), OR the attempt was already HTTP (nothing better to
+        // try): degrade to WASM rather than failing the dApp.
+        logger.warn("Local accelerator /prove failed at the network layer, falling back to WASM", {
+          error: String(err),
+          httpsOnly: this.#transport.httpsOnly,
+        });
+        return this.#fallbackToWasm(
+          executionSteps,
+          "Local proof completed after transport failure",
+        );
       }
       throw err;
     }
