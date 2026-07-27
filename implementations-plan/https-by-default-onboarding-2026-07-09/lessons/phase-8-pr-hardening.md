@@ -1,0 +1,77 @@
+# Phase 8 — PR hardening (merge onto security-hardening + codex bug-hunt fixes + certainty tests)
+
+Re-engaged 2026-07-27. Three inputs drove this phase: (1) `main` had moved 23 commits ahead (the
+183-file security-hardening campaign), (2) three PR-scoped codex `gpt-5.6-sol` bug-hunts had found real
+bugs, (3) the owner asked to increase install certainty across Ubuntu/Windows/macOS. Owner decision:
+**no migration** — treat HTTPS-by-default as a clean install (drop the `safari_support` serde alias).
+
+## Merge (origin/main → branch)
+
+A read-only Sonnet analyst mapped the divergence first. Beyond the 4 textual conflicts (accelerator.yml,
+settings.html, commands.rs, index.md) main's campaign silently broke the feature in ways the compiler
+wouldn't catch:
+
+- `windows.rs` gained a required `focus_on_create` field → our two new WindowConfig literals wouldn't compile.
+- The Tauri capability model became an explicit per-window allowlist → our `onboarding`/`renewal`
+  windows and renamed `enable_https`/etc. commands had ZERO IPC grants (runtime-only failure).
+- Every command now takes `require_label(window, LABEL)` (F-012) → ours needed it retrofitted.
+- Frontend moved to bundled ES modules + strict `script-src 'self'; style-src 'self'` CSP → our inline
+  `<script>`/`<style>` in onboarding/renewal/settings were dead. Ported to `frontend-src/*.js` +
+  external CSS; windows now close from Rust (no core:window grant).
+- `crash_recovery` API changed to Result/bool → `set_autostart_inner` rebuilt from main's hardened body.
+- `build.rs` hard-codes the bundle list + F-012 command surface; `tauri-trust-boundary.test.ts` pins the
+  window/command/capability set — both updated to the 5-window, 20-command topology.
+
+Merge commit audited by codex (`gpt-5.6-sol@xhigh`): verdict "sound, no lost hunks", one Low
+(native `window.close()` failures swallowed) → fixed (they now propagate so wireButton re-enables).
+
+## codex bug-hunt fixes (all folded)
+
+SDK: `#isHealthy` + prover now require `status:"ok"` + `api_version:1` (mirror `probe.rs`), enforced in
+`httpsOnly` too; `/health` body read once under a deadline+cap (no `clone().json()` hang);
+config-generation guard + single-flight probes (no stale repin); pinned-HTTPS `/prove` network failure
+demotes to HTTP once then WASM (`httpsOnly` → WASM); monotonic cache clock; honest `httpsOnly` docs.
+
+Trust: macOS `verify-cert -l -L` (a CA is rejected as a leaf without `-l` → launch gate false-negative)
++ `delete-certificate -t`; Windows live-cert identity by **serial** (CN reserved for delete-all); Linux
+ancestor-walk safe-path guard, `-V -u L` trust validation (not bare presence), tri-state removal;
+removal failures now propagate (Settings `Err`, CLI non-zero exit).
+
+Enable path: `enable_https` awaits the real bind before persisting (spawn_https returns a oneshot); the
+"already trusted" short-circuit spawns when unbound; opt-out persists `https_enabled=false`;
+`certs_exist()` also requires the leaf+key load into rustls (recovers a mixed swap); renewal restarts to
+serve the new leaf; the launch HTTPS gate runs on a blocking task so a hung trust query can't block HTTP.
+
+## Certainty tests
+
+- **Tier 1 (shipped, runs on all 3 OSes)**: `tests/tls_handshake.rs` — in-process rustls handshake
+  against the real generated cert set, verified by both `localhost` and `127.0.0.1`. Proves leaf/key
+  match + chain-to-CA + loopback name constraints + webpki acceptance, with no OS store or browser.
+  Wired into the `cert-trust` matrix (`cargo test --test tls_handshake`) so cert-gen regressions fail
+  fast on macOS + Windows too.
+- **Tier 4 (shipped)**: static guard in `tauri-trust-boundary.test.ts` pinning the NSIS
+  `${If} $UpdateMode <> 1` guard around the uninstall `-delstore Root` (audit R1 — an auto-update must
+  never wipe trust).
+- **Existing coverage that already addresses "browser trusts after install"**: the `cert-trust` Linux
+  leg installs the CA into `~/.pki/nssdb` and chain-validates a leaf via `certutil -V` — NSS is exactly
+  Chrome/Chromium's verification path, so this is the browser-trust mechanism, minus the pixels.
+
+### Deferred: Tier 2 (real-browser E2E, 3 OSes) + Tier 3 (Windows certutil command-shape)
+
+NOT shipped, deliberately — I can't verify browser automation blind on macOS/Windows from a Linux box,
+and a broken-blind CI job downgrades quality (the owner's explicit bar). Recommended next increment,
+with the exact approach:
+
+- **Tier 2**: per-OS, seed the CA into a store the browser trusts *silently on a CI runner* (Linux:
+  `~/.pki/nssdb`, already done by `install_ca_trust`; macOS: `security add-trusted-cert -d` into the
+  **admin/system** keychain — silent with the runner's sudo; Windows: `certutil -addstore Root` into the
+  **LocalMachine** Root — silent when elevated, unlike the CurrentUser Root dialog). Start the real
+  HTTPS server (a tiny harness bin serving `load_rustls_config()` on 59834), then drive Playwright
+  `chromium` to `https://127.0.0.1:59834/health` and assert `200` + JSON with no cert error. The
+  LocalMachine/admin-store seeding is the unlock that makes this headless-runnable (the CurrentUser
+  paths prompt).
+- **Tier 3**: a Windows-only test exercising the `certutil` argv shapes against the non-prompting
+  `CurrentUser\CA` store (add/verify-by-serial/remove) to catch arg-shape drift without the Root dialog.
+
+The owner will smoke the two consent dialogs (Windows CurrentUser-Root prompt, macOS Keychain password)
++ uninstall on real machines — the irreducibly-manual bit.

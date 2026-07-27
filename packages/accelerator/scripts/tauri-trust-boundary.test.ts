@@ -256,3 +256,28 @@ describe("F-012 P3 — per-window capability ACL", () => {
     ]);
   });
 });
+
+// Tier-4 certainty (audit R1 / C-1): the Windows NSIS uninstall hook must NEVER wipe the CA trust +
+// certs during an AUTO-UPDATE (Tauri runs the previous version's uninstaller on every update). This is
+// unverifiable in headless CI (it needs a real Windows install/update cycle), so a static guard pins
+// the load-bearing property: the `-delstore Root` (+ cert RMDir) live INSIDE an `${If} $UpdateMode <> 1`
+// block, so they only fire on a genuine uninstall. A refactor that drops the guard fails here.
+describe("NSIS uninstall hook — auto-update must not wipe trust", () => {
+  const HOOKS = path.join(SRC_TAURI, "nsis", "hooks.nsi");
+
+  test("the -delstore Root + cert removal are guarded by ${If} $UpdateMode <> 1", async () => {
+    const nsi = await read(HOOKS);
+    const guardOpen = nsi.search(/\$\{If\}\s*\$UpdateMode\s*<>\s*1/);
+    const delstore = nsi.search(/-delstore\s+Root/i);
+    const rmdir = nsi.search(/RMDir\s+\/r/i);
+    const guardClose = nsi.search(/\$\{EndIf\}/);
+
+    expect(guardOpen, "an ${If} $UpdateMode <> 1 guard must exist").toBeGreaterThanOrEqual(0);
+    expect(delstore, "-delstore Root must exist and sit AFTER the guard opens").toBeGreaterThan(
+      guardOpen,
+    );
+    expect(rmdir, "the cert RMDir must sit AFTER the guard opens").toBeGreaterThan(guardOpen);
+    expect(guardClose, "the guard must close AFTER the destructive ops").toBeGreaterThan(delstore);
+    expect(guardClose).toBeGreaterThan(rmdir);
+  });
+});

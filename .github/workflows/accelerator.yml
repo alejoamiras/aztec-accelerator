@@ -150,6 +150,11 @@ jobs:
       - name: Install libnss3-tools (certutil)
         if: matrix.platform == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libnss3-tools
+      # Tier-1 certainty: an in-process TLS handshake against the REAL generated cert set (no OS store,
+      # no browser). Runs on ALL three OSes here so a cert-generation regression (bad SANs / key usage /
+      # name constraints / mismatched key) fails fast on macOS + Windows too, not just the Linux `test`
+      # job. Cheap + needs no certutil/keychain, so it's safe on every matrix leg.
+      - run: cargo test --test tls_handshake -- --nocapture
       # Real trust-store test per OS. Windows: CurrentUser Root add/verify/remove (spike I3 — expected
       # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
       # interactive auth — spike I7, covered by the manual runbook, NOT here).
