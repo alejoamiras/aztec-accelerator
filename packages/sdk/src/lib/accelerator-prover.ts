@@ -299,6 +299,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
     logger.info("Using accelerated prover");
 
+    // Capture the endpoint generation BEFORE probing. A probe that started against endpoint A and
+    // completes after `setAcceleratorConfig(B)` has its pin/cache commit discarded, but it still
+    // RETURNS `available: true` — proving on that basis would POST the witness to B, which was never
+    // probed (post-impl codex High). Re-check after the probe and degrade to WASM if it moved.
+    const detectGen = this.#transport.generation;
+
     this.#onPhase?.("detect");
     const status = await this.checkAcceleratorStatus();
 
@@ -307,12 +313,19 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       return this.#fallbackToWasm(executionSteps, "Local proof completed");
     }
 
+    if (this.#transport.generation !== detectGen) {
+      logger.info(
+        "Endpoint reconfigured during detection; falling back to WASM (unprobed endpoint)",
+      );
+      return this.#fallbackToWasm(executionSteps, "Local proof completed after endpoint change");
+    }
+
     if (status.needsDownload) {
       logger.info("Accelerator needs to download bb for this version");
       this.#onPhase?.("downloading");
     }
 
-    return this.#proveRemote(executionSteps);
+    return this.#proveRemote(executionSteps, detectGen);
   }
 
   /**
@@ -325,18 +338,20 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    * errors (the accelerator answered, e.g. 500) still propagate. Extracted from
    * {@link AcceleratorProver.createChonkProof}; only reached when the accelerator is available.
    */
-  async #proveRemote(executionSteps: PrivateExecutionStep[]): Promise<ChonkProofWithPublicInputs> {
-    // Snapshot the endpoint this attempt targets: the transport's config GENERATION and the scheme of
-    // the URL we're about to POST to. A `setAcceleratorConfig` mid-proof bumps the generation; the
-    // network-failure handler below refuses to demote/retry against a since-reconfigured endpoint
-    // (codex High), and it decides the fallback from THIS request's own scheme rather than a shared,
-    // mutable pin (so concurrent failures each fall back correctly — codex Medium).
-    const attemptGen = this.#transport.generation;
-    const attemptWasHttps = this.#transport.baseUrl.startsWith("https:");
+  async #proveRemote(
+    executionSteps: PrivateExecutionStep[],
+    attemptGen: number,
+  ): Promise<ChonkProofWithPublicInputs> {
+    // IMMUTABLE snapshot of the endpoint this attempt targets, taken BEFORE any `onPhase` callback
+    // runs. `attemptGen` is the generation the probe validated. The URLs are captured here (not read
+    // from the mutable `baseUrl`/host/port at POST time) because a dApp's `onPhase` handler can call
+    // `setAcceleratorConfig(B)` between here and the POST — the old code would then have sent the
+    // witness to the unprobed B (post-impl codex High). Every POST below uses these snapshots.
+    const attemptUrl = `${this.#transport.baseUrl}/prove`;
+    const attemptWasHttps = attemptUrl.startsWith("https:");
+    const httpRetryUrl = this.#transport.proveUrlFor("http");
 
-    logger.info("Accelerator available, proving natively", {
-      url: this.#transport.baseUrl,
-    });
+    logger.info("Accelerator available, proving natively", { url: attemptUrl });
 
     this.#onPhase?.("serialize");
     const msgpack = serializePrivateExecutionSteps(executionSteps);
@@ -346,10 +361,19 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#onPhase?.("transmit");
     this.#onPhase?.("proving");
 
+    // A callback above may have reconfigured the endpoint. The snapshot URLs still point at the
+    // PROBED endpoint (correct), but that endpoint is no longer the configured one — the caller asked
+    // us to talk to B, and A was never re-validated. Degrade to WASM rather than sending the witness
+    // to either an abandoned or an unprobed endpoint.
+    if (this.#transport.generation !== attemptGen) {
+      logger.info("Endpoint reconfigured before transmit; falling back to WASM");
+      return this.#fallbackToWasm(executionSteps, "Local proof completed after endpoint change");
+    }
+
     const start = performance.now();
     let res: Response;
     try {
-      res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion);
+      res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion, attemptUrl);
     } catch (err) {
       // 403: user denied this site, or authorization timed out — fall back to WASM
       if (err instanceof HTTPError && err.response.status === 403) {
@@ -389,10 +413,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             error: String(err),
           });
           try {
+            // The SNAPSHOT http url (captured at attempt entry), not a freshly-derived one — the
+            // retry must target the same endpoint this attempt probed, never a reconfigured host/port.
             res = await this.#transport.postProve(
               new Uint8Array(msgpack),
               aztecVersion,
-              this.#transport.proveUrlFor("http"),
+              httpRetryUrl,
             );
             return this.#decodeProof(res, start);
           } catch (retryErr) {

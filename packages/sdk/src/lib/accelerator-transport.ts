@@ -92,10 +92,19 @@ async function readJsonBounded(response: Response): Promise<unknown> {
       timedOut = true;
       void reader.cancel().catch(() => {});
     }, HEALTH_BODY_TIMEOUT_MS);
+    const started = performance.now();
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        // A stream that endlessly enqueues ZERO-LENGTH chunks resolves every read() immediately, so
+        // the microtask loop starves the `setTimeout` and neither the deadline nor the byte cap ever
+        // fires (codex Low). An in-loop wall-clock check does not depend on the timer running.
+        if (performance.now() - started > HEALTH_BODY_TIMEOUT_MS) {
+          timedOut = true;
+          void reader.cancel().catch(() => {});
+          return undefined;
+        }
         total += value.byteLength;
         if (total > HEALTH_BODY_MAX_BYTES) {
           void reader.cancel().catch(() => {}); // fire-and-forget — do not await a possibly-stuck cancel

@@ -101,6 +101,34 @@ A second PR-scoped pair of hunts (one at **ultra**) found refinements to the rou
 - `enable_https_inner` treats `https_bound == true` as success even if its own spawn lost the bind
   race with the launch gate — no more persisting `https_enabled = false` while HTTPS is actually live.
 
+## Round-3 (convergence re-audit of the round-2 fixes) — folded
+
+Both sessions were resumed on the round-2 diff to check the fixes AND whether the fixes introduced new
+bugs. Both confirmed the round-2 fixes sound, and each found one more real race:
+
+**SDK (High, fixed):** the generation snapshot didn't bind the *health result* or the *initial* POST
+URL. Two live paths still sent the witness to an unprobed endpoint: (a) a probe that started against A
+and completed after `setAcceleratorConfig(B)` had its commit discarded but still returned
+`available:true`, and the prove then targeted B; (b) an `onPhase("serialize"|"transmit"|"proving")`
+callback calling `setAcceleratorConfig(B)` — the initial `postProve()` read the *mutable* `baseUrl`
+after the callbacks. Fixed: `createChonkProof` captures the generation BEFORE probing and re-checks it
+after; `#proveRemote` takes that generation, snapshots BOTH prove URLs before any callback runs,
+re-checks the generation after the callbacks, and POSTs to the snapshot (initial AND retry). Also
+(Low) an endless stream of ZERO-LENGTH chunks starved the `setTimeout` deadline — added an in-loop
+wall-clock check that doesn't depend on the timer firing.
+
+**Rust (High, fixed):** the Linux ownership check was bypassable via a replaceable SYMLINK —
+`certutil_bin()` returned the *original* path while validation canonicalized the target, so a
+foreign-owned symlink currently pointing at `/usr/bin/certutil` passed and could be re-pointed before
+`Command::new`. Fixed with `safe_canonical()`: validate, then return and execute the CANONICAL path.
+
+**Rust (Medium, fixed):** the listener race was narrowed but not closed — both the launch gate and the
+enable path could sample `https_bound == false` and each spawn. Fixed properly with a compare-and-swap
+on a new `https_starting` atomic in `HeadlessState`: `spawn_https` returns `Option<Receiver>` and only
+ONE attempt ever runs; a caller that loses the CAS waits on `https_bound` via the bounded
+`wait_for_https_bound` (~3s, exits early if the owner released without binding) instead of concluding
+failure. This also removes the AddrInUse path that made the rotate-before-serve race reachable.
+
 **Accepted residuals (documented, not fixed — all degrade gracefully):**
 - *macOS removal query-error fails open*: a `find-certificate` that ERRORS mid-removal-postcheck (vs
   "not found") can report removed. The login keychain is essentially always unlocked while the app

@@ -441,6 +441,27 @@ describe("AcceleratorTransport", () => {
       expect(body).toBeUndefined(); // deadline fired → undefined, NOT the parsed {status:ok}
     }, 10_000);
 
+    test("a stream of endless ZERO-LENGTH chunks cannot starve the deadline", async () => {
+      // codex Low (round 2): zero-length chunks resolve every read() immediately, starving the
+      // setTimeout so neither the deadline nor the byte cap ever fires. The in-loop wall-clock check
+      // must still bail. httpsOnly so this is the deciding probe.
+      globalThis.fetch = mock(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.enqueue(new Uint8Array(0)); // never any bytes, never closes
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const started = performance.now();
+      const { body } = await t.probeHealth();
+      expect(body).toBeUndefined();
+      // Bounded by the body deadline (2s), not hung forever.
+      expect(performance.now() - started).toBeLessThan(6_000);
+    }, 15_000);
+
     test("unreachable HTTPS rejects (→ caller maps to offline), never touching http", async () => {
       const urls: string[] = [];
       globalThis.fetch = mock(async (input: any) => {

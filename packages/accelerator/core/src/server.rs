@@ -116,6 +116,13 @@ pub struct HeadlessState {
     /// the config flag, which would point the SDK at a dead port when the CA is untrusted at startup
     /// (HTTPS skipped, but `https_enabled` config stays on). (Q7)
     pub https_bound: Arc<AtomicBool>,
+    /// `true` while an HTTPS start attempt is IN FLIGHT (set by a compare-and-swap in the GUI's
+    /// `spawn_https`, cleared when that attempt's listener exits / fails to bind). The launch gate and
+    /// the Settings/onboarding enable path can both decide to start HTTPS at the same moment; without
+    /// this, both spawn, one loses the port with `AddrInUse`, and the loser reports failure even though
+    /// HTTPS is live (post-impl codex Medium). The CAS makes exactly one attempt run; the other waits
+    /// on `https_bound`.
+    pub https_starting: Arc<AtomicBool>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
@@ -152,6 +159,7 @@ impl Default for HeadlessState {
             bundled_version: None,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             https_bound: Arc::new(AtomicBool::new(false)),
+            https_starting: Arc::new(AtomicBool::new(false)),
             config: None,
             auth_manager: None,
             prove_semaphore: Arc::new(Semaphore::new(1)),
@@ -174,6 +182,7 @@ impl HeadlessState {
             app_version: app_version.into(),
             bundled_version,
             https_bound: Arc::new(AtomicBool::new(false)),
+            https_starting: Arc::new(AtomicBool::new(false)),
             config,
             auth_manager,
             prove_semaphore: Arc::new(Semaphore::new(1)),

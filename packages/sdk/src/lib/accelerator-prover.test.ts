@@ -843,6 +843,58 @@ describe("AcceleratorProver", () => {
       serSpy.mockRestore();
     });
 
+    test("an onPhase callback that reconfigures mid-proof cannot redirect the witness", async () => {
+      // codex High (round 2): the initial postProve() used to read the MUTABLE baseUrl *after* the
+      // onPhase callbacks ran, so a handler calling setAcceleratorConfig(B) sent the witness to the
+      // unprobed B. The attempt now POSTs to a URL snapshotted before any callback.
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      let prover!: AcceleratorProver;
+      prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        onPhase: (phase) => {
+          // Reconfigure at the last possible moment before transmission.
+          if (phase === "transmit") prover.setAcceleratorConfig({ port: 51337, httpsPort: 51338 });
+        },
+      });
+      const { fetchedUrls } = mockFetch({
+        "127.0.0.1:59833/health": () => healthyBody(),
+        "127.0.0.1:59833/prove": () => Response.json({ proof: "" }),
+      });
+
+      try {
+        await prover.createChonkProof([fakeStep]);
+      } catch {
+        // Either the WASM fallback (endpoint changed) or a decode failure — the URLs are the assertion.
+      }
+      // The witness must NEVER have gone to the reconfigured endpoint B.
+      expect(fetchedUrls.some((u) => u.includes("51337") || u.includes("51338"))).toBe(false);
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
+    test("a status from a probe whose endpoint changed mid-flight does not drive a remote prove", async () => {
+      // codex High (round 2): the probe's pin/cache commit was discarded on a generation change, but
+      // its `available:true` was still returned and proved upon — against the NEW, unprobed endpoint.
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const { fetchedUrls } = mockFetch({
+        "/health": async () => {
+          // Reconfigure while the probe is in flight, then answer healthy for the OLD endpoint.
+          prover.setAcceleratorConfig({ port: 51337, httpsPort: 51338 });
+          return healthyBody();
+        },
+      });
+
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test", // WASM fallback was reached
+      );
+      expect(fetchedUrls.some((u) => u.includes("/prove"))).toBe(false);
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
     test("two concurrent proofs failing over the pinned HTTPS BOTH fall back (neither left with the raw error)", async () => {
       const serSpy = mockSerializer();
       const wasmSpy = mockWasmProver();

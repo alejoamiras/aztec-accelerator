@@ -9,11 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Resolve `certutil` to a SAFE absolute path. Prefer known system locations; only accept a
-/// PATH-resolved binary if it is absolute AND neither it nor its parent dir is group/world-writable
-/// — a planted `certutil` in a writable PATH dir must not win (plan §8 / codex S2). `None` ⇒ absent.
+/// PATH-resolved binary if it is absolute AND neither it nor any ancestor is group/world-writable or
+/// foreign-owned — a planted `certutil` in a writable PATH dir must not win (plan §8 / codex S2).
+/// `None` ⇒ absent.
+///
+/// Returns the **canonical** path — the exact one that was validated. Returning the original would
+/// leave a TOCTOU: a foreign-owned SYMLINK whose target is currently `/usr/bin/certutil` passes the
+/// check, and its owner can then re-point it before we `Command::new(...)` it (post-impl codex High
+/// R3). Executing the canonical target closes that window.
 fn certutil_bin() -> Option<PathBuf> {
-    // Even the known locations get the writability guard — `/usr/local/bin` is group/other-writable on
-    // some setups, and accepting a planted binary there would be the ACE this guard exists to prevent
+    // Even the known locations get the guard — `/usr/local/bin` is group/other-writable on some
+    // setups, and accepting a planted binary there would be the ACE this guard exists to prevent
     // (post-impl review). A rejected path just falls through; if none qualifies, HTTPS degrades with a
     // "certutil not found" hint rather than executing an attacker binary.
     for p in [
@@ -22,14 +28,27 @@ fn certutil_bin() -> Option<PathBuf> {
         "/usr/local/bin/certutil",
     ] {
         let pb = PathBuf::from(p);
-        if pb.is_file() && !is_writable_by_nonowner(&pb) {
-            return Some(pb);
+        if pb.is_file() {
+            if let Some(safe) = safe_canonical(&pb) {
+                return Some(safe);
+            }
         }
     }
     match which::which("certutil") {
-        Ok(p) if p.is_absolute() && !is_writable_by_nonowner(&p) => Some(p),
+        Ok(p) if p.is_absolute() => safe_canonical(&p),
         _ => None,
     }
+}
+
+/// Canonicalize `p` and return it ONLY if the resolved binary and every ancestor pass the
+/// [`is_writable_by_nonowner`] check. `None` ⇒ unsafe or unresolvable (fail closed). The returned path
+/// is what callers must execute, so validation and execution refer to the same inode path.
+fn safe_canonical(p: &Path) -> Option<PathBuf> {
+    let resolved = p.canonicalize().ok()?;
+    if is_writable_by_nonowner(&resolved) {
+        return None;
+    }
+    Some(resolved)
 }
 
 /// True if the resolved binary — or ANY ancestor directory up to `/` — is unsafe to trust as the

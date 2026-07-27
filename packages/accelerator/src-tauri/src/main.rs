@@ -139,7 +139,8 @@ fn try_start_https(state: &AppState) {
     };
 
     // Launch path is fire-and-forget: it does not await the bind (a dropped receiver just makes
-    // start_https's `ready.send` a no-op). The Settings/onboarding enable path is the one that awaits.
+    // start_https's `ready.send` a no-op), and a `None` (an enable path already starting HTTPS) is
+    // simply nothing to do. The Settings/onboarding enable path is the one that awaits the outcome.
     drop(aztec_accelerator::server::spawn_https(
         state.clone(),
         tls_config,
