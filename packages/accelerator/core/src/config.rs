@@ -38,9 +38,12 @@ impl Speed {
 /// Current config schema version. Bump when fields are removed or renamed.
 /// Added fields with `#[serde(default)]` don't require a version bump.
 ///
-/// NOTE: nothing currently *reads* `config_version` — the `safari_support`→`https_enabled` rename
-/// is handled entirely by `#[serde(alias)]`, so this stays at 1 (bumping it would be decorative
-/// until version-gated migration logic exists).
+/// NOTE: nothing currently *reads* `config_version`. The HTTPS-by-default feature is a CLEAN-INSTALL
+/// (no migration from the old macOS-only "Safari Support" state — decided with the owner): a config
+/// written by an older build that carried `safari_support` simply deserializes with `https_enabled`
+/// at its serde default (`false`); the onboarding wizard (shown once because `onboarding_version`
+/// defaults to 0) re-enables HTTPS in one click. Dropping the `safari_support` alias also removes the
+/// duplicate-field edge that could reset an entire config to defaults.
 const CONFIG_VERSION: u32 = 1;
 
 /// The onboarding-wizard consent version. The first-run wizard shows while a config's
@@ -55,11 +58,9 @@ pub struct AcceleratorConfig {
     #[serde(default = "default_config_version")]
     pub config_version: u32,
     /// Whether the local HTTPS listener (browser ⇄ accelerator encrypted channel) is enabled.
-    /// Renamed from `safari_support` (it's no longer macOS/Safari-only) — `#[serde(alias)]` loads
-    /// pre-rename configs 1:1, and the next save writes only `https_enabled`. A config carrying BOTH
-    /// keys is a serde duplicate-field error → defaults (HTTPS off), matching the existing
-    /// malformed-config policy; the app can't self-produce that state (save rewrites the whole file).
-    #[serde(default, alias = "safari_support")]
+    /// Clean-install: NO `safari_support` alias (see `CONFIG_VERSION`) — an older config's
+    /// `safari_support` key is simply ignored and this defaults to `false`; the wizard re-enables.
+    #[serde(default)]
     pub https_enabled: bool,
     #[serde(default, deserialize_with = "de_approved_origins")]
     pub approved_origins: Vec<CanonicalOrigin>,
@@ -279,25 +280,23 @@ mod tests {
         );
     }
 
-    // ─── safari_support → https_enabled migration (Phase 1) ──────────────────
+    // ─── no-migration clean install: `safari_support` is NOT aliased ─────────
 
     #[test]
-    fn legacy_safari_support_key_migrates_to_https_enabled() {
-        // A pre-rename config on disk uses `safari_support`; the alias must load it 1:1.
+    fn legacy_safari_support_key_is_ignored_https_defaults_off() {
+        // Clean-install (no alias): a pre-rename config's `safari_support` key is an UNKNOWN field —
+        // ignored — so https_enabled takes its serde default (false). The onboarding wizard (shown once
+        // because onboarding_version defaults to 0) re-enables HTTPS.
         let cfg: AcceleratorConfig = serde_json::from_str(r#"{"safari_support": true}"#).unwrap();
         assert!(
-            cfg.https_enabled,
-            "legacy safari_support:true must load as https_enabled:true"
+            !cfg.https_enabled,
+            "legacy safari_support is ignored — https_enabled defaults off (no migration)"
         );
-
-        let cfg_false: AcceleratorConfig =
-            serde_json::from_str(r#"{"safari_support": false}"#).unwrap();
-        assert!(!cfg_false.https_enabled);
     }
 
     #[test]
     fn save_writes_only_new_key_not_legacy_alias() {
-        // After migration, a save must emit `https_enabled` and never re-emit `safari_support`.
+        // A save must emit `https_enabled` and never `safari_support`.
         let cfg = AcceleratorConfig {
             https_enabled: true,
             ..Default::default()
@@ -308,20 +307,26 @@ mod tests {
     }
 
     #[test]
-    fn both_keys_present_falls_back_to_defaults() {
-        // A hand-edited config with BOTH keys is a serde duplicate-field error (alias == same field).
-        // load_from must fall back to defaults = HTTPS off (fail-safe; matches existing malformed policy).
+    fn both_keys_present_reads_https_enabled_ignores_safari() {
+        // With no alias, a config carrying BOTH keys is NOT a duplicate-field error: `safari_support`
+        // is ignored and `https_enabled` is read normally (the old alias made this a hard error that
+        // reset the WHOLE config to defaults — post-impl codex Medium, now moot).
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.json");
         std::fs::write(
             &cfg_path,
-            r#"{"safari_support": true, "https_enabled": true}"#,
+            r#"{"safari_support": false, "https_enabled": true, "speed": "low"}"#,
         )
         .unwrap();
         let loaded = load_from(&cfg_path);
         assert!(
-            !loaded.https_enabled,
-            "duplicate keys must fail safe to HTTPS off"
+            loaded.https_enabled,
+            "https_enabled must be read directly; safari_support ignored, not a duplicate-field error"
+        );
+        assert_eq!(
+            loaded.speed,
+            Speed::Low,
+            "the rest of the config must survive (no reset to defaults)"
         );
     }
 

@@ -329,17 +329,19 @@ pub async fn enable_https(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
-    enable_https_inner(&config, &shared_state)
+    enable_https_inner(&config, &shared_state).await
 }
 
 /// The shared enable-HTTPS routine, callable outside a Tauri command (the onboarding wizard reuses
-/// it). Generate certs → install browser trust → save config → start HTTPS. Errors iff trust landed
-/// in zero stores (R3), so the wizard can render HTTPS as failed-with-Retry.
-fn enable_https_inner(
+/// it). Generate certs → install browser trust → ensure the listener is LIVE → save config. Errors if
+/// trust lands in zero stores (R3) or the HTTPS listener can't bind, so the wizard renders HTTPS as
+/// failed-with-Retry. `async` because it AWAITS the real bind before persisting `https_enabled`.
+async fn enable_https_inner(
     config: &ConfigState,
     shared_state: &crate::server::AppState,
 ) -> Result<(), String> {
     use crate::certs;
+    use std::sync::atomic::Ordering;
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
@@ -351,30 +353,41 @@ fn enable_https_inner(
         format!("Legacy CA key could not be removed; refusing to enable HTTPS: {e}")
     })?;
 
-    // Already set up? Skip the (re-)install and its OS prompt entirely (post-impl review). An upgrader
-    // whose migrated config already has HTTPS trusted — launch already generated certs, installed
-    // trust, and spawned the listener — clicks the wizard's pre-checked "Start"; without this guard
-    // that would pop a fresh macOS Keychain password dialog to "install" an already-trusted cert and
-    // fire a redundant spawn_https that just fails to bind the already-bound port.
-    if certs::certs_exist() && certs::is_ca_trusted() {
-        mutate_config(config, |cfg| cfg.https_enabled = true)?;
-        tracing::info!("HTTPS already enabled + trusted — no re-install");
-        return Ok(());
+    // Generate + install trust ONLY when needed. Already set up (valid certs + trusted anchor)? Skip
+    // the (re-)install and its OS prompt (post-impl review) — but STILL ensure the listener is running
+    // below. The old short-circuit RETURNED here without spawning, so after disable→restart→re-enable
+    // (certs kept, trusted, but the launch gate didn't start HTTPS because config was off) HTTPS never
+    // served until yet another restart (post-impl codex High).
+    if !(certs::certs_exist() && certs::is_ca_trusted()) {
+        certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
+        certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
+    } else {
+        tracing::info!("Certs already present + trusted — skipping re-install");
     }
 
-    certs::generate_and_save().map_err(|e| format!("Failed to generate certificates: {e}"))?;
-
-    certs::install_ca_trust().map_err(|e| format!("Certificate trust was not granted: {e}"))?;
+    // Ensure the HTTPS listener is LIVE. If launch already bound it, don't double-spawn; otherwise
+    // spawn and AWAIT the real bind, persisting `https_enabled = true` ONLY once the listener is up
+    // (post-impl codex High: a swallowed bind failure used to report success while Safari/strict
+    // users silently fell back / failed).
+    if !shared_state.https_bound.load(Ordering::Relaxed) {
+        let tls_config =
+            certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
+        // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping
+        // it after a successful bind is visible to /health — no https_port propagation needed. (Q7)
+        let ready = crate::server::spawn_https(shared_state.clone(), tls_config);
+        match ready.await {
+            Ok(true) => {}
+            _ => {
+                return Err(
+                    "Certificates are ready, but the HTTPS server could not start \
+                     (port 59834 may be in use). Please try again."
+                        .to_string(),
+                );
+            }
+        }
+    }
 
     mutate_config(config, |cfg| cfg.https_enabled = true)?;
-
-    // Start HTTPS server with the full shared state (includes auth, config, popup callback)
-    let tls_config =
-        certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
-    // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping it
-    // after a successful bind is visible to /health — no https_port propagation needed. (Q7)
-    crate::server::spawn_https(shared_state.clone(), tls_config);
-
     tracing::info!("HTTPS enabled");
     Ok(())
 }
@@ -520,10 +533,19 @@ pub async fn complete_onboarding(
 ) -> Result<OnboardingResult, String> {
     require_label(window.label(), ONBOARDING_LABEL)?;
     let https_res = if https {
-        enable_https_inner(&config, &shared_state)
+        enable_https_inner(&config, &shared_state).await
     } else {
-        Ok(())
+        // Explicit opt-out: persist HTTPS OFF (post-impl codex High — the old `Ok(())` no-op left
+        // `https_enabled` at whatever it was, so unchecking HTTPS on "Run setup again" from an
+        // already-on install silently kept it on). A fresh install is already `false`; this makes the
+        // decline authoritative in every case.
+        mutate_config(&config, |cfg| cfg.https_enabled = false)
     };
+    // If the user REQUESTED HTTPS but it failed, don't leave a stale `true` from a prior enable —
+    // reflect the real (off) state so Settings and the next launch agree.
+    if https && https_res.is_err() {
+        let _ = mutate_config(&config, |cfg| cfg.https_enabled = false);
+    }
     let autostart_res = set_autostart_inner(&app, autostart);
     let auto_update_res = mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update));
 
@@ -588,14 +610,13 @@ pub async fn renew_cert(
     let _ = mutate_config(&config, |cfg| {
         cfg.last_rotation_prompt_at = Some(now_unix_secs());
     });
-    tracing::info!("Certificate renewed via consent window");
-    // F-012: closed from Rust on success (the page has no core:window grant); a failed close
-    // propagates so wireButton re-enables the buttons (merge-audit Low) — rotate_now is idempotent
-    // enough for a retry (it mints another fresh set).
-    window
-        .close()
-        .map_err(|e| format!("renewed, but the window could not be closed: {e}"))?;
-    Ok(())
+    // The running HTTPS listener still serves the OLD leaf from an in-memory TlsAcceptor that isn't
+    // hot-reloaded (see certs::rotate) — the freshly-rotated leaf only takes effect on the next
+    // launch. Rather than let a long-lived app keep serving the old leaf until it eventually expires
+    // (post-impl codex Medium), RESTART now so the new leaf is served immediately. The user
+    // explicitly asked to renew, and a tray app relaunch is near-invisible (it reappears in the tray).
+    tracing::info!("Certificate renewed via consent window — restarting to serve the new leaf");
+    window.app_handle().restart();
 }
 
 /// Record that the renewal window was shown/declined (throttles re-prompting).

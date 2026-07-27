@@ -12,13 +12,21 @@ pub use tls::start_https;
 /// (launch-time `try_start_https` + settings-time `enable_https`) — only the identical
 /// spawn+error-log wrapper is unified; each caller keeps its own (intentionally divergent) TLS-load
 /// and failure-handling preamble upstream. (F-09)
+///
+/// Returns a receiver that resolves to the BIND outcome (`true` = listener live, `false` = port
+/// unavailable). The enable path awaits it before persisting `https_enabled`; the launch path drops it
+/// (a dropped receiver just makes `start_https`'s `send` a no-op).
 pub fn spawn_https(
     state: AppState,
     tls_config: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
-) {
+) -> tokio::sync::oneshot::Receiver<bool> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = start_https(state, tls_config).await {
+        if let Err(e) = start_https(state, tls_config, tx).await {
+            // start_https only returns Err before it can send `ready`; the dropped `tx` makes the
+            // awaiting receiver observe a bind failure (RecvError), which the caller treats as such.
             tracing::error!("HTTPS server error: {e}");
         }
     });
+    rx
 }

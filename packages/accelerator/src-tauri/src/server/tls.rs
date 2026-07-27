@@ -12,9 +12,16 @@ use accelerator_core::server::{bind_with_retry, router_for_port, AppState, HTTPS
 
 /// Start an HTTPS listener using the provided TLS config.
 /// Runs independently from HTTP — errors are logged but never crash the app.
+///
+/// `ready` is signalled EXACTLY once with the bind outcome: `true` after the listener actually binds,
+/// `false` if the port is unavailable past the retry budget. The Settings/onboarding enable path
+/// awaits it so it persists `https_enabled = true` only once HTTPS is genuinely live (post-impl codex
+/// High: bind failure used to be swallowed as success, silently breaking Safari/strict users). The
+/// launch-time caller ignores the receiver.
 pub async fn start_https(
     state: AppState,
     tls_config: Arc<tokio_rustls::rustls::ServerConfig>,
+    ready: tokio::sync::oneshot::Sender<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Capture the shared bind-state flag before `router_for_port` consumes `state`.
     let https_bound = state.https_bound.clone();
@@ -30,11 +37,13 @@ pub async fn start_https(
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("HTTPS port {HTTPS_PORT} unavailable: {e} — continuing HTTP-only");
+            let _ = ready.send(false);
             return Ok(());
         }
     };
     // The listener bound — mark HTTPS live so /health advertises https_port (Q7).
     https_bound.store(true, Ordering::Relaxed);
+    let _ = ready.send(true);
 
     let acceptor = TlsAcceptor::from(tls_config);
     tracing::info!("HTTPS server listening on {addr}");

@@ -126,14 +126,22 @@ fn leaf_params(
     Ok(p)
 }
 
-/// Whether a usable cert set exists: the CA anchor + leaf cert/key are present AND the leaf parses
-/// and is not expired. Validity-checked (not just `.exists()`) so a corrupt/expired/half-written leaf
-/// triggers regeneration instead of being skipped forever. Note: `ca.key` is intentionally NOT
-/// required — it is never written.
+/// Whether a usable cert set exists: the CA anchor + leaf cert/key are present, the leaf parses and is
+/// not expired, AND the leaf+key are a matching pair (they load into a rustls `ServerConfig`).
+/// Validity- AND consistency-checked (not just `.exists()`) so a corrupt/expired/half-written OR
+/// mismatched set triggers regeneration instead of being skipped forever. The cross-file rename swap
+/// (`swap_into`) isn't atomic across all three files, so a crash / Windows file-lock mid-swap can
+/// leave a NEW leaf next to an OLD key (a mismatched pair) — `with_single_cert` rejects that, so this
+/// returns `false` and the set is regenerated on the next enable, rather than `generate_and_save`
+/// refusing forever and HTTPS being unrecoverable (post-impl codex High). `ca.pem` is not part of the
+/// served identity (`load_rustls_config` uses only the leaf + key), so a lone stale `ca.pem` doesn't
+/// gate here; it's re-installed on the next enable. `ca.key` is intentionally NOT required — never written.
 pub fn certs_exist() -> bool {
     // Check the raw seconds-remaining, NOT days: `days > 0` truncates a leaf with <24h left to 0 and
     // would wrongly report a still-valid cert as unusable (post-impl review). `> 0` on seconds is exact.
-    CertPaths::live().exists() && leaf_secs_remaining().map(|s| s > 0).unwrap_or(false)
+    CertPaths::live().exists()
+        && leaf_secs_remaining().map(|s| s > 0).unwrap_or(false)
+        && load_rustls_config().is_ok()
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
@@ -497,6 +505,36 @@ mod tests {
             .with_no_client_auth()
             .with_single_cert(certs, key);
         assert!(config.is_ok(), "rustls config should build successfully");
+    }
+
+    #[test]
+    fn mismatched_leaf_and_key_fail_to_load() {
+        // The consistency mechanism `certs_exist()` now relies on: rustls REJECTS a leaf paired with a
+        // key that didn't sign it — exactly the mixed set a non-atomic 3-file rename crash can leave
+        // (new leaf next to old key). So `certs_exist()` returns false for such a set and it is
+        // regenerated on the next enable, instead of `generate_and_save` refusing forever and HTTPS
+        // being unrecoverable (post-impl codex High).
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (_ca, _ca_key, leaf_cert, _leaf_key) = build_test_ca_and_leaf();
+        // A fresh, UNRELATED key — not the one that signed `leaf_cert`.
+        let wrong_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+
+        let cert_pem = leaf_cert.pem();
+        let key_pem = wrong_key.serialize_pem();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut BufReader::new(key_pem.as_bytes()))
+            .unwrap()
+            .unwrap();
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key);
+        assert!(
+            config.is_err(),
+            "a leaf paired with the WRONG key must not build a rustls config (drives certs_exist=false)"
+        );
     }
 
     #[test]

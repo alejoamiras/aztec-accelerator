@@ -618,7 +618,17 @@ fn main() {
             // bring up HTTPS — a live HTTPS server next to a readable mint-any-cert key + its
             // still-trusted anchor is the exposure we're closing. HTTP is unaffected. Idempotent.
             match certs::migrate_legacy_ca_key() {
-                Ok(()) => try_start_https(&state),
+                Ok(()) => {
+                    // Run the HTTPS gate OFF the setup thread. On macOS/Windows it makes a SYNCHRONOUS
+                    // trust-store query (`is_ca_trusted` shells out to `security`/`certutil`) with no
+                    // timeout; the setup thread must still reach the HTTP-server spawn below regardless
+                    // — HTTP is the critical path and must never be blocked by a slow/hung HTTPS trust
+                    // query (post-impl codex Medium). HTTPS binds a different port, so there's no race
+                    // with the HTTP listener. (Linux's gate is trust-free, so this only matters on
+                    // macOS/Windows.)
+                    let https_state = state.clone();
+                    tauri::async_runtime::spawn_blocking(move || try_start_https(&https_state));
+                }
                 Err(e) => tracing::error!(error = %e,
                     "SECURITY: legacy ca.key could not be removed — HTTPS NOT started (HTTP unaffected)"),
             }
