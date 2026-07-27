@@ -1,0 +1,9 @@
+/* Certificate-renewal consent window. Externalized from an inline <style> so the app's strict
+   `style-src 'self'` CSP (no unsafe-inline) doesn't block it (F-012 frontend architecture). */
+.r { padding: 20px 22px; }
+.r h1 { font-size: 1.15rem; margin: 2px 0 8px; }
+.r p { color: var(--muted, #6b7280); font-size: 0.9rem; margin: 0 0 16px; }
+.r .cta { display: flex; gap: 10px; }
+.r .cta button { border: none; border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.92rem; font-weight: 600; cursor: pointer; }
+.r .cta .primary { flex: 1; background: #f0a020; color: #231a06; }
+.r .cta .ghost { background: transparent; border: 1px solid var(--line, #e3e6ea); color: var(--muted, #6b7280); }

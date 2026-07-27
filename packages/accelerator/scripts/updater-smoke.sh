@@ -75,7 +75,10 @@ N_SIG_FILE="$(find "$N_ARTIFACTS_DIR" -name '*.app.tar.gz.sig' | head -1)"
 N_BASENAME="$(basename "$N_TARBALL")"
 cp "$N_TARBALL" "$SERVE_DIR/$N_BASENAME"
 N_SIG="$(cat "$N_SIG_FILE")"
-log "N artifact: $N_BASENAME"
+# Byte size of the GENUINE artifact (before any negative-mode tamper) — bound into the signed
+# manifest (F-004 Layer A + SEC-03). BSD/GNU `wc -c` both need the whitespace trimmed.
+N_SIZE="$(wc -c < "$N_TARBALL" | tr -d ' ')"
+log "N artifact: $N_BASENAME ($N_SIZE bytes)"
 
 # Negative control: serve the GENUINE signature but a TAMPERED tarball (append a
 # byte). The updater downloads the artifact, then the minisign check over the
@@ -106,11 +109,15 @@ log "trusting CA + adding hosts entry"
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$WORK/ca.pem"
 echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
 
-# ── Synthesize latest.json for N ──
+# ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
+# A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry a `manifest`/`manifest_sig`
+# signed with the SAME updater key N-1 embeds (the prod key — the synthetic N-1 keeps the committed
+# prod pubkey). The workflow provides it via TAURI_SIGNING_PRIVATE_KEY[_PASSWORD].
 jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
-  --arg url "https://$HOST/releases/download/$N_BASENAME" \
+  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" \
   '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
-    platforms: { ($key): { signature:$sig, url:$url } }}' > "$WORK/latest.json"
+    platforms: { ($key): { signature:$sig, url:$url, size:$size } }}' > "$WORK/latest.json"
+"$REPO_ROOT/packages/accelerator/scripts/sign-smoke-feed.sh" "$WORK/latest.json" "$REPO_ROOT"
 log "latest.json:"; cat "$WORK/latest.json"
 
 # ── Start the local HTTPS feed on :443 ──

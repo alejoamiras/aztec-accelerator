@@ -27,6 +27,8 @@ describe("updatePackageJson", () => {
       dependencies: {
         "@aztec/stdlib": "4.1.0-rc.4",
         "@aztec/bb-prover": "4.1.0-rc.4",
+        "@aztec-foundation/aztec-standards": "5.0.1",
+        "@aztec-foundation/some-other-package": "1.2.3",
         "ky": "^1.14.3",
       },
       devDependencies: {
@@ -51,6 +53,16 @@ describe("updatePackageJson", () => {
     const pkg = JSON.parse(result);
     expect(pkg.dependencies.ky).toBe("^1.14.3");
     expect(pkg.devDependencies.typescript).toBe("^5.9.3");
+  });
+
+  test("bumps lockstep companions but not other @aztec-foundation packages", () => {
+    const result = updatePackageJson(samplePkg, "5.0.2");
+    const pkg = JSON.parse(result);
+    // aztec-standards ships generated code with undeclared @aztec/aztec.js imports —
+    // it must move in lockstep with the @aztec/* pins.
+    expect(pkg.dependencies["@aztec-foundation/aztec-standards"]).toBe("5.0.2");
+    // The allowlist is exact — the scope alone must not opt a package in.
+    expect(pkg.dependencies["@aztec-foundation/some-other-package"]).toBe("1.2.3");
   });
 
   test("respects skipPackages set", () => {

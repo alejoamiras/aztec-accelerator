@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // The repo root hoists a second (newer) vite for another workspace; force every
+    // `import "vite"` in this graph onto the playground's own pinned copy so plugin
+    // types (vite-plugin-node-polyfills) and defineConfig agree.
+    "paths": { "vite": ["./node_modules/vite"] }
+  },
+  "include": ["e2e", "playwright.config.ts", "vite.config.ts"],
+  "exclude": []
+}

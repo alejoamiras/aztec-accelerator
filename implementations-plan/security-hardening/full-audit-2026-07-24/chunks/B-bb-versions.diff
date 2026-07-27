@@ -1,0 +1,1369 @@
+diff --git a/packages/accelerator/core/src/bb.rs b/packages/accelerator/core/src/bb.rs
+index 9f467b1..46c0690 100644
+--- a/packages/accelerator/core/src/bb.rs
++++ b/packages/accelerator/core/src/bb.rs
+@@ -6,20 +6,25 @@ use crate::versions;
+ /// Maximum time to wait for bb prove to complete before killing the process.
+ const PROVE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+ 
+-/// Find the `bb` binary. When `version` is provided, the version cache is checked
+-/// before the standard search chain.
++/// Find the `bb` binary. When `version` is provided, the marker-verified version cache is the ONLY
++/// acceptable source — never the standard search chain.
+ ///
+ /// Search order:
+-/// 0. `BB_BINARY_PATH` env var — explicit override (CI, testing, custom installs)
+-/// 1. Version cache (`~/.aztec-accelerator/versions/{version}/bb`) — when version specified
++/// 0. `BB_BINARY_PATH` env var — trusted, unversioned operator override (A4). The one documented
++///    exception to "no unverified execution": whoever sets the process env already owns the process.
++/// 1. Version cache (`~/.aztec-accelerator/versions/{version}/bb`) — when a version is requested.
+ /// 2. Bundled sidecar (Tauri externalBin) — `binaries/bb-{target-triple}` next to the executable
+ /// 3. `~/.bb/bb` — user-installed via `bbup`
+ /// 4. `bb` on `$PATH`
+ ///
+-/// q7e3-F-08: `version` is the validated `&AztecVersion` — the cache-path lookup below is
+-/// traversal-safe by construction.
++/// F-007: for a REQUESTED (non-bundled) version, the marker-verified cache entry is the ONLY acceptable
++/// source. `resolve_version` normalizes the bundled request to `None`, so a `Some(v)` here is always a
++/// genuinely non-bundled request; ANY cache failure (absent, tampered, unreadable) is a hard error —
++/// steps 2–4 would silently execute the WRONG version (or an unverified binary) over the private
++/// witness. Only `find_bb(None)` (bundled / unspecified) walks the sidecar → `~/.bb` → `$PATH` chain.
++/// q7e3-F-08: `version` is the validated `&AztecVersion` — the cache-path lookup is traversal-safe.
+ pub fn find_bb(version: Option<&versions::AztecVersion>) -> Result<PathBuf, String> {
+-    // 0. Explicit override via environment variable
++    // 0. Explicit override via environment variable (trusted, unversioned — A4).
+     if let Ok(path) = std::env::var("BB_BINARY_PATH") {
+         let explicit = PathBuf::from(&path);
+         if explicit.exists() {
+@@ -27,12 +32,11 @@ pub fn find_bb(version: Option<&versions::AztecVersion>) -> Result<PathBuf, Stri
+         }
+     }
+ 
+-    // 1. Version cache (only when a specific version is requested)
++    // 1. Version cache — a requested non-bundled version MUST resolve to a marker-verified entry, with
++    //    NO fall-through to a different bb (F-007).
+     if let Some(v) = version {
+-        let cached = versions::version_bb_path(v);
+-        if cached.exists() {
+-            return Ok(cached);
+-        }
++        return versions::verify_cached_bb(v)
++            .map_err(|e| format!("cached bb for {v} failed integrity verification: {e}"));
+     }
+ 
+     // 2. Sidecar: check next to the current executable (bb.exe on Windows)
+@@ -70,6 +74,110 @@ fn home_dir_fallback() -> Option<PathBuf> {
+     std::env::var("HOME").ok().map(PathBuf::from)
+ }
+ 
++/// Per-user private base for prove workspaces: `<data-local>/aztec-accelerator/prove-tmp`, created
++/// owner-only. Using our OWN per-user directory (not the shared OS temp) keeps the witness off a
++/// world-readable / shared `$TMPDIR`/`%TEMP%` and out of a non-sticky temp parent where an
++/// attacker could replace an ancestor between creation and use (F-003 hardening). `None` if no
++/// data-local dir is resolvable (caller falls back to OS temp).
++fn prove_tmp_parent() -> Option<PathBuf> {
++    let base = dirs::data_local_dir()?
++        .join("aztec-accelerator")
++        .join("prove-tmp");
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
++        std::fs::DirBuilder::new()
++            .recursive(true)
++            .mode(0o700)
++            .create(&base)
++            .ok()?;
++        // Tighten even if it pre-existed with a looser mode.
++        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).ok()?;
++    }
++    #[cfg(windows)]
++    {
++        // F-003 Windows tail: create `prove-tmp` with an owner-only PROTECTED+inheritable DACL, or harden
++        // it if it pre-exists. Fail closed (None → caller must NOT fall back to a shared temp on Windows).
++        if let Some(mid) = base.parent() {
++            std::fs::create_dir_all(mid).ok()?;
++        }
++        match crate::win_acl::secure_create_dir(&base) {
++            Ok(()) => {}
++            Err(_) if base.is_dir() => crate::win_acl::harden_existing_dir(&base).ok()?,
++            Err(_) => return None,
++        }
++    }
++    #[cfg(all(not(unix), not(windows)))]
++    std::fs::create_dir_all(&base).ok()?;
++    Some(base)
++}
++
++/// Create the per-prove temp workspace under the per-user private base (see `prove_tmp_parent`).
++/// On Unix the directory is created `0o700` (owner-only) at the creation syscall — never
++/// write-then-chmod — so the private witness never has a world-traversable window (F-003).
++/// `tempfile::tempdir()` alone applies no mode and inherits the umask default (typically `0o755`).
++/// Falls back to the OS temp dir (still `0o700` on Unix) only if no per-user dir is resolvable.
++fn create_prove_tempdir() -> std::io::Result<tempfile::TempDir> {
++    let mut builder = tempfile::Builder::new();
++    builder.prefix("prove-");
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        builder.permissions(std::fs::Permissions::from_mode(0o700));
++    }
++    #[cfg(windows)]
++    {
++        // F-003 (D4/D21): fail closed on Windows — NO OS-`%TEMP%` fallback for the private witness. The
++        // `prove-tmp` parent is owner-only + inheritable, so the child tempdir inherits owner-only AT
++        // creation (no window); harden it explicitly (PROTECTED) too.
++        let parent = prove_tmp_parent().ok_or_else(|| {
++            std::io::Error::new(
++                std::io::ErrorKind::NotFound,
++                "no per-user data dir for a private prove workspace (refusing OS-temp fallback)",
++            )
++        })?;
++        let dir = builder.tempdir_in(parent)?;
++        crate::win_acl::harden_existing_dir(dir.path())?;
++        Ok(dir)
++    }
++    #[cfg(not(windows))]
++    match prove_tmp_parent() {
++        Some(parent) => builder.tempdir_in(parent),
++        None => {
++            tracing::warn!(
++                "No per-user data dir for a private prove workspace; using OS temp (0o700 on Unix)"
++            );
++            builder.tempdir()
++        }
++    }
++}
++
++/// Write the proving witness (private ZK inputs) with mode `0o600` supplied to the creation
++/// syscall (F-003) — no write-then-chmod window. `create_new(true)` fails closed if the path
++/// already exists (defends against a pre-planted file/symlink in the workspace).
++fn write_witness(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
++    use std::io::Write;
++    #[cfg(windows)]
++    {
++        // F-003 Windows tail: create the empty witness with an owner-only DACL BEFORE writing bytes
++        // (CREATE_NEW rejects a pre-planted file/symlink), then write.
++        let mut file = crate::win_acl::secure_create_file(path)?;
++        file.write_all(bytes)
++    }
++    #[cfg(not(windows))]
++    {
++        let mut options = std::fs::OpenOptions::new();
++        options.write(true).create_new(true);
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::OpenOptionsExt;
++            options.mode(0o600);
++        }
++        let mut file = options.open(path)?;
++        file.write_all(bytes)
++    }
++}
++
+ /// Run `bb prove` on the given IVC inputs (msgpack bytes) and return the proof
+ /// with a 4-byte BE field-count header suitable for `ChonkProofWithPublicInputs.fromBuffer()`.
+ ///
+@@ -83,11 +191,11 @@ pub async fn prove(
+     let bb_path =
+         find_bb(version).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+ 
+-    let tmp_dir = tempfile::tempdir()?;
++    let tmp_dir = create_prove_tempdir()?;
+     let input_path = tmp_dir.path().join("ivc-inputs.msgpack");
+     let output_dir = tmp_dir.path().join("output");
+     std::fs::create_dir_all(&output_dir)?;
+-    std::fs::write(&input_path, ivc_inputs)?;
++    write_witness(&input_path, ivc_inputs)?;
+ 
+     tracing::info!(
+         version = version.map_or("bundled", |v| v.as_str()),
+@@ -176,6 +284,50 @@ mod tests {
+     use super::*;
+     use serial_test::serial;
+ 
++    /// F-003: the per-prove workspace dir is created `0o700` and the witness file `0o600` — at
++    /// the creation syscall, so no other local user can read the private witness while proving.
++    #[cfg(unix)]
++    #[test]
++    fn prove_workspace_and_witness_have_private_modes() {
++        use std::os::unix::fs::MetadataExt;
++
++        let dir = create_prove_tempdir().unwrap();
++        let witness = dir.path().join("ivc-inputs.msgpack");
++        write_witness(&witness, b"secret-witness-bytes").unwrap();
++
++        assert_eq!(
++            std::fs::metadata(dir.path()).unwrap().mode() & 0o777,
++            0o700,
++            "prove workspace dir must be owner-only"
++        );
++        assert_eq!(
++            std::fs::metadata(&witness).unwrap().mode() & 0o777,
++            0o600,
++            "witness file must be owner-only"
++        );
++
++        // create_new fails closed on a pre-existing path (no silent overwrite of a planted file).
++        assert!(write_witness(&witness, b"again").is_err());
++    }
++
++    /// F-003 Windows tail (runs in the `windows-build` CI lane). `create_prove_tempdir` / `write_witness`
++    /// apply an owner-only PROTECTED DACL and then READ IT BACK, failing closed if it did not take effect
++    /// (`win_acl::verify_owner_only` — catches FAT/exFAT no-op, foreign/world ACEs). So a successful
++    /// create+write IS the effective-DACL assertion: owner-only, no `BUILTIN\Users`/`Everyone`. Also
++    /// pins reparse/pre-plant rejection (CREATE_NEW / CreateDirectoryW fail if the path already exists).
++    #[cfg(windows)]
++    #[test]
++    fn prove_workspace_and_witness_are_owner_only_windows() {
++        let dir =
++            create_prove_tempdir().expect("secure prove workspace (owner-only DACL verified)");
++        let witness = dir.path().join("ivc-inputs.msgpack");
++        write_witness(&witness, b"secret-witness-bytes")
++            .expect("secure witness (owner-only DACL verified)");
++        assert!(witness.exists());
++        // CREATE_NEW must reject a second write to the same path (planted-file / symlink defense).
++        assert!(write_witness(&witness, b"again").is_err());
++    }
++
+     #[test]
+     fn truncate_stderr_cuts_at_char_boundary_without_panic() {
+         // 600 'é' = 1200 bytes / 600 chars → must truncate (char_count > 500); a byte slice at 500
+@@ -271,13 +423,18 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn test_find_bb_with_version_checks_cache() {
+-        // Verify that find_bb with a version doesn't panic and follows the chain
++    #[serial]
++    fn test_find_bb_with_uncached_version_is_fail_closed() {
++        // F-007: a requested (non-bundled) version with no marker-verified cache entry MUST hard-error —
++        // it never falls through to the sidecar/~/.bb/$PATH (which would run the wrong/unverified bb over
++        // the witness). `#[serial]` + clearing the env override keeps this deterministic vs the env tests.
++        std::env::remove_var("BB_BINARY_PATH");
+         let version = versions::AztecVersion::parse("99.99.99-nonexistent").unwrap();
+         let result = find_bb(Some(&version));
+-        match result {
+-            Ok(path) => assert!(path.exists()),
+-            Err(msg) => assert!(msg.contains("bb binary not found")),
+-        }
++        assert!(
++            result.is_err(),
++            "uncached requested version must fail closed, got {result:?}"
++        );
++        assert!(result.unwrap_err().contains("integrity verification"));
+     }
+ }
+diff --git a/packages/accelerator/core/src/lib.rs b/packages/accelerator/core/src/lib.rs
+index 5b47dcf..149f293 100644
+--- a/packages/accelerator/core/src/lib.rs
++++ b/packages/accelerator/core/src/lib.rs
+@@ -11,7 +11,12 @@ pub mod authorization;
+ pub mod bb;
+ pub mod config;
+ pub mod server;
++pub mod update_manifest;
++pub mod updater_state;
+ pub mod versions;
++/// F-003 Windows tail — owner-only ACL helpers (Windows-only; the module is `#![cfg(windows)]`).
++#[cfg(windows)]
++pub mod win_acl;
+ 
+ use std::path::PathBuf;
+ 
+diff --git a/packages/accelerator/core/src/versions/cache_layout.rs b/packages/accelerator/core/src/versions/cache_layout.rs
+index 8a52200..538c30f 100644
+--- a/packages/accelerator/core/src/versions/cache_layout.rs
++++ b/packages/accelerator/core/src/versions/cache_layout.rs
+@@ -1,17 +1,27 @@
+ //! On-disk layout of the bb version cache (`~/.aztec-accelerator/versions/`). q7e3-F-07: split from
+ //! the `versions` module root; the root re-exports keep external paths unchanged.
+ 
++use super::release_metadata::current_platform;
+ use super::version_policy::AztecVersion;
+-use std::path::PathBuf;
+-
+-/// Returns the base directory for cached bb versions: `~/.aztec-accelerator/versions/`.
+-pub fn versions_base_dir() -> PathBuf {
+-    dirs::home_dir()
+-        .unwrap_or_else(|| PathBuf::from("."))
+-        .join(".aztec-accelerator")
+-        .join("versions")
++use std::path::{Path, PathBuf};
++
++/// The base directory for cached bb versions: `~/.aztec-accelerator/versions/`. Returns `None` when
++/// the user home directory cannot be resolved — every caller then FAILS CLOSED (codex audit #4).
++///
++/// The previous `unwrap_or_else(|| ".")` (current-working-directory) fallback was a real hole: the
++/// bb-cache integrity marker is only trustworthy inside a directory the *user* owns. If home
++/// resolution failed and the cache root became the CWD, an attacker who controls the working
++/// directory could preseed `./.aztec-accelerator/versions/<v>/{bb, bb.sha256.json}` with a bb and a
++/// SELF-AUTHORED marker whose digest matches — and `verify_cached_bb` would accept it, bypassing the
++/// download-time verification entirely. No resolvable home ⇒ no trusted cache location ⇒ refuse.
++pub fn versions_base_dir() -> Option<PathBuf> {
++    dirs::home_dir().map(|h| h.join(".aztec-accelerator").join("versions"))
+ }
+ 
++/// Error returned by the security-critical paths when [`versions_base_dir`] yields `None`.
++const NO_TRUSTED_CACHE_ROOT: &str =
++    "SECURITY: home directory unresolved; refusing to trust any cache location";
++
+ /// The bb binary filename on the current platform (`bb.exe` on Windows, `bb` elsewhere).
+ pub fn bb_binary_name() -> &'static str {
+     if cfg!(target_os = "windows") {
+@@ -24,28 +34,189 @@ pub fn bb_binary_name() -> &'static str {
+ /// Returns the path to a cached bb binary for a given version.
+ /// q7e3-F-08: takes the validated `&AztecVersion` — an unvalidated string can no longer reach this
+ /// path-building sink (the #99 traversal guard holds by construction).
+-pub fn version_bb_path(version: &AztecVersion) -> PathBuf {
+-    versions_base_dir()
+-        .join(version.as_str())
+-        .join(bb_binary_name())
++pub fn version_bb_path(version: &AztecVersion) -> Option<PathBuf> {
++    versions_base_dir().map(|b| b.join(version.as_str()).join(bb_binary_name()))
+ }
+ 
+-/// List all cached bb versions by scanning `versions_base_dir()`.
++/// List all cached bb versions by scanning `versions_base_dir()`. An unresolvable home ⇒ no trusted
++/// cache ⇒ empty inventory (fail closed: nothing is advertised as cached).
+ pub fn list_cached_versions() -> Vec<String> {
+-    let base = versions_base_dir();
++    versions_base_dir()
++        .map(|b| list_cached_versions_in(&b))
++        .unwrap_or_default()
++}
++
++/// Inner, base-dir-parameterized for testing. A directory counts as a cached version ONLY if its name
++/// is a VALID version (skips dot-prefixed `.{v}.tmp.<rand>` staging dirs + junk) AND it holds BOTH the
++/// binary and its integrity marker. Cheap stat only — NEVER rehashes: this feeds the hot inventory
++/// (`/health` + tray), so it must not read binary bytes. Execution paths rehash via `verify_cached_bb`
++/// (F-007).
++pub(crate) fn list_cached_versions_in(base: &Path) -> Vec<String> {
+     let mut versions = Vec::new();
+-    if let Ok(entries) = std::fs::read_dir(&base) {
++    if let Ok(entries) = std::fs::read_dir(base) {
+         for entry in entries.flatten() {
+-            if entry.path().join(bb_binary_name()).exists() {
+-                if let Some(name) = entry.file_name().to_str() {
+-                    versions.push(name.to_string());
+-                }
++            let Ok(name) = entry.file_name().into_string() else {
++                continue;
++            };
++            // Exclude staging dirs (leading dot) and any non-version-named directory.
++            if name.starts_with('.') || AztecVersion::parse(&name).is_none() {
++                continue;
++            }
++            let dir = entry.path();
++            if dir.join(bb_binary_name()).exists() && dir.join(MARKER_NAME).exists() {
++                versions.push(name);
+             }
+         }
+     }
+     versions.sort();
+     versions
+ }
++
++// ---------------------------------------------------------------------------
++// F-007 integrity marker: every cached bb carries a `bb.sha256.json` recording the verified archive
++// digest + the FINAL-binary digest (post macOS codesign). The runtime rehashes the cached binary
++// against this marker on every use (`verify_cached_bb`); a missing/malformed/mismatched marker fails
++// closed and triggers a verified re-download.
++// ---------------------------------------------------------------------------
++
++/// Marker filename, colocated with `bb` in each version dir.
++pub(crate) const MARKER_NAME: &str = "bb.sha256.json";
++/// Marker schema tag — `read_bb_marker` rejects anything else (forward-compatible evolution).
++pub(crate) const MARKER_SCHEMA: &str = "aztec-accelerator/bb-cache-marker@1";
++
++/// Path to a cached version's integrity marker. `None` when home is unresolved (fail closed).
++pub(crate) fn version_bb_marker_path(version: &AztecVersion) -> Option<PathBuf> {
++    versions_base_dir().map(|b| b.join(version.as_str()).join(MARKER_NAME))
++}
++
++fn is_hex64(s: &str) -> bool {
++    s.len() == 64
++        && s.bytes()
++            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++}
++
++/// Streamed SHA-256 of a file (never loads the whole binary into memory).
++pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
++    use sha2::{Digest, Sha256};
++    use std::io::Read;
++    let mut file = std::fs::File::open(path)?;
++    let mut hasher = Sha256::new();
++    let mut buf = [0u8; 64 * 1024];
++    loop {
++        let n = file.read(&mut buf)?;
++        if n == 0 {
++            break;
++        }
++        hasher.update(&buf[..n]);
++    }
++    Ok(hex::encode(hasher.finalize()))
++}
++
++/// Write the marker at mode `0600`-at-creation (Unix) into `dir` (the staging dir, pre-publish). Both
++/// digests are recorded (archive = provenance; binary = what the runtime re-verifies).
++pub(crate) fn write_bb_marker(
++    dir: &Path,
++    version: &str,
++    archive_sha256: &str,
++    binary_sha256: &str,
++) -> std::io::Result<()> {
++    use std::io::Write;
++    let body = serde_json::json!({
++        "schema": MARKER_SCHEMA,
++        "version": version,
++        "platform": current_platform(),
++        "archive_sha256": archive_sha256,
++        "binary_sha256": binary_sha256,
++    })
++    .to_string();
++
++    let mut opts = std::fs::OpenOptions::new();
++    opts.write(true).create(true).truncate(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        opts.mode(0o600);
++    }
++    let mut file = opts.open(dir.join(MARKER_NAME))?;
++    file.write_all(body.as_bytes())
++}
++
++/// Read + structurally validate a marker file, returning the verified binary digest. Fail-closed:
++/// missing, oversized, malformed, unknown-schema, version/platform-mismatch, or noncanonical-hex ⇒
++/// `Err`. Path-parameterized so it is unit-testable without the home-bound cache dir. (Archive digest
++/// is validated as canonical hex but not returned — the runtime re-verifies the binary; the archive
++/// digest is provenance recorded in the file.)
++fn read_bb_marker_at(
++    marker_path: &Path,
++    expect_version: &str,
++    expect_platform: &str,
++) -> Result<String, String> {
++    let meta = std::fs::metadata(marker_path).map_err(|e| format!("marker missing: {e}"))?;
++    if meta.len() > 4096 {
++        return Err(format!(
++            "marker is implausibly large ({} bytes)",
++            meta.len()
++        ));
++    }
++    let raw = std::fs::read_to_string(marker_path).map_err(|e| format!("marker read: {e}"))?;
++    let v: serde_json::Value =
++        serde_json::from_str(&raw).map_err(|e| format!("marker parse: {e}"))?;
++
++    let field = |k: &str| v.get(k).and_then(|x| x.as_str());
++    if field("schema") != Some(MARKER_SCHEMA) {
++        return Err("marker has an unknown schema".to_string());
++    }
++    if field("version") != Some(expect_version) {
++        return Err(format!("marker version does not match {expect_version}"));
++    }
++    if field("platform") != Some(expect_platform) {
++        return Err(format!("marker platform does not match {expect_platform}"));
++    }
++    let archive = field("archive_sha256").unwrap_or_default();
++    let binary = field("binary_sha256").unwrap_or_default();
++    if !is_hex64(archive) || !is_hex64(binary) {
++        return Err("marker has non-canonical digest(s)".to_string());
++    }
++    Ok(binary.to_string())
++}
++
++/// Fail-closed integrity check for a bb at explicit paths: the binary must be a present regular file
++/// whose streamed SHA-256 matches its valid marker's `binary_sha256`. Path-parameterized for testing.
++fn verify_bb_entry(
++    bb_path: &Path,
++    marker_path: &Path,
++    expect_version: &str,
++    expect_platform: &str,
++) -> Result<(), String> {
++    let meta =
++        std::fs::symlink_metadata(bb_path).map_err(|e| format!("cached bb unreadable: {e}"))?;
++    if !meta.file_type().is_file() {
++        return Err("cached bb is not a regular file".to_string());
++    }
++    let expected = read_bb_marker_at(marker_path, expect_version, expect_platform)?;
++    let actual = sha256_file(bb_path).map_err(|e| format!("hash cached bb: {e}"))?;
++    if actual != expected {
++        return Err(format!(
++            "SECURITY: cached bb {expect_version} failed integrity check (marker {expected}, actual {actual})"
++        ));
++    }
++    Ok(())
++}
++
++/// Fail-closed integrity check for a cached bb: the binary must be a present regular file whose streamed
++/// SHA-256 matches its valid marker's `binary_sha256`. Returns the verified path on success. This is the
++/// SINGLE authority the runtime trusts before executing a cached bb over the witness (F-007).
++pub fn verify_cached_bb(version: &AztecVersion) -> Result<PathBuf, String> {
++    // codex #4: resolve the trusted cache root first — a `None` home fails closed here rather than
++    // silently trusting a CWD-rooted (attacker-preseedable) path.
++    let bb_path =
++        version_bb_path(version).ok_or_else(|| format!("bb {version}: {NO_TRUSTED_CACHE_ROOT}"))?;
++    let marker_path = version_bb_marker_path(version)
++        .ok_or_else(|| format!("bb {version}: {NO_TRUSTED_CACHE_ROOT}"))?;
++    verify_bb_entry(&bb_path, &marker_path, version.as_str(), current_platform())
++        .map_err(|e| format!("bb {version}: {e}"))?;
++    Ok(bb_path)
++}
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -53,7 +224,7 @@ mod tests {
+     #[test]
+     fn version_bb_path_format() {
+         let version = AztecVersion::parse("5.0.0-nightly.20260307").unwrap();
+-        let path = version_bb_path(&version);
++        let path = version_bb_path(&version).expect("home resolvable in the test environment");
+         // Separator-agnostic: compare path components, and use the platform's bb name.
+         let tail: std::path::PathBuf = [
+             ".aztec-accelerator",
+@@ -91,4 +262,166 @@ mod tests {
+         assert!(v2_dir.join("bb").exists());
+         assert!(!v3_dir.join("bb").exists());
+     }
++
++    // ----- F-007 marker + inventory ---------------------------------------------------------------
++
++    /// Write a `{ bb, marker }` cache entry into `base/<version>`; returns the version dir.
++    fn write_entry(base: &std::path::Path, version: &str, bb_bytes: &[u8]) -> PathBuf {
++        let dir = base.join(version);
++        std::fs::create_dir_all(&dir).unwrap();
++        std::fs::write(dir.join(bb_binary_name()), bb_bytes).unwrap();
++        let bin = super::sha256_file(&dir.join(bb_binary_name())).unwrap();
++        // archive digest is arbitrary provenance for the test (a valid 64-hex).
++        write_bb_marker(&dir, version, &"a".repeat(64), &bin).unwrap();
++        dir
++    }
++
++    #[test]
++    fn verify_bb_entry_accepts_a_matching_marker() {
++        let tmp = tempfile::tempdir().unwrap();
++        let dir = write_entry(tmp.path(), "5.0.0-rc.2", b"the-bb-bytes");
++        assert!(verify_bb_entry(
++            &dir.join(bb_binary_name()),
++            &dir.join(MARKER_NAME),
++            "5.0.0-rc.2",
++            current_platform(),
++        )
++        .is_ok());
++    }
++
++    #[test]
++    fn verify_bb_entry_is_fail_closed() {
++        let tmp = tempfile::tempdir().unwrap();
++        let dir = write_entry(tmp.path(), "5.0.0-rc.2", b"original");
++        let bb = dir.join(bb_binary_name());
++        let marker = dir.join(MARKER_NAME);
++        let plat = current_platform();
++
++        // Tampered binary ⇒ hash mismatch.
++        std::fs::write(&bb, b"tampered").unwrap();
++        assert!(verify_bb_entry(&bb, &marker, "5.0.0-rc.2", plat).is_err());
++        std::fs::write(&bb, b"original").unwrap(); // restore for the remaining checks
++
++        // Version / platform mismatch.
++        assert!(verify_bb_entry(&bb, &marker, "9.9.9", plat).is_err());
++        assert!(verify_bb_entry(&bb, &marker, "5.0.0-rc.2", "arm64-solaris").is_err());
++
++        // Missing marker.
++        assert!(verify_bb_entry(&bb, &tmp.path().join("nope.json"), "5.0.0-rc.2", plat).is_err());
++
++        // Unknown schema / noncanonical hex.
++        std::fs::write(&marker, r#"{"schema":"other@9"}"#).unwrap();
++        assert!(read_bb_marker_at(&marker, "5.0.0-rc.2", plat).is_err());
++        std::fs::write(
++            &marker,
++            format!(
++                r#"{{"schema":"{MARKER_SCHEMA}","version":"5.0.0-rc.2","platform":"{plat}","archive_sha256":"NOTHEX","binary_sha256":"{}"}}"#,
++                "b".repeat(64)
++            ),
++        )
++        .unwrap();
++        assert!(read_bb_marker_at(&marker, "5.0.0-rc.2", plat).is_err());
++
++        // Oversized marker.
++        std::fs::write(&marker, " ".repeat(5000)).unwrap();
++        assert!(read_bb_marker_at(&marker, "5.0.0-rc.2", plat).is_err());
++    }
++
++    #[test]
++    fn verify_bb_entry_rejects_a_symlink_binary() {
++        #[cfg(unix)]
++        {
++            let tmp = tempfile::tempdir().unwrap();
++            let dir = tmp.path().join("5.0.0-rc.2");
++            std::fs::create_dir_all(&dir).unwrap();
++            std::os::unix::fs::symlink("/etc/passwd", dir.join(bb_binary_name())).unwrap();
++            write_bb_marker(&dir, "5.0.0-rc.2", &"a".repeat(64), &"b".repeat(64)).unwrap();
++            assert!(verify_bb_entry(
++                &dir.join(bb_binary_name()),
++                &dir.join(MARKER_NAME),
++                "5.0.0-rc.2",
++                current_platform(),
++            )
++            .is_err());
++        }
++    }
++
++    #[test]
++    fn list_cached_versions_in_excludes_stages_unmarked_and_junk() {
++        let base = tempfile::tempdir().unwrap();
++        // A valid, marked entry — listed.
++        write_entry(base.path(), "5.0.0-rc.2", b"x");
++        // Unmarked (bb but no marker) — NOT listed.
++        let unmarked = base.path().join("5.0.0-rc.3");
++        std::fs::create_dir_all(&unmarked).unwrap();
++        std::fs::write(unmarked.join(bb_binary_name()), b"y").unwrap();
++        // A crash-stale staging dir (dot-prefixed) WITH a marker — NOT listed.
++        let stage = base.path().join(".5.0.0-rc.9.tmp.1234-5-0");
++        std::fs::create_dir_all(&stage).unwrap();
++        std::fs::write(stage.join(bb_binary_name()), b"z").unwrap();
++        write_bb_marker(&stage, "5.0.0-rc.9", &"a".repeat(64), &"b".repeat(64)).unwrap();
++        // A junk-named dir — NOT listed.
++        std::fs::create_dir_all(base.path().join("not a version!")).unwrap();
++
++        assert_eq!(
++            list_cached_versions_in(base.path()),
++            vec!["5.0.0-rc.2".to_string()]
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn marker_is_written_owner_only() {
++        use std::os::unix::fs::PermissionsExt;
++        let tmp = tempfile::tempdir().unwrap();
++        write_bb_marker(tmp.path(), "5.0.0-rc.2", &"a".repeat(64), &"b".repeat(64)).unwrap();
++        let mode = std::fs::metadata(tmp.path().join(MARKER_NAME))
++            .unwrap()
++            .permissions()
++            .mode()
++            & 0o777;
++        assert_eq!(mode, 0o600, "marker must be owner-only");
++    }
++
++    /// Cross-language contract: the committed fixture the TS suite also loads must parse under the Rust
++    /// marker schema (schema tag + canonical-hex digest fields).
++    #[test]
++    fn shared_fixture_marker_matches_schema() {
++        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++            .join("../../../scripts/__fixtures__/bb-cache-marker.json");
++        let raw = std::fs::read_to_string(&path).expect("fixture bb-cache-marker.json present");
++        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
++        assert_eq!(v["schema"].as_str(), Some(MARKER_SCHEMA));
++        for f in ["archive_sha256", "binary_sha256"] {
++            assert!(is_hex64(v[f].as_str().unwrap()), "{f} must be 64-lc-hex");
++        }
++        // read_bb_marker_at accepts it when told the fixture's own version + platform.
++        let (ver, plat) = (
++            v["version"].as_str().unwrap(),
++            v["platform"].as_str().unwrap(),
++        );
++        assert!(read_bb_marker_at(&path, ver, plat).is_ok());
++    }
++
++    /// Cross-language contract: the release-metadata fixture the TS suite loads must expose each asset's
++    /// digest as `sha256:<64-lc-hex>` and survive the `sha256:` strip → canonical-hex check that both
++    /// `fetch_github_asset_digest` (Rust) and `fetchAssetDigest` (TS) apply.
++    #[test]
++    fn shared_fixture_release_metadata_has_canonical_digests() {
++        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++            .join("../../../scripts/__fixtures__/github-release-metadata.json");
++        let raw =
++            std::fs::read_to_string(&path).expect("fixture github-release-metadata.json present");
++        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
++        let assets = v["assets"].as_array().expect("assets array");
++        assert!(!assets.is_empty());
++        for asset in assets {
++            let digest = asset["digest"].as_str().expect("asset digest");
++            let hex = digest.strip_prefix("sha256:").expect("sha256: prefix");
++            assert!(
++                is_hex64(hex),
++                "asset digest must strip to 64-lc-hex: {digest}"
++            );
++        }
++    }
+ }
+diff --git a/packages/accelerator/core/src/versions/downloader.rs b/packages/accelerator/core/src/versions/downloader.rs
+index b5a6814..8174bd7 100644
+--- a/packages/accelerator/core/src/versions/downloader.rs
++++ b/packages/accelerator/core/src/versions/downloader.rs
+@@ -5,13 +5,16 @@
+ //! that was bolted onto the otherwise cross-platform flow (now its own `finalize_downloaded_binary`).
+ //! The smaller identity/platform/layout/cache concerns stay in the `versions` module root.
+ 
+-use super::cache_layout::{bb_binary_name, version_bb_path, versions_base_dir};
++use super::cache_layout::{
++    bb_binary_name, sha256_file, verify_cached_bb, versions_base_dir, write_bb_marker,
++};
+ use super::release_metadata::{
+     current_platform, download_url, fetch_github_asset_digest, http_client, sha256_hex,
+ };
+ use super::version_policy::AztecVersion;
+ use std::error::Error;
+-use std::path::PathBuf;
++use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+     // The `&AztecVersion` parameter IS the #99 traversal guard: a value of this type can only have
+@@ -20,9 +23,10 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
+     // against is now structurally impossible. q7e3-F-08: the path/URL sinks now take `&AztecVersion`
+     // themselves; deref to `&str` only for the log/digest sites (byte-identical strings).
+     let version_str: &str = version;
+-    let bb_path = version_bb_path(version);
+-    if bb_path.exists() {
+-        tracing::info!(version = version_str, "bb already cached");
++    // F-007: skip only when the cache entry is present AND marker-verified. A missing/tampered/legacy
++    // entry falls through to a fresh verified download that atomically REPLACES it (not `exists()`).
++    if let Ok(bb_path) = verify_cached_bb(version) {
++        tracing::info!(version = version_str, "bb already cached (verified)");
+         return Ok(bb_path);
+     }
+ 
+@@ -35,27 +39,22 @@ pub async fn download_bb(version: &AztecVersion) -> Result<PathBuf, Box<dyn Erro
+         bytes = bytes.len(),
+         "Download complete, verifying integrity"
+     );
+-    verify_digest(version_str, &bytes).await?;
+-
+-    // Extract into the version's cache dir via temp dir + atomic rename (Q11: extracted to
+-    // `install_version_dir` so the cleanup/rename is unit-testable without the network).
+-    let version_dir = versions_base_dir().join(version.as_str());
+-    install_version_dir(&version_dir, &bytes)?;
+-
+-    let final_path = version_dir.join(bb_binary_name());
+-    #[cfg(unix)]
+-    {
+-        use std::os::unix::fs::PermissionsExt;
+-        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o755))?;
+-    }
+-
+-    // macOS: clear quarantine xattrs + ad-hoc re-sign so Gatekeeper doesn't SIGKILL the chmod'd
+-    // binary. Extracted to `finalize_downloaded_binary` (a no-op off macOS) — F-04 folds the
+-    // "macOS tail bolted onto the cross-platform flow" sub-finding.
+-    finalize_downloaded_binary(&final_path, &version_dir, version_str)?;
++    let archive_digest = verify_digest(version_str, &bytes).await?;
++
++    // F-007: stage privately, finalize (chmod + macOS codesign), fingerprint the FINAL binary, write
++    // the marker, THEN publish fail-closed — so the live dir only ever appears with a codesigned binary
++    // + a matching marker.
++    // codex #4: install ONLY into the trusted home-rooted cache; never fall back to CWD (which an
++    // attacker could pre-own). No resolvable home ⇒ refuse to write a downloaded binary anywhere.
++    let version_dir = versions_base_dir()
++        .ok_or(
++            "SECURITY: home directory unresolved; refusing to install bb to an untrusted location",
++        )?
++        .join(version.as_str());
++    install_version_dir(&version_dir, &bytes, version_str, &archive_digest)?;
+ 
+     tracing::info!(version = version_str, "bb cached successfully");
+-    Ok(final_path)
++    Ok(version_dir.join(bb_binary_name()))
+ }
+ 
+ /// macOS: clear extended attributes (quarantine, provenance) and ad-hoc re-sign the binary so
+@@ -150,11 +149,14 @@ async fn download_tarball(version: &AztecVersion) -> Result<Vec<u8>, Box<dyn Err
+     Ok(bytes)
+ }
+ 
+-/// Verify the downloaded `bytes` against the GitHub release asset's published SHA-256 digest.
++/// Verify the downloaded `bytes` against the GitHub release asset's published SHA-256 digest, returning
++/// the verified hex (recorded as the marker's `archive_sha256` provenance field).
+ /// **Fail-closed:** a missing digest (`Ok(None)`) or a fetch error is an error, not a skip — we never
+-/// install unverified code. The bundled sidecar path never reaches here. Byte-identical to the
+-/// pre-Q11 inline block.
+-async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
++/// install unverified code. The bundled sidecar path never reaches here.
++async fn verify_digest(
++    version: &str,
++    bytes: &[u8],
++) -> Result<String, Box<dyn Error + Send + Sync>> {
+     let asset_name = format!("barretenberg-{}.tar.gz", current_platform());
+     match fetch_github_asset_digest(version, &asset_name).await {
+         Ok(Some(expected)) => {
+@@ -166,7 +168,7 @@ async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error
+                 .into());
+             }
+             tracing::info!(version, digest = %actual, "Download integrity verified");
+-            Ok(())
++            Ok(actual)
+         }
+         Ok(None) => {
+             Err(format!("Cannot verify bb v{version}: no digest available from GitHub API").into())
+@@ -175,41 +177,117 @@ async fn verify_digest(version: &str, bytes: &[u8]) -> Result<(), Box<dyn Error
+     }
+ }
+ 
+-/// Install an extracted bb tarball into `version_dir` via a temp dir + atomic rename.
+-///
+-/// Cleans up any stale partial-download temp dir, extracts into it, then removes any pre-existing
+-/// `version_dir` and renames the temp dir into place — so the cache swap is atomic and a previously
+-/// corrupt entry is replaced wholesale. The temp dir is a sibling named `.{name}.tmp` (derived from
+-/// `version_dir`'s file name), matching the pre-Q11 inline behavior byte-for-byte.
+-///
+-/// Private + single-caller by design: `download_bb` passes `versions_base_dir().join(version)` where
+-/// `version` came from a validated `AztecVersion`, so the `remove_dir_all` here never sees an
+-/// attacker-derived path. Pinned by `install_version_dir_replaces_stale_and_extracts_atomically`.
+-pub(crate) fn install_version_dir(
+-    version_dir: &std::path::Path,
+-    bytes: &[u8],
+-) -> Result<(), Box<dyn Error + Send + Sync>> {
++/// Monotonic sequence making each staging dir name unique within a process; combined with the PID +
++/// a nanosecond stamp it is unique across concurrent Rust/TS publishers and across crash-restart.
++static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
++
++/// A per-run-UNIQUE, dot-prefixed staging sibling: `.{name}.tmp.{pid}-{nanos}-{seq}`. Dot-prefixed +
++/// non-version-named so `list_cached_versions` never surfaces an in-flight or crash-stale stage; unique
++/// so a concurrent publisher never shares (and stomps) one stage.
++fn unique_staging_dir(version_dir: &Path) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+     let name = version_dir
+         .file_name()
+         .and_then(|n| n.to_str())
+         .ok_or("invalid version dir (no file name)")?;
+-    let tmp_dir = version_dir.with_file_name(format!(".{name}.tmp"));
++    let nanos = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_nanos())
++        .unwrap_or(0);
++    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
++    Ok(version_dir.with_file_name(format!(".{name}.tmp.{}-{nanos}-{seq}", std::process::id())))
++}
+ 
+-    // Clean up any leftover partial download
+-    if tmp_dir.exists() {
+-        std::fs::remove_dir_all(&tmp_dir)?;
++/// Remove crash-stale staging siblings for this version (`.{name}.tmp.*`) before a fresh install, so a
++/// crashed prior run can't accumulate hidden cache data. Best-effort: errors are ignored.
++fn reap_stale_stages(version_dir: &Path) {
++    let (Some(parent), Some(name)) = (
++        version_dir.parent(),
++        version_dir.file_name().and_then(|n| n.to_str()),
++    ) else {
++        return;
++    };
++    let prefix = format!(".{name}.tmp.");
++    if let Ok(entries) = std::fs::read_dir(parent) {
++        for entry in entries.flatten() {
++            if entry
++                .file_name()
++                .to_str()
++                .is_some_and(|n| n.starts_with(&prefix))
++            {
++                let _ = std::fs::remove_dir_all(entry.path());
++            }
++        }
++    }
++}
++
++/// Stage a verified bb tarball privately, finalize it (chmod + macOS codesign), fingerprint the FINAL
++/// binary, write the integrity marker, THEN publish fail-closed into `version_dir` (F-007).
++///
++/// Ordering matters: the marker digest is taken AFTER codesign (which mutates the binary on macOS), and
++/// the marker is written BEFORE the publish rename — so the live dir only ever appears holding a
++/// codesigned `bb` + a matching marker. Publish is delete-then-rename: initial publish into an empty
++/// slot is atomic; REPLACEMENT is deliberately NOT atomic (a crash between leaves no live entry ⇒
++/// verified re-download next use). The staging dir is unique per run, so concurrent publishers never
++/// collide; a torn/last-loser publish is caught by `verify_cached_bb` on next use.
++///
++/// Private + single-caller: `download_bb` passes `versions_base_dir().join(version)` where `version`
++/// came from a validated `AztecVersion`, so the `remove_dir_all` here never sees an attacker path.
++pub(crate) fn install_version_dir(
++    version_dir: &Path,
++    bytes: &[u8],
++    version: &str,
++    archive_digest: &str,
++) -> Result<(), Box<dyn Error + Send + Sync>> {
++    if let Some(parent) = version_dir.parent() {
++        std::fs::create_dir_all(parent)?;
+     }
+-    std::fs::create_dir_all(&tmp_dir)?;
++    reap_stale_stages(version_dir);
++    let staging = unique_staging_dir(version_dir)?;
++    create_owner_only_dir(&staging)?;
++
++    // Everything happens in staging; on ANY failure the whole stage is removed (never a partial live).
++    let staged = (|| -> Result<(), Box<dyn Error + Send + Sync>> {
++        extract_bb_from_tarball(bytes, &staging)?;
++        let staged_bb = staging.join(bb_binary_name());
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            std::fs::set_permissions(&staged_bb, std::fs::Permissions::from_mode(0o755))?;
++        }
++        // macOS ad-hoc re-sign in staging (a no-op off macOS). Codesign failure removes the stage and
++        // errors — we never publish an unsignable binary.
++        finalize_downloaded_binary(&staged_bb, &staging, version)?;
+ 
+-    extract_bb_from_tarball(bytes, &tmp_dir)?;
++        let binary_digest = sha256_file(&staged_bb)?;
++        write_bb_marker(&staging, version, archive_digest, &binary_digest)?;
+ 
+-    // Atomic rename — replace any pre-existing cache entry wholesale
+-    if version_dir.exists() {
+-        std::fs::remove_dir_all(version_dir)?;
++        // Fail-closed publish: drop any live entry, then rename the stage into place.
++        if version_dir.exists() {
++            std::fs::remove_dir_all(version_dir)?;
++        }
++        std::fs::rename(&staging, version_dir)?;
++        Ok(())
++    })();
++
++    if staged.is_err() {
++        let _ = std::fs::remove_dir_all(&staging);
+     }
+-    std::fs::rename(&tmp_dir, version_dir)?;
++    staged
++}
+ 
+-    Ok(())
++/// Create a staging dir owner-only (`0700`) at the creation syscall on Unix — never create-then-chmod,
++/// so the in-flight binary never has a world-traversable window. `create_dir` (not `_all`) so a
++/// name collision fails closed.
++fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::DirBuilderExt;
++        std::fs::DirBuilder::new().mode(0o700).create(dir)
++    }
++    #[cfg(not(unix))]
++    {
++        std::fs::create_dir(dir)
++    }
+ }
+ 
+ /// Extract the `bb` binary from a gzipped tarball.
+@@ -302,6 +380,7 @@ fn extract_bb_from_tarball_capped(
+ 
+ #[cfg(test)]
+ mod tests {
++    use super::super::cache_layout::version_bb_path;
+     use super::*;
+     use std::io::Write;
+ 
+@@ -392,15 +471,14 @@ mod tests {
+         assert!(contents.contains("echo hello"));
+     }
+ 
+-    /// Q11 atomic-rename-cleanup: `install_version_dir` extracts into a sibling temp dir then renames
+-    /// it into place, replacing any stale cache entry wholesale and leaving no temp dir behind. Pins
+-    /// the behavior the pre-Q11 inline block in `download_bb` had, now that it's a testable unit.
++    /// F-007 staged verified install: `install_version_dir` extracts + finalizes + writes the marker in
++    /// a unique staging dir, then publishes fail-closed — replacing any stale entry wholesale, leaving
++    /// no staging dir, and producing a marker whose `binary_sha256` matches the FINAL published binary.
+     #[test]
+-    fn install_version_dir_replaces_stale_and_extracts_atomically() {
++    fn install_version_dir_stages_marks_and_publishes() {
+         use flate2::write::GzEncoder;
+         use flate2::Compression;
+ 
+-        // Minimal valid tarball containing the platform bb binary name.
+         let bb_content = b"#!/bin/sh\necho fake-bb\n";
+         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+         {
+@@ -415,34 +493,59 @@ mod tests {
+             builder.finish().unwrap();
+         }
+         let tarball = encoder.finish().unwrap();
++        let archive_digest = sha256_hex(&tarball);
+ 
+         let base = tempfile::tempdir().unwrap();
+         let version_dir = base.path().join("5.0.0-test");
+ 
+-        // Fresh install → bb present.
+-        install_version_dir(&version_dir, &tarball).unwrap();
++        // A crash-stale staging sibling from a prior run must be reaped by the next install.
++        let stale = base.path().join(".5.0.0-test.tmp.999-0-0");
++        std::fs::create_dir_all(&stale).unwrap();
++        std::fs::write(stale.join("junk"), b"stale").unwrap();
++
++        // Fresh install → bb + marker present, marker binds the published binary bytes (post-finalize).
++        install_version_dir(&version_dir, &tarball, "5.0.0-test", &archive_digest).unwrap();
+         assert!(
+-            version_dir.join(bb_binary_name()).exists(),
+-            "bb extracted on fresh install"
++            !stale.exists(),
++            "crash-stale staging dir reaped on next install"
++        );
++        let bb = version_dir.join(bb_binary_name());
++        assert!(bb.exists(), "bb published");
++        let marker_path = version_dir.join("bb.sha256.json");
++        assert!(marker_path.exists(), "marker published");
++        let marker: serde_json::Value =
++            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
++        assert_eq!(
++            marker["schema"].as_str(),
++            Some("aztec-accelerator/bb-cache-marker@1")
++        );
++        assert_eq!(marker["version"].as_str(), Some("5.0.0-test"));
++        assert_eq!(
++            marker["archive_sha256"].as_str(),
++            Some(archive_digest.as_str())
++        );
++        assert_eq!(
++            marker["binary_sha256"].as_str().unwrap(),
++            sha256_file(&bb).unwrap(),
++            "marker binary digest matches the FINAL published binary (post-finalize)"
+         );
+ 
+-        // A stale cache entry (junk file) is replaced wholesale by the atomic rename.
++        // A stale cache entry (junk file) is replaced wholesale.
+         std::fs::write(version_dir.join("STALE_JUNK"), b"old").unwrap();
+-        install_version_dir(&version_dir, &tarball).unwrap();
+-        assert!(
+-            version_dir.join(bb_binary_name()).exists(),
+-            "bb re-extracted after replace"
+-        );
++        install_version_dir(&version_dir, &tarball, "5.0.0-test", &archive_digest).unwrap();
++        assert!(bb.exists(), "bb re-published after replace");
+         assert!(
+             !version_dir.join("STALE_JUNK").exists(),
+-            "stale entry removed by atomic replace"
++            "stale entry removed by fail-closed replace"
+         );
+ 
+-        // No leftover temp dir after the rename.
+-        assert!(
+-            !version_dir.with_file_name(".5.0.0-test.tmp").exists(),
+-            "temp dir cleaned up after rename"
+-        );
++        // No leftover staging dir (.5.0.0-test.tmp.*) after publish.
++        let leftover = std::fs::read_dir(base.path()).unwrap().flatten().any(|e| {
++            e.file_name()
++                .to_string_lossy()
++                .starts_with(".5.0.0-test.tmp.")
++        });
++        assert!(!leftover, "staging dir cleaned up after publish");
+     }
+ 
+     #[test]
+@@ -595,11 +698,16 @@ mod tests {
+         let av = AztecVersion::parse(&version).expect("bundled version is valid");
+ 
+         // Delete cached version to force a fresh download
+-        let cached_dir = versions_base_dir().join(&version);
++        let cached_dir = versions_base_dir()
++            .expect("home resolvable in the test environment")
++            .join(&version);
+         if cached_dir.exists() {
+             std::fs::remove_dir_all(&cached_dir).unwrap();
+         }
+-        assert!(!version_bb_path(&av).exists(), "cache should be cleared");
++        assert!(
++            !version_bb_path(&av).expect("home resolvable").exists(),
++            "cache should be cleared"
++        );
+ 
+         // Download — exercises the full pipeline: HTTP GET → SHA-256 → extract → codesign
+         let bb_path = download_bb(&av)
+@@ -607,7 +715,7 @@ mod tests {
+             .unwrap_or_else(|e| panic!("download_bb({version}) failed: {e}"));
+ 
+         // Verify the binary was cached in the right location
+-        assert_eq!(bb_path, version_bb_path(&av));
++        assert_eq!(bb_path, version_bb_path(&av).expect("home resolvable"));
+         assert!(bb_path.exists(), "bb binary should exist after download");
+ 
+         // Verify it's a real file (not a directory or symlink)
+diff --git a/packages/accelerator/core/src/versions/mod.rs b/packages/accelerator/core/src/versions/mod.rs
+index 7b6b0cd..1cab333 100644
+--- a/packages/accelerator/core/src/versions/mod.rs
++++ b/packages/accelerator/core/src/versions/mod.rs
+@@ -10,9 +10,12 @@ mod downloader;
+ mod release_metadata;
+ mod version_policy;
+ 
+-pub use cache_layout::{bb_binary_name, list_cached_versions, version_bb_path, versions_base_dir};
++pub use cache_layout::{
++    bb_binary_name, list_cached_versions, verify_cached_bb, version_bb_path, versions_base_dir,
++};
+ pub use downloader::download_bb;
+ pub use release_metadata::{current_platform, download_url};
+ pub use version_policy::{
+-    cleanup_old_versions, is_valid_version, versions_to_evict, AztecVersion, NetworkTier,
++    check_version_selectable, cleanup_old_versions, is_valid_version, versions_to_evict,
++    AztecVersion, NetworkTier, VersionRejection,
+ };
+diff --git a/packages/accelerator/core/src/versions/version_policy.rs b/packages/accelerator/core/src/versions/version_policy.rs
+index 7772975..33dd40f 100644
+--- a/packages/accelerator/core/src/versions/version_policy.rs
++++ b/packages/accelerator/core/src/versions/version_policy.rs
+@@ -180,6 +180,85 @@ pub fn versions_to_evict(
+     to_evict
+ }
+ 
++/// Aztec versions whose bundled `bb` is KNOWN to be vulnerable — a REVOCATION list, **EMPTY by default**.
++///
++/// `x-aztec-version` carries the **Aztec** version (the SDK's `@aztec/stdlib` dependency version), NOT a
++/// barretenberg/`bb` version — and many Aztec releases ship the *same* `bb`. So a "newer-is-safer" floor
++/// keyed on this string would wrongly reject a legitimate older-but-compatible dApp (e.g. an Aztec 5.0.1
++/// app talking to a 5.1.0-bundled accelerator). Instead this is a targeted denylist: the app owner adds a
++/// version string here ONLY if a security defect is found in the `bb` shipped with that Aztec release,
++/// and a remote request for it is then refused (403). Empty ⇒ no restriction — any version the dApp
++/// requests is allowed, and it is still digest-verified against Aztec's published hash on download (so it
++/// is always an AUTHENTIC Aztec `bb`). COMPILE-TIME so a remote dApp cannot change it. Entries must be the
++/// exact wire version string the SDK sends.
++pub const KNOWN_VULNERABLE_VERSIONS: &[&str] = &[];
++
++/// Why a remote-requested version was refused by [`check_version_selectable`]. Carried into the 403
++/// body + a `warn!` so a legitimate integrator sees WHY their pin was rejected.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum VersionRejection {
++    /// Passed the `is_valid_version` charset gate but is not a canonical strict semver — a syntactic
++    /// alias (`latest`, `5`, `5.0`) or a non-canonical spelling. Rejected so only well-formed versions
++    /// are ever fetched or exact-matched against the revocation list (codex denylist-review #2).
++    NotSemver,
++    /// Carries `+build` metadata. Two builds with equal SemVer precedence are distinct release
++    /// identities we can't reason about — refuse them.
++    HasBuildMetadata,
++    /// The requested Aztec version is on the [`KNOWN_VULNERABLE_VERSIONS`] revocation list.
++    KnownVulnerable,
++}
++
++impl VersionRejection {
++    /// Short, stable reason string for logs + the error body.
++    pub fn reason(self) -> &'static str {
++        match self {
++            Self::NotSemver => "not a canonical strict semver version",
++            Self::HasBuildMetadata => "carries build metadata (ambiguous release identity)",
++            Self::KnownVulnerable => "on the known-vulnerable revocation list",
++        }
++    }
++}
++
++/// Gate a REMOTE `x-aztec-version` request.
++///
++/// The header is the **Aztec** version, not a `bb` version, and the accelerator downloads the `bb`
++/// tarball attached to the Aztec release of that exact version. We therefore CANNOT impose a
++/// "newer-is-safer" floor here — many Aztec versions share one `bb`, so a floor would break a legitimate
++/// older-but-compatible dApp (this was the over-blocking bug this function replaces). Every download is
++/// already digest-verified against Aztec's published hash, so a requested version is always an authentic
++/// Aztec `bb`. The only residual risk — an approved dApp pinning an Aztec version whose bundled `bb` is
++/// *later* found vulnerable — is handled REACTIVELY via the [`KNOWN_VULNERABLE_VERSIONS`] revocation list
++/// (empty by default). Everything not on that list is allowed.
++///
++/// Well-formedness is STILL enforced (codex denylist-review #2): the request must be canonical strict
++/// semver with no build metadata. This rejects aliases (`latest`) the looser `is_valid_version` charset
++/// gate lets through, and keeps the exact-string revocation match meaningful.
++///
++/// (A precise FUTURE gate could run `bb --version` on the downloaded binary to obtain the true
++/// barretenberg build id — distinct from the Aztec/npm version — and denylist on THAT, or ship a signed
++/// updateable revocation manifest. Larger cross-package changes, tracked separately.)
++pub fn check_version_selectable(requested: &str) -> Result<(), VersionRejection> {
++    check_version_against(requested, KNOWN_VULNERABLE_VERSIONS)
++}
++
++/// Inner, denylist-parameterized core of [`check_version_selectable`] — unit-testable against an
++/// arbitrary revocation list (the production const is empty). Validates well-formedness FIRST, then the
++/// revocation match.
++fn check_version_against(requested: &str, denylist: &[&str]) -> Result<(), VersionRejection> {
++    // Canonical strict semver, no build metadata — same well-formedness the earlier gate enforced.
++    let v = semver::Version::parse(requested).map_err(|_| VersionRejection::NotSemver)?;
++    if v.to_string() != requested {
++        return Err(VersionRejection::NotSemver); // non-canonical spelling
++    }
++    if !v.build.is_empty() {
++        return Err(VersionRejection::HasBuildMetadata);
++    }
++    if denylist.contains(&requested) {
++        return Err(VersionRejection::KnownVulnerable);
++    }
++    Ok(())
++}
++
+ /// Validate a version string before it is used to build cache paths or download URLs. THE single
+ /// source of truth for both the HTTP ingress (`server::prove::resolve_version`) and the `download_bb`
+ /// sink. Rejects path-traversal + injection: non-empty, `<= 128` chars, ASCII alnum/`.`/`-`/`_`,
+@@ -198,23 +277,44 @@ pub fn is_valid_version(version: &str) -> bool {
+ /// Clean up old cached versions per the retention policy.
+ /// q7e3-F-08: takes the validated `&AztecVersion` (callers parse; an unparseable bundled skips
+ /// cleanup at the call site — same defensive outcome as the old internal parse-else-return).
+-pub async fn cleanup_old_versions(bundled: &AztecVersion) {
++pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecVersion>) {
+     // Parse the cached dir names into validated versions. An unparseable dir name is skipped — same
+     // net outcome as before (the old code classified it Mainnet → retention `None` → never evicted).
+     let cached: Vec<AztecVersion> = list_cached_versions()
+         .iter()
+         .filter_map(|s| AztecVersion::parse(s))
+         .collect();
+-    let to_evict = versions_to_evict(&cached, bundled);
+-
+-    for version in &to_evict {
+-        let dir = versions_base_dir().join(version.as_str());
++    // codex #4: no resolvable home ⇒ no trusted cache root ⇒ nothing to evict (and never join onto a
++    // CWD fallback). `list_cached_versions` is already empty in this case, but guard the base dir too.
++    let Some(base) = versions_base_dir() else {
++        return;
++    };
++    for version in evictions(&cached, bundled, in_use) {
++        let dir = base.join(version.as_str());
+         match std::fs::remove_dir_all(&dir) {
+             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
+             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
+         }
+     }
+ }
++
++/// The versions to actually delete: the retention-policy evictions MINUS the in-use version.
++///
++/// F-007 race guard: `cleanup_old_versions` is spawned (detached) right after a download and races
++/// `bb::prove`. Without this, a freshly-downloaded old nightly (the oldest excess in its tier) could be
++/// deleted before it executes, turning the now-fail-closed `find_bb` into a spurious hard error. Keeping
++/// the in-use version one round over the limit is harmless — the next cleanup (when it is no longer in
++/// use) evicts it.
++fn evictions(
++    cached: &[AztecVersion],
++    bundled: &AztecVersion,
++    in_use: Option<&AztecVersion>,
++) -> Vec<AztecVersion> {
++    versions_to_evict(cached, bundled)
++        .into_iter()
++        .filter(|v| !in_use.is_some_and(|u| u.as_str() == v.as_str()))
++        .collect()
++}
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -378,6 +478,36 @@ mod tests {
+         assert!(evicted.contains(&av("5.0.0-nightly.20260302")));
+     }
+ 
++    #[test]
++    fn evictions_exempt_the_in_use_version() {
++        // F-007: the version being proved right now must never be evicted by the cleanup that races it.
++        let cached = vec![
++            av("5.0.0-nightly.20260301"),
++            av("5.0.0-nightly.20260302"),
++            av("5.0.0-nightly.20260303"),
++            av("5.0.0-nightly.20260304"),
++        ];
++        let bundled = av("4.2.0-aztecnr-rc.2"); // not in this tier
++
++        // No protection: the two oldest are evicted (retention keeps 2).
++        let unprotected = evictions(&cached, &bundled, None);
++        assert!(unprotected.contains(&av("5.0.0-nightly.20260301")));
++        assert!(unprotected.contains(&av("5.0.0-nightly.20260302")));
++
++        // Protecting the OLDEST (the just-downloaded, in-use version): it is exempted, while the next
++        // non-protected version is still evicted.
++        let in_use = av("5.0.0-nightly.20260301");
++        let protected = evictions(&cached, &bundled, Some(&in_use));
++        assert!(
++            !protected.contains(&in_use),
++            "the in-use version must be exempted from eviction"
++        );
++        assert!(
++            protected.contains(&av("5.0.0-nightly.20260302")),
++            "a non-protected excess version is still evicted"
++        );
++    }
++
+     #[test]
+     fn bundled_version_never_evicted() {
+         let cached = vec![
+@@ -441,6 +571,77 @@ mod tests {
+         assert!(evicted.contains(&av("5.0.0-nightly.20260301")));
+     }
+ 
++    // ─── remote version selection: known-vulnerable revocation denylist ─────────
++
++    #[test]
++    fn version_policy_allows_everything_by_default() {
++        // The header is the Aztec version (not a bb version), and many Aztec releases share one bb, so
++        // there is NO floor: any well-formed version a dApp requests is allowed — including OLDER ones —
++        // so a legitimate older-but-compatible app is never broken. Default (empty) production denylist.
++        for v in [
++            "5.0.0",
++            "5.1.0",
++            "5.0.1", // older than a 5.1.0 bundle — MUST still be allowed (the bug this replaces)
++            "5.0.0-rc.1", // older rc
++            "5.0.0-nightly.20260307",
++            "4.2.0-aztecnr-rc.2",
++        ] {
++            assert_eq!(check_version_selectable(v), Ok(()), "{v} must be allowed");
++        }
++    }
++
++    #[test]
++    fn version_policy_refuses_a_denylisted_version() {
++        // Exercise the REAL implementation (check_version_against) with a simulated revocation list —
++        // the production const is empty, so this is how we cover the refusal path (codex review #3).
++        let deny = &["5.0.7", "5.1.3-rc.1"];
++        assert_eq!(
++            check_version_against("5.0.7", deny),
++            Err(VersionRejection::KnownVulnerable)
++        );
++        assert_eq!(
++            check_version_against("5.1.3-rc.1", deny),
++            Err(VersionRejection::KnownVulnerable)
++        );
++        // Neighbouring versions are unaffected — the denylist is exact, not a range.
++        assert_eq!(check_version_against("5.0.8", deny), Ok(()));
++        assert_eq!(check_version_against("5.0.6", deny), Ok(()));
++    }
++
++    #[test]
++    fn version_policy_rejects_aliases_and_build_metadata() {
++        // Well-formedness is still enforced (codex review #2): aliases the charset gate lets through, a
++        // non-canonical spelling, and build metadata are all rejected BEFORE any download / revocation
++        // match — regardless of the denylist.
++        for alias in ["latest", "5", "5.0", "5.0.0-alpha_beta"] {
++            assert_eq!(
++                check_version_selectable(alias),
++                Err(VersionRejection::NotSemver),
++                "alias {alias:?} must be rejected"
++            );
++        }
++        assert_eq!(
++            check_version_selectable("5.1.0+build9"),
++            Err(VersionRejection::HasBuildMetadata)
++        );
++    }
++
++    #[test]
++    fn version_policy_denylist_entries_are_wellformed_if_present() {
++        // If the owner ever populates the list, each entry must be a canonical strict semver so it
++        // matches the exact wire version the SDK sends. Does NOT assert emptiness (codex review #4: an
++        // emptiness assertion would break CI exactly when an emergency revocation is added).
++        for v in KNOWN_VULNERABLE_VERSIONS {
++            let parsed = semver::Version::parse(v)
++                .unwrap_or_else(|_| panic!("KNOWN_VULNERABLE_VERSIONS entry {v:?} must be semver"));
++            assert_eq!(
++                &parsed.to_string(),
++                v,
++                "KNOWN_VULNERABLE_VERSIONS entry {v:?} must be canonical"
++            );
++        }
++    }
++
+     /// CHARACTERIZATION (quality-refactor Phase 0 — Q3 guard). Edge cases the AztecVersion refactor
+     /// (Q3 changes `versions_to_evict`'s signature `&[String]` → `&[AztecVersion]`) must preserve.
+     #[test]
+diff --git a/packages/accelerator/core/tests/fixtures/updater/latest.json b/packages/accelerator/core/tests/fixtures/updater/latest.json
+new file mode 100644
+index 0000000..311de23
+--- /dev/null
++++ b/packages/accelerator/core/tests/fixtures/updater/latest.json
+@@ -0,0 +1,10 @@
++{
++  "version": "1.0.8",
++  "notes": "test fixture",
++  "pub_date": "2026-07-14T00:00:00Z",
++  "platforms": {
++    "linux-x86_64": { "url": "https://example.test/app.AppImage", "size": 12345, "signature": "ARTIFACT_SIG_PLACEHOLDER" }
++  },
++  "manifest": "eyJzY2hlbWEiOiJhenRlYy1hY2NlbGVyYXRvci11cGRhdGUtbWFuaWZlc3QtdjEiLCJ2ZXJzaW9uIjoiMS4wLjgiLCJwdWJfZGF0ZSI6IjIwMjYtMDctMTRUMDA6MDA6MDBaIiwicGxhdGZvcm1zIjp7ImxpbnV4LXg4Nl82NCI6eyJ1cmwiOiJodHRwczovL2V4YW1wbGUudGVzdC9hcHAuQXBwSW1hZ2UiLCJzaXplIjoxMjM0NSwic2lnbmF0dXJlIjoiQVJUSUZBQ1RfU0lHX1BMQUNFSE9MREVSIn19fQ==",
++  "manifest_sig": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVROEIyMW9udEtXRi9aUWxDNUcrWG5jcEdPSWF5U0hBUXB4ZnhkSUk2VGVDR3Y5VVNjVGJrL0MxN0dTUjZGZEg4UUtkbUdKRU9wbTFqektGWHRZQzFOUDJkYXBBQ0xjTkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzOTk0MzY1CWZpbGU6ZW52ZWxvcGUuanNvbgpFWEVjTXZWSVA0dlREclREQXdUbm54VFdoMTA2S2xxcHlYR3ZEaElva2h3OVNqREt6Q1h0Wk5FWFozaHQrWTlHUWVZVUQwUFhQV2Y5NDI5ZVVBNC9EUT09Cg=="
++}
+diff --git a/packages/accelerator/core/tests/fixtures/updater/pubkey.b64 b/packages/accelerator/core/tests/fixtures/updater/pubkey.b64
+new file mode 100644
+index 0000000..e853c09
+--- /dev/null
++++ b/packages/accelerator/core/tests/fixtures/updater/pubkey.b64
+@@ -0,0 +1 @@
++dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3OTZEMjlFNjg2RDA3M0MKUldROEIyMW9udEtXRnozWFdYWTJQOFdaZGg1UCtYek5xN0tGSkcyL3RGVDQyQm9vbzFmcG1ISlIK
+\ No newline at end of file

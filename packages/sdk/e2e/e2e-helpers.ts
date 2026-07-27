@@ -7,7 +7,7 @@
 
 import { NO_FROM } from "@aztec/aztec.js/account";
 import type { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee";
-import { Fr } from "@aztec/aztec.js/fields";
+import { Fq, Fr } from "@aztec/aztec.js/fields";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { getLogger } from "@logtape/logtape";
 
@@ -22,7 +22,9 @@ export async function deploySchnorrAccount(
   const tag = label ? ` (${label})` : "";
   const secret = Fr.random();
   const salt = Fr.random();
-  const accountManager = await wallet.createSchnorrAccount(secret, salt);
+  // 5.0: the signing key is required and is the account's root of ownership.
+  const signingKey = Fq.random();
+  const accountManager = await wallet.createSchnorrAccount(secret, salt, signingKey);
 
   logger.debug(`Deploying account${tag}`, { address: accountManager.address.toString() });
 

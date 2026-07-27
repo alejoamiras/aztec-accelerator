@@ -15,12 +15,18 @@ import { config, isLocalNetwork } from "./e2e-setup.js";
 const logger = getLogger(["aztec-accelerator", "sdk", "e2e", "remote-network"]);
 
 describe.skipIf(isLocalNetwork)("Remote Network Connectivity", () => {
-  test("should reach the Aztec node /status endpoint", async () => {
-    const res = await fetch(`${config.nodeUrl}/status`, {
+  test("should reach the Aztec node via node_getNodeInfo RPC", async () => {
+    // 5.0.0 nodes reject a plain GET /status with 405 — probe via JSON-RPC.
+    const res = await fetch(config.nodeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "node_getNodeInfo", params: [], id: 1 }),
       signal: AbortSignal.timeout(10_000),
     });
     expect(res.ok).toBe(true);
-    logger.info("Node /status reachable", { url: config.nodeUrl });
+    const data = (await res.json()) as { result?: { nodeVersion?: string } };
+    expect(data.result?.nodeVersion).toBeDefined();
+    logger.info("Node RPC reachable", { url: config.nodeUrl, version: data.result?.nodeVersion });
   });
 
   test("should return non-sandbox chain ID", async () => {

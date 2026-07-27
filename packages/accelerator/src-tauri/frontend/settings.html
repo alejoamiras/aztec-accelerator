@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aztec Accelerator Settings</title>
   <link rel="stylesheet" href="style.css" />
-  <script src="tauri-bridge.js"></script>
+  <script type="module" src="assets/settings.js"></script>
 </head>
 <body>
   <div class="section">
@@ -19,7 +19,9 @@
     <div class="row">
       <span id="autostart-label">Start on Login</span>
       <label class="toggle">
-        <input type="checkbox" id="autostart" role="switch" aria-labelledby="autostart-label" />
+        <!-- codex r3 #6: ships DISABLED so an unknown state is never presented as an actionable "off".
+             settings.js enables it only after get_autostart_enabled succeeds. -->
+        <input type="checkbox" id="autostart" role="switch" aria-labelledby="autostart-label" disabled />
         <span class="slider"></span>
       </label>
     </div>
@@ -30,14 +32,14 @@
         <span class="slider"></span>
       </label>
     </div>
-    <div id="https-row" class="row" style="display:none">
+    <div id="https-row" class="row" hidden>
       <span id="https-label">Encrypted Connection (HTTPS)</span>
       <label class="toggle">
         <input type="checkbox" id="https" role="switch" aria-labelledby="https-label" />
         <span class="slider"></span>
       </label>
     </div>
-    <div id="remove-trust-row" class="row" style="display:none">
+    <div id="remove-trust-row" class="row" hidden>
       <span>Certificate</span>
       <button type="button" id="remove-trust" class="link-button">Remove certificate trust</button>
     </div>
@@ -47,7 +49,7 @@
         <span class="speed-value" id="speed-label">Full</span>
       </div>
       <div class="speed-track-wrap">
-        <input type="range" id="speed" class="speed-slider" min="0" max="4" step="1" value="4" aria-label="Proving Speed" />
+        <input type="range" id="speed" class="speed-slider" min="0" max="4" step="1" value="4" data-fill="4" aria-label="Proving Speed" />
         <div class="speed-ticks">
           <span>Low</span>
           <span>Light</span>
@@ -63,140 +65,5 @@
       <button type="button" id="run-setup" class="link-button">Run setup again</button>
     </div>
   </div>
-
-  <script>
-    // invoke and wireToggle are provided by tauri-bridge.js (loaded in <head>)
-
-    // CPU count comes from the Rust backend (std::thread::available_parallelism),
-    // NOT navigator.hardwareConcurrency which WebKit caps for fingerprinting protection.
-    let CPUS = 1;
-
-    function threadsForLevel(index) {
-      const fractions = [1/4, 3/8, 1/2, 3/4, 1];
-      return Math.max(1, Math.floor(CPUS * fractions[index]));
-    }
-
-    const SPEED_LEVELS = [
-      { value: "low",      label: "Low" },
-      { value: "light",    label: "Light" },
-      { value: "balanced", label: "Balanced" },
-      { value: "high",     label: "High" },
-      { value: "full",     label: "Full" },
-    ];
-
-    function descForLevel(index) {
-      const t = threadsForLevel(index);
-      if (index === 4) return `All ${CPUS} cores. Fastest proving.`;
-      return `${t} of ${CPUS} cores. ${
-        index <= 1 ? "Keeps the system responsive." : "Good balance of speed and usability."
-      }`;
-    }
-
-    function speedToIndex(speed) {
-      const idx = SPEED_LEVELS.findIndex(l => l.value === speed);
-      return idx >= 0 ? idx : 4;
-    }
-
-    function updateSpeedUI(index) {
-      const level = SPEED_LEVELS[index];
-      document.getElementById("speed-label").textContent = level.label;
-      document.getElementById("speed-desc").textContent = descForLevel(index);
-      document.getElementById("speed").style.setProperty("--fill", (index / 4) * 100 + "%");
-    }
-
-    async function loadSettings() {
-      const [config, autostart, sysInfo] = await Promise.all([
-        invoke("get_config"),
-        invoke("get_autostart_enabled"),
-        invoke("get_system_info"),
-      ]);
-
-      CPUS = sysInfo.cpu_count;
-
-      document.getElementById("autostart").checked = autostart;
-      document.getElementById("auto-update").checked = config.auto_update === true;
-
-      // HTTPS row: all three desktop OSes now have a trust backend (Keychain / user NSS /
-      // CurrentUser Root).
-      if (["macos", "linux", "windows"].includes(sysInfo.platform)) {
-        document.getElementById("https-row").style.display = "";
-        document.getElementById("https").checked = config.https_enabled;
-        document.getElementById("remove-trust-row").style.display = "";
-      }
-
-      const idx = speedToIndex(config.speed || "full");
-      document.getElementById("speed").value = idx;
-      updateSpeedUI(idx);
-
-      renderOrigins(config.approved_origins || []);
-    }
-
-    function renderOrigins(origins) {
-      const list = document.getElementById("origins");
-      const empty = document.getElementById("origins-empty");
-      list.innerHTML = "";
-
-      if (origins.length === 0) {
-        empty.style.display = "";
-        return;
-      }
-      empty.style.display = "none";
-
-      for (const origin of origins) {
-        const li = document.createElement("li");
-        li.className = "origin-item";
-
-        const span = document.createElement("span");
-        span.textContent = origin;
-
-        const btn = document.createElement("button");
-        btn.textContent = "Remove";
-        btn.onclick = async () => {
-          await invoke("remove_approved_origin", { origin });
-          await loadSettings();
-        };
-
-        li.appendChild(span);
-        li.appendChild(btn);
-        list.appendChild(li);
-      }
-    }
-
-    // Toggles — all use wireToggle from tauri-bridge.js
-    wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
-    wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
-    wireToggle("https", (checked) => ({
-      cmd: checked ? "enable_https" : "disable_https",
-    }));
-
-    // "Run setup again" — reopen the first-run onboarding wizard.
-    document.getElementById("run-setup").addEventListener("click", () => {
-      invoke("open_onboarding").catch((err) => console.error("open_onboarding failed:", err));
-    });
-
-    // "Remove certificate trust" (D5) — remove the local CA from all browser stores + turn HTTPS off.
-    wireButton("remove-trust", {
-      onClick: async () => {
-        await invoke("remove_https_trust");
-        document.getElementById("https").checked = false;
-      },
-    });
-
-    // Speed slider
-    const speedSlider = document.getElementById("speed");
-    speedSlider.addEventListener("input", (e) => {
-      updateSpeedUI(Number(e.target.value));
-    });
-    speedSlider.addEventListener("change", (e) => {
-      const level = SPEED_LEVELS[Number(e.target.value)];
-      invoke("set_speed", { speed: level.value }).catch((err) => {
-        console.error("Failed to set speed:", err);
-        showErrorHint(speedSlider, "Failed to save");
-        loadSettings();
-      });
-    });
-
-    loadSettings().catch((err) => console.error("Failed to load settings:", err));
-  </script>
 </body>
 </html>

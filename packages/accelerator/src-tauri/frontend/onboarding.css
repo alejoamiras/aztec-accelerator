@@ -1,0 +1,21 @@
+/* First-run onboarding wizard. Externalized from an inline <style> so the app's strict
+   `style-src 'self'` CSP (no unsafe-inline) doesn't block it (F-012 frontend architecture). */
+.wiz { padding: 20px 22px; }
+.wiz h1 { font-size: 1.2rem; margin: 4px 0 2px; }
+.wiz .sub { color: var(--muted, #6b7280); font-size: 0.9rem; margin: 0 0 14px; }
+.opt { display: flex; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line, #e3e6ea); }
+.opt:first-of-type { border-top: none; }
+.opt .ic { width: 24px; text-align: center; font-size: 1.05rem; }
+.opt .meta { flex: 1; }
+.opt .name { font-weight: 600; font-size: 0.96rem; }
+.opt .desc { color: var(--muted, #6b7280); font-size: 0.83rem; margin-top: 3px; }
+.opt .warn { color: #b45309; }
+.opt .result { font-size: 0.83rem; margin-top: 4px; display: none; }
+.opt .result.ok { color: #178a4e; }
+.opt .result.err { color: #c0392b; }
+.wiz .cta { display: flex; gap: 10px; margin-top: 18px; }
+.wiz .cta button { border: none; border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.92rem; font-weight: 600; cursor: pointer; }
+.wiz .cta .primary { flex: 1; background: #f0a020; color: #231a06; }
+.wiz .cta .ghost { background: transparent; border: 1px solid var(--line, #e3e6ea); color: var(--muted, #6b7280); }
+.retry { display: none; margin-top: 6px; background: transparent; border: 1px solid var(--line, #e3e6ea); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; cursor: pointer; }
+.foot { color: var(--muted, #6b7280); font-size: 0.76rem; margin-top: 12px; text-align: center; }

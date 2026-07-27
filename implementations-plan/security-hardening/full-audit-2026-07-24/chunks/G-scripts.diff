@@ -1,0 +1,2017 @@
+diff --git a/packages/accelerator/scripts/build-frontend.ts b/packages/accelerator/scripts/build-frontend.ts
+new file mode 100644
+index 0000000..6a86237
+--- /dev/null
++++ b/packages/accelerator/scripts/build-frontend.ts
+@@ -0,0 +1,114 @@
++#!/usr/bin/env bun
++import { mkdir, rm } from "node:fs/promises";
++import path from "node:path";
++/**
++ * F-012: bundle the popup frontend ESM modules (`src-tauri/frontend-src/*.js`) into the
++ * gitignored `src-tauri/frontend/assets/*.js` that ship inside the Tauri app. Each page gets one
++ * self-contained bundle (the shared `bridge.js` + `@tauri-apps/api/core` are inlined), loaded via a
++ * single `<script type="module">`. This is what lets `withGlobalTauri: false` + `script-src 'self'`
++ * work: no inline scripts, no global back-door.
++ *
++ * Runs as tauri's beforeDev/beforeBuildCommand AND must run before any raw `cargo build` (the
++ * bundles are gitignored, so a fresh checkout has none). `build.rs` fails the Rust build if a bundle
++ * is missing or STALE vs the sources — the `.build-manifest.json` written here is that staleness key.
++ *
++ * Wired via `bun run --cwd packages/accelerator frontend:build`.
++ */
++import { Glob } from "bun";
++
++const ROOT = path.resolve(import.meta.dir, "..");
++const SRC_DIR = path.join(ROOT, "src-tauri", "frontend-src");
++const OUT_DIR = path.join(ROOT, "src-tauri", "frontend", "assets");
++const MANIFEST = path.join(OUT_DIR, ".build-manifest.json");
++// Also fingerprint the dependency surface: a @tauri-apps/api bump (package.json) or a resolution change
++// (root bun.lock) must invalidate the shipped bundles even if frontend-src/ is untouched (GATE-3 codex).
++const PKG_JSON = path.join(ROOT, "package.json");
++const LOCKFILE = path.join(ROOT, "..", "..", "bun.lock");
++
++// Per-page entrypoints (bridge.js is shared and pulled into each bundle, not an entry of its own).
++const ENTRIES = ["authorize.js", "settings.js", "update-prompt.js"] as const;
++
++/**
++ * SHA-256 over raw bytes → lowercase hex. `build.rs` recomputes it identically (sha2 crate) so the guard
++ * detects not just "forgot to rebuild" but a swapped/injected OUTPUT bundle — a fnv-style fingerprint an
++ * attacker could trivially forge would not. (An attacker who can rewrite BOTH a bundle and this manifest
++ * still wins; the guard's job is to catch accidental staleness and a bundle-only substitution.)
++ */
++function sha256Hex(bytes: ArrayBuffer | Uint8Array): string {
++  return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
++}
++
++/** Fingerprint every build INPUT: each frontend-src/*.js plus the dependency-surface files. */
++async function hashInputs(): Promise<Record<string, string>> {
++  const inputs: Record<string, string> = {};
++  const glob = new Glob("*.js");
++  const names: string[] = [];
++  for await (const name of glob.scan({ cwd: SRC_DIR })) names.push(name);
++  names.sort();
++  for (const name of names) {
++    inputs[`frontend-src/${name}`] = sha256Hex(
++      await Bun.file(path.join(SRC_DIR, name)).arrayBuffer(),
++    );
++  }
++  inputs["package.json"] = sha256Hex(await Bun.file(PKG_JSON).arrayBuffer());
++  inputs["bun.lock"] = sha256Hex(await Bun.file(LOCKFILE).arrayBuffer());
++  return inputs;
++}
++
++/** Fingerprint every emitted OUTPUT bundle (so a post-build swap is caught). */
++async function hashOutputs(): Promise<Record<string, string>> {
++  const outputs: Record<string, string> = {};
++  for (const e of ENTRIES) {
++    outputs[e] = sha256Hex(await Bun.file(path.join(OUT_DIR, e)).arrayBuffer());
++  }
++  return outputs;
++}
++
++async function main() {
++  // Snapshot inputs BEFORE bundling (to catch a source edit racing the build).
++  const inputsBefore = await hashInputs();
++
++  // Clean-before-build: never ship an orphaned stale bundle from a since-deleted source.
++  await rm(OUT_DIR, { recursive: true, force: true });
++  await mkdir(OUT_DIR, { recursive: true });
++
++  const result = await Bun.build({
++    entrypoints: ENTRIES.map((e) => path.join(SRC_DIR, e)),
++    outdir: OUT_DIR,
++    target: "browser",
++    format: "esm",
++    minify: true,
++    sourcemap: "none",
++    splitting: false,
++    naming: "[name].js",
++  });
++
++  if (!result.success) {
++    for (const log of result.logs) console.error(log);
++    throw new Error("frontend bundle build failed");
++  }
++
++  const emitted = new Set(result.outputs.map((o) => path.basename(o.path)));
++  for (const entry of ENTRIES) {
++    if (!emitted.has(entry)) throw new Error(`expected bundle ${entry} was not emitted`);
++  }
++
++  // Re-snapshot inputs AFTER bundling; a mismatch means a source changed mid-build → the manifest would
++  // record hashes for content the bundles don't reflect. Fail rather than record a lie.
++  const inputs = await hashInputs();
++  if (JSON.stringify(inputs) !== JSON.stringify(inputsBefore)) {
++    throw new Error("a tracked input changed during the bundle build; re-run frontend:build");
++  }
++
++  const outputs = await hashOutputs();
++  await Bun.write(
++    MANIFEST,
++    `${JSON.stringify({ schema: 2, algo: "sha256", inputs, outputs }, null, 2)}\n`,
++  );
++
++  console.log(
++    `frontend:build → ${ENTRIES.length} bundles + manifest in ${path.relative(ROOT, OUT_DIR)}`,
++  );
++}
++
++await main();
+diff --git a/packages/accelerator/scripts/copy-bb.test.ts b/packages/accelerator/scripts/copy-bb.test.ts
+index 94185ed..cb1534f 100644
+--- a/packages/accelerator/scripts/copy-bb.test.ts
++++ b/packages/accelerator/scripts/copy-bb.test.ts
+@@ -17,15 +17,71 @@ describe("windows bb.exe sidecar supply chain", () => {
+     expect(windowsBbReleaseTag("4.3.0-aztecnr-rc.1")).toBe("v4.3.0-aztecnr-rc.1");
+   });
+ 
+-  test("the shipped version has a pinned, well-formed checksum", () => {
+-    expect(resolveWindowsBbChecksum("4.2.0")).toBe(WINDOWS_BB_CHECKSUMS["4.2.0"]);
+-    expect(resolveWindowsBbChecksum("4.2.0")).toMatch(/^[0-9a-f]{64}$/);
++  test("the LIVE bb.js version has an accepted, well-formed manual-review pin", () => {
++    // F-008: key on the version the gate actually resolves (resolveAztecBb), not a hard-coded literal.
++    const { version } = resolveAztecBb();
++    expect(resolveWindowsBbChecksum(version)).toMatch(/^[0-9a-f]{64}$/);
++    expect(WINDOWS_BB_CHECKSUMS[version]?.provenance).toBe("manual-review");
+   });
+ 
+-  test("an unknown version fails closed — forces a hash review on every bb bump", () => {
++  test("an unknown version fails closed — forces a reviewed pin on every bb bump", () => {
+     expect(() => resolveWindowsBbChecksum("9.9.9")).toThrow(/No pinned Windows bb\.exe SHA-256/);
+   });
+ 
++  test("a non-manual-review provenance fails closed (reserved attestation)", () => {
++    WINDOWS_BB_CHECKSUMS["0.0.0-att"] = {
++      sha256: "a".repeat(64),
++      provenance: "attestation",
++      note: "reserved",
++    };
++    try {
++      expect(() => resolveWindowsBbChecksum("0.0.0-att")).toThrow(/not accepted yet/);
++    } finally {
++      delete WINDOWS_BB_CHECKSUMS["0.0.0-att"];
++    }
++  });
++
++  test("a malformed sha256 fails closed", () => {
++    WINDOWS_BB_CHECKSUMS["0.0.0-badsha"] = {
++      sha256: "NOTHEX",
++      provenance: "manual-review",
++      note: "x",
++    };
++    try {
++      expect(() => resolveWindowsBbChecksum("0.0.0-badsha")).toThrow(/malformed sha256/);
++    } finally {
++      delete WINDOWS_BB_CHECKSUMS["0.0.0-badsha"];
++    }
++  });
++
++  test("an empty / whitespace review note fails closed", () => {
++    WINDOWS_BB_CHECKSUMS["0.0.0-emptynote"] = {
++      sha256: "a".repeat(64),
++      provenance: "manual-review",
++      note: "",
++    };
++    WINDOWS_BB_CHECKSUMS["0.0.0-wsnote"] = {
++      sha256: "a".repeat(64),
++      provenance: "manual-review",
++      note: "   ",
++    };
++    try {
++      expect(() => resolveWindowsBbChecksum("0.0.0-emptynote")).toThrow(/empty review note/);
++      expect(() => resolveWindowsBbChecksum("0.0.0-wsnote")).toThrow(/empty review note/);
++    } finally {
++      delete WINDOWS_BB_CHECKSUMS["0.0.0-emptynote"];
++      delete WINDOWS_BB_CHECKSUMS["0.0.0-wsnote"];
++    }
++  });
++
++  test("every committed pin is manual-review with a well-formed sha + a real note", () => {
++    for (const [version, pin] of Object.entries(WINDOWS_BB_CHECKSUMS)) {
++      expect(pin.provenance, `${version} provenance`).toBe("manual-review");
++      expect(pin.sha256, `${version} sha`).toMatch(/^[0-9a-f]{64}$/);
++      expect(pin.note.trim().length, `${version} note`).toBeGreaterThan(0);
++    }
++  });
++
+   test("a tampered tarball is rejected (SHA-256 mismatch)", () => {
+     expect(() =>
+       assertSha256(Buffer.from("malicious payload"), "0".repeat(64), WINDOWS_BB_ASSET),
+diff --git a/packages/accelerator/scripts/copy-bb.ts b/packages/accelerator/scripts/copy-bb.ts
+index 9b3866f..59972f4 100644
+--- a/packages/accelerator/scripts/copy-bb.ts
++++ b/packages/accelerator/scripts/copy-bb.ts
+@@ -53,36 +53,89 @@ export function getTargetTriple(): string {
+ 
+ export const WINDOWS_BB_ASSET = "barretenberg-amd64-windows.tar.gz";
+ 
+-export const WINDOWS_BB_CHECKSUMS: Record<string, string> = {
+-  // @aztec/bb.js 4.2.0 — verified on windows-latest (Windows Prebuild Smoke CI gate).
+-  "4.2.0": "55043d74d20afd55cb3d3c5fd690b79f9d964ba52bfebd13bcba71b74a3d0c8f",
+-  // @aztec/bb.js 4.3.1 — sha256 of barretenberg-amd64-windows.tar.gz from the v4.3.1 release.
+-  "4.3.1": "58294203ba658d2c6d983dc22f68f3a2280f5107e9e973570e4adb751997fd2c",
+-  // @aztec/bb.js 5.0.0-rc.1 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.0-rc.1
+-  // release (archive contains bb.exe only — the no-DLL canary holds). Required because the
+-  // 4.3.1→5.0.0-rc.1 lockfile bump makes resolveAztecBb() key on 5.0.0-rc.1; the Windows Prebuild
+-  // Smoke CI gate independently re-fetches + verifies this hash.
+-  "5.0.0-rc.1": "7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd",
+-  // @aztec/bb.js 5.0.0-rc.2 — sha256 of barretenberg-amd64-windows.tar.gz from the v5.0.0-rc.2
+-  // release (5.5 MB gzip, bb.exe only). Required by the rc.1→rc.2 lockfile bump so the Windows
+-  // Prebuild/Build Smoke gates can re-fetch + verify; without it resolveWindowsBbChecksum throws.
+-  "5.0.0-rc.2": "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
++/**
++ * Provenance of a Windows bb.exe pin (F-008). ONLY `manual-review` is accepted today: a maintainer
++ * downloaded the release asset, inspected the release page + tag, diffed it against the prior pinned
++ * asset, and recorded the hash by hand. It is a CHANGE-DETECTOR, not cryptographic proof against a
++ * compromised upstream publisher — AztecProtocol does not yet sign/attest bb releases (the SEC-02
++ * residual, same upstream-signing gap as F-007). `attestation` is RESERVED for when they do (to be
++ * verified via `gh attestation verify` pinning repo + signer workflow + source ref/digest); it is NOT
++ * yet accepted and currently fails closed. A recognized string is not verification.
++ */
++export type WindowsBbProvenance = "manual-review" | "attestation";
++
++export interface WindowsBbPin {
++  sha256: string;
++  provenance: WindowsBbProvenance;
++  note: string;
++}
++
++// F-008: pins are NEVER auto-generated (`update-aztec-version.ts` no longer downloads + writes a hash —
++// a twice-downloaded asset is not independent evidence). A human adds each entry after review; the
++// Windows Prebuild/Build Smoke gate re-fetches + re-verifies against the pinned sha, failing closed on a
++// missing/mismatched/unaccepted-provenance entry.
++export const WINDOWS_BB_CHECKSUMS: Record<string, WindowsBbPin> = {
++  "4.2.0": {
++    sha256: "55043d74d20afd55cb3d3c5fd690b79f9d964ba52bfebd13bcba71b74a3d0c8f",
++    provenance: "manual-review",
++    note: "Legacy pin adopted as a change-detector — CI-hashed on windows-latest, not independently verified (SEC-02).",
++  },
++  "4.3.1": {
++    sha256: "58294203ba658d2c6d983dc22f68f3a2280f5107e9e973570e4adb751997fd2c",
++    provenance: "manual-review",
++    note: "Legacy pin, change-detector only — sha256 of the v4.3.1 release asset, not independently verified.",
++  },
++  "5.0.0-rc.1": {
++    sha256: "7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd",
++    provenance: "manual-review",
++    note: "Legacy pin, change-detector only — v5.0.0-rc.1 asset (bb.exe only, no-DLL canary), not independently verified.",
++  },
++  "5.0.0-rc.2": {
++    sha256: "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
++    provenance: "manual-review",
++    note: "Legacy pin, change-detector only — v5.0.0-rc.2 asset (5.5 MB gzip, bb.exe only), not independently verified.",
++  },
+ };
+ 
+ export function windowsBbReleaseTag(version: string): string {
+   return `v${version}`;
+ }
+ 
++/**
++ * Resolve the pinned Windows bb.exe SHA-256 for a bb.js `version`. Fail-closed: a missing entry, an
++ * unaccepted provenance (only `manual-review` today — `attestation` is reserved until we implement
++ * `gh attestation verify`), or a malformed hash all throw (F-008).
++ */
+ export function resolveWindowsBbChecksum(version: string): string {
+-  const sha = WINDOWS_BB_CHECKSUMS[version];
+-  if (!sha) {
++  const pin = WINDOWS_BB_CHECKSUMS[version];
++  if (!pin) {
+     throw new Error(
+       `No pinned Windows bb.exe SHA-256 for @aztec/bb.js ${version}.\n` +
+-        `Download ${WINDOWS_BB_ASSET} from the v${version} aztec-packages release, ` +
+-        `sha256sum it, and add the hash to WINDOWS_BB_CHECKSUMS in copy-bb.ts.`,
++        `A human must add a REVIEWED pin: download ${WINDOWS_BB_ASSET} from the v${version} ` +
++        `aztec-packages release, verify the release page + tag signature, diff it against the prior ` +
++        `pinned asset, then add a { sha256, provenance: "manual-review", note } entry to ` +
++        `WINDOWS_BB_CHECKSUMS in copy-bb.ts. (Pins are never auto-generated — F-008.)`,
++    );
++  }
++  if (pin.provenance !== "manual-review") {
++    throw new Error(
++      `Windows bb.exe pin for ${version} has provenance "${pin.provenance}", which is not accepted yet. ` +
++        `Only "manual-review" is honored today; "attestation" requires implementing gh attestation verify (F-008).`,
++    );
++  }
++  if (!/^[0-9a-f]{64}$/.test(pin.sha256)) {
++    throw new Error(
++      `Windows bb.exe pin for ${version} has a malformed sha256: ${JSON.stringify(pin.sha256)}`,
++    );
++  }
++  // A manual-review pin MUST carry a non-empty review record (what a human checked). An empty/whitespace
++  // note means the review evidence is missing — fail closed (F-008).
++  if (typeof pin.note !== "string" || pin.note.trim().length === 0) {
++    throw new Error(
++      `Windows bb.exe pin for ${version} has an empty review note — a manual-review pin must record what was reviewed.`,
+     );
+   }
+-  return sha;
++  return pin.sha256;
+ }
+ 
+ export function assertSha256(data: Uint8Array, expected: string, label: string): void {
+diff --git a/packages/accelerator/scripts/sign-smoke-feed.sh b/packages/accelerator/scripts/sign-smoke-feed.sh
+new file mode 100755
+index 0000000..2401431
+--- /dev/null
++++ b/packages/accelerator/scripts/sign-smoke-feed.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++# Sign a synthesized updater-smoke feed IN PLACE (F-004 Layer A).
++#
++# A C4+ N-1 build enforces the signed-manifest envelope, so the local smoke feed must carry a
++# `manifest` + `manifest_sig` signed with the SAME updater key N-1 embeds (the prod key — the synthetic
++# N-1 keeps the committed prod pubkey). This assembles the canonical envelope from the feed, signs it
++# with the key in TAURI_SIGNING_PRIVATE_KEY[_PASSWORD], and splices the two fields back in. Shared by
++# updater-smoke.sh (macOS) + updater-smoke-linux.sh so the envelope shape has ONE definition.
++#
++# Encoding contract (kept in lockstep with accelerator_core::update_manifest):
++#   - manifest     = base64(envelope.json bytes)
++#   - manifest_sig = the .sig file content VERBATIM (tauri writes it as base64(minisign doc))
++#
++# Usage: sign-smoke-feed.sh <feed.json> <repo-root>
++set -euo pipefail
++
++FEED="$1"
++REPO_ROOT="$2"
++: "${TAURI_SIGNING_PRIVATE_KEY:?TAURI_SIGNING_PRIVATE_KEY is required to sign the smoke feed}"
++
++ENVELOPE="$(dirname "$FEED")/envelope.json"
++# Envelope shape MUST match accelerator_core::update_manifest::SignedEnvelope (deny_unknown_fields):
++# exactly {schema, version, pub_date, platforms:{key:{url,size,signature}}}. The feed's platform
++# entries already carry exactly {signature,url,size}, so projecting them is field-name-exact.
++jq '{schema: "aztec-accelerator-update-manifest-v1", version, pub_date, platforms}' "$FEED" > "$ENVELOPE"
++
++# Sign the exact envelope bytes with the updater key (bunx resolves @tauri-apps/cli from the package).
++( cd "$REPO_ROOT/packages/accelerator" && bunx tauri signer sign "$ENVELOPE" )
++
++# base64 of the signed bytes; strip newlines (BSD + GNU base64 both wrap by default).
++MANIFEST_B64="$(base64 < "$ENVELOPE" | tr -d '\n')"
++MANIFEST_SIG="$(cat "$ENVELOPE.sig")" # already base64(minisign doc) — embed verbatim
++
++jq --arg m "$MANIFEST_B64" --arg s "$MANIFEST_SIG" '. + {manifest: $m, manifest_sig: $s}' \
++  "$FEED" > "$FEED.signed"
++mv "$FEED.signed" "$FEED"
++echo "── signed smoke feed: manifest + manifest_sig spliced ──"
+diff --git a/packages/accelerator/scripts/tauri-trust-boundary.test.ts b/packages/accelerator/scripts/tauri-trust-boundary.test.ts
+new file mode 100644
+index 0000000..852862f
+--- /dev/null
++++ b/packages/accelerator/scripts/tauri-trust-boundary.test.ts
+@@ -0,0 +1,240 @@
++/**
++ * F-012 trust-boundary static guards (`bun test scripts/`). These are the drift-detectors: they fail CI
++ * if a future change reopens the frontend trust boundary — an inline script/style, the `withGlobalTauri`
++ * global, a CSP relaxation, or a capability/command-matrix mismatch. They read files only (no app runtime),
++ * so they run fast on the GUI-less CI matrix. Grows per phase: P1 externalization (here); P2 CSP; P3 caps.
++ */
++import { describe, expect, test } from "bun:test";
++import path from "node:path";
++
++const SRC_TAURI = path.resolve(import.meta.dir, "..", "src-tauri");
++const FRONTEND = path.join(SRC_TAURI, "frontend");
++const FRONTEND_SRC = path.join(SRC_TAURI, "frontend-src");
++const TAURI_CONF = path.join(SRC_TAURI, "tauri.conf.json");
++
++// The exact CSP directives F-012 ships. Kept as an ordered list so the drift test pins each one — a future
++// relaxation (adding `unsafe-inline`, dropping `form-action`, widening `connect-src`) fails CI loudly.
++const REQUIRED_CSP: Record<string, string> = {
++  "default-src": "'self'",
++  "script-src": "'self'",
++  "style-src": "'self'",
++  "img-src": "'self'",
++  "connect-src": "ipc: http://ipc.localhost",
++  "object-src": "'none'",
++  "base-uri": "'none'",
++  "frame-ancestors": "'none'",
++  "form-action": "'none'",
++  "frame-src": "'none'",
++  "child-src": "'none'",
++  "worker-src": "'none'",
++};
++
++const PAGES = ["authorize.html", "settings.html", "update-prompt.html"] as const;
++
++async function read(p: string): Promise<string> {
++  return await Bun.file(p).text();
++}
++
++/** Strip `/* *​/` block and `//` line comments so guards match CODE, not prose in doc comments. */
++function stripComments(js: string): string {
++  return js.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
++}
++
++describe("F-012 P1 — frontend externalization", () => {
++  test("each popup page loads exactly one ES-module bundle and no other script", async () => {
++    for (const page of PAGES) {
++      const html = await read(path.join(FRONTEND, page));
++      const scripts = [...html.matchAll(/<script\b[^>]*>/gi)].map((m) => m[0]);
++      expect(scripts.length, `${page}: exactly one <script>`).toBe(1);
++      const tag = scripts[0];
++      expect(tag, `${page}: must be a module`).toContain('type="module"');
++      // Points at a bundled asset built from frontend-src/ — never an inline block.
++      expect(tag, `${page}: loads assets/*.js`).toMatch(/src="assets\/[a-z-]+\.js"/);
++    }
++  });
++
++  test("no inline scripts, inline styles, or markup event handlers in any page", async () => {
++    for (const page of PAGES) {
++      const html = await read(path.join(FRONTEND, page));
++      // An inline <script> has no `src=` before its closing `>`.
++      for (const tag of html.matchAll(/<script\b([^>]*)>/gi)) {
++        expect(tag[1], `${page}: <script> must have src (no inline JS)`).toContain("src=");
++      }
++      expect(html, `${page}: no <style> block`).not.toMatch(/<style\b/i);
++      expect(html, `${page}: no inline style= attribute`).not.toMatch(/\sstyle\s*=/i);
++      expect(html, `${page}: no on*= handler attribute`).not.toMatch(/\son[a-z]+\s*=\s*["']/i);
++    }
++  });
++
++  test("frontend-src references the official API, never the window.__TAURI__ global", async () => {
++    const glob = new Bun.Glob("*.js");
++    const names: string[] = [];
++    for await (const name of glob.scan({ cwd: FRONTEND_SRC })) names.push(name);
++    expect(names.length).toBeGreaterThanOrEqual(4); // bridge + 3 pages
++
++    let importsCore = false;
++    for (const name of names) {
++      const js = await read(path.join(FRONTEND_SRC, name));
++      const code = stripComments(js);
++      expect(code, `${name}: no window.__TAURI__ global back-door`).not.toMatch(
++        /window\.__TAURI__\b/,
++      );
++      if (/@tauri-apps\/api\/core/.test(code)) importsCore = true;
++    }
++    expect(importsCore, "the shared bridge imports invoke from @tauri-apps/api/core").toBe(true);
++  });
++
++  test("the old global tauri-bridge.js is gone", async () => {
++    expect(await Bun.file(path.join(FRONTEND, "tauri-bridge.js")).exists()).toBe(false);
++  });
++});
++
++describe("F-012 P2 — CSP + global flag drift guards", () => {
++  async function conf(): Promise<any> {
++    return JSON.parse(await read(TAURI_CONF));
++  }
++
++  test("withGlobalTauri is false (no window.__TAURI__ back-door)", async () => {
++    expect((await conf()).app?.withGlobalTauri).toBe(false);
++  });
++
++  test("CSP pins every required directive with no unsafe-* relaxation", async () => {
++    const csp: string = (await conf()).app?.security?.csp ?? "";
++    expect(csp, "csp must be set").toBeTruthy();
++
++    // Parse "name a b c; name2 …" into a directive → sources map.
++    const directives = new Map<string, string>();
++    for (const chunk of csp.split(";")) {
++      const parts = chunk.trim().split(/\s+/);
++      if (parts.length) directives.set(parts[0], parts.slice(1).join(" "));
++    }
++    for (const [name, sources] of Object.entries(REQUIRED_CSP)) {
++      expect(directives.get(name), `csp ${name}`).toBe(sources);
++    }
++    // connect-src deliberately EXCLUDES 'self' (popups never fetch) — only the IPC origins.
++    expect(directives.get("connect-src")).not.toContain("'self'");
++    // No inline/eval escape hatches, ever.
++    expect(csp).not.toContain("unsafe-inline");
++    expect(csp).not.toContain("unsafe-eval");
++  });
++
++  test("dev never silently weakens the shipped CSP (no devUrl, no weaker devCsp)", async () => {
++    const c = await conf();
++    // is_dev() serves the same csp only when devCsp is unset and there is no devUrl — pin both so a future
++    // edit can't turn the dev-mode PR-gate WebDriver run into a no-op against the real policy.
++    expect(c.build?.devUrl, "no devUrl").toBeUndefined();
++    const devCsp = c.app?.security?.devCsp;
++    if (devCsp !== undefined) expect(devCsp).toBe(c.app.security.csp);
++    // The asset-CSP nonce augmentation must stay on (never disable it).
++    expect(c.app?.security?.dangerousDisableAssetCspModification ?? false).toBe(false);
++  });
++});
++
++// The authoritative per-window (window → snake_case command) matrix. Every command a window's frontend
++// invokes MUST be here, and NOTHING more (least privilege). has_app_acl is all-or-nothing: a command absent
++// from a window's capability is default-DENIED for that window.
++const WINDOW_MATRIX: Record<string, string[]> = {
++  settings: [
++    "get_config",
++    "get_autostart_enabled",
++    "get_system_info",
++    "set_autostart",
++    "set_auto_update",
++    "set_speed",
++    "enable_safari_support",
++    "disable_safari_support",
++    "remove_approved_origin",
++  ],
++  authorize: ["get_verified_info", "get_pending_auth", "respond_auth"],
++  "update-prompt": ["respond_update_prompt"],
++};
++const snakeToPerm = (cmd: string) => `allow-${cmd.replace(/_/g, "-")}`;
++
++describe("F-012 P3 — per-window capability ACL", () => {
++  const CAPS = path.join(SRC_TAURI, "capabilities");
++
++  async function capFiles(): Promise<Record<string, any>> {
++    const glob = new Bun.Glob("*.json");
++    const out: Record<string, any> = {};
++    for await (const name of glob.scan({ cwd: CAPS })) {
++      out[name] = JSON.parse(await read(path.join(CAPS, name)));
++    }
++    return out;
++  }
++
++  test("exactly the 3 scoped capabilities exist — no default.json, no extras", async () => {
++    const files = await capFiles();
++    expect(Object.keys(files).sort()).toEqual([
++      "authorize.json",
++      "settings.json",
++      "update-prompt.json",
++    ]);
++    // The old broad default.json (core:default + plugin grants to every window) must be gone (D7 DROP).
++    expect(files["default.json"]).toBeUndefined();
++  });
++
++  test("each capability grants EXACTLY its window's commands and no others", async () => {
++    const files = await capFiles();
++    const byId: Record<string, any> = {};
++    for (const c of Object.values(files)) byId[c.identifier] = c;
++
++    for (const [id, cmds] of Object.entries(WINDOW_MATRIX)) {
++      const cap = byId[id];
++      expect(cap, `capability ${id}`).toBeTruthy();
++      // The window glob matches the runtime label (settings / auth-* / update-prompt).
++      const expectedWindow = id === "authorize" ? "auth-*" : id;
++      expect(cap.windows).toEqual([expectedWindow]);
++      // Exact permission set — kebab `allow-<cmd>`, no plugin/core grants (least privilege).
++      expect([...cap.permissions].sort()).toEqual(cmds.map(snakeToPerm).sort());
++      for (const p of cap.permissions) {
++        expect(p, `${id} grants only app allow-* perms`).toMatch(/^allow-[a-z-]+$/);
++      }
++    }
++  });
++
++  test("the authorization popup canNOT reach any settings mutator (least-privilege drift guard)", async () => {
++    const files = await capFiles();
++    const authorize = Object.values(files).find((c) => c.identifier === "authorize");
++    for (const settingsCmd of WINDOW_MATRIX.settings) {
++      expect(authorize.permissions, `auth must not grant ${settingsCmd}`).not.toContain(
++        snakeToPerm(settingsCmd),
++      );
++    }
++  });
++
++  test("build.rs COMMANDS == main.rs generate_handler! == union of capability grants (set-equality)", async () => {
++    const buildRs = await read(path.join(SRC_TAURI, "build.rs"));
++    const mainRs = await read(path.join(SRC_TAURI, "src", "main.rs"));
++
++    // build.rs: the string list passed to AppManifest.commands().
++    const commandsBlock = buildRs.match(/let commands: &\[&str\] = &\[([\s\S]*?)\];/);
++    expect(commandsBlock, "build.rs COMMANDS block").toBeTruthy();
++    const buildCommands = [...commandsBlock![1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).sort();
++
++    // main.rs: the generate_handler! command list.
++    const handlerBlock = mainRs.match(/generate_handler!\[([\s\S]*?)\]/);
++    expect(handlerBlock, "main.rs generate_handler!").toBeTruthy();
++    const handlers = [...handlerBlock![1].matchAll(/commands::([a-z_]+)/g)].map((m) => m[1]).sort();
++
++    // union of every capability's granted commands (perm → snake).
++    const files = await capFiles();
++    const granted = new Set<string>();
++    for (const c of Object.values(files)) {
++      for (const p of c.permissions) granted.add(p.replace(/^allow-/, "").replace(/-/g, "_"));
++    }
++    const grantedSorted = [...granted].sort();
++
++    expect(buildCommands).toEqual(handlers); // declared surface == registered surface
++    expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
++    expect(handlers.length).toBe(13);
++  });
++
++  test("tauri.conf.json pins the capability allowlist to exactly the 3", async () => {
++    const c = JSON.parse(await read(TAURI_CONF));
++    expect([...(c.app?.security?.capabilities ?? [])].sort()).toEqual([
++      "authorize",
++      "settings",
++      "update-prompt",
++    ]);
++  });
++});
+diff --git a/packages/accelerator/scripts/updater-smoke-linux.sh b/packages/accelerator/scripts/updater-smoke-linux.sh
+index 99484c5..f2fc31d 100755
+--- a/packages/accelerator/scripts/updater-smoke-linux.sh
++++ b/packages/accelerator/scripts/updater-smoke-linux.sh
+@@ -102,9 +102,12 @@ N_BASENAME="$(basename "$N_APPIMAGE")"
+ # Genuine N checksum, captured BEFORE the optional negative-mode tamper, so the
+ # positive path can assert the on-disk swap landed exactly N's bytes.
+ N_SUM="$(sha256sum "$N_APPIMAGE" | awk '{print $1}')"
++# Byte size of the GENUINE artifact (before any negative-mode tamper) — bound into the signed
++# manifest (F-004 Layer A + SEC-03).
++N_SIZE="$(wc -c < "$N_APPIMAGE" | tr -d ' ')"
+ cp "$N_APPIMAGE" "$SERVE_DIR/$N_BASENAME"
+ N_SIG="$(cat "$N_SIG_FILE")"
+-log "N artifact: $N_BASENAME (sha256=$N_SUM)"
++log "N artifact: $N_BASENAME (sha256=$N_SUM, $N_SIZE bytes)"
+ 
+ # Negative control: serve the GENUINE signature but a TAMPERED AppImage (append a
+ # byte). The updater downloads the artifact, then the minisign check over the
+@@ -138,11 +141,14 @@ sudo cp "$WORK/ca.pem" "$CA_DEST"
+ sudo update-ca-certificates >/dev/null 2>&1
+ echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
+ 
+-# ── Synthesize latest.json for N ──
++# ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
++# A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry manifest/manifest_sig signed
++# with the SAME (prod) key N-1 embeds. The workflow provides it via TAURI_SIGNING_PRIVATE_KEY[_PASSWORD].
+ jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
+-  --arg url "https://$HOST/releases/download/$N_BASENAME" \
++  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" \
+   '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
+-    platforms: { ($key): { signature:$sig, url:$url } }}' > "$WORK/latest.json"
++    platforms: { ($key): { signature:$sig, url:$url, size:$size } }}' > "$WORK/latest.json"
++"$REPO_ROOT/packages/accelerator/scripts/sign-smoke-feed.sh" "$WORK/latest.json" "$REPO_ROOT"
+ log "latest.json:"; cat "$WORK/latest.json"
+ 
+ # ── Start the local HTTPS feed on :443 ──
+diff --git a/packages/accelerator/scripts/updater-smoke-windows.ps1 b/packages/accelerator/scripts/updater-smoke-windows.ps1
+index 28ed3d9..cd200f3 100644
+--- a/packages/accelerator/scripts/updater-smoke-windows.ps1
++++ b/packages/accelerator/scripts/updater-smoke-windows.ps1
+@@ -96,7 +96,10 @@ try {
+   $Served = Join-Path $ServeDir $NName
+   Copy-Item $NZip.FullName $Served
+   $NSigText = (Get-Content $NSig.FullName -Raw).Trim()
+-  Log "N artifact: $NName"
++  # Byte size of the GENUINE artifact (before any negative-mode tamper) — bound into the signed
++  # manifest (F-004 Layer A + SEC-03).
++  $NSize = $NZip.Length
++  Log "N artifact: $NName ($NSize bytes)"
+ 
+   # Negative control: tamper the served zip (append a byte) but keep the GENUINE sig,
+   # so the minisign check over the tampered bytes MUST fail against the embedded pubkey.
+@@ -127,14 +130,40 @@ try {
+   # ── Scoped Defender exclusion (the UNSIGNED installer/exe) ──
+   Add-MpPreference -ExclusionPath $InstallRoot, $ServeDir -ErrorAction SilentlyContinue
+ 
+-  # ── Synthesize latest.json for N ──
+-  $latest = [ordered]@{
+-    version  = $NVersion
+-    notes    = "updater smoke $NVersion"
+-    pub_date = "2026-01-01T00:00:00Z"
+-    platforms = [ordered]@{ $PlatformKey = [ordered]@{ signature = $NSigText; url = "https://$FeedHost/releases/download/$NName" } }
+-  } | ConvertTo-Json -Depth 6
+-  Set-Content -Path (Join-Path $Work "latest.json") -Value $latest
++  # ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
++  # A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry manifest/manifest_sig
++  # signed with the SAME (prod) key N-1 embeds. The synthetic N-1 keeps the committed prod pubkey, so
++  # the manifest key is the prod key — provided to THIS step's env (overriding the ephemeral key that
++  # only built N-1's artifacts). Encoding contract matches accelerator_core::update_manifest:
++  # manifest = base64(envelope bytes); manifest_sig = the .sig content verbatim (base64(minisign doc)).
++  $platform = [ordered]@{ signature = $NSigText; url = "https://$FeedHost/releases/download/$NName"; size = $NSize }
++  $platforms = [ordered]@{ $PlatformKey = $platform }
++  # The signed envelope shape MUST match SignedEnvelope (deny_unknown_fields): {schema, version,
++  # pub_date, platforms}. Write WITHOUT a BOM (pwsh 7 default) so the signed bytes parse.
++  $envelope = [ordered]@{
++    schema    = "aztec-accelerator-update-manifest-v1"
++    version   = $NVersion
++    pub_date  = "2026-01-01T00:00:00Z"
++    platforms = $platforms
++  }
++  $EnvPath = Join-Path $Work "envelope.json"
++  ($envelope | ConvertTo-Json -Depth 6) | Set-Content -Path $EnvPath -Encoding utf8NoBOM
++  Push-Location "$RepoRoot\packages\accelerator"
++  & bunx tauri signer sign $EnvPath
++  if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Error "tauri signer sign failed for the smoke manifest"; exit 1 }
++  Pop-Location
++  $ManifestB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($EnvPath))
++  $ManifestSig = (Get-Content "$EnvPath.sig" -Raw).Trim()
++  $latestObj = [ordered]@{
++    version      = $NVersion
++    notes        = "updater smoke $NVersion"
++    pub_date     = "2026-01-01T00:00:00Z"
++    platforms    = $platforms
++    manifest     = $ManifestB64
++    manifest_sig = $ManifestSig
++  }
++  $latest = $latestObj | ConvertTo-Json -Depth 6
++  Set-Content -Path (Join-Path $Work "latest.json") -Value $latest -Encoding utf8NoBOM
+   Log "latest.json:"; Write-Host $latest
+ 
+   # ── Start the local HTTPS feed on :443 (no sudo on Windows) ──
+diff --git a/packages/accelerator/scripts/updater-smoke.sh b/packages/accelerator/scripts/updater-smoke.sh
+index 896ce84..07d2f99 100755
+--- a/packages/accelerator/scripts/updater-smoke.sh
++++ b/packages/accelerator/scripts/updater-smoke.sh
+@@ -75,7 +75,10 @@ N_SIG_FILE="$(find "$N_ARTIFACTS_DIR" -name '*.app.tar.gz.sig' | head -1)"
+ N_BASENAME="$(basename "$N_TARBALL")"
+ cp "$N_TARBALL" "$SERVE_DIR/$N_BASENAME"
+ N_SIG="$(cat "$N_SIG_FILE")"
+-log "N artifact: $N_BASENAME"
++# Byte size of the GENUINE artifact (before any negative-mode tamper) — bound into the signed
++# manifest (F-004 Layer A + SEC-03). BSD/GNU `wc -c` both need the whitespace trimmed.
++N_SIZE="$(wc -c < "$N_TARBALL" | tr -d ' ')"
++log "N artifact: $N_BASENAME ($N_SIZE bytes)"
+ 
+ # Negative control: serve the GENUINE signature but a TAMPERED tarball (append a
+ # byte). The updater downloads the artifact, then the minisign check over the
+@@ -106,11 +109,15 @@ log "trusting CA + adding hosts entry"
+ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$WORK/ca.pem"
+ echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
+ 
+-# ── Synthesize latest.json for N ──
++# ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
++# A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry a `manifest`/`manifest_sig`
++# signed with the SAME updater key N-1 embeds (the prod key — the synthetic N-1 keeps the committed
++# prod pubkey). The workflow provides it via TAURI_SIGNING_PRIVATE_KEY[_PASSWORD].
+ jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
+-  --arg url "https://$HOST/releases/download/$N_BASENAME" \
++  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" \
+   '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
+-    platforms: { ($key): { signature:$sig, url:$url } }}' > "$WORK/latest.json"
++    platforms: { ($key): { signature:$sig, url:$url, size:$size } }}' > "$WORK/latest.json"
++"$REPO_ROOT/packages/accelerator/scripts/sign-smoke-feed.sh" "$WORK/latest.json" "$REPO_ROOT"
+ log "latest.json:"; cat "$WORK/latest.json"
+ 
+ # ── Start the local HTTPS feed on :443 ──
+diff --git a/scripts/__fixtures__/bb-cache-marker.json b/scripts/__fixtures__/bb-cache-marker.json
+new file mode 100644
+index 0000000..756faff
+--- /dev/null
++++ b/scripts/__fixtures__/bb-cache-marker.json
+@@ -0,0 +1,7 @@
++{
++  "schema": "aztec-accelerator/bb-cache-marker@1",
++  "version": "5.0.0-rc.2",
++  "platform": "amd64-linux",
++  "archive_sha256": "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
++  "binary_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++}
+diff --git a/scripts/__fixtures__/github-release-metadata.json b/scripts/__fixtures__/github-release-metadata.json
+new file mode 100644
+index 0000000..d65f276
+--- /dev/null
++++ b/scripts/__fixtures__/github-release-metadata.json
+@@ -0,0 +1,15 @@
++{
++  "tag_name": "v5.0.0-rc.2",
++  "name": "v5.0.0-rc.2",
++  "immutable": false,
++  "assets": [
++    {
++      "name": "barretenberg-amd64-linux.tar.gz",
++      "digest": "sha256:c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842"
++    },
++    {
++      "name": "barretenberg-arm64-darwin.tar.gz",
++      "digest": "sha256:7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd"
++    }
++  ]
++}
+diff --git a/scripts/check-windows-bb-pin.test.ts b/scripts/check-windows-bb-pin.test.ts
+new file mode 100644
+index 0000000..b662516
+--- /dev/null
++++ b/scripts/check-windows-bb-pin.test.ts
+@@ -0,0 +1,30 @@
++import { afterEach, describe, expect, test } from "bun:test";
++import { resolveAztecBb } from "../packages/accelerator/scripts/copy-bb.ts";
++import { checkWindowsBbPin } from "./check-windows-bb-pin.ts";
++
++// F-008: the pin-status check must resolve the LIVE bb.js version and NEVER touch the network.
++describe("check-windows-bb-pin", () => {
++  const origFetch = globalThis.fetch;
++  afterEach(() => {
++    globalThis.fetch = origFetch;
++  });
++
++  test("reports the live bb.js version's pin as present, with no network", () => {
++    globalThis.fetch = (() => {
++      throw new Error("check-windows-bb-pin must not fetch");
++    }) as typeof fetch;
++    const { version, present, message } = checkWindowsBbPin();
++    expect(version).toBe(resolveAztecBb().version); // keys on the gate's version, not argv
++    expect(present).toBe(true); // the committed live version has a manual-review pin
++    expect(message).toContain("present");
++  });
++
++  test("an unpinned version reports MANUAL PIN REQUIRED, with no network", () => {
++    globalThis.fetch = (() => {
++      throw new Error("check-windows-bb-pin must not fetch");
++    }) as typeof fetch;
++    const { present, message } = checkWindowsBbPin("9.9.9");
++    expect(present).toBe(false);
++    expect(message).toContain("MANUAL PIN REQUIRED");
++  });
++});
+diff --git a/scripts/check-windows-bb-pin.ts b/scripts/check-windows-bb-pin.ts
+new file mode 100644
+index 0000000..5fa0fc5
+--- /dev/null
++++ b/scripts/check-windows-bb-pin.ts
+@@ -0,0 +1,57 @@
++#!/usr/bin/env bun
++/**
++ * F-008: report whether the LIVE @aztec/bb.js version has a REVIEWED Windows bb.exe pin.
++ *
++ * Run this AFTER `bun install` — it resolves the installed bb.js version (the SAME key the Windows
++ * Prebuild/Build Smoke gate uses via resolveWindowsBbChecksum), never the argv/aztec.js version.
++ *
++ * Read-only: it NEVER downloads the asset or writes a pin. A pin is added by a human after review (see
++ * WINDOWS_BB_CHECKSUMS in packages/accelerator/scripts/copy-bb.ts) — a twice-downloaded asset is not
++ * independent evidence. This step is INFORMATIONAL; the enforcing fail-closed check is the Windows CI
++ * gate (resolveWindowsBbChecksum throws without an accepted pin), and the only automated bump caller
++ * (aztec-stable → main) runs that gate.
++ */
++import {
++  resolveAztecBb,
++  resolveWindowsBbChecksum,
++  WINDOWS_BB_ASSET,
++} from "../packages/accelerator/scripts/copy-bb.ts";
++
++export interface WindowsBbPinStatus {
++  version: string;
++  present: boolean;
++  message: string;
++}
++
++/** Report the pin status for `version` (defaults to the live bb.js version). Never touches the network. */
++export function checkWindowsBbPin(version: string = resolveAztecBb().version): WindowsBbPinStatus {
++  try {
++    const sha = resolveWindowsBbChecksum(version);
++    return {
++      version,
++      present: true,
++      message: `✓ Windows bb.exe pin present for @aztec/bb.js ${version} (sha256:${sha.slice(0, 12)}…, provenance manual-review).`,
++    };
++  } catch (err) {
++    const detail = err instanceof Error ? err.message : String(err);
++    return {
++      version,
++      present: false,
++      message:
++        `⚠️  MANUAL PIN REQUIRED for @aztec/bb.js ${version}\n` +
++        `The Windows Prebuild/Build Smoke CI gate stays RED until a human adds a reviewed pin.\n` +
++        `Steps: download ${WINDOWS_BB_ASSET} from the v${version} aztec-packages release, verify the\n` +
++        `release page + tag signature, diff it against the prior pinned asset, then add a\n` +
++        `{ sha256, provenance: "manual-review", note } entry to WINDOWS_BB_CHECKSUMS in\n` +
++        `packages/accelerator/scripts/copy-bb.ts. Pins are NEVER auto-generated (F-008).\n` +
++        `(${detail})`,
++    };
++  }
++}
++
++if (import.meta.main) {
++  const status = checkWindowsBbPin();
++  console.log(status.message);
++  // Informational only — exit 0 so the bump can still open its PR; the Windows CI gate is the enforcer.
++  process.exit(0);
++}
+diff --git a/scripts/download-bb.test.ts b/scripts/download-bb.test.ts
+new file mode 100644
+index 0000000..86dd01a
+--- /dev/null
++++ b/scripts/download-bb.test.ts
+@@ -0,0 +1,419 @@
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++import { createHash } from "node:crypto";
++import {
++  existsSync,
++  linkSync,
++  mkdirSync,
++  mkdtempSync,
++  readFileSync,
++  rmSync,
++  statSync,
++  symlinkSync,
++  writeFileSync,
++} from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { gzipSync } from "node:zlib";
++import {
++  assertValidVersion,
++  type BbMarker,
++  cleanupOldVersions,
++  currentPlatform,
++  downloadBb,
++  downloadTarball,
++  fetchAssetDigest,
++  findSingleBb,
++  isValidVersionName,
++  listCachedVersions,
++  MARKER_NAME,
++  MARKER_SCHEMA,
++  readMarker,
++  sha256Hex,
++  verifyCachedBb,
++  versionBbPath,
++  versionMarkerPath,
++} from "./download-bb";
++
++// These tests exercise the exported functions on the host platform (Linux CI = amd64-linux, matching
++// the committed fixtures). The CLI itself refuses to run on Windows; the functions are platform-generic.
++
++const sha = (s: string): string => createHash("sha256").update(s).digest("hex");
++
++let base: string;
++const origFetch = globalThis.fetch;
++
++beforeEach(() => {
++  base = mkdtempSync(join(tmpdir(), "bbcache-"));
++  process.env.BB_VERSIONS_DIR = base;
++});
++afterEach(() => {
++  globalThis.fetch = origFetch;
++  delete process.env.BB_VERSIONS_DIR;
++  rmSync(base, { recursive: true, force: true });
++});
++
++/** Build a gzipped tar containing `barretenberg/bb` (+ optional unsafe members). */
++function buildTarball(
++  bbContent: string,
++  opts: { symlink?: boolean; extraBb?: boolean } = {},
++): Uint8Array {
++  const work = mkdtempSync(join(tmpdir(), "bbtar-"));
++  try {
++    const inner = join(work, "barretenberg");
++    mkdirSync(inner, { recursive: true });
++    if (opts.symlink) {
++      symlinkSync("/etc/passwd", join(inner, "bb"));
++    } else {
++      writeFileSync(join(inner, "bb"), bbContent);
++    }
++    if (opts.extraBb) {
++      const other = join(work, "other");
++      mkdirSync(other, { recursive: true });
++      writeFileSync(join(other, "bb"), "second-bb");
++    }
++    const tgz = join(work, "a.tgz");
++    const dirs = opts.extraBb ? ["barretenberg", "other"] : ["barretenberg"];
++    const p = Bun.spawnSync(["tar", "-czf", tgz, "-C", work, ...dirs]);
++    if (!p.success) throw new Error("test tar build failed");
++    return new Uint8Array(readFileSync(tgz));
++  } finally {
++    rmSync(work, { recursive: true, force: true });
++  }
++}
++
++// Minimal fetch fakes — download-bb only touches the fields below.
++function jsonResp(status: number, body: unknown) {
++  return { ok: status >= 200 && status < 300, status, statusText: "s", json: async () => body };
++}
++function streamResp(bytes: Uint8Array, o: { status?: number; contentLength?: string | null } = {}) {
++  const status = o.status ?? 200;
++  return {
++    ok: status >= 200 && status < 300,
++    status,
++    statusText: "s",
++    headers: {
++      get: (k: string) =>
++        k.toLowerCase() === "content-length"
++          ? o.contentLength === undefined
++            ? String(bytes.length)
++            : o.contentLength
++          : null,
++    },
++    body: new Response(bytes).body,
++  };
++}
++function routeFetch(fn: (url: string) => unknown): void {
++  globalThis.fetch = ((input: unknown) => Promise.resolve(fn(String(input)))) as typeof fetch;
++}
++
++/** Wire fetch so the api.github.com digest lookup + the release download both resolve for `version`. */
++function wireHappyFetch(version: string, tarball: Uint8Array): void {
++  const asset = `barretenberg-${currentPlatform()}.tar.gz`;
++  const digest = sha256Hex(tarball);
++  routeFetch((url) => {
++    if (url.includes("api.github.com")) {
++      return jsonResp(200, { assets: [{ name: asset, digest: `sha256:${digest}` }] });
++    }
++    return streamResp(tarball);
++  });
++}
++
++/** Write a valid { bb, marker } cache entry by hand (bypassing the download path). */
++function writeCacheEntry(version: string, bbContent: string, markerOverride: Partial<BbMarker> = {}): void {
++  const dir = join(base, version);
++  mkdirSync(dir, { recursive: true });
++  writeFileSync(join(dir, "bb"), bbContent);
++  const marker: BbMarker = {
++    schema: MARKER_SCHEMA,
++    version,
++    platform: currentPlatform(),
++    archive_sha256: sha("archive"),
++    binary_sha256: sha(bbContent),
++    ...markerOverride,
++  };
++  writeFileSync(versionMarkerPath(version), `${JSON.stringify(marker, null, 2)}\n`);
++}
++
++// ---------------------------------------------------------------------------
++
++describe("assertValidVersion / isValidVersionName (mirrors Rust is_valid_version)", () => {
++  test("accepts real versions", () => {
++    for (const v of ["5.0.0", "5.0.0-rc.2", "5.0.0-nightly.20260307", "4.2.0-aztecnr-rc.2"]) {
++      expect(isValidVersionName(v)).toBe(true);
++      expect(() => assertValidVersion(v)).not.toThrow();
++    }
++  });
++  test("rejects traversal + injection", () => {
++    for (const v of ["", ".hidden", "5.0.0.", "a..b", "../etc", "5.0.0/bb", "a b", "a;b", "x".repeat(129)]) {
++      expect(isValidVersionName(v)).toBe(false);
++      expect(() => assertValidVersion(v)).toThrow();
++    }
++  });
++});
++
++describe("readMarker / verifyCachedBb", () => {
++  test("valid entry verifies", () => {
++    writeCacheEntry("5.0.0-rc.2", "the-bb-bytes");
++    expect(verifyCachedBb("5.0.0-rc.2")).toBe(true);
++    expect(readMarker("5.0.0-rc.2")?.schema).toBe(MARKER_SCHEMA);
++  });
++  test("missing marker ⇒ false", () => {
++    const dir = join(base, "5.0.0-rc.2");
++    mkdirSync(dir, { recursive: true });
++    writeFileSync(join(dir, "bb"), "x");
++    expect(verifyCachedBb("5.0.0-rc.2")).toBe(false);
++  });
++  test("unknown schema ⇒ reject", () => {
++    writeCacheEntry("5.0.0-rc.2", "x", { schema: "other@9" });
++    expect(readMarker("5.0.0-rc.2")).toBeNull();
++    expect(verifyCachedBb("5.0.0-rc.2")).toBe(false);
++  });
++  test("version / platform mismatch ⇒ reject", () => {
++    writeCacheEntry("5.0.0-rc.2", "x", { version: "9.9.9" });
++    expect(verifyCachedBb("5.0.0-rc.2")).toBe(false);
++    writeCacheEntry("5.0.0-rc.3", "x", { platform: "arm64-solaris" });
++    expect(verifyCachedBb("5.0.0-rc.3")).toBe(false);
++  });
++  test("noncanonical hex ⇒ reject", () => {
++    writeCacheEntry("5.0.0-rc.2", "x", { binary_sha256: "NOTHEX" });
++    expect(verifyCachedBb("5.0.0-rc.2")).toBe(false);
++  });
++  test("tampered binary (hash mismatch) ⇒ reject", () => {
++    writeCacheEntry("5.0.0-rc.2", "original");
++    writeFileSync(versionBbPath("5.0.0-rc.2"), "tampered");
++    expect(verifyCachedBb("5.0.0-rc.2")).toBe(false);
++  });
++  test("oversized marker ⇒ reject", () => {
++    writeCacheEntry("5.0.0-rc.2", "x");
++    writeFileSync(versionMarkerPath("5.0.0-rc.2"), " ".repeat(5000));
++    expect(readMarker("5.0.0-rc.2")).toBeNull();
++  });
++});
++
++describe("fetchAssetDigest (fail-closed, mirrors release_metadata.rs)", () => {
++  const asset = `barretenberg-${currentPlatform()}.tar.gz`;
++  test("returns the hex on a valid release", async () => {
++    routeFetch(() => jsonResp(200, { assets: [{ name: asset, digest: `sha256:${sha("t")}` }] }));
++    expect(await fetchAssetDigest("5.0.0-rc.2", asset)).toBe(sha("t"));
++  });
++  test("non-2xx ⇒ throws", async () => {
++    routeFetch(() => jsonResp(404, {}));
++    await expect(fetchAssetDigest("5.0.0-rc.2", asset)).rejects.toThrow();
++  });
++  test("missing asset ⇒ throws", async () => {
++    routeFetch(() => jsonResp(200, { assets: [{ name: "other", digest: `sha256:${sha("t")}` }] }));
++    await expect(fetchAssetDigest("5.0.0-rc.2", asset)).rejects.toThrow();
++  });
++  test("malformed digest ⇒ throws", async () => {
++    routeFetch(() => jsonResp(200, { assets: [{ name: asset, digest: "sha256:xyz" }] }));
++    await expect(fetchAssetDigest("5.0.0-rc.2", asset)).rejects.toThrow();
++  });
++});
++
++describe("downloadTarball (bounded streaming)", () => {
++  test("404 ⇒ throws", async () => {
++    routeFetch(() => streamResp(new Uint8Array(0), { status: 404 }));
++    await expect(downloadTarball("5.0.0-rc.2")).rejects.toThrow();
++  });
++  test("declared oversize Content-Length ⇒ throws before streaming", async () => {
++    routeFetch(() => streamResp(new Uint8Array([1, 2, 3]), { contentLength: "70000000" }));
++    await expect(downloadTarball("5.0.0-rc.2")).rejects.toThrow();
++  });
++  test("normal body streams through", async () => {
++    const bytes = new Uint8Array([1, 2, 3, 4]);
++    routeFetch(() => streamResp(bytes));
++    expect(await downloadTarball("5.0.0-rc.2")).toEqual(bytes);
++  });
++});
++
++describe("findSingleBb (archive-member safety)", () => {
++  test("finds a single regular bb", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    mkdirSync(join(root, "barretenberg"));
++    writeFileSync(join(root, "barretenberg", "bb"), "x");
++    expect(findSingleBb(root)).toBe(join(root, "barretenberg", "bb"));
++    rmSync(root, { recursive: true, force: true });
++  });
++  test("rejects a symlink member", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    symlinkSync("/etc/passwd", join(root, "bb"));
++    expect(() => findSingleBb(root)).toThrow(/symlink/);
++    rmSync(root, { recursive: true, force: true });
++  });
++  test("rejects multiple bb entries", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    mkdirSync(join(root, "a"));
++    mkdirSync(join(root, "b"));
++    writeFileSync(join(root, "a", "bb"), "1");
++    writeFileSync(join(root, "b", "bb"), "2");
++    expect(() => findSingleBb(root)).toThrow(/bb entries/);
++    rmSync(root, { recursive: true, force: true });
++  });
++  test("rejects when no bb present", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    writeFileSync(join(root, "notbb"), "x");
++    expect(() => findSingleBb(root)).toThrow(/not found/);
++    rmSync(root, { recursive: true, force: true });
++  });
++  test("rejects a hardlink bb (nlink > 1)", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    writeFileSync(join(root, "target"), "real");
++    linkSync(join(root, "target"), join(root, "bb")); // hardlink → bb nlink == 2
++    expect(() => findSingleBb(root)).toThrow(/hardlink/);
++    rmSync(root, { recursive: true, force: true });
++  });
++  test("rejects a directory named bb (no regular bb ⇒ not found)", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    mkdirSync(join(root, "bb"));
++    expect(() => findSingleBb(root)).toThrow(/not found/);
++    rmSync(root, { recursive: true, force: true });
++  });
++  test("rejects a wrong-platform archive (only bb.exe ⇒ not found)", () => {
++    const root = mkdtempSync(join(tmpdir(), "ex-"));
++    writeFileSync(join(root, "bb.exe"), "windows");
++    expect(() => findSingleBb(root)).toThrow(/not found/);
++    rmSync(root, { recursive: true, force: true });
++  });
++});
++
++describe("downloadBb end-to-end", () => {
++  test("verifies, publishes bb + marker, and is a verified cache entry", async () => {
++    const v = "5.0.0-rc.2";
++    const tarball = buildTarball("real-bb-binary");
++    wireHappyFetch(v, tarball);
++    await downloadBb(v);
++
++    expect(readFileSync(versionBbPath(v), "utf8")).toBe("real-bb-binary");
++    expect(existsSync(versionMarkerPath(v))).toBe(true);
++    expect(verifyCachedBb(v)).toBe(true);
++    expect(readMarker(v)?.binary_sha256).toBe(sha("real-bb-binary"));
++  });
++
++  test("skips (no fetch) when a valid marker already exists", async () => {
++    const v = "5.0.0-rc.2";
++    writeCacheEntry(v, "already-here");
++    routeFetch(() => {
++      throw new Error("fetch must not be called on a verified skip");
++    });
++    await expect(downloadBb(v)).resolves.toBeUndefined();
++    expect(readFileSync(versionBbPath(v), "utf8")).toBe("already-here");
++  });
++
++  test("digest mismatch ⇒ throws and publishes nothing", async () => {
++    const v = "5.0.0-rc.2";
++    const tarball = buildTarball("real-bb-binary");
++    const asset = `barretenberg-${currentPlatform()}.tar.gz`;
++    routeFetch((url) => {
++      if (url.includes("api.github.com")) {
++        return jsonResp(200, { assets: [{ name: asset, digest: `sha256:${sha("WRONG")}` }] });
++      }
++      return streamResp(tarball);
++    });
++    await expect(downloadBb(v)).rejects.toThrow(/Integrity check failed/);
++    expect(existsSync(join(base, v))).toBe(false); // no live entry, no leftover
++  });
++
++  test("legacy/tampered entry ⇒ re-downloads to a verified state", async () => {
++    const v = "5.0.0-rc.2";
++    writeCacheEntry(v, "original");
++    writeFileSync(versionBbPath(v), "tampered"); // now marker-invalid
++    expect(verifyCachedBb(v)).toBe(false);
++
++    const tarball = buildTarball("fresh-bb");
++    wireHappyFetch(v, tarball);
++    await downloadBb(v);
++    expect(verifyCachedBb(v)).toBe(true);
++    expect(readFileSync(versionBbPath(v), "utf8")).toBe("fresh-bb");
++  });
++
++  test("rejects an unsafe (symlink) archive without publishing", async () => {
++    const v = "5.0.0-rc.2";
++    const tarball = buildTarball("", { symlink: true });
++    wireHappyFetch(v, tarball);
++    await expect(downloadBb(v)).rejects.toThrow(/symlink/);
++    expect(existsSync(join(base, v))).toBe(false);
++  });
++
++  test("rejects an invalid version BEFORE any fetch or fs write", async () => {
++    routeFetch(() => {
++      throw new Error("fetch must not run for an invalid version");
++    });
++    // assertValidVersion throws first — routeFetch would throw if we ever reached the network/fs path.
++    await expect(downloadBb("../../etc")).rejects.toThrow(/Invalid version/);
++  });
++
++  test("aborts on a corrupt/undecompressable archive (post-digest) without publishing", async () => {
++    const v = "5.0.0-rc.2";
++    const corrupt = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]); // not gzip
++    const asset = `barretenberg-${currentPlatform()}.tar.gz`;
++    routeFetch((url) => {
++      if (url.includes("api.github.com")) {
++        // digest matches the corrupt bytes, so it passes the integrity check and reaches gunzip.
++        return jsonResp(200, { assets: [{ name: asset, digest: `sha256:${sha256Hex(corrupt)}` }] });
++      }
++      return streamResp(corrupt);
++    });
++    await expect(downloadBb(v)).rejects.toThrow(/decompression|tar extraction/);
++    expect(existsSync(join(base, v))).toBe(false);
++  });
++
++  test("published bb + marker have owner-only-ish modes (Unix)", async () => {
++    const v = "5.0.0-rc.2";
++    wireHappyFetch(v, buildTarball("real-bb"));
++    await downloadBb(v);
++    expect(statSync(versionBbPath(v)).mode & 0o777).toBe(0o755);
++    expect(statSync(versionMarkerPath(v)).mode & 0o777).toBe(0o600);
++  });
++});
++
++describe("decompression bound (gzip-bomb defense)", () => {
++  test("gunzip rejects output exceeding the cap (the primitive downloadBb relies on)", () => {
++    const { gunzipSync } = require("node:zlib");
++    const gz = gzipSync(Buffer.alloc(2 * 1024 * 1024, 7)); // 2 MiB decompressed
++    expect(() => gunzipSync(gz, { maxOutputLength: 1024 * 1024 })).toThrow();
++    expect(gunzipSync(gz, { maxOutputLength: 4 * 1024 * 1024 }).length).toBe(2 * 1024 * 1024);
++  });
++});
++
++describe("listCachedVersions (inventory excludes stages + unmarked)", () => {
++  test("lists only valid-named, marker-bearing dirs", () => {
++    writeCacheEntry("5.0.0-rc.2", "x"); // valid + marked
++    mkdirSync(join(base, "5.0.0-rc.3"), { recursive: true }); // unmarked
++    writeFileSync(join(base, "5.0.0-rc.3", "bb"), "y");
++    // a crash-stale staging dir — dot-prefixed, WITH a marker inside — must NOT be listed
++    const stage = join(base, ".5.0.0-rc.9.tmp.deadbeef");
++    mkdirSync(stage, { recursive: true });
++    writeFileSync(join(stage, MARKER_NAME), "{}");
++    expect(listCachedVersions()).toEqual(["5.0.0-rc.2"]);
++  });
++});
++
++describe("cleanupOldVersions", () => {
++  test("never evicts a protected (this-invocation) version", () => {
++    for (const v of ["5.0.0-nightly.20260301", "5.0.0-nightly.20260302", "5.0.0-nightly.20260303"]) {
++      writeCacheEntry(v, "x");
++    }
++    // nightly limit is 2; protect the OLDEST so a non-protected one is evicted instead.
++    cleanupOldVersions(new Set(["5.0.0-nightly.20260301"]));
++    const left = listCachedVersions();
++    expect(left).toContain("5.0.0-nightly.20260301"); // protected survived
++    expect(left.length).toBe(2);
++  });
++});
++
++describe("cross-language contract fixtures", () => {
++  test("bb-cache-marker.json matches the marker schema", () => {
++    const m = JSON.parse(readFileSync(join(import.meta.dir, "__fixtures__", "bb-cache-marker.json"), "utf8"));
++    expect(m.schema).toBe(MARKER_SCHEMA);
++    for (const f of [m.archive_sha256, m.binary_sha256]) expect(f).toMatch(/^[0-9a-f]{64}$/);
++    expect(typeof m.version).toBe("string");
++    expect(typeof m.platform).toBe("string");
++  });
++  test("github-release-metadata.json has sha256-prefixed asset digests", () => {
++    const r = JSON.parse(
++      readFileSync(join(import.meta.dir, "__fixtures__", "github-release-metadata.json"), "utf8"),
++    );
++    expect(Array.isArray(r.assets)).toBe(true);
++    for (const a of r.assets) expect(a.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
++  });
++});
+diff --git a/scripts/download-bb.ts b/scripts/download-bb.ts
+index 1e0d7e7..27b3bfe 100644
+--- a/scripts/download-bb.ts
++++ b/scripts/download-bb.ts
+@@ -6,123 +6,433 @@
+  *   bun scripts/download-bb.ts <version>[,<version>,...]
+  *   bun scripts/download-bb.ts --list
+  *
+- * Examples:
+- *   bun scripts/download-bb.ts 5.0.0-nightly.20260305
+- *   bun scripts/download-bb.ts 5.0.0-nightly.20260305,5.0.0-rc.1
+- *   bun scripts/download-bb.ts --list
+- *
+  * Downloads from Aztec GitHub releases into ~/.aztec-accelerator/versions/{version}/bb
+- * (or BB_VERSIONS_DIR if set). Runs retention cleanup after download.
++ * (or BB_VERSIONS_DIR if set), then runs retention cleanup.
++ *
++ * SECURITY (F-007): this cache is runtime-trusted — the accelerator executes `bb` from it over the
++ * private proving witness. So every download is verified against the GitHub release asset's published
++ * SHA-256 digest, extracted into a PRIVATE per-run staging dir with archive-member safety checks,
++ * ad-hoc re-signed (macOS), fingerprinted, and published atomically alongside a `bb.sha256.json` MARKER
++ * (archive digest + final-binary digest). The Rust runtime rehashes the cached `bb` against that marker
++ * on every use; a missing/tampered marker fails closed and re-downloads. Mirrors the fail-closed Rust
++ * pipeline in packages/accelerator/core/src/versions/{downloader,release_metadata,cache_layout}.rs.
++ *
++ * Windows: bb.exe ships as a bundled Tauri sidecar via packages/accelerator/scripts/copy-bb.ts — NOT
++ * this cache tool — so this script is Unix-only and refuses to run on win32.
+  */
+-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
++import { createHash, randomBytes } from "node:crypto";
++import {
++  chmodSync,
++  closeSync,
++  copyFileSync,
++  existsSync,
++  lstatSync,
++  mkdirSync,
++  openSync,
++  readdirSync,
++  readFileSync,
++  readSync,
++  renameSync,
++  rmSync,
++  statSync,
++  writeFileSync,
++} from "node:fs";
+ import { homedir } from "node:os";
+ import { join } from "node:path";
++import { gunzipSync } from "node:zlib";
++
++// ---------------------------------------------------------------------------
++// Constants
++// ---------------------------------------------------------------------------
++
++export const MARKER_SCHEMA = "aztec-accelerator/bb-cache-marker@1";
++export const MARKER_NAME = "bb.sha256.json";
++// bb's tarball is ~5 MiB; cap far above that so a compromised CDN can't OOM us before the digest
++// mismatch is detected. Mirrors Rust MAX_DOWNLOAD_BYTES.
++const MAX_BB_TARBALL_BYTES = 64 * 1024 * 1024;
++// Decompressed ceiling — a ≤64 MB-compressed binary inflates to at most a few hundred MB. Applied as a
++// CUMULATIVE cap on the whole decompressed tar (before extraction, defeating a gzip bomb) AND to the
++// selected bb. Mirrors Rust MAX_DECOMPRESSED_BYTES.
++const MAX_BB_BINARY_BYTES = 512 * 1024 * 1024;
++const HEX64 = /^[0-9a-f]{64}$/;
++
++export interface BbMarker {
++  schema: string;
++  version: string;
++  platform: string;
++  archive_sha256: string;
++  binary_sha256: string;
++}
+ 
+ // ---------------------------------------------------------------------------
+-// Platform detection — matches accelerator's current_platform() (versions.rs)
+-// Aztec release naming: arm64-darwin, amd64-darwin, amd64-linux, arm64-linux
++// Platform detection — matches accelerator's current_platform() (release_metadata.rs)
+ // ---------------------------------------------------------------------------
+ 
+-function currentPlatform(): string {
++export function currentPlatform(): string {
+   const arch = process.arch === "arm64" ? "arm64" : "amd64";
+   const os = process.platform === "darwin" ? "darwin" : "linux";
+   return `${arch}-${os}`;
+ }
+ 
+-function downloadUrl(version: string): string {
+-  return `https://github.com/AztecProtocol/aztec-packages/releases/download/v${version}/barretenberg-${currentPlatform()}.tar.gz`;
++function assetName(): string {
++  return `barretenberg-${currentPlatform()}.tar.gz`;
++}
++
++export function downloadUrl(version: string): string {
++  return `https://github.com/AztecProtocol/aztec-packages/releases/download/v${version}/${assetName()}`;
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Paths — same as packages/accelerator/src-tauri/src/versions.rs
++// Version validation — mirror of Rust is_valid_version (version_policy.rs): the single
++// path-traversal/injection guard before a version string is used to build a cache path.
+ // ---------------------------------------------------------------------------
+ 
+-function versionsBaseDir(): string {
+-  return process.env.BB_VERSIONS_DIR || join(homedir(), ".aztec-accelerator", "versions");
++export function isValidVersionName(version: string): boolean {
++  return (
++    version.length > 0 &&
++    version.length <= 128 &&
++    !version.startsWith(".") &&
++    !version.endsWith(".") &&
++    !version.includes("..") &&
++    /^[A-Za-z0-9._-]+$/.test(version)
++  );
+ }
+ 
+-function versionBbPath(version: string): string {
+-  return join(versionsBaseDir(), version, "bb");
++export function assertValidVersion(version: string): void {
++  if (!isValidVersionName(version)) {
++    throw new Error(
++      `Invalid version string ${JSON.stringify(version)} — rejected by the path-traversal/injection guard`,
++    );
++  }
+ }
+ 
+-function listCachedVersions(): string[] {
+-  const base = versionsBaseDir();
+-  if (!existsSync(base)) return [];
+-  const { readdirSync } = require("node:fs");
+-  const versions: string[] = [];
+-  for (const entry of readdirSync(base, { withFileTypes: true })) {
+-    if (entry.isDirectory() && existsSync(join(base, entry.name, "bb"))) {
+-      versions.push(entry.name);
+-    }
+-  }
+-  return versions.sort();
++// ---------------------------------------------------------------------------
++// Paths
++// ---------------------------------------------------------------------------
++
++export function versionsBaseDir(): string {
++  return process.env.BB_VERSIONS_DIR || join(homedir(), ".aztec-accelerator", "versions");
++}
++function versionDir(version: string): string {
++  return join(versionsBaseDir(), version);
++}
++export function versionBbPath(version: string): string {
++  return join(versionDir(version), "bb");
++}
++export function versionMarkerPath(version: string): string {
++  return join(versionDir(version), MARKER_NAME);
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Download
++// Integrity: digest lookup, hashing, marker read + cached-bb verification
+ // ---------------------------------------------------------------------------
+ 
+-async function downloadBb(version: string): Promise<void> {
+-  const bbPath = versionBbPath(version);
++export function sha256Hex(data: Uint8Array): string {
++  return createHash("sha256").update(data).digest("hex");
++}
++
++/** Streamed SHA-256 of a file (chunked reads — never buffers the whole binary). Mirrors Rust sha256_file. */
++export function sha256File(path: string): string {
++  const hash = createHash("sha256");
++  const fd = openSync(path, "r");
++  try {
++    const buf = Buffer.allocUnsafe(64 * 1024);
++    let n: number;
++    while ((n = readSync(fd, buf, 0, buf.length, null)) > 0) {
++      hash.update(buf.subarray(0, n));
++    }
++  } finally {
++    closeSync(fd);
++  }
++  return hash.digest("hex");
++}
+ 
+-  if (existsSync(bbPath)) {
+-    console.log(`  ✓ ${version} (already cached)`);
+-    return;
++/**
++ * Fetch the expected SHA-256 for a release asset from the GitHub API. Mirrors
++ * release_metadata.rs::fetch_github_asset_digest, but FAIL-CLOSED at the call site: a non-2xx, a
++ * missing asset/digest, or a malformed digest THROWS (the Rust helper returns Ok(None) and its caller
++ * throws — same net behavior). Honors GITHUB_TOKEN to dodge the 60/hr unauth rate limit.
++ */
++export async function fetchAssetDigest(version: string, asset: string): Promise<string> {
++  const apiUrl = `https://api.github.com/repos/AztecProtocol/aztec-packages/releases/tags/v${version}`;
++  const headers: Record<string, string> = {
++    accept: "application/vnd.github+json",
++    "user-agent": "aztec-accelerator",
++  };
++  if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
++
++  const res = await fetch(apiUrl, { headers });
++  if (!res.ok) {
++    throw new Error(`Cannot verify bb v${version}: release metadata HTTP ${res.status} ${res.statusText}`);
++  }
++  const release = (await res.json()) as { assets?: Array<{ name?: string; digest?: string }> };
++  const found = (release.assets ?? []).find((a) => a.name === asset);
++  if (!found?.digest) {
++    throw new Error(`Cannot verify bb v${version}: no digest for asset ${asset} in release metadata`);
+   }
++  const hex = found.digest.startsWith("sha256:") ? found.digest.slice("sha256:".length) : "";
++  if (!HEX64.test(hex)) {
++    throw new Error(`Cannot verify bb v${version}: malformed asset digest ${JSON.stringify(found.digest)}`);
++  }
++  return hex;
++}
+ 
+-  const url = downloadUrl(version);
+-  console.log(`  ↓ ${version} — downloading from GitHub releases...`);
++/** Read + structurally validate a cached version's marker. Returns null on any defect (fail-closed). */
++export function readMarker(version: string): BbMarker | null {
++  const p = versionMarkerPath(version);
++  if (!existsSync(p)) return null;
++  try {
++    // Bounded read — a marker is a few hundred bytes; refuse an oversized blob.
++    if (statSync(p).size > 4096) return null;
++    const m = JSON.parse(readFileSync(p, "utf8")) as BbMarker;
++    if (m.schema !== MARKER_SCHEMA) return null;
++    if (m.version !== version) return null;
++    if (m.platform !== currentPlatform()) return null;
++    if (!HEX64.test(m.archive_sha256) || !HEX64.test(m.binary_sha256)) return null;
++    return m;
++  } catch {
++    return null;
++  }
++}
++
++/** True iff the cached bb for `version` is a present regular file whose bytes match its valid marker. */
++export function verifyCachedBb(version: string): boolean {
++  const bb = versionBbPath(version);
++  if (!existsSync(bb)) return false;
++  const st = lstatSync(bb);
++  if (!st.isFile()) return false;
++  const marker = readMarker(version);
++  if (!marker) return false;
++  return sha256File(bb) === marker.binary_sha256;
++}
+ 
+-  const response = await fetch(url);
+-  if (!response.ok) {
+-    if (response.status === 404) {
++// ---------------------------------------------------------------------------
++// Download (bounded streaming) + archive-member safety
++// ---------------------------------------------------------------------------
++
++/**
++ * Bounded streaming download (mirror Rust download_tarball): read the body chunk-by-chunk with a
++ * running byte cap. Never `arrayBuffer()` — that would buffer an unbounded body when Content-Length is
++ * absent or lying, defeating the cap.
++ */
++export async function downloadTarball(version: string): Promise<Uint8Array> {
++  const url = downloadUrl(version);
++  const res = await fetch(url);
++  if (!res.ok) {
++    if (res.status === 404) {
+       throw new Error(
+         `Version ${version} not found (404). Check available releases at:\n` +
+           `  https://github.com/AztecProtocol/aztec-packages/releases`,
+       );
+     }
+-    throw new Error(`Download failed: ${response.status} ${response.statusText}`);
++    throw new Error(`Download failed: ${res.status} ${res.statusText}`);
++  }
++  const declared = Number(res.headers.get("content-length") ?? "0");
++  if (declared > MAX_BB_TARBALL_BYTES) {
++    throw new Error(`bb v${version} download too large (advertised ${declared} bytes, max ${MAX_BB_TARBALL_BYTES})`);
++  }
++  if (!res.body) throw new Error(`bb v${version}: empty response body`);
++
++  const reader = res.body.getReader();
++  const chunks: Uint8Array[] = [];
++  let total = 0;
++  for (;;) {
++    const { done, value } = await reader.read();
++    if (done) break;
++    total += value.length;
++    if (total > MAX_BB_TARBALL_BYTES) {
++      throw new Error(`bb v${version} download exceeded ${MAX_BB_TARBALL_BYTES} bytes — aborting`);
++    }
++    chunks.push(value);
++  }
++  const out = new Uint8Array(total);
++  let off = 0;
++  for (const c of chunks) {
++    out.set(c, off);
++    off += c.length;
++  }
++  return out;
++}
++
++/**
++ * Locate exactly one regular file named `bb` in the extracted tree, rejecting unsafe members. Symlinks
++ * anywhere in the tree are rejected (a symlink `bb` → /etc/passwd is the classic archive-escape). Zero
++ * or multiple `bb` entries, a non-regular `bb`, or an oversized `bb` all fail closed. (Digest
++ * verification already ran before extraction, so this is defense-in-depth against a compromised-upstream
++ * archive whose digest was also forged.)
++ */
++export function findSingleBb(root: string): string {
++  const found: string[] = [];
++  const walk = (dir: string): void => {
++    for (const entry of readdirSync(dir, { withFileTypes: true })) {
++      const full = join(dir, entry.name);
++      const st = lstatSync(full);
++      if (st.isSymbolicLink()) {
++        throw new Error(`Unsafe archive member (symlink): ${entry.name}`);
++      }
++      if (st.isDirectory()) {
++        walk(full);
++        continue;
++      }
++      if (entry.name === "bb") {
++        if (!st.isFile()) throw new Error(`Unsafe archive: bb entry is not a regular file`);
++        // A tar hardlink extracts to an inode with nlink > 1 (linked to another extracted member); a
++        // lone legitimate bb has nlink 1. Reject to match the Rust path's regular-file-only guarantee.
++        if (st.nlink > 1) throw new Error(`Unsafe archive: bb is a hardlink (nlink=${st.nlink})`);
++        if (st.size > MAX_BB_BINARY_BYTES) {
++          throw new Error(`bb entry too large: ${st.size} bytes > ${MAX_BB_BINARY_BYTES}`);
++        }
++        found.push(full);
++      }
++    }
++  };
++  walk(root);
++  const [bb, ...rest] = found;
++  if (bb === undefined) throw new Error("bb binary not found in tarball");
++  if (rest.length > 0) throw new Error(`Unsafe archive: ${found.length} bb entries (expected exactly 1)`);
++  return bb;
++}
++
++// ---------------------------------------------------------------------------
++// Staged, verified install
++// ---------------------------------------------------------------------------
++
++/** Remove crash-stale staging siblings for `version` (`.{version}.tmp.*`) before starting a fresh one. */
++function reapStaleStages(version: string): void {
++  const base = versionsBaseDir();
++  if (!existsSync(base)) return;
++  const prefix = `.${version}.tmp.`;
++  for (const name of readdirSync(base)) {
++    if (name.startsWith(prefix)) {
++      rmSync(join(base, name), { recursive: true, force: true });
++    }
+   }
++}
++
++/**
++ * Create a per-run-UNIQUE, dot-prefixed, owner-only staging sibling (`.{version}.tmp.<rand>`). Unique so
++ * a concurrent Rust/TS publisher never shares (and stomps) one stage; dot-prefixed + non-version-named so
++ * inventory never surfaces an in-flight or crash-stale stage. `mkdir` is strict (non-recursive) so the
++ * astronomically-unlikely name collision fails closed rather than reusing a dir.
++ */
++function createStagingDir(version: string): string {
++  mkdirSync(versionsBaseDir(), { recursive: true, mode: 0o700 });
++  const stage = join(versionsBaseDir(), `.${version}.tmp.${randomBytes(6).toString("hex")}`);
++  mkdirSync(stage, { mode: 0o700 });
++  return stage;
++}
+ 
+-  const tarball = await response.arrayBuffer();
+-  const versionDir = join(versionsBaseDir(), version);
+-  mkdirSync(versionDir, { recursive: true });
++/**
++ * Download + verify + stage + finalize + marker + fail-closed publish for one version. Skips (verified)
++ * if the cache already holds a marker-valid binary.
++ */
++export async function downloadBb(version: string): Promise<void> {
++  assertValidVersion(version);
+ 
+-  // Extract tarball — bb binary is at the root of the archive
+-  const proc = Bun.spawn(["tar", "-xzf", "-", "-C", versionDir], {
+-    stdin: new Uint8Array(tarball),
+-  });
+-  const exitCode = await proc.exited;
+-  if (exitCode !== 0) {
+-    rmSync(versionDir, { recursive: true, force: true });
+-    throw new Error(`tar extraction failed (exit code ${exitCode})`);
++  if (verifyCachedBb(version)) {
++    console.log(`  ✓ ${version} (already cached, verified)`);
++    return;
+   }
+ 
+-  if (!existsSync(bbPath)) {
+-    rmSync(versionDir, { recursive: true, force: true });
+-    throw new Error(`bb binary not found after extraction at ${bbPath}`);
++  console.log(`  ↓ ${version} — downloading + verifying...`);
++  const archiveDigest = await fetchAssetDigest(version, assetName());
++  const tarball = await downloadTarball(version);
++  const actualArchive = sha256Hex(tarball);
++  if (actualArchive !== archiveDigest) {
++    throw new Error(
++      `Integrity check failed for bb v${version}: expected sha256:${archiveDigest}, got sha256:${actualArchive}`,
++    );
+   }
+ 
+-  chmodSync(bbPath, 0o755);
++  reapStaleStages(version);
++  const stage = createStagingDir(version);
++  try {
++    // Extract into an isolated subdir so only the promoted `bb` + marker ever publish.
++    const extract = join(stage, "extract");
++    mkdirSync(extract, { mode: 0o700 });
++    // Bound decompression BEFORE touching the fs: `gunzipSync` with a cumulative output cap aborts a
++    // gzip bomb (system `tar -xz` would stream an unbounded bomb to disk). Then extract the bounded tar.
++    let tarBytes: Buffer;
++    try {
++      tarBytes = gunzipSync(tarball, { maxOutputLength: MAX_BB_BINARY_BYTES });
++    } catch (e) {
++      throw new Error(
++        `bb v${version}: decompression aborted (exceeds ${MAX_BB_BINARY_BYTES} bytes or is corrupt): ${e instanceof Error ? e.message : String(e)}`,
++      );
++    }
++    const tarPath = join(stage, "archive.tar");
++    writeFileSync(tarPath, tarBytes, { mode: 0o600 });
++    const proc = Bun.spawnSync(["tar", "-xf", tarPath, "-C", extract]);
++    if (!proc.success) throw new Error(`tar extraction failed (exit code ${proc.exitCode})`);
++
++    const bbSrc = findSingleBb(extract);
++    const stagedBb = join(stage, "bb");
++    copyFileSync(bbSrc, stagedBb);
++    chmodSync(stagedBb, 0o755);
++
++    // macOS: clear quarantine + ad-hoc re-sign (chmod invalidates the original signature, and
++    // Gatekeeper SIGKILLs an unsigned binary). Codesign failure ABORTS — we never publish an
++    // unsignable bb. This mutates the bytes, so the marker fingerprint is taken AFTER it.
++    if (process.platform === "darwin") {
++      Bun.spawnSync(["xattr", "-cr", stagedBb]);
++      const cs = Bun.spawnSync(["codesign", "--force", "--sign", "-", stagedBb]);
++      if (!cs.success) {
++        throw new Error(`codesign failed for bb v${version} (exit ${cs.exitCode})`);
++      }
++    }
+ 
+-  // macOS: clear quarantine attribute and ad-hoc re-sign.
+-  // GitHub release binaries have ad-hoc signatures that get invalidated during
+-  // download/extraction, causing Gatekeeper to silently block execution (hang).
+-  if (process.platform === "darwin") {
+-    Bun.spawnSync(["xattr", "-d", "com.apple.quarantine", bbPath]);
+-    Bun.spawnSync(["codesign", "--force", "--sign", "-", bbPath]);
++    const binaryDigest = sha256File(stagedBb);
++    const marker: BbMarker = {
++      schema: MARKER_SCHEMA,
++      version,
++      platform: currentPlatform(),
++      archive_sha256: archiveDigest,
++      binary_sha256: binaryDigest,
++    };
++    writeFileSync(join(stage, MARKER_NAME), `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o600 });
++
++    // Drop the extract scratch + archive so the stage holds only { bb, bb.sha256.json }.
++    rmSync(extract, { recursive: true, force: true });
++    rmSync(tarPath, { force: true });
++
++    // Fail-closed publish: remove any live entry, then rename the stage into place. A crash between
++    // the two leaves NO live entry (⇒ verified re-download next use) plus a `.tmp.<rand>` stage
++    // (reaped by the next install's stage-unique naming + cleanup). Deliberately NOT atomic replacement.
++    const vdir = versionDir(version);
++    if (existsSync(vdir)) rmSync(vdir, { recursive: true, force: true });
++    renameSync(stage, vdir);
++  } catch (err) {
++    rmSync(stage, { recursive: true, force: true });
++    throw err;
+   }
+ 
+-  const stat = Bun.file(bbPath);
+-  const sizeMb = ((await stat.size) / 1024 / 1024).toFixed(1);
+-  console.log(`  ✓ ${version} (${sizeMb} MB)`);
++  const sizeMb = (statSync(versionBbPath(version)).size / 1024 / 1024).toFixed(1);
++  console.log(`  ✓ ${version} (${sizeMb} MB, verified)`);
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Retention cleanup — same logic as bb-versions.ts
++// Inventory + retention
+ // ---------------------------------------------------------------------------
+ 
+-type NetworkTier = "nightly" | "devnet" | "testnet" | "mainnet";
++/**
++ * List cached versions: a directory is "cached" only if its name is a valid version (skips
++ * dot-prefixed `.tmp.<rand>` stages and junk) AND it holds a marker. Cheap stat only — never rehashes
++ * (execution paths rehash; inventory does not).
++ */
++export function listCachedVersions(): string[] {
++  const base = versionsBaseDir();
++  if (!existsSync(base)) return [];
++  const versions: string[] = [];
++  for (const entry of readdirSync(base, { withFileTypes: true })) {
++    if (!entry.isDirectory()) continue;
++    if (!isValidVersionName(entry.name)) continue; // excludes `.{v}.tmp.<rand>` (leading dot)
++    if (!existsSync(join(base, entry.name, MARKER_NAME))) continue;
++    versions.push(entry.name);
++  }
++  return versions.sort();
++}
++
++export type NetworkTier = "nightly" | "devnet" | "testnet" | "mainnet";
+ 
+ const RETENTION_LIMITS: Record<NetworkTier, number | null> = {
+   nightly: 2,
+@@ -131,7 +441,7 @@ const RETENTION_LIMITS: Record<NetworkTier, number | null> = {
+   mainnet: null,
+ };
+ 
+-function classifyVersion(version: string): NetworkTier {
++export function classifyVersion(version: string): NetworkTier {
+   const prerelease = version.split("-").slice(1).join("-");
+   if (prerelease.startsWith("nightly")) return "nightly";
+   if (prerelease.startsWith("devnet")) return "devnet";
+@@ -139,7 +449,12 @@ function classifyVersion(version: string): NetworkTier {
+   return "mainnet";
+ }
+ 
+-function cleanupOldVersions(): void {
++/**
++ * Evict old cached versions per tier retention. `protectedVersions` (the versions downloaded in THIS
++ * invocation) are never evicted — otherwise `download-bb.ts <old-nightly>` could delete the very
++ * version it just fetched.
++ */
++export function cleanupOldVersions(protectedVersions: Set<string> = new Set()): void {
+   const cached = listCachedVersions();
+   const byTier = new Map<NetworkTier, string[]>();
+   for (const v of cached) {
+@@ -151,11 +466,13 @@ function cleanupOldVersions(): void {
+   for (const [tier, versions] of byTier) {
+     const limit = RETENTION_LIMITS[tier];
+     if (limit === null) continue;
+-    const sorted = [...versions].sort();
++    const sorted = [...versions].sort(); // oldest first
+     while (sorted.length > limit) {
+-      const evict = sorted.shift()!;
+-      const dir = join(versionsBaseDir(), evict);
+-      rmSync(dir, { recursive: true, force: true });
++      // Evict the oldest NON-protected version; stop if only protected ones remain.
++      const idx = sorted.findIndex((v) => !protectedVersions.has(v));
++      if (idx === -1) break;
++      const [evict] = sorted.splice(idx, 1);
++      rmSync(join(versionsBaseDir(), evict), { recursive: true, force: true });
+       console.log(`  🗑 Evicted ${evict} (${tier} retention: keep ${limit})`);
+     }
+   }
+@@ -165,68 +482,76 @@ function cleanupOldVersions(): void {
+ // CLI
+ // ---------------------------------------------------------------------------
+ 
+-const args = process.argv.slice(2);
++async function main(): Promise<void> {
++  if (process.platform === "win32") {
++    console.error(
++      "download-bb.ts is not supported on Windows.\n" +
++        "The Windows bb.exe ships as a bundled Tauri sidecar via packages/accelerator/scripts/copy-bb.ts.",
++    );
++    process.exit(1);
++  }
+ 
+-if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+-  console.log(`Usage: bun scripts/download-bb.ts <version>[,<version>,...] [--list]
++  const args = process.argv.slice(2);
+ 
+-Downloads bb binaries for specific Aztec versions.
++  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
++    console.log(`Usage: bun scripts/download-bb.ts <version>[,<version>,...] [--list]
++
++Downloads + verifies bb binaries for specific Aztec versions.
+ 
+ Options:
+   --list    List cached versions and exit
+ 
+-Examples:
+-  bun scripts/download-bb.ts 5.0.0-nightly.20260305
+-  bun scripts/download-bb.ts 5.0.0-nightly.20260305,5.0.0-devnet.1
+-  bun scripts/download-bb.ts --list
+-
+ Cache: ${versionsBaseDir()}
+ Platform: ${currentPlatform()}`);
+-  process.exit(0);
+-}
++    process.exit(0);
++  }
+ 
+-if (args.includes("--list")) {
+-  const cached = listCachedVersions();
+-  console.log(`Cache: ${versionsBaseDir()}`);
+-  if (cached.length === 0) {
+-    console.log("No cached versions.");
+-  } else {
+-    console.log(`\n${cached.length} cached version(s):`);
+-    for (const v of cached) {
+-      const tier = classifyVersion(v);
+-      console.log(`  ${v} (${tier})`);
++  if (args.includes("--list")) {
++    const cached = listCachedVersions();
++    console.log(`Cache: ${versionsBaseDir()}`);
++    if (cached.length === 0) {
++      console.log("No cached versions.");
++    } else {
++      console.log(`\n${cached.length} cached version(s):`);
++      for (const v of cached) console.log(`  ${v} (${classifyVersion(v)})`);
+     }
++    process.exit(0);
+   }
+-  process.exit(0);
+-}
+ 
+-const versions = args
+-  .flatMap((a) => a.split(","))
+-  .map((v) => v.trim())
+-  .filter(Boolean);
++  const versions = args
++    .flatMap((a) => a.split(","))
++    .map((v) => v.trim())
++    .filter(Boolean);
+ 
+-if (versions.length === 0) {
+-  console.error("Error: no versions specified");
+-  process.exit(1);
+-}
+-
+-console.log(`Downloading bb for ${versions.length} version(s) [${currentPlatform()}]`);
+-console.log(`Cache: ${versionsBaseDir()}\n`);
++  if (versions.length === 0) {
++    console.error("Error: no versions specified");
++    process.exit(1);
++  }
+ 
+-let failed = false;
+-for (const version of versions) {
+-  try {
+-    await downloadBb(version);
+-  } catch (err) {
+-    console.error(`  ✗ ${version}: ${err instanceof Error ? err.message : String(err)}`);
+-    failed = true;
++  console.log(`Downloading bb for ${versions.length} version(s) [${currentPlatform()}]`);
++  console.log(`Cache: ${versionsBaseDir()}\n`);
++
++  let failed = false;
++  const downloaded = new Set<string>();
++  for (const version of versions) {
++    try {
++      await downloadBb(version);
++      downloaded.add(version);
++    } catch (err) {
++      console.error(`  ✗ ${version}: ${err instanceof Error ? err.message : String(err)}`);
++      failed = true;
++    }
+   }
+-}
+ 
+-console.log("");
+-cleanupOldVersions();
++  console.log("");
++  cleanupOldVersions(downloaded);
+ 
+-const cached = listCachedVersions();
+-console.log(`\nCached versions: ${cached.join(", ") || "(none)"}`);
++  const cached = listCachedVersions();
++  console.log(`\nCached versions: ${cached.join(", ") || "(none)"}`);
+ 
+-if (failed) process.exit(1);
++  if (failed) process.exit(1);
++}
++
++if (import.meta.main) {
++  await main();
++}
+diff --git a/scripts/update-aztec-version.ts b/scripts/update-aztec-version.ts
+index c33c042..31a174e 100644
+--- a/scripts/update-aztec-version.ts
++++ b/scripts/update-aztec-version.ts
+@@ -65,7 +65,6 @@ async function findMissingPackages(version: string, packageFiles: string[]): Pro
+ }
+ 
+ const CRS_FILE = "packages/playground/src/aztec.ts";
+-const COPY_BB_FILE = "packages/accelerator/scripts/copy-bb.ts";
+ 
+ /** Bump CRS_CACHE_VERSION so returning playground visitors re-download the CRS if bb.js changed its format. */
+ async function updateCrsCacheVersion(version: string): Promise<boolean> {
+@@ -76,26 +75,10 @@ async function updateCrsCacheVersion(version: string): Promise<boolean> {
+   return true;
+ }
+ 
+-/** Fetch + pin the Windows bb.exe SHA-256 (the Windows Prebuild/Build Smoke gates verify it). Best-effort. */
+-async function pinWindowsBbChecksum(version: string): Promise<string> {
+-  const original = await Bun.file(COPY_BB_FILE).text();
+-  if (original.includes(`"${version}":`)) return `Windows bb checksum: already pinned for ${version}.`;
+-  const url = `https://github.com/AztecProtocol/aztec-packages/releases/download/v${version}/barretenberg-amd64-windows.tar.gz`;
+-  try {
+-    const res = await fetch(url);
+-    if (!res.ok) return `Windows bb checksum: fetch failed (HTTP ${res.status}) — pin "${version}" in ${COPY_BB_FILE} manually.`;
+-    const digest = await crypto.subtle.digest("SHA-256", await res.arrayBuffer());
+-    const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+-    const marker = "};\n\nexport function resolveWindowsBbChecksum";
+-    const idx = original.indexOf(marker);
+-    const entry = `  // @aztec/bb.js ${version} — sha256 of barretenberg-amd64-windows.tar.gz from the v${version} release (auto-pinned).\n  "${version}": "${sha}",\n`;
+-    if (idx === -1) return `Windows bb checksum for ${version} = ${sha} — couldn't auto-insert; add it to ${COPY_BB_FILE} manually.`;
+-    await Bun.write(COPY_BB_FILE, original.slice(0, idx) + entry + original.slice(idx));
+-    return `Windows bb checksum: pinned ${version} = ${sha.slice(0, 12)}… in ${COPY_BB_FILE}.`;
+-  } catch (err) {
+-    return `Windows bb checksum: ${(err as Error).message} — pin "${version}" manually.`;
+-  }
+-}
++// F-008: the Windows bb.exe pin is NEVER auto-generated here. Auto-downloading the asset and writing its
++// own hash is circular (a twice-downloaded asset is not independent evidence). A human adds a reviewed
++// `manual-review` entry to WINDOWS_BB_CHECKSUMS (copy-bb.ts); the post-install `check-windows-bb-pin.ts`
++// step reports whether the live bb.js version has a pin, and the Windows CI gate fails closed without one.
+ 
+ async function main() {
+   const newVersion = process.argv[2];
+@@ -134,7 +117,7 @@ async function main() {
+   // Companion bumps an @aztec version change also requires (lessons from the 5.0.0-rc.2 bump):
+   const crsBumped = await updateCrsCacheVersion(newVersion);
+   if (crsBumped) console.log(`Bumped CRS_CACHE_VERSION → ${newVersion} in ${CRS_FILE}.`);
+-  console.log(await pinWindowsBbChecksum(newVersion));
++  // The Windows bb.exe pin is intentionally NOT touched here (F-008) — see check-windows-bb-pin.ts.
+ 
+   if (updatedFiles === 0 && !crsBumped) {
+     console.log("\nAll files already at target version. No changes needed.");

@@ -8,7 +8,11 @@ on:
         required: true
         type: string
       mode:
-        description: "'dev' or 'release'"
+        description: >-
+          'dev' (tauri dev — fast, but is_dev()==true so it never runs the shipped custom-protocol path),
+          'built-debug' (F-012/D8: `tauri build --debug` — a real custom-protocol binary that exercises the
+          production asset+CSP path), or 'release' (release binary; note raw cargo build does NOT enable
+          tauri's custom-protocol feature, so it is also is_dev()==true).
         required: false
         type: string
         default: "dev"
@@ -27,12 +31,14 @@ jobs:
         shell: bash
         working-directory: packages/accelerator
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       # ── Shared env setup (Bun, Rust toolchain + cache, Linux Tauri deps, bb sidecar) ──
       - uses: ./.github/actions/setup-accelerator
         with:
-          rust-cache-key: e2e-webdriver-${{ inputs.mode }}
+          # F-012: -v2 busts the shared cache once — an earlier PR build could have cached a stale/empty
+          # frontend asset embed (codegen output) that a later build restored instead of regenerating.
+          rust-cache-key: e2e-webdriver-v2-${{ inputs.mode }}
           rust-components: ""
 
       # ── Linux: WebDriver-specific extras (xvfb + tray + dbus) ──
@@ -59,16 +65,34 @@ jobs:
         working-directory: packages/accelerator/src-tauri
         run: cargo build --release --features webdriver
 
+      # ── Build (dev — plain `cargo build`, run DIRECTLY, no `tauri dev`. F-012 ROOT CAUSE: `tauri dev`
+      #    injects a dev-server devUrl (e.g. http://127.0.0.1:1430), which makes tauri-codegen embed an EMPTY
+      #    asset set (context.rs: `dev && dev_url.is_some()`), so the webview's tauri:// protocol 404s every
+      #    asset. A plain `cargo build` has dev_url=None → codegen embeds frontendDist fully → tauri:// works.
+      #    setup-accelerator already built the frontend bundles the build.rs guard needs. ──
+      - name: Build app (dev)
+        if: inputs.mode == 'dev'
+        working-directory: packages/accelerator/src-tauri
+        run: cargo build --features webdriver
+
+      # ── Build (built-debug — F-012/D8: a real `tauri build` enables tauri's custom-protocol feature, so
+      #    the webdriver run exercises the SHIPPED asset/CSP path that `tauri dev` and raw `cargo build` skip.
+      #    Runs from packages/accelerator so tauri's beforeBuildCommand (bun run frontend:build) fires. ──
+      - name: Build app (built-debug)
+        if: inputs.mode == 'built-debug'
+        run: bunx tauri build --debug --no-bundle --features webdriver
+
       # ── Launch app (single step, no platform conditionals) ──
       - name: Launch app
         run: |
           EXE=""
           [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
-          if [ "${{ inputs.mode }}" = "release" ]; then
-            APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE"
-          else
-            APP_CMD="bunx tauri dev --no-watch --features webdriver"
-          fi
+          case "${{ inputs.mode }}" in
+            release)     APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE" ;;
+            built-debug) APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;;
+            *)           APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;; # dev: built above
+
+          esac
           $APP_CMD > /tmp/tauri.log 2>&1 &
           echo "TAURI_PID=$!" >> "$GITHUB_ENV"
 
@@ -117,7 +141,7 @@ jobs:
       # ── Artifacts on failure ──
       - name: Upload logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: webdriver-e2e-logs-${{ runner.os }}-${{ inputs.mode }}
           path: /tmp/tauri.log

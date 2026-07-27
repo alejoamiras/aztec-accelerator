@@ -1,19 +1,52 @@
 /**
- * Shared utilities for Tauri IPC in accelerator frontend pages.
- * Provides consistent error handling and loading states.
+ * Shared utilities for Tauri IPC in the accelerator frontend pages.
  *
- * Loaded via <script src="tauri-bridge.js"> in each HTML page.
- * Functions are used globally — biome can't see cross-file usage.
+ * F-012: this is an ESM module bundled (per page) into `frontend/assets/*.js` by
+ * `scripts/build-frontend.ts`. `invoke` comes from the official `@tauri-apps/api/core`
+ * package — NOT `window.__TAURI__` — so the app runs with `withGlobalTauri: false`
+ * (the global back-door is removed; only `window.__TAURI_INTERNALS__` remains, which
+ * the API's `invoke` delegates to). Loaded via a single `<script type="module">` per page.
  */
 
-const { invoke } = window.__TAURI__.core;
+import { invoke } from "@tauri-apps/api/core";
+
+export { invoke };
+
+// C9 (A / D9): click-steal guard. A button wired with `guard: true` ignores activation for GUARD_MS after
+// the window last gained focus — reset on EVERY native focus/show, not just first paint — so a popup
+// popped under the cursor (or promoted into the active slot) can't catch a click meant for another window.
+// Gating at click ENTRY also covers keyboard Enter/Space (which dispatch a click event).
+const DEFAULT_GUARD_MS = 700;
+function guardMs() {
+  // Overridable ONLY for tests (Playwright mock sets it to 0). Production never sets this global, so the
+  // real 700 ms guard always applies. Read dynamically so an init-script override takes effect.
+  return typeof window !== "undefined" && typeof window.__CLICK_GUARD_MS__ === "number"
+    ? window.__CLICK_GUARD_MS__
+    : DEFAULT_GUARD_MS;
+}
+function now() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+let inputArmedAt = now();
+function rearmInputGuard() {
+  inputArmedAt = now();
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("focus", rearmInputGuard);
+  window.addEventListener("pageshow", rearmInputGuard);
+}
+// Exported so consequential non-button controls (e.g. the authorize "Remember" checkbox) can gate on the
+// same click-steal window — Allow/Deny aren't the only stealable actions.
+export function isClickGuardActive() {
+  return now() - inputArmedAt < guardMs();
+}
 
 /**
  * Show a brief error hint near a control. Disappears after 3 seconds.
  * @param {HTMLElement} anchor — element to show the error near
  * @param {string} message
  */
-function showErrorHint(anchor, message) {
+export function showErrorHint(anchor, message) {
   // Remove any existing hint on this anchor
   const existing = anchor.parentElement?.querySelector(".error-hint");
   if (existing) existing.remove();
@@ -33,8 +66,7 @@ function showErrorHint(anchor, message) {
  * @param {(checked: boolean) => {cmd: string, args?: object}} handler
  *   Function that returns the command name and args based on checked state.
  */
-// biome-ignore lint/correctness/noUnusedVariables: used by HTML pages
-function wireToggle(id, handler) {
+export function wireToggle(id, handler) {
   document.getElementById(id).addEventListener("change", (e) => {
     const el = e.target;
     el.disabled = true;
@@ -59,12 +91,14 @@ function wireToggle(id, handler) {
  * @param {object} opts
  * @param {string} [opts.disableAlso] — ID of another button to disable during operation
  * @param {string} [opts.loadingText] — text to show while loading (restores original on error)
+ * @param {boolean} [opts.guard] — apply the click-steal guard (ignore activation within GUARD_MS of focus)
  * @param {() => Promise<void>} opts.onClick — async handler
  */
-// biome-ignore lint/correctness/noUnusedVariables: used by HTML pages
-function wireButton(id, opts) {
+export function wireButton(id, opts) {
   const btn = document.getElementById(id);
   btn.addEventListener("click", async () => {
+    // C9 (A): ignore a click that lands within the guard window after focus (click-steal defense).
+    if (opts.guard && isClickGuardActive()) return;
     btn.disabled = true;
     const originalText = btn.textContent;
     if (opts.loadingText) btn.textContent = opts.loadingText;

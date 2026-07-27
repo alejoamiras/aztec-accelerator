@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "update-prompt",
+  "description": "F-012: the update prompt (label update-prompt) may invoke ONLY respond_update_prompt. Preserves F-004: it has NO updater:default / process grants — updates flow through the Rust check/perform path that verifies the signed manifest + monotonic floor.",
+  "local": true,
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["update-prompt"],
+  "permissions": ["allow-respond-update-prompt"]
+}

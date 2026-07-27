@@ -59,7 +59,7 @@ test("HTTPS stays pre-checked for an upgrader on any platform (A9)", async ({ pa
   await expect(page.locator("#opt-auto-update")).toBeChecked();
 });
 
-test("Start invokes complete_onboarding with the toggle states and closes on success", async ({
+test("Start invokes complete_onboarding with the toggle states; on success the page waits for the Rust-side close", async ({
   page,
 }) => {
   await page.goto("/onboarding.html");
@@ -74,8 +74,10 @@ test("Start invokes complete_onboarding with the toggle states and closes on suc
   const calls = await callsFor(page, "complete_onboarding");
   expect(calls.length).toBe(1);
   expect(calls[0].args).toEqual({ https: true, autostart: true, autoUpdate: false });
-  // completed:true (mock default) → the wizard closes itself.
-  expect((await callsFor(page, "__window.close")).length).toBe(1);
+  // completed:true (mock default) → Rust closes the window (F-012 — the page can't close itself);
+  // the frontend leaves both buttons disabled while it waits for that close.
+  await expect(page.locator("#start")).toBeDisabled();
+  await expect(page.locator("#skip")).toBeDisabled();
 });
 
 test("partial cert failure: HTTPS shown off with Retry, other choices still applied", async ({
@@ -96,8 +98,9 @@ test("partial cert failure: HTTPS shown off with Retry, other choices still appl
   await expect(page.locator("#opt-https")).not.toBeChecked();
   await expect(page.locator("#https-retry")).toBeVisible();
   await expect(page.locator("#skip")).toHaveText("Continue without HTTPS");
-  // The window must NOT have closed (marker not set).
-  expect((await callsFor(page, "__window.close")).length).toBe(0);
+  // completed:false → Rust does NOT close the window; Start/Skip are re-enabled for Retry/Continue.
+  await expect(page.locator("#start")).toBeEnabled();
+  await expect(page.locator("#skip")).toBeEnabled();
 });
 
 test("Retry re-checks HTTPS and re-enables Start", async ({ page }) => {
@@ -118,9 +121,10 @@ test("Retry re-checks HTTPS and re-enables Start", async ({ page }) => {
   await expect(page.locator("#https-retry")).not.toBeVisible();
 });
 
-test("Skip dismisses onboarding and closes", async ({ page }) => {
+test("Skip dismisses onboarding (Rust sets the marker and closes the window)", async ({ page }) => {
   await page.goto("/onboarding.html");
   await page.locator("#skip").click();
   expect((await callsFor(page, "dismiss_onboarding")).length).toBe(1);
-  expect((await callsFor(page, "__window.close")).length).toBe(1);
+  // dismiss_onboarding succeeded → wireButton leaves Skip disabled while Rust closes the window.
+  await expect(page.locator("#skip")).toBeDisabled();
 });

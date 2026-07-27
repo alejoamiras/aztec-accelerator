@@ -12,10 +12,11 @@ export const config: WebdriverIO.Config = {
 
   framework: "mocha",
   reporters: ["spec"],
-  // Explicit order: smoke first (basic health), settings, auth-flow last (most complex)
+  // Explicit order: smoke first (basic health), settings, trust-boundary (F-012), auth-flow last (most complex)
   specs: [
     "./e2e-webdriver/smoke.spec.ts",
     "./e2e-webdriver/settings.spec.ts",
+    "./e2e-webdriver/trust-boundary.spec.ts",
     "./e2e-webdriver/auth-flow.spec.ts",
   ],
 

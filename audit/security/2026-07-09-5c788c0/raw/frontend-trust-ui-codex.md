@@ -1,0 +1,1 @@
+NO FINDINGS — Query/config values in this cluster are rendered via `textContent`, the badge is backend-looked-up, and I found no concrete injection or origin-spoof path that reaches the broad Tauri IPC surface.

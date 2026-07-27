@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — C5 / F-005 infra-deploy-authz</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1,h2,h3 { font-weight: 600; }
+    h1 { font-size: 1.75rem; margin-bottom: 1rem; }
+    h2 { font-size: 1.25rem; margin-top: 2.4rem; }
+    h3 { font-size: 1.02rem; margin-top: 1.4rem; color: #444; }
+    code,pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.2rem 0; padding: 0.9rem 1.2rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .recommended { background: #fff8e1; border-left-color: #f0a020; }
+    .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    .warn { color: #b45309; font-weight: 600; }
+    .muted { color: #666; font-size: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    th,td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+    a { color: #0366d6; }
+  </style>
+</head>
+<body>
+  <h1>C5 · F-005 — Locking down who can deploy</h1>
+  <p>Right now a <strong>single AWS role</strong> lets four different CI pipelines write <em>anywhere</em>
+  in the website's storage bucket — including the file that tells every installed app "here's the latest
+  version to auto-update to." If any one pipeline (or its token) is compromised, an attacker could overwrite
+  that update file (a rollback attack) or deface the site. This plan splits that one key into
+  <strong>three narrow keys</strong> — one per pipeline — so each can only touch its own corner, and only
+  the release pipeline can touch the update file. It also tightens the rules on the <code>main</code> branch
+  and fixes a lurking bug where a routine site deploy was <em>deleting</em> the update file. <strong>We only
+  write and check the config here — you (a human) run the actual AWS + GitHub changes</strong> via a precise,
+  reversible runbook.</p>
+
+  <h2>Why "deep" tier</h2>
+  <p>Rubric: <strong>3 of 6 dimensions HIGH</strong> — security-sensitivity (IAM/OIDC deploy trust),
+  irreversibility (production cloud roles + a live update feed), blast-radius (all deploy pipelines). Deep
+  means three independent plans (me + Codex + Fable) plus a double audit. That paid off: the two auditors
+  <em>disagreed</em> on a load-bearing AWS detail, which forced a safer choice (below).</p>
+
+  <h2>What we'll change (phases)</h2>
+  <div class="phase"><h3>Phase 1 — Split the one role into three (Terraform) + harden the main-branch rules</h3>
+  <p>Three per-pipeline roles: <strong>landing</strong> (can't touch the update file — explicit deny +
+  a fix so its sync stops deleting the feed), <strong>release-feed</strong> (can write <em>only</em>
+  <code>latest.json</code>), <strong>playground</strong>. Each role only trusts <em>its own workflow</em>
+  running on <code>main</code>. Main-branch rules add: no force-push, no branch deletion, linear history,
+  conversation-resolution, required infra-validation check (kept at 0 approvals — GitHub won't let a solo
+  owner approve their own PR).</p>
+  <p class="muted">Proves itself by: <code>tofu fmt -check</code> + <code>tofu validate</code> + the existing
+  OpenTofu CI job + a ruleset-JSON assertion, all green.</p></div>
+
+  <div class="phase"><h3>Phase 2 — Point each pipeline at its own key + safety asserts</h3>
+  <p>Each workflow uses its own role secret; the release workflow gets an early "can I even reach AWS?"
+  check <em>before</em> it pushes a git tag (so a mis-wire can't leave a dangling release); the unused
+  nightlies workflow is explicitly switched off (so it can't half-run and publish to npm).</p>
+  <p class="muted">Proves itself by: <code>bun run lint:actions</code> green + a grep confirming no live
+  workflow still uses the old shared secret.</p></div>
+
+  <div class="phase"><h3>Phase 3 — Remove the old over-broad role (separate, later commit)</h3>
+  <p>Deleted only AFTER the new roles are proven live — kept as its own post-smoke PR so it can't be applied
+  too early.</p>
+  <p class="muted">Proves itself by: tofu validate green + the commit states "2 destroy, 0 add".</p></div>
+
+  <div class="phase"><h3>Phase 4/5 — Human-applies runbook</h3>
+  <p>An exact, ordered, reversible script <em>you</em> run: apply roles → set 3 secrets → land the workflow
+  cutover on main → smoke each pipeline (incl. a <strong>negative test</strong> that a stolen token is
+  <em>denied</em> the wrong role, and AWS policy simulations) → delete the old role → apply the ruleset.
+  Every wrong order fails <em>closed</em> (a visible red run, never a silent privilege grant).</p></div>
+
+  <h2>Human context</h2>
+  <p>This is a single-owner public repo. The realistic threat isn't a random internet attacker running code
+  — it's blast-radius: a compromised CI token or an owner slip overwriting the update feed or defacing the
+  sites. The in-app update verification from the previous cluster (C4/F-004) already rejects a forged or
+  rolled-back feed on the client side; this cluster removes the ability to write that feed from the wrong
+  place in the first place.</p>
+
+  <h2>The one thing the auditors disagreed on</h2>
+  <p>To stop pipeline A's token from assuming pipeline B's role (they all run on <code>main</code>), each
+  role is bound to <em>one specific workflow</em>. Fable said the strong "workflow file path" claim
+  (<code>job_workflow_ref</code>) works for these jobs; Codex said it's only emitted for <em>reusable</em>
+  workflows and would make every login fail. Rather than gamble on a total deploy outage, the plan uses the
+  <strong>workflow-name claim</strong> that both agree is supported and always present. Its only weakness —
+  renaming a workflow to impersonate another — requires merging that rename to <code>main</code>, which is
+  already the "malicious code on main" risk that no claim can stop. The stronger file-binding is offered as
+  optional upgrade <strong>A7</strong>.</p>
+
+  <div class="approval">
+    <h2>Your decisions at this gate</h2>
+    <ul>
+      <li>Approve scope + the <strong>deep</strong> tier, or send back.</li>
+      <li><strong>A1</strong> (recommended YES): make the OpenTofu/Actionlint validation a <em>required</em>
+        merge check on main (else it's advisory).</li>
+      <li><strong>A6/nightlies</strong>: confirm we explicitly disable <code>publish-nightlies.yml</code>
+        (you said the branch is unused) rather than keep a 4th role.</li>
+      <li><strong>A7</strong>: workflow-<em>name</em> binding (chosen default) vs the stronger reusable-file
+        binding (more refactor)?</li>
+      <li><strong>A8</strong>: enable S3 bucket versioning for easier site-overwrite recovery?</li>
+      <li><strong>A2</strong> (optional): GitHub environments as extra defense — note the footgun (it
+        changes the trust subject).</li>
+      <li><strong>A3/A4/A5</strong>: hardware-key 2FA + tfstate ownership (out-of-repo); accept the brief
+        deploy freeze during cutover; confirm whether a past landing deploy already deleted the live feed.</li>
+      <li>Reminder: <strong>a human applies</strong> tofu + secrets + the ruleset — CI never gets AWS creds
+        or runs apply.</li>
+    </ul>
+  </div>
+
+  <h2>Audit outcome</h2>
+  <p>Fable: <strong>conditional approve</strong> (8 findings, all folded). Codex: <strong>reject</strong>
+  (7 findings, all folded — including the D1 contradiction resolution + explicit nightlies retirement +
+  release preflight). A final fresh Codex verdict pass on the folded plan is running; this gate will show
+  its result.</p>
+
+  <section class="seeds">
+    <h2>Implementation seeds (draft — finalized after approval)</h2>
+    <p class="warn">Use exactly ONE per session — they don't compose.</p>
+    <div class="phase recommended"><h3>Recommended: /goal (completion is transcript-observable)</h3>
+<pre><code>/goal All C5 phases ✓ in C5-CONSOLIDATED.md, each backed by its validation gate (tofu fmt -check + tofu validate + bun run lint:tofu + bun run lint:actions + the ruleset jq assertion + the existing Lint-OpenTofu PR job green) reported in the transcript; the human-applies runbook (C5-runbook.md) written; post-impl codex xhigh audit folded; PR into security-hardening CI green; NOTHING applied (a human runs tofu apply + gh secret + the ruleset API).</code></pre></div>
+    <h3>Alternative: /loop 15m</h3>
+<pre><code>/loop 15m Drive C5 (infra-deploy-authz). Read C5-CONSOLIDATED.md; after each edit run tofu fmt -check + tofu validate + bun run lint:actions; commit; push; watch CI. Consult codex xhigh on any IAM/OIDC condition-key detail. NEVER run tofu apply / gh secret / the ruleset API (human-only). Mark a phase ✓ only when its validation gate passes.</code></pre>
+  </section>
+
+  <p class="muted"><a href="C5-CONSOLIDATED.md">Full consolidated plan</a> ·
+  <a href="C5-audit-codex.md">Codex audit</a> · <a href="C5-audit-fable.md">Fable audit</a> ·
+  <a href="C5-plan-main.md">main leg</a> · <a href="C5-plan-codex.md">codex leg</a> ·
+  <a href="C5-plan-fable.md">fable leg</a></p>
+</body>
+</html>

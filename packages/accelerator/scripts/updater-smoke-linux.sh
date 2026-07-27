@@ -102,9 +102,12 @@ N_BASENAME="$(basename "$N_APPIMAGE")"
 # Genuine N checksum, captured BEFORE the optional negative-mode tamper, so the
 # positive path can assert the on-disk swap landed exactly N's bytes.
 N_SUM="$(sha256sum "$N_APPIMAGE" | awk '{print $1}')"
+# Byte size of the GENUINE artifact (before any negative-mode tamper) — bound into the signed
+# manifest (F-004 Layer A + SEC-03).
+N_SIZE="$(wc -c < "$N_APPIMAGE" | tr -d ' ')"
 cp "$N_APPIMAGE" "$SERVE_DIR/$N_BASENAME"
 N_SIG="$(cat "$N_SIG_FILE")"
-log "N artifact: $N_BASENAME (sha256=$N_SUM)"
+log "N artifact: $N_BASENAME (sha256=$N_SUM, $N_SIZE bytes)"
 
 # Negative control: serve the GENUINE signature but a TAMPERED AppImage (append a
 # byte). The updater downloads the artifact, then the minisign check over the
@@ -138,11 +141,14 @@ sudo cp "$WORK/ca.pem" "$CA_DEST"
 sudo update-ca-certificates >/dev/null 2>&1
 echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
 
-# ── Synthesize latest.json for N ──
+# ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
+# A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry manifest/manifest_sig signed
+# with the SAME (prod) key N-1 embeds. The workflow provides it via TAURI_SIGNING_PRIVATE_KEY[_PASSWORD].
 jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
-  --arg url "https://$HOST/releases/download/$N_BASENAME" \
+  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" \
   '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
-    platforms: { ($key): { signature:$sig, url:$url } }}' > "$WORK/latest.json"
+    platforms: { ($key): { signature:$sig, url:$url, size:$size } }}' > "$WORK/latest.json"
+"$REPO_ROOT/packages/accelerator/scripts/sign-smoke-feed.sh" "$WORK/latest.json" "$REPO_ROOT"
 log "latest.json:"; cat "$WORK/latest.json"
 
 # ── Start the local HTTPS feed on :443 ──

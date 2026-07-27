@@ -1,0 +1,2103 @@
+diff --git a/.github/actions/playwright-cache/action.yml b/.github/actions/playwright-cache/action.yml
+index 0b04e00..c440706 100644
+--- a/.github/actions/playwright-cache/action.yml
++++ b/.github/actions/playwright-cache/action.yml
+@@ -33,7 +33,7 @@ runs:
+ 
+     - name: Restore Playwright browser cache
+       id: cache
+-      uses: actions/cache/restore@v5
++      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+       with:
+         path: ~/.cache/ms-playwright
+         key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}-shell
+@@ -76,7 +76,7 @@ runs:
+       # RESTORES in the same run, sidestepping the CDN-hang on bad-routing
+       # runners. The `save` input is retained for clarity but no longer gates.
+       if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+-      uses: actions/cache/save@v5
++      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+       with:
+         path: ~/.cache/ms-playwright
+         key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}-shell
+diff --git a/.github/actions/setup-accelerator/action.yml b/.github/actions/setup-accelerator/action.yml
+index a23c3d5..b1ae87e 100644
+--- a/.github/actions/setup-accelerator/action.yml
++++ b/.github/actions/setup-accelerator/action.yml
+@@ -89,11 +89,11 @@ runs:
+         sudo apt-get update
+         sudo apt-get install -y libssl-dev
+ 
+-    - uses: oven-sh/setup-bun@v2
++    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+       with:
+-        bun-version: latest
++        bun-version: 1.3.14
+ 
+-    - uses: actions/cache@v5
++    - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+       with:
+         path: ~/.bun/install/cache
+         key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -102,12 +102,14 @@ runs:
+     - run: bun install --frozen-lockfile
+       shell: bash
+ 
+-    - uses: dtolnay/rust-toolchain@stable
++    # F-015: pin to a master-history SHA (not the GC-able @stable commit) + explicit channel.
++    - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+       with:
++        toolchain: stable
+         components: ${{ inputs.rust-components }}
+         targets: ${{ inputs.rust-target }}
+ 
+-    - uses: Swatinem/rust-cache@v2
++    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+       with:
+         workspaces: ${{ inputs.rust-workspaces }}
+         shared-key: ${{ inputs.rust-cache-key }}
+@@ -116,3 +118,12 @@ runs:
+       if: inputs.run-prebuild != 'false'
+       shell: bash
+       run: bun run --cwd packages/accelerator prebuild
++
++    # F-012: the desktop src-tauri build.rs fails if the gitignored frontend/assets/*.js bundles are
++    # missing or stale. Build them here so every downstream cargo command (clippy/test/build) in a
++    # desktop job has them. Headless server jobs (install-tauri-system-deps: false) don't build
++    # src-tauri, so they skip this.
++    - name: Build frontend bundles (F-012)
++      if: inputs.install-tauri-system-deps != 'false'
++      shell: bash
++      run: bun run --cwd packages/accelerator frontend:build
+diff --git a/.github/actions/setup-aztec/action.yml b/.github/actions/setup-aztec/action.yml
+index 9ed071b..2191e3e 100644
+--- a/.github/actions/setup-aztec/action.yml
++++ b/.github/actions/setup-aztec/action.yml
+@@ -10,11 +10,11 @@ inputs:
+ runs:
+   using: composite
+   steps:
+-    - uses: oven-sh/setup-bun@v2
++    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+       with:
+-        bun-version: latest
++        bun-version: 1.3.14
+ 
+-    - uses: actions/cache@v5
++    - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+       with:
+         path: ~/.bun/install/cache
+         key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -34,13 +34,13 @@ runs:
+ 
+     - name: Install Node.js 24
+       if: inputs.skip_cli != 'true'
+-      uses: actions/setup-node@v6
++      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+       with:
+-        node-version: 24
++        node-version: 24.18.0
+ 
+     - name: Install Foundry
+       if: inputs.skip_cli != 'true'
+-      uses: foundry-rs/foundry-toolchain@v1
++      uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+       with:
+         # Pinned, not "stable": aztec's L1 deploy wrapper (l1-contracts/scripts/forge_broadcast.js,
+         # since 4.3.1) passes `--batch-size` WITHOUT `--batch`; foundry 1.7 made `--batch-size`
+@@ -52,7 +52,7 @@ runs:
+     - name: Cache Aztec CLI
+       if: inputs.skip_cli != 'true'
+       id: cache-aztec
+-      uses: actions/cache@v5
++      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+       with:
+         path: ~/.aztec/versions/${{ steps.detect.outputs.version }}
+         key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}
+diff --git a/.github/workflows/_aztec-update.yml b/.github/workflows/_aztec-update.yml
+index f0f9267..adcce33 100644
+--- a/.github/workflows/_aztec-update.yml
++++ b/.github/workflows/_aztec-update.yml
+@@ -20,11 +20,15 @@ on:
+         required: false
+         default: ""
+         type: string
+-      auto_merge:
+-        description: "true: gh pr merge --auto --squash; false: gh pr merge --squash (immediate)"
++      merge_mode:
++        # F-008: `none` leaves the PR OPEN for human review (the safe default — a Windows @aztec bump
++        # must not auto-land an unreviewed bb.exe pin). `auto` enables `gh pr merge --auto --squash`,
++        # which still WAITS for the required checks (incl. the fail-closed Windows pin gate). The old
++        # `auto_merge: false` ran an IMMEDIATE `gh pr merge --squash` that bypassed CI entirely — removed.
++        description: "none: create/update the PR and stop (default). auto: gh pr merge --auto --squash (CI-gated)."
+         required: false
+-        default: true
+-        type: boolean
++        default: none
++        type: string
+       version:
+         description: "Force specific version (leave empty for auto-detect)"
+         required: false
+@@ -42,18 +46,22 @@ jobs:
+     name: Check for new ${{ inputs.dist_tag }}
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
++    # F-008 least-privilege: reusable jobs inherit the CALLER's GITHUB_TOKEN scope unless downgraded
++    # here. This job only reads, so read-only — the token cannot merge/push even if a step tried.
++    permissions:
++      contents: read
+     outputs:
+       needs_update: ${{ steps.check.outputs.needs_update }}
+       new_version: ${{ steps.check.outputs.new_version }}
+       current_version: ${{ steps.check.outputs.current_version }}
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           ref: ${{ inputs.target_branch }}
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+       - name: Check ${{ inputs.dist_tag }} version
+         id: check
+@@ -62,6 +70,15 @@ jobs:
+           INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+         run: |
+           if [ -n "$INPUT_VERSION" ]; then
++            # F-008: validate the forced version against the strict pattern BEFORE emitting it as an
++            # output (it flows into branch names, commits, the fetch URL). A WHOLE-STRING bash `=~` match
++            # (not `grep`, which matches any single line) so a multiline value like $'5.0.0\nneeds_update=false'
++            # cannot slip an injected output record past the check. Generic error — never echo the raw value.
++            VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-(nightly\.[0-9]{8}|rc\.[0-9]+|aztecnr-rc\.[0-9]+))?$'
++            if [[ ! "$INPUT_VERSION" =~ $VERSION_RE ]]; then
++              echo "::error::Invalid forced version (rejected before use)"
++              exit 1
++            fi
+             CURRENT=$(bun -e "console.log(JSON.parse(require('fs').readFileSync('packages/sdk/package.json','utf8')).devDependencies['@aztec/aztec.js'])")
+             {
+               echo "needs_update=true"
+@@ -94,18 +111,21 @@ jobs:
+     if: needs.check-update.outputs.needs_update == 'true'
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
++    # Needs contents:write ONLY here — the branch push. It does NOT create/merge PRs.
++    permissions:
++      contents: write
+     env:
+       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           ref: ${{ inputs.target_branch }}
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+-      - uses: actions/cache@v5
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ inputs.dist_tag }}-${{ needs.check-update.outputs.new_version }}
+@@ -119,6 +139,12 @@ jobs:
+       - name: Install dependencies with new versions
+         run: bun install
+ 
++      # F-008: after install (so resolveAztecBb() sees the NEW bb.js), report whether the live bb.js
++      # version has a reviewed Windows pin. Informational — never fetches/writes; the Windows Prebuild/
++      # Build Smoke gate is the enforcing fail-closed check on the PR.
++      - name: Report Windows bb.exe pin status
++        run: bun scripts/check-windows-bb-pin.ts
++
+       - name: Commit and push
+         env:
+           BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+@@ -147,24 +173,29 @@ jobs:
+     if: needs.update.result == 'success'
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
++    # F-008: read-only GITHUB_TOKEN — ALL PR create/edit/close/merge here use the scoped App tokens
++    # (create-pr token has no contents:write; the opt-in merge uses a separate contents-scoped token).
++    # So even the inherited GITHUB_TOKEN cannot merge/push on the `none` path.
++    permissions:
++      contents: read
+     env:
+       NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
+       CURRENT_VERSION: ${{ needs.check-update.outputs.current_version }}
+     steps:
+-      # Short-lived, repo-scoped GitHub App token instead of the long-lived PAT.
+-      # Needs issues:write too — `gh pr edit --add-label` + `gh pr close --comment`
+-      # below go through the issues label/comment endpoints. The token still
+-      # triggers CI on the created PR (so `--auto` waits for the required checks).
++      # Short-lived, repo-scoped GitHub App token. F-008 least-privilege: this token has NO
++      # contents:write — it only creates/edits/closes PRs (pull-requests) + labels/comments (issues).
++      # It cannot merge (merge = contents:write). The `auto` path mints a SEPARATE, narrowly-scoped
++      # contents:write token below, only when explicitly opted in. `issues:write` is for
++      # `gh pr edit --add-label` + `gh pr close --comment`. The token still triggers CI on the PR.
+       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+         id: app-token
+         with:
+           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+-          permission-contents: write
+           permission-pull-requests: write
+           permission-issues: write
+ 
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+       - name: Close stale update PRs
+         env:
+@@ -174,14 +205,19 @@ jobs:
+           NEW_VERSION: ${{ needs.check-update.outputs.new_version }}
+         run: |
+           CURRENT_BRANCH="${BRANCH_PREFIX}-${NEW_VERSION}"
++          # F-008: pass branch_prefix/current-branch as jq --arg DATA, never interpolated into the jq
++          # program (a crafted prefix could otherwise rewrite the filter and select every open PR).
+           gh pr list \
+             --base "$TARGET_BRANCH" \
+             --state open \
+             --json number,headRefName \
+-            --jq ".[] | select(.headRefName | startswith(\"${BRANCH_PREFIX}-\")) | select(.headRefName != \"${CURRENT_BRANCH}\") | .number" \
++          | jq -r --arg prefix "${BRANCH_PREFIX}-" --arg current "$CURRENT_BRANCH" \
++              '.[] | select(.headRefName | startswith($prefix)) | select(.headRefName != $current) | .number' \
+           | while read -r pr_num; do
+               echo "Closing stale PR #$pr_num"
+-              gh pr close "$pr_num" --delete-branch --comment "Superseded by ${NEW_VERSION} update."
++              # F-008 least-privilege: close WITHOUT --delete-branch (deletion needs contents:write,
++              # which this token no longer has). A stale branch is harmless; its PR is closed.
++              gh pr close "$pr_num" --comment "Superseded by ${NEW_VERSION} update."
+             done
+ 
+       - name: Create or update PR
+@@ -190,7 +226,6 @@ jobs:
+           BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+           TARGET_BRANCH: ${{ inputs.target_branch }}
+           ADD_LABEL: ${{ inputs.add_label }}
+-          AUTO_MERGE: ${{ inputs.auto_merge }}
+           DIST_TAG: ${{ inputs.dist_tag }}
+           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+         run: |
+@@ -232,9 +267,27 @@ jobs:
+             gh pr edit "$PR_NUM" --add-label "$ADD_LABEL" 2>/dev/null || true
+           fi
+ 
+-          # Merge strategy: auto-merge waits for checks, immediate merges now
+-          if [ "$AUTO_MERGE" = "true" ]; then
+-            gh pr merge "$PR_NUM" --auto --squash --delete-branch
+-          else
+-            gh pr merge "$PR_NUM" --squash --delete-branch
+-          fi
++          # F-008: the PR is left OPEN for review. Merge (if opted in) happens in the separate,
++          # contents:write-scoped `auto-merge` step below — never here, and never immediately.
++          echo "PR #$PR_NUM is open for review: $(gh pr view "$PR_NUM" --json url --jq .url)"
++          echo "pr_num=$PR_NUM" >> "$GITHUB_OUTPUT"
++        id: pr
++
++      # F-008: `auto` opt-in only. A SEPARATE, narrowly-scoped contents:write token (the create-pr token
++      # above has none) enables `--auto --squash`, which WAITS for the required checks — including the
++      # fail-closed Windows pin gate. `none` (the default) skips this entirely, leaving the PR open.
++      - name: Enable auto-merge (opt-in)
++        if: inputs.merge_mode == 'auto'
++        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
++        id: merge-token
++        with:
++          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
++          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
++          permission-contents: write
++          permission-pull-requests: write
++      - name: Auto-merge (opt-in, CI-gated)
++        if: inputs.merge_mode == 'auto'
++        env:
++          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
++          PR_NUM: ${{ steps.pr.outputs.pr_num }}
++        run: gh pr merge "$PR_NUM" --auto --squash --delete-branch
+diff --git a/.github/workflows/_e2e-app.yml b/.github/workflows/_e2e-app.yml
+index 373a901..689beb0 100644
+--- a/.github/workflows/_e2e-app.yml
++++ b/.github/workflows/_e2e-app.yml
+@@ -27,7 +27,7 @@ jobs:
+     # aztec node setup + the test; ~1-2 min install on a cache hit.
+     timeout-minutes: 55
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           ref: ${{ inputs.ref || github.ref }}
+ 
+@@ -52,7 +52,7 @@ jobs:
+ 
+       - name: Upload Aztec logs
+         if: failure()
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: aztec-node-logs-app
+           path: /tmp/aztec-node.log
+diff --git a/.github/workflows/_e2e-crash-recovery-windows.yml b/.github/workflows/_e2e-crash-recovery-windows.yml
+index 61d9012..b980dc6 100644
+--- a/.github/workflows/_e2e-crash-recovery-windows.yml
++++ b/.github/workflows/_e2e-crash-recovery-windows.yml
+@@ -21,7 +21,7 @@ jobs:
+     runs-on: windows-2025
+     timeout-minutes: 20
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - name: Run crash-recovery crux spike
+         shell: pwsh
+         run: ./packages/accelerator/scripts/crash-recovery-smoke-windows.ps1
+diff --git a/.github/workflows/_e2e-updater-linux.yml b/.github/workflows/_e2e-updater-linux.yml
+index 8e75d9c..3a06953 100644
+--- a/.github/workflows/_e2e-updater-linux.yml
++++ b/.github/workflows/_e2e-updater-linux.yml
+@@ -37,6 +37,12 @@ on:
+         required: false
+         default: positive
+         type: string
++    secrets:
++      # F-004: sign the smoke feed with the prod updater key (which N-1 embeds). See _e2e-updater.yml.
++      TAURI_SIGNING_PRIVATE_KEY:
++        required: true
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
++        required: true
+ 
+ jobs:
+   updater-smoke-linux:
+@@ -46,11 +52,11 @@ jobs:
+     permissions:
+       contents: read
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+       # FUSE (AppImage runtime) + headless display + tray host + dbus. Running the
+       # AppImage natively (via FUSE) sets $APPIMAGE, which the Tauri Linux updater
+@@ -85,7 +91,7 @@ jobs:
+           } >> "$GITHUB_ENV"
+ 
+       - name: Download N artifacts (this run)
+-        uses: actions/download-artifact@v8
++        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+         with:
+           name: ${{ inputs.n-artifact }}
+           path: n-artifacts
+@@ -121,6 +127,8 @@ jobs:
+       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
+         env:
+           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
++          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+         run: |
+           APPIMAGE=$(find n1 -name '*.AppImage' | head -1)
+           if [ -z "$APPIMAGE" ]; then echo "::error::N-1 AppImage not found"; exit 1; fi
+diff --git a/.github/workflows/_e2e-updater-windows.yml b/.github/workflows/_e2e-updater-windows.yml
+index 2da1386..e0f7a5a 100644
+--- a/.github/workflows/_e2e-updater-windows.yml
++++ b/.github/workflows/_e2e-updater-windows.yml
+@@ -35,6 +35,13 @@ on:
+         required: false
+         default: positive
+         type: string
++    secrets:
++      # F-004: the synthetic N-1 keeps the committed PROD pubkey, so the smoke feed's manifest must be
++      # signed with the prod updater key (NOT the ephemeral key that only emitted N-1's artifacts).
++      TAURI_SIGNING_PRIVATE_KEY:
++        required: true
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
++        required: true
+ 
+ jobs:
+   updater-smoke-windows:
+@@ -48,7 +55,7 @@ jobs:
+       N1_VERSION: ${{ inputs.n1-version }}
+       SMOKE_MODE: ${{ inputs.mode }}
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+@@ -57,7 +64,7 @@ jobs:
+ 
+       # Download the REAL prod-signed N (this run's build): *-setup.nsis.zip + .sig.
+       - name: Download N (prod-signed build artifact)
+-        uses: actions/download-artifact@v8
++        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+         with:
+           name: ${{ inputs.n-artifact }}
+           path: ${{ runner.temp }}/n-dl
+@@ -111,6 +118,10 @@ jobs:
+         shell: pwsh
+         env:
+           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
++          # PROD key for the manifest signature — overrides the ephemeral TAURI_SIGNING_PRIVATE_KEY that
++          # an earlier step exported to GITHUB_ENV (that one only built N-1's artifacts).
++          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+         run: |
+           $n1 = Get-ChildItem -Path "$env:RUNNER_TEMP\n1" -Filter "*-setup.exe" | Select-Object -First 1
+           if (-not $n1) { Write-Error "N-1 installer not found"; exit 1 }
+diff --git a/.github/workflows/_e2e-updater.yml b/.github/workflows/_e2e-updater.yml
+index 40f6b2e..a726051 100644
+--- a/.github/workflows/_e2e-updater.yml
++++ b/.github/workflows/_e2e-updater.yml
+@@ -38,6 +38,13 @@ on:
+         required: false
+         default: positive
+         type: string
++    secrets:
++      # F-004: a C4+ N-1 enforces the signed-manifest envelope, so the smoke feed must be signed with
++      # the prod updater key (which the synthetic/real N-1 embeds). Same key the build job uses.
++      TAURI_SIGNING_PRIVATE_KEY:
++        required: true
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
++        required: true
+ 
+ jobs:
+   updater-smoke:
+@@ -47,14 +54,14 @@ jobs:
+     permissions:
+       contents: read
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+       - name: Download N artifacts (this run)
+-        uses: actions/download-artifact@v8
++        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+         with:
+           name: ${{ inputs.n-artifact }}
+           path: n-artifacts
+@@ -86,6 +93,8 @@ jobs:
+       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
+         env:
+           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
++          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+         run: |
+           DMG=$(find n1 -name '*.dmg' | head -1)
+           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi
+diff --git a/.github/workflows/_e2e-webdriver.yml b/.github/workflows/_e2e-webdriver.yml
+index 52a5665..da7d88d 100644
+--- a/.github/workflows/_e2e-webdriver.yml
++++ b/.github/workflows/_e2e-webdriver.yml
+@@ -8,7 +8,11 @@ on:
+         required: true
+         type: string
+       mode:
+-        description: "'dev' or 'release'"
++        description: >-
++          'dev' (tauri dev — fast, but is_dev()==true so it never runs the shipped custom-protocol path),
++          'built-debug' (F-012/D8: `tauri build --debug` — a real custom-protocol binary that exercises the
++          production asset+CSP path), or 'release' (release binary; note raw cargo build does NOT enable
++          tauri's custom-protocol feature, so it is also is_dev()==true).
+         required: false
+         type: string
+         default: "dev"
+@@ -27,12 +31,14 @@ jobs:
+         shell: bash
+         working-directory: packages/accelerator
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+       # ── Shared env setup (Bun, Rust toolchain + cache, Linux Tauri deps, bb sidecar) ──
+       - uses: ./.github/actions/setup-accelerator
+         with:
+-          rust-cache-key: e2e-webdriver-${{ inputs.mode }}
++          # F-012: -v2 busts the shared cache once — an earlier PR build could have cached a stale/empty
++          # frontend asset embed (codegen output) that a later build restored instead of regenerating.
++          rust-cache-key: e2e-webdriver-v2-${{ inputs.mode }}
+           rust-components: ""
+ 
+       # ── Linux: WebDriver-specific extras (xvfb + tray + dbus) ──
+@@ -59,16 +65,34 @@ jobs:
+         working-directory: packages/accelerator/src-tauri
+         run: cargo build --release --features webdriver
+ 
++      # ── Build (dev — plain `cargo build`, run DIRECTLY, no `tauri dev`. F-012 ROOT CAUSE: `tauri dev`
++      #    injects a dev-server devUrl (e.g. http://127.0.0.1:1430), which makes tauri-codegen embed an EMPTY
++      #    asset set (context.rs: `dev && dev_url.is_some()`), so the webview's tauri:// protocol 404s every
++      #    asset. A plain `cargo build` has dev_url=None → codegen embeds frontendDist fully → tauri:// works.
++      #    setup-accelerator already built the frontend bundles the build.rs guard needs. ──
++      - name: Build app (dev)
++        if: inputs.mode == 'dev'
++        working-directory: packages/accelerator/src-tauri
++        run: cargo build --features webdriver
++
++      # ── Build (built-debug — F-012/D8: a real `tauri build` enables tauri's custom-protocol feature, so
++      #    the webdriver run exercises the SHIPPED asset/CSP path that `tauri dev` and raw `cargo build` skip.
++      #    Runs from packages/accelerator so tauri's beforeBuildCommand (bun run frontend:build) fires. ──
++      - name: Build app (built-debug)
++        if: inputs.mode == 'built-debug'
++        run: bunx tauri build --debug --no-bundle --features webdriver
++
+       # ── Launch app (single step, no platform conditionals) ──
+       - name: Launch app
+         run: |
+           EXE=""
+           [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
+-          if [ "${{ inputs.mode }}" = "release" ]; then
+-            APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE"
+-          else
+-            APP_CMD="bunx tauri dev --no-watch --features webdriver"
+-          fi
++          case "${{ inputs.mode }}" in
++            release)     APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE" ;;
++            built-debug) APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;;
++            *)           APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;; # dev: built above
++
++          esac
+           $APP_CMD > /tmp/tauri.log 2>&1 &
+           echo "TAURI_PID=$!" >> "$GITHUB_ENV"
+ 
+@@ -117,7 +141,7 @@ jobs:
+       # ── Artifacts on failure ──
+       - name: Upload logs
+         if: failure()
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: webdriver-e2e-logs-${{ runner.os }}-${{ inputs.mode }}
+           path: /tmp/tauri.log
+diff --git a/.github/workflows/_e2e.yml b/.github/workflows/_e2e.yml
+index d33566b..b4ae6ca 100644
+--- a/.github/workflows/_e2e.yml
++++ b/.github/workflows/_e2e.yml
+@@ -25,7 +25,7 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 45
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           ref: ${{ inputs.ref || github.ref }}
+ 
+@@ -63,15 +63,20 @@ jobs:
+           AZTEC_BB_VERSION="$(cat packages/accelerator/src-tauri/AZTEC_VERSION)"
+           echo "AZTEC_BB_VERSION=$AZTEC_BB_VERSION" >> "$GITHUB_ENV"
+ 
+-      - uses: dtolnay/rust-toolchain@stable
++      # F-015: pin the action to a master-history SHA (NOT the @stable-generated commit, which
++      # upstream may GC) and select the channel explicitly via `toolchain:` — @stable was the
++      # channel selector, so pinning the ref alone would break the toolchain resolution.
++      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+         if: inputs.build_accelerator
++        with:
++          toolchain: stable
+ 
+       # This job builds the server crate FROM packages/accelerator/server, so
+       # Cargo writes all artifacts (incl. the src-tauri path-dep) under
+       # server/target. Cache that dir only. Use the SAME `shared-key` as the
+       # other linux server builds (smoke / release-smoke / release build-headless
+       # + setup-accelerator) so they cross-warm one shared server cache.
+-      - uses: Swatinem/rust-cache@v2
++      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+         if: inputs.build_accelerator
+         with:
+           workspaces: packages/accelerator/server -> target
+@@ -116,7 +121,7 @@ jobs:
+ 
+       - name: Upload Aztec logs
+         if: failure()
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: aztec-node-logs-sdk
+           path: /tmp/aztec-node.log
+@@ -125,7 +130,7 @@ jobs:
+ 
+       - name: Upload accelerator logs
+         if: failure() && inputs.build_accelerator
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: accelerator-logs
+           path: /tmp/accelerator.log
+diff --git a/.github/workflows/_publish-sdk.yml b/.github/workflows/_publish-sdk.yml
+index f119f03..85fd5fd 100644
+--- a/.github/workflows/_publish-sdk.yml
++++ b/.github/workflows/_publish-sdk.yml
+@@ -37,20 +37,39 @@ jobs:
+       id-token: write # needed for --provenance (Sigstore attestation)
+       contents: write
+     steps:
+-      - uses: actions/checkout@v6
++      # F-006: reject a malformed dist_tag BEFORE checkout or any token-bearing step. Job perms
++      # (id-token/contents: write) and checkout-persisted git credentials are live from step 1, so
++      # validation must come first. Whole-string bash match (not grep, which would pass a multiline
++      # value with one valid line); must start with a lowercase letter, so no leading '-' (npm
++      # option/argument injection) and no leading digit. Read via env, never interpolated into shell.
++      # (A still-invalid tag like a semver range that slips the regex fails later at npm — not an injection.)
++      - name: Validate dist_tag
++        env:
++          DIST_TAG: ${{ inputs.dist_tag }}
++          LC_ALL: C
++        run: |
++          if [[ ! "$DIST_TAG" =~ ^[a-z][a-z0-9._-]*$ ]]; then
++            # Do NOT echo the rejected value: a malformed multiline dist_tag could otherwise inject
++            # ::workflow-commands:: into the log stream. The value is already masked/available to the
++            # operator via the dispatch inputs.
++            echo "::error::Invalid dist_tag (must match ^[a-z][a-z0-9._-]*\$)"
++            exit 1
++          fi
++
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           fetch-depth: 0
+ 
+-      - uses: actions/setup-node@v6
++      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+         with:
+-          node-version: 24
++          node-version: 24.18.0
+           registry-url: https://registry.npmjs.org
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+-      - uses: actions/cache@v5
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -76,17 +95,21 @@ jobs:
+ 
+       - name: Determine SDK publish version
+         id: sdk-version
++        env:
++          AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
+         run: |
+-          VERSION=$(bun scripts/get-sdk-publish-version.ts "${{ steps.aztec-version.outputs.version }}")
++          VERSION=$(bun scripts/get-sdk-publish-version.ts "$AZTEC_VERSION")
+           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+           echo "SDK publish version: $VERSION"
+ 
+       - name: Set SDK version and fix exports for npm
+         working-directory: packages/sdk
++        env:
++          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
+         run: |
+           node -e "
+             const p = require('./package.json');
+-            p.version = '${{ steps.sdk-version.outputs.version }}';
++            p.version = process.env.SDK_VERSION;
+             p.main = './dist/index.js';
+             p.types = './dist/index.d.ts';
+             p.exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } };
+@@ -98,32 +121,37 @@ jobs:
+         working-directory: packages/sdk
+         env:
+           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+-        run: npm publish --provenance --access public --tag ${{ inputs.dist_tag }} --workspaces=false
++          DIST_TAG: ${{ inputs.dist_tag }}
++        # --tag="$DIST_TAG" (=-form + quoted): DIST_TAG is validated + inert shell data, and the
++        # =-form stops a value from being parsed as a separate npm option.
++        run: npm publish --provenance --access public --tag="$DIST_TAG" --workspaces=false
+ 
+       - name: Also tag as 'latest' on npm
+         if: inputs.latest && inputs.dist_tag != 'latest'
+         working-directory: packages/sdk
+         env:
+           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+-        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${{ steps.sdk-version.outputs.version }}" latest
++          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
++        run: npm dist-tag add "@alejoamiras/aztec-accelerator@${SDK_VERSION}" latest
+ 
+       - name: Create git tag and GitHub release
+         env:
+           GH_TOKEN: ${{ github.token }}
++          SDK_VERSION: ${{ steps.sdk-version.outputs.version }}
++          AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
++          DIST_TAG: ${{ inputs.dist_tag }}
+         run: |
+-          VERSION="${{ steps.sdk-version.outputs.version }}"
+-          AZTEC_VERSION="${{ steps.aztec-version.outputs.version }}"
+-          TAG="@alejoamiras/aztec-accelerator@${VERSION}"
++          TAG="@alejoamiras/aztec-accelerator@${SDK_VERSION}"
+ 
+           git config user.name "github-actions[bot]"
+           git config user.email "github-actions[bot]@users.noreply.github.com"
+           git tag "$TAG" || true
+           git push origin "$TAG" || true
+ 
+-          if [ "$VERSION" = "$AZTEC_VERSION" ]; then
+-            NOTES="Aligned with Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
++          if [ "$SDK_VERSION" = "$AZTEC_VERSION" ]; then
++            NOTES="Aligned with Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
+           else
+-            NOTES="SDK revision for Aztec ${{ inputs.dist_tag }} version \`${AZTEC_VERSION}\`."
++            NOTES="SDK revision for Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
+           fi
+ 
+           # ALWAYS --latest=false: `inputs.latest` governs the npm dist-tag only. The repo's GitHub
+diff --git a/.github/workflows/accelerator.yml b/.github/workflows/accelerator.yml
+index e405c6e..1340e4b 100644
+--- a/.github/workflows/accelerator.yml
++++ b/.github/workflows/accelerator.yml
+@@ -3,7 +3,7 @@ name: Accelerator
+ on:
+   workflow_dispatch:
+   pull_request:
+-    branches: [main]
++    branches: [main, security-hardening]
+ 
+ # Cancel a superseded in-flight run when a new commit is pushed to the same PR.
+ concurrency:
+@@ -19,8 +19,8 @@ jobs:
+       desktop: ${{ steps.override.outputs.relevant || steps.filter.outputs.desktop }}
+       integration: ${{ steps.override.outputs.relevant || steps.filter.outputs.integration }}
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: dorny/paths-filter@v4
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+         id: filter
+         with:
+           filters: |
+@@ -31,6 +31,8 @@ jobs:
+             # affect the accelerator's Rust/app build).
+             desktop:
+               - 'packages/accelerator/**'
++              - 'scripts/download-bb*.ts'
++              - 'scripts/__fixtures__/**'
+               - 'packages/sdk/package.json'
+               - 'biome.json'
+               - 'package.json'
+@@ -44,6 +46,8 @@ jobs:
+             # runs on SDK src changes (what `desktop` skips) AND everything else.
+             integration:
+               - 'packages/accelerator/**'
++              - 'scripts/download-bb*.ts'
++              - 'scripts/__fixtures__/**'
+               - 'packages/sdk/src/**'
+               - 'packages/sdk/package.json'
+               - 'biome.json'
+@@ -68,7 +72,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/src-tauri
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+@@ -94,7 +98,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/src-tauri
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+@@ -106,6 +110,66 @@ jobs:
+       # accelerator-core's own unit tests (113) — not exercised by `cargo test` in src-tauri.
+       - run: cargo test --manifest-path ../core/Cargo.toml
+ 
++  # F-004: full updater-feed sign/verify round-trip with a THROWAWAY key (no prod secret). Guards the
++  # version-binding property end-to-end against tauri-CLI drift and any change to the update-manifest
++  # tool: happy path (envelope -> tauri signer sign -> splice -> verify) must pass, and the F-004 splice
++  # attack (bump the OUTER version while the signed envelope stays put) must be rejected. The rejection
++  # logic itself is also unit-covered by accelerator-core tests above; this proves the real signing path.
++  updater-feed-e2e:
++    name: Updater Feed Sign/Verify E2E
++    needs: changes
++    if: needs.changes.outputs.desktop == 'true'
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    steps:
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: ./.github/actions/setup-accelerator
++        with:
++          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
++          rust-workspaces: packages/accelerator/core -> target
++          rust-components: ""
++          # Only the pure core example + the tauri signer are exercised — no GTK stack, no bb sidecar.
++          install-tauri-system-deps: "false"
++          run-prebuild: "false"
++      - name: Round-trip sign + verify (throwaway key)
++        run: |
++          set -euo pipefail
++          work="$(mktemp -d)"
++
++          # 1. Throwaway updater keypair (never a prod secret; empty password for CI). tauri writes the
++          #    private key + a .pub whose CONTENT is already base64(minisign .pub doc) — the exact format
++          #    tauri.conf.json.plugins.updater.pubkey uses, so the app verifies against this same shape.
++          ( cd packages/accelerator && bunx tauri signer generate --ci -p "" -w "$work/test.key" )
++          cp "$work/test.key.pub" "$work/pubkey.b64"
++          export TAURI_SIGNING_PRIVATE_KEY
++          TAURI_SIGNING_PRIVATE_KEY="$(cat "$work/test.key")"
++          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
++
++          # 2. Representative unsigned feed (artifact `signature` values are opaque to the manifest
++          #    binding — only the manifest signature is cryptographically checked here).
++          jq -n '{version:"1.2.3", notes:"ci", pub_date:"2026-01-01T00:00:00Z", platforms:{
++            "linux-x86_64":{signature:"art-linux", url:"https://example.test/app.AppImage", size:111},
++            "darwin-aarch64":{signature:"art-mac", url:"https://example.test/app.tar.gz", size:222}
++          }}' > "$work/latest.json"
++
++          tool() { cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- "$@"; }
++
++          # 3. Happy path: envelope -> sign -> splice -> verify (must exit 0).
++          tool envelope --feed "$work/latest.json" > "$work/envelope.json"
++          ( cd packages/accelerator && bunx tauri signer sign "$work/envelope.json" )
++          tool splice --feed "$work/latest.json" --envelope "$work/envelope.json" --sig "$work/envelope.json.sig" > "$work/signed.json"
++          tool verify --feed "$work/signed.json" --pubkey "$work/pubkey.b64"
++          echo "happy-path verify OK"
++
++          # 4. F-004 splice attack: bump the OUTER version; the signed envelope stays at 1.2.3. verify
++          #    MUST reject (OuterMismatch). A pass here is a regression.
++          jq '.version = "9.9.9"' "$work/signed.json" > "$work/tampered.json"
++          if tool verify --feed "$work/tampered.json" --pubkey "$work/pubkey.b64"; then
++            echo "::error::version-splice feed VERIFIED but must have been rejected (F-004 regression)"
++            exit 1
++          fi
++          echo "splice-reject OK (F-004 downgrade attack correctly refused)"
++
+   lint:
+     name: Lint
+     needs: changes
+@@ -113,11 +177,11 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -126,6 +190,8 @@ jobs:
+       - run: bun run lint
+       - name: Unit-test build scripts (copy-bb supply-chain gate)
+         run: bun run --cwd packages/accelerator test:unit
++      - name: Unit-test root scripts (download-bb F-007 cache-integrity gate)
++        run: bun run test:scripts
+ 
+   smoke:
+     name: Smoke
+@@ -137,7 +203,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/src-tauri
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
+@@ -220,7 +286,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/src-tauri
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
+@@ -248,11 +314,11 @@ jobs:
+     # cache hit, so this ceiling is a safety net that normal runs never approach.
+     timeout-minutes: 35
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -288,6 +354,19 @@ jobs:
+       runner: ${{ matrix.runner }}
+       mode: dev
+ 
++  # F-012 (D8): the dev matrix above runs `tauri dev`, which is `is_dev()==true` and never exercises the
++  # SHIPPED custom-protocol asset/CSP path. This Linux-only lane does a real `tauri build --debug` so the
++  # trust-boundary spec's CSP + per-window ACL assertions run against a production-mode binary. Linux-only
++  # keeps the extra full-compile cost to one job (the 3-OS dev matrix covers per-platform WebView/IPC diffs).
++  e2e-webdriver-builtdebug:
++    name: E2E WebDriver (built-debug, linux)
++    needs: changes
++    if: needs.changes.outputs.desktop == 'true'
++    uses: ./.github/workflows/_e2e-webdriver.yml
++    with:
++      runner: ubuntu-latest
++      mode: built-debug
++
+   windows-prebuild:
+     name: Windows Prebuild Smoke
+     needs: changes
+@@ -295,11 +374,11 @@ jobs:
+     runs-on: windows-latest
+     timeout-minutes: 15
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -341,7 +420,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/src-tauri
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+@@ -349,6 +428,10 @@ jobs:
+           rust-components: ""
+       - name: Compile + unit-test the app crate on Windows
+         run: cargo test
++      # accelerator-core on Windows: exercises the bb.exe name, platform binding, marker/publish, and
++      # directory-replacement paths that the app crate doesn't cover (F-007).
++      - name: Compile + unit-test accelerator-core on Windows
++        run: cargo test --manifest-path ../core/Cargo.toml
+       - name: Build the Tauri app (NSIS installer)
+         working-directory: packages/accelerator
+         shell: bash
+@@ -423,12 +506,14 @@ jobs:
+         changes,
+         clippy,
+         test,
++        updater-feed-e2e,
+         lint,
+         smoke,
+         release-smoke,
+         desktop-ui,
+         e2e,
+         e2e-webdriver,
++        e2e-webdriver-builtdebug,
+         windows-prebuild,
+         windows-build,
+       ]
+@@ -437,7 +522,7 @@ jobs:
+     steps:
+       - name: Check results
+         run: |
+-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
++          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.e2e-webdriver-builtdebug.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+           for r in $results; do
+             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+               echo "Job failed or was cancelled: $r"
+diff --git a/.github/workflows/actionlint.yml b/.github/workflows/actionlint.yml
+index 922e41f..57ccfc2 100644
+--- a/.github/workflows/actionlint.yml
++++ b/.github/workflows/actionlint.yml
+@@ -3,7 +3,7 @@ name: "Lint: Infra & Workflows"
+ on:
+   workflow_dispatch:
+   pull_request:
+-    branches: [main]
++    branches: [main, security-hardening]
+ 
+ jobs:
+   changes:
+@@ -15,8 +15,8 @@ jobs:
+       shell: ${{ steps.override.outputs.shell || steps.filter.outputs.shell }}
+       tofu: ${{ steps.override.outputs.tofu || steps.filter.outputs.tofu }}
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: dorny/paths-filter@v4
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+         id: filter
+         with:
+           filters: |
+@@ -44,22 +44,25 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: actions/cache@v5
+-        id: actionlint-cache
+-        with:
+-          path: ./actionlint
+-          key: actionlint-v1.7.11-${{ runner.os }}
+-      - name: Download actionlint
+-        if: steps.actionlint-cache.outputs.cache-hit != 'true'
+-        id: get_actionlint
+-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.11/scripts/download-actionlint.bash)
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      # F-015: download a PINNED actionlint release and verify its SHA-256 instead of piping a
++      # moving `download-actionlint.bash` into bash. No binary cache (a poisoned cache would be a
++      # trusted executable); the ~2 MB download each run is negligible. The prior setup was also
++      # mislabeled — the v1.7.11 installer defaults to actionlint 1.7.10 while the cache key said
++      # 1.7.11. Pinned to 1.7.12 (matches the local lint gate).
++      - name: Download + verify actionlint
++        env:
++          ACTIONLINT_VERSION: 1.7.12
++          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
++        run: |
++          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
++          curl -fsSL "$url" -o actionlint.tar.gz
++          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
++          tar -xzf actionlint.tar.gz actionlint
++          chmod +x actionlint
+         shell: bash
+       - name: Run actionlint
+-        run: |
+-          ACTIONLINT="${{ steps.get_actionlint.outputs.executable }}"
+-          [ -z "$ACTIONLINT" ] && ACTIONLINT="./actionlint"
+-          "$ACTIONLINT" -color
++        run: ./actionlint -color
+         shell: bash
+ 
+   shellcheck:
+@@ -69,9 +72,14 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - name: Run shellcheck
+-        run: shellcheck infra/*.sh
++        # F-015/C0: `shellcheck infra/*.sh` errors when the glob matches nothing (no infra scripts
++        # today), which fails the job on workflow_dispatch. `find … | xargs -0r` is empty-safe AND
++        # recursive — matching the `infra/**/*.sh` paths-filter so a nested script can't trigger the
++        # job yet silently skip linting. `xargs -0r` propagates shellcheck's real exit code (the old
++        # `&& … || echo` form would have masked a genuine failure as success).
++        run: find infra -type f -name '*.sh' -print0 | xargs -0r shellcheck
+ 
+   tofu:
+     name: Lint OpenTofu
+@@ -80,8 +88,8 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: opentofu/setup-opentofu@v1
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+         with:
+           tofu_version: '1.10.0'
+       - name: Format check
+diff --git a/.github/workflows/app.yml b/.github/workflows/app.yml
+index 84cf20d..c2187d4 100644
+--- a/.github/workflows/app.yml
++++ b/.github/workflows/app.yml
+@@ -3,7 +3,7 @@ name: App
+ on:
+   workflow_dispatch:
+   pull_request:
+-    branches: [main]
++    branches: [main, security-hardening]
+ 
+ # Cancel a superseded in-flight run when a new commit is pushed to the same PR.
+ concurrency:
+@@ -18,8 +18,8 @@ jobs:
+     outputs:
+       relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: dorny/paths-filter@v4
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+         id: filter
+         with:
+           filters: |
+@@ -46,11 +46,11 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -69,11 +69,11 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -90,11 +90,11 @@ jobs:
+     # a cache hit, so this ceiling is a safety net normal runs never approach.
+     timeout-minutes: 35
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -112,11 +112,11 @@ jobs:
+     # a cache hit, so this ceiling is a safety net normal runs never approach.
+     timeout-minutes: 35
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+diff --git a/.github/workflows/aztec-nightlies.yml b/.github/workflows/aztec-nightlies.yml
+deleted file mode 100644
+index 9715ef3..0000000
+--- a/.github/workflows/aztec-nightlies.yml
++++ /dev/null
+@@ -1,31 +0,0 @@
+-name: Aztec Nightlies Update
+-
+-on:
+-  workflow_dispatch:
+-    inputs:
+-      version:
+-        description: "Force specific version (leave empty for auto-detect)"
+-        required: false
+-        type: string
+-
+-concurrency:
+-  group: aztec-nightlies
+-  cancel-in-progress: true
+-
+-permissions:
+-  contents: write
+-  pull-requests: write
+-
+-jobs:
+-  update:
+-    uses: ./.github/workflows/_aztec-update.yml
+-    secrets:
+-      RELEASE_BOT_APP_ID: ${{ secrets.RELEASE_BOT_APP_ID }}
+-      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+-    with:
+-      dist_tag: nightly
+-      target_branch: nightlies
+-      branch_prefix: chore/aztec-nightlies
+-      add_label: test-infra
+-      auto_merge: false
+-      version: ${{ inputs.version || '' }}
+diff --git a/.github/workflows/aztec-stable.yml b/.github/workflows/aztec-stable.yml
+index a4b6082..80c248a 100644
+--- a/.github/workflows/aztec-stable.yml
++++ b/.github/workflows/aztec-stable.yml
+@@ -13,8 +13,10 @@ concurrency:
+   cancel-in-progress: true
+ 
+ permissions:
++  # F-008: the GITHUB_TOKEN needs contents:write ONLY for the `update` job's branch push. PR
++  # create/edit/close use the reusable workflow's separate GitHub App token, so no pull-requests:write
++  # here. Merge (auto opt-in) uses a distinct contents-scoped app token inside the reusable workflow.
+   contents: write
+-  pull-requests: write
+ 
+ jobs:
+   update:
+@@ -26,5 +28,5 @@ jobs:
+       dist_tag: rc
+       target_branch: main
+       branch_prefix: chore/aztec-stable
+-      auto_merge: false
++      merge_mode: none
+       version: ${{ inputs.version || '' }}
+diff --git a/.github/workflows/deploy-landing.yml b/.github/workflows/deploy-landing.yml
+index 1590cf6..041d85a 100644
+--- a/.github/workflows/deploy-landing.yml
++++ b/.github/workflows/deploy-landing.yml
+@@ -16,10 +16,20 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
+     steps:
+-      - uses: actions/checkout@v6
++      # F-005: the ci-landing role trusts only refs/heads/main; a workflow_dispatch from another ref would
++      # fail at AssumeRole anyway, but assert early so it fails before build with a clear message.
++      - name: Assert main ref
++        run: |
++          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
++            echo "::error::Deploy Landing Page must run on refs/heads/main (got $GITHUB_REF)"; exit 1
++          fi
++
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+-      - uses: oven-sh/setup-bun@v2
+-      - uses: actions/cache@v5
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
++        with:
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -28,15 +38,18 @@ jobs:
+ 
+       - run: bun run --cwd packages/landing build
+ 
+-      - uses: aws-actions/configure-aws-credentials@v6
++      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+         with:
+-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
++          role-to-assume: ${{ secrets.AWS_ROLE_ARN_LANDING }}
+           aws-region: ${{ secrets.AWS_REGION }}
+ 
+       - name: Deploy to S3
+         run: |
++          # F-005/F-004: NEVER delete the update feed. --exclude keeps `landing/releases/*` (and the exact
++          # `releases` key) out of the --delete set; the ci-landing IAM policy ALSO Denies those, so a
++          # missing exclude fails loud instead of deleting latest.json.
+           aws s3 sync packages/landing/dist/ s3://${{ secrets.S3_BUCKET_NAME }}/landing/ \
+-            --delete
++            --delete --exclude "releases" --exclude "releases/*"
+ 
+       - name: Invalidate CloudFront
+         run: |
+diff --git a/.github/workflows/publish-nightlies.yml b/.github/workflows/publish-nightlies.yml
+deleted file mode 100644
+index d8ed119..0000000
+--- a/.github/workflows/publish-nightlies.yml
++++ /dev/null
+@@ -1,82 +0,0 @@
+-name: Publish Nightlies
+-
+-on:
+-  workflow_dispatch:
+-
+-concurrency:
+-  group: publish-nightlies
+-  cancel-in-progress: true
+-
+-permissions:
+-  id-token: write
+-  contents: write
+-
+-jobs:
+-  changes:
+-    name: Detect changes
+-    runs-on: ubuntu-latest
+-    timeout-minutes: 2
+-    outputs:
+-      sdk: ${{ steps.filter.outputs.sdk }}
+-      playground: ${{ steps.filter.outputs.playground }}
+-    steps:
+-      - uses: actions/checkout@v6
+-      - uses: dorny/paths-filter@v4
+-        id: filter
+-        with:
+-          filters: |
+-            sdk:
+-              - "packages/sdk/**"
+-            playground:
+-              - "packages/playground/**"
+-
+-  e2e:
+-    uses: ./.github/workflows/_e2e.yml
+-    with:
+-      ref: ${{ github.sha }}
+-
+-  publish-sdk:
+-    needs: [changes, e2e]
+-    if: needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch'
+-    uses: ./.github/workflows/_publish-sdk.yml
+-    with:
+-      dist_tag: nightlies
+-    secrets:
+-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+-
+-  deploy-app:
+-    # Deploy playground unless E2E explicitly failed — skip on cancel, proceed on skip/success.
+-    if: ${{ !cancelled() && needs.e2e.result != 'failure' }}
+-    needs: e2e
+-    runs-on: ubuntu-latest
+-    timeout-minutes: 10
+-    steps:
+-      - uses: actions/checkout@v6
+-
+-      - uses: oven-sh/setup-bun@v2
+-      - uses: actions/cache@v5
+-        with:
+-          path: ~/.bun/install/cache
+-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+-          restore-keys: ${{ runner.os }}-bun-
+-      - run: bun install --frozen-lockfile
+-
+-      - name: Build playground
+-        env:
+-          AZTEC_NODE_URL: ${{ secrets.TESTNET_AZTEC_NODE_URL }}
+-        run: bun run --cwd packages/playground build
+-
+-      - uses: aws-actions/configure-aws-credentials@v6
+-        with:
+-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+-          aws-region: ${{ secrets.AWS_REGION }}
+-
+-      - name: Deploy playground to S3
+-        run: |
+-          aws s3 sync packages/playground/dist/ s3://${{ secrets.S3_BUCKET_NAME }}/playground-nightly/ --delete
+-
+-      - name: Invalidate CloudFront
+-        run: |
+-          aws cloudfront create-invalidation \
+-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+-            --paths "/playground-nightly/*"
+diff --git a/.github/workflows/publish-testnet.yml b/.github/workflows/publish-testnet.yml
+index b48dc46..db45a7a 100644
+--- a/.github/workflows/publish-testnet.yml
++++ b/.github/workflows/publish-testnet.yml
+@@ -13,9 +13,10 @@ concurrency:
+   group: publish-testnet
+   cancel-in-progress: true
+ 
++# F-005: least-privilege default. id-token: write (OIDC) is granted ONLY to the two jobs that need it
++# (deploy-app for AWS, publish-sdk for Sigstore provenance), not workflow-wide.
+ permissions:
+-  id-token: write
+-  contents: write
++  contents: read
+ 
+ jobs:
+   changes:
+@@ -26,8 +27,8 @@ jobs:
+       sdk: ${{ steps.filter.outputs.sdk }}
+       playground: ${{ steps.filter.outputs.playground }}
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: dorny/paths-filter@v4
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+         id: filter
+         with:
+           filters: |
+@@ -46,6 +47,10 @@ jobs:
+     # Skip when deploying the playground only. latest:false — while @aztec deps are rc-labeled the
+     # SDK ships on the `testnet` dist-tag, never npm `latest` (which stays on the last stable line).
+     if: (needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch') && inputs.skip_sdk_publish != true
++    # id-token+contents:write for _publish-sdk.yml's Sigstore provenance + npm publish.
++    permissions:
++      id-token: write
++      contents: write
+     uses: ./.github/workflows/_publish-sdk.yml
+     with:
+       dist_tag: testnet
+@@ -59,11 +64,16 @@ jobs:
+     needs: e2e
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
++    permissions:
++      id-token: write # OIDC → AWS (ci-playground-testnet role)
++      contents: read
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+-      - uses: oven-sh/setup-bun@v2
+-      - uses: actions/cache@v5
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
++        with:
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -75,9 +85,9 @@ jobs:
+           AZTEC_NODE_URL: ${{ secrets.TESTNET_AZTEC_NODE_URL }}
+         run: bun run --cwd packages/playground build
+ 
+-      - uses: aws-actions/configure-aws-credentials@v6
++      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+         with:
+-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
++          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PLAYGROUND }}
+           aws-region: ${{ secrets.AWS_REGION }}
+ 
+       - name: Deploy playground to S3
+diff --git a/.github/workflows/release-accelerator.yml b/.github/workflows/release-accelerator.yml
+index c41811a..6da78e1 100644
+--- a/.github/workflows/release-accelerator.yml
++++ b/.github/workflows/release-accelerator.yml
+@@ -7,6 +7,11 @@ on:
+         description: "Version to release (e.g. 1.2.0)"
+         required: true
+         type: string
++      auth_probe:
++        description: "F-005: prove the release OIDC role assumes correctly, then STOP (no build/tag/release/publish)"
++        required: false
++        type: boolean
++        default: false
+ 
+ concurrency:
+   group: release-accelerator
+@@ -48,6 +53,29 @@ jobs:
+           } >> "$GITHUB_OUTPUT"
+           echo "Resolved: version=$INPUT_VERSION  is_prerelease=$IS_PRERELEASE"
+ 
++  # F-005 (Codex C3): prove the release OIDC token can assume the release-feed role BEFORE any tag/release
++  # side effect. `tag` needs this, so a post-cutover trust/secret failure aborts before a dangling tag is
++  # pushed. Runs on every dispatch (the release role is assumable on Release Accelerator/main regardless of
++  # is_prerelease); with `auth_probe=true` this is the only meaningful job — the side-effecting jobs are
++  # all guarded off. GetBucketLocation is the least-privilege probe (allowed by the release policy).
++  release-auth-preflight:
++    name: Release AWS trust preflight
++    needs: [validate]
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    permissions:
++      id-token: write
++      contents: read
++    steps:
++      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
++        with:
++          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }}
++          aws-region: ${{ secrets.AWS_REGION }}
++      - name: Prove the release role (GetBucketLocation only)
++        run: |
++          aws s3api get-bucket-location --bucket "${{ secrets.S3_BUCKET_NAME }}" >/dev/null
++          echo "✅ release role assumed + GetBucketLocation OK"
++
+   e2e-webdriver:
+     name: Pre-release E2E Gate
+     needs: validate
+@@ -102,7 +130,7 @@ jobs:
+             runner: windows-latest
+             platform: windows-x86_64
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+       - uses: ./.github/actions/setup-accelerator
+         with:
+@@ -220,7 +248,7 @@ jobs:
+           done
+ 
+       - name: Upload artifacts
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: accelerator-${{ matrix.platform }}
+           path: |
+@@ -258,7 +286,7 @@ jobs:
+             runner: ubuntu-24.04-arm
+             platform: linux-arm64
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+       - uses: ./.github/actions/setup-accelerator
+         with:
+@@ -317,7 +345,7 @@ jobs:
+           shasum -a 256 -c "$TARBALL.sha256"
+ 
+       - name: Upload artifacts
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: accelerator-server-${{ matrix.platform }}
+           path: |
+@@ -332,7 +360,7 @@ jobs:
+     permissions:
+       contents: read
+     steps:
+-      - uses: actions/download-artifact@v8
++      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+         with:
+           name: accelerator-macos-arm64
+           path: artifacts
+@@ -402,7 +430,7 @@ jobs:
+ 
+       - name: Upload logs
+         if: failure()
+-        uses: actions/upload-artifact@v7
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+         with:
+           name: post-build-smoke-logs
+           path: /tmp/smoke.log
+@@ -423,7 +451,7 @@ jobs:
+     permissions:
+       contents: read
+     steps:
+-      - uses: actions/download-artifact@v8
++      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+         with:
+           name: accelerator-macos-x86_64
+           path: artifacts
+@@ -491,6 +519,9 @@ jobs:
+       n-artifact: ${{ matrix.n-artifact }}
+       n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
+       mode: ${{ matrix.mode }}
++    secrets:
++      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+ 
+   # Linux/AppImage updater smoke — BLOCKING (in `tag.needs` + `release.needs`).
+   # Proves a user on the previous stable AppImage auto-updates to N AND the
+@@ -505,6 +536,9 @@ jobs:
+     uses: ./.github/workflows/_e2e-updater-linux.yml
+     with:
+       n-version: ${{ needs.validate.outputs.version }}
++    secrets:
++      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+ 
+   # Windows/NSIS updater smoke — BLOCKING (in tag.needs + release.needs), proven green on the
+   # 1.0.4-rc.3 dry-run (positive + negative). Tests the REAL prod-signed Windows artifact (this run's
+@@ -525,6 +559,9 @@ jobs:
+     with:
+       n-version: ${{ needs.validate.outputs.version }}
+       mode: positive
++    secrets:
++      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+ 
+   update-smoke-windows-negative:
+     name: Updater Smoke (windows-x86_64 / negative)
+@@ -539,43 +576,199 @@ jobs:
+     with:
+       n-version: ${{ needs.validate.outputs.version }}
+       mode: negative
++    secrets:
++      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+ 
+   tag:
+     name: Create Git Tag
+-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
++    needs: [validate, release-auth-preflight, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
++    # F-005: skip in auth_probe mode so a probe never pushes a tag. release-auth-preflight in `needs`
++    # means a broken release-role trust aborts BEFORE the tag is pushed (no dangling tag).
++    if: ${{ !inputs.auth_probe }}
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     permissions:
+       contents: write
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           fetch-tags: true
++      # codex audit #9: pin the tag to the EXACT commit the whole pipeline validated. checkout@v6
++      # defaults to github.sha, but assert it explicitly so the pushed tag can never target a
++      # different HEAD than the one build/smoke/e2e all ran against (shipped-integrity anchor).
++      - name: Verify checkout is the dispatched commit (tag == github.sha)
++        env:
++          EXPECTED_SHA: ${{ github.sha }}
++        run: |
++          ACTUAL_SHA="$(git rev-parse HEAD)"
++          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
++            echo "::error::HEAD ($ACTUAL_SHA) != github.sha ($EXPECTED_SHA); refusing to tag a drifted commit"
++            exit 1
++          fi
++          echo "Tagging verified commit $ACTUAL_SHA"
+       - name: Create and push tag
+         env:
+           TAG: ${{ needs.validate.outputs.tag }}
++          EXPECTED_SHA: ${{ github.sha }}
+         run: |
+-          if git rev-parse "$TAG" >/dev/null 2>&1; then
+-            echo "Tag $TAG already exists, skipping creation"
++          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
++            # An existing tag MUST already point at github.sha; a tag pinned to a different commit is a
++            # release-integrity red flag (someone pre-created it) — fail rather than silently proceed.
++            EXISTING_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
++            if [ "$EXISTING_SHA" != "$EXPECTED_SHA" ]; then
++              echo "::error::Tag $TAG already exists at $EXISTING_SHA, not github.sha ($EXPECTED_SHA); aborting"
++              exit 1
++            fi
++            echo "Tag $TAG already exists at the expected commit, skipping creation"
+           else
+             git tag "$TAG"
+             git push origin "$TAG"
+             echo "Created and pushed tag $TAG"
+           fi
+ 
++  # F-004: assemble, SIGN, and verify the auto-updater feed in an ISOLATED least-privilege job.
++  # The signed-manifest envelope binds the advertised version to the exact signed artifact set,
++  # closing the downgrade-splice (a feed writer advertising a HIGH version while pointing url/signature
++  # at an OLD, still-validly-signed artifact). Signing lives HERE (`contents: read` + the signing secret
++  # only) rather than in `release` (`contents: write` + `id-token: write` for OIDC→AWS) so the
++  # update-signing capability is never co-located with prod-cloud credentials. `release` consumes the
++  # signed feed as an artifact and never holds the signing key. The `verify` step runs the SAME
++  # production Rust verifier the app runs, so a mis-signed/mis-bound feed FAILS the release here instead
++  # of shipping a self-DoS (Layer A would then reject every update).
++  sign-update-feed:
++    name: Sign update feed
++    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
++    # Only stable releases publish an auto-update feed (mirrors the old inline is_prerelease gate).
++    if: needs.validate.outputs.is_prerelease == 'false'
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    permissions:
++      contents: read
++    steps:
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++
++      - uses: ./.github/actions/setup-accelerator
++        with:
++          rust-target: x86_64-unknown-linux-gnu
++          rust-cache-key: accelerator-sign-feed
++          rust-workspaces: packages/accelerator/core -> target
++          rust-components: ""
++          # Signing + the pure-core `update-manifest` example need neither the GTK stack nor the bb sidecar.
++          install-tauri-system-deps: "false"
++          run-prebuild: "false"
++
++      - name: Download all artifacts
++        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
++        with:
++          path: artifacts
++
++      - name: Assemble, sign, and verify latest.json
++        env:
++          VERSION: ${{ needs.validate.outputs.version }}
++          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
++          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
++          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
++        run: |
++          set -euo pipefail
++          REPO="alejoamiras/aztec-accelerator"
++          BASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
++
++          # Signatures from the .sig files. This job does NOT flatten/rename, so artifacts/ still holds
++          # both the updater artifacts AND their .sig siblings.
++          DARWIN_AARCH64_SIG=$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz.sig' -exec cat {} \;)
++          DARWIN_X86_64_SIG=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz.sig' -exec cat {} \;)
++          LINUX_APPIMAGE_SIG=$(find artifacts/accelerator-linux-x86_64 -name '*.AppImage.sig' -exec cat {} \;)
++          WINDOWS_X86_64_SIG=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip.sig' -exec cat {} \;)
++
++          # Byte sizes from the ORIGINAL artifact files (identical bytes to the renamed release files the
++          # URLs point at). The signed envelope makes this size authoritative (SEC-03 cap can't be lied to).
++          size_of() { wc -c < "$1" | tr -d ' '; }
++          DARWIN_AARCH64_SIZE=$(size_of "$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz' | head -1)")
++          DARWIN_X86_64_SIZE=$(size_of "$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz' | head -1)")
++          LINUX_X86_64_SIZE=$(size_of "$(find artifacts/accelerator-linux-x86_64 -name '*.AppImage' | head -1)")
++          WINDOWS_X86_64_SIZE=$(size_of "$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip' | head -1)")
++
++          # Empty sig/size ⇒ broken auto-update. Fail loudly (matches the old jq-block assertion).
++          for var_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG \
++                          DARWIN_AARCH64_SIZE DARWIN_X86_64_SIZE LINUX_X86_64_SIZE WINDOWS_X86_64_SIZE; do
++            if [ -z "${!var_name}" ]; then
++              echo "::error::Missing $var_name — cannot generate latest.json"
++              exit 1
++            fi
++          done
++
++          jq -n \
++            --arg version "$VERSION" \
++            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
++            --arg darwin_aarch64_sig "$DARWIN_AARCH64_SIG" \
++            --arg darwin_aarch64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \
++            --argjson darwin_aarch64_size "$DARWIN_AARCH64_SIZE" \
++            --arg darwin_x86_64_sig "$DARWIN_X86_64_SIG" \
++            --arg darwin_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \
++            --argjson darwin_x86_64_size "$DARWIN_X86_64_SIZE" \
++            --arg linux_x86_64_sig "$LINUX_APPIMAGE_SIG" \
++            --arg linux_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \
++            --argjson linux_x86_64_size "$LINUX_X86_64_SIZE" \
++            --arg windows_x86_64_sig "$WINDOWS_X86_64_SIG" \
++            --arg windows_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" \
++            --argjson windows_x86_64_size "$WINDOWS_X86_64_SIZE" \
++            '{
++              version: $version,
++              notes: ("Aztec Accelerator " + $version),
++              pub_date: $pub_date,
++              platforms: {
++                "darwin-aarch64": { signature: $darwin_aarch64_sig, url: $darwin_aarch64_url, size: $darwin_aarch64_size },
++                "darwin-x86_64": { signature: $darwin_x86_64_sig, url: $darwin_x86_64_url, size: $darwin_x86_64_size },
++                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url, size: $linux_x86_64_size },
++                "windows-x86_64": { signature: $windows_x86_64_sig, url: $windows_x86_64_url, size: $windows_x86_64_size }
++              }
++            }' > latest.json
++
++          # Pinned pubkey, verbatim from tauri.conf.json (already base64 of the minisign .pub — the exact
++          # key the app + the plugin trust).
++          bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
++
++          tool() { cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- "$@"; }
++
++          # Assemble the canonical envelope bytes → sign them with the release key → splice manifest +
++          # manifest_sig into the feed → VERIFY with the PRODUCTION verifier (fails the job on any
++          # mis-signed / mis-bound feed, before the release job can publish it).
++          tool envelope --feed latest.json > envelope.json
++          ( cd packages/accelerator && bunx tauri signer sign "${GITHUB_WORKSPACE}/envelope.json" )
++          tool splice --feed latest.json --envelope envelope.json --sig envelope.json.sig > latest.signed.json
++          tool verify --feed latest.signed.json --pubkey pubkey.b64
++          mv latest.signed.json latest.json
++
++          echo "Signed + verified latest.json:"
++          cat latest.json
++
++      - name: Upload signed update feed
++        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
++        with:
++          name: signed-update-feed
++          path: latest.json
++          if-no-files-found: error
++
+   release:
+     name: Create GitHub Release
+-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, tag, e2e-webdriver]
++    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, tag, e2e-webdriver, sign-update-feed]
++    # sign-update-feed is SKIPPED for prereleases (they get no feed); a skipped need must not skip
++    # release. Run whenever nothing FAILED/was cancelled — so a failed signing correctly blocks release,
++    # a skipped one (prerelease) does not.
++    # F-005: `!inputs.auth_probe` so a probe never publishes. `tag` is skipped in probe mode, but this
++    # job's `!cancelled()` would otherwise still run it — guard explicitly.
++    if: ${{ !inputs.auth_probe && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     permissions:
+       contents: write     # gh release create
+       id-token: write     # OIDC for aws-actions/configure-aws-credentials
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+       - name: Download all artifacts
+-        uses: actions/download-artifact@v8
++        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+         with:
+           path: artifacts
+ 
+@@ -638,74 +831,22 @@ jobs:
+           done
+           echo "All ${#EXPECTED[@]} expected artifacts present"
+ 
+-      - name: Generate latest.json for auto-updater
++      # F-004: latest.json is now assembled, SIGNED, and verified by the isolated sign-update-feed job
++      # (contents: read + signing key only). This job just stages that verified feed alongside the
++      # release artifacts — no signing key here, no re-generation. Gated on stable exactly like the old
++      # inline step; prereleases still ship no feed.
++      - name: Download signed update feed
+         if: needs.validate.outputs.is_prerelease == 'false'
+-        env:
+-          VERSION: ${{ needs.validate.outputs.version }}
+-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+-        run: |
+-          REPO="alejoamiras/aztec-accelerator"
+-          BASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+-
+-          # Read signatures from .sig files in artifacts
+-          DARWIN_AARCH64_SIG=$(find artifacts/accelerator-macos-arm64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
+-          DARWIN_X86_64_SIG=$(find artifacts/accelerator-macos-x86_64 -name '*.app.tar.gz.sig' -exec cat {} \; 2>/dev/null || echo "")
+-          LINUX_APPIMAGE_SIG=$(find artifacts -name '*.AppImage.sig' -exec cat {} \; 2>/dev/null || echo "")
+-          WINDOWS_X86_64_SIG=$(find artifacts/accelerator-windows-x86_64 -name '*-setup.nsis.zip.sig' -exec cat {} \; 2>/dev/null || echo "")
+-
+-          # Ground truth for debugging (the 1.0.5 incident): by this point "Flatten and rename
+-          # artifacts" has ALREADY mv'd every binary out of artifacts/ into release-files/ under its
+-          # release name — artifacts/ holds only the desktop .sig files (which is why the sig reads
+-          # above work). Any size/binary read MUST target release-files/, never artifacts/.
+-          echo "Artifacts tree (post-flatten — sigs only):"
+-          find artifacts -type f | sort
+-
+-          # Read artifact byte sizes (SEC-03): the client pre-flight-rejects an update whose advertised
+-          # size exceeds its cap, BEFORE the plugin buffers the whole artifact into memory. Read the
+-          # RENAMED files in release-files/ — the exact bytes the latest.json URLs point at (the
+-          # flatten step's EXPECTED assertion already guarantees they exist; a miss fails loudly here).
+-          DARWIN_AARCH64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" | tr -d ' ')
+-          DARWIN_X86_64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" | tr -d ' ')
+-          LINUX_X86_64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" | tr -d ' ')
+-          WINDOWS_X86_64_SIZE=$(wc -c <"release-files/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" | tr -d ' ')
+-
+-          # Assert all signatures AND sizes are present — empty values produce broken auto-updates
+-          for var_name in DARWIN_AARCH64_SIG DARWIN_X86_64_SIG LINUX_APPIMAGE_SIG WINDOWS_X86_64_SIG \
+-                          DARWIN_AARCH64_SIZE DARWIN_X86_64_SIZE LINUX_X86_64_SIZE WINDOWS_X86_64_SIZE; do
+-            if [ -z "${!var_name}" ]; then
+-              echo "::error::Missing $var_name — cannot generate latest.json"
+-              exit 1
+-            fi
+-          done
+-
+-          jq -n \
+-            --arg version "$VERSION" \
+-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+-            --arg darwin_aarch64_sig "$DARWIN_AARCH64_SIG" \
+-            --arg darwin_aarch64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \
+-            --argjson darwin_aarch64_size "$DARWIN_AARCH64_SIZE" \
+-            --arg darwin_x86_64_sig "$DARWIN_X86_64_SIG" \
+-            --arg darwin_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \
+-            --argjson darwin_x86_64_size "$DARWIN_X86_64_SIZE" \
+-            --arg linux_x86_64_sig "$LINUX_APPIMAGE_SIG" \
+-            --arg linux_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \
+-            --argjson linux_x86_64_size "$LINUX_X86_64_SIZE" \
+-            --arg windows_x86_64_sig "$WINDOWS_X86_64_SIG" \
+-            --arg windows_x86_64_url "${BASE_URL}/Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" \
+-            --argjson windows_x86_64_size "$WINDOWS_X86_64_SIZE" \
+-            '{
+-              version: $version,
+-              notes: ("Aztec Accelerator " + $version),
+-              pub_date: $pub_date,
+-              platforms: {
+-                "darwin-aarch64": { signature: $darwin_aarch64_sig, url: $darwin_aarch64_url, size: $darwin_aarch64_size },
+-                "darwin-x86_64": { signature: $darwin_x86_64_sig, url: $darwin_x86_64_url, size: $darwin_x86_64_size },
+-                "linux-x86_64": { signature: $linux_x86_64_sig, url: $linux_x86_64_url, size: $linux_x86_64_size },
+-                "windows-x86_64": { signature: $windows_x86_64_sig, url: $windows_x86_64_url, size: $windows_x86_64_size }
+-              }
+-            }' > release-files/latest.json
++        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
++        with:
++          name: signed-update-feed
++          path: signed-feed
+ 
+-          echo "Generated latest.json:"
++      - name: Stage signed latest.json
++        if: needs.validate.outputs.is_prerelease == 'false'
++        run: |
++          cp signed-feed/latest.json release-files/latest.json
++          echo "Staged signed latest.json:"
+           cat release-files/latest.json
+ 
+       - name: Create release
+@@ -806,10 +947,10 @@ jobs:
+               "${FILES[@]}"
+           fi
+ 
+-      - uses: aws-actions/configure-aws-credentials@v6
++      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+         if: needs.validate.outputs.is_prerelease == 'false'
+         with:
+-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
++          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }} # F-005: feed-only role (Put latest.json)
+           aws-region: ${{ secrets.AWS_REGION }}
+ 
+       - name: Upload latest.json to S3 for auto-updater
+@@ -819,9 +960,11 @@ jobs:
+           aws s3 cp release-files/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
+             --content-type application/json \
+             --cache-control "max-age=300"
++          # F-005: the viewer-request CloudFront function rewrites the URI PRE-cache, so the cached key is
++          # `/landing/releases/latest.json`; invalidate that (keep the legacy path too, harmless).
+           aws cloudfront create-invalidation \
+             --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+-            --paths "/releases/latest.json"
++            --paths "/landing/releases/latest.json" "/releases/latest.json"
+ 
+   # Enforce the live-feed check that was previously done by hand: after `release`
+   # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
+@@ -835,8 +978,18 @@ jobs:
+     if: needs.validate.outputs.is_prerelease == 'false'
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+-    permissions: {}
++    permissions:
++      contents: read
+     steps:
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: ./.github/actions/setup-accelerator
++        with:
++          rust-target: x86_64-unknown-linux-gnu
++          rust-cache-key: accelerator-sign-feed
++          rust-workspaces: packages/accelerator/core -> target
++          rust-components: ""
++          install-tauri-system-deps: "false"
++          run-prebuild: "false"
+       - name: Poll the prod feed + assert it serves this release
+         env:
+           EXPECTED: ${{ needs.validate.outputs.version }}
+@@ -874,7 +1027,16 @@ jobs:
+             [ -n "$ok" ] || { echo "::error::asset URL not reachable (last=$code): $u"; exit 1; }
+             echo "✅ 200 $u"
+           done < <(printf '%s' "$FEED" | jq -r '.platforms[].url')
+-          echo "✅ live updater feed verified == $EXPECTED, all assets reachable"
++
++          # F-004 (audit M7): run the PRODUCTION verifier over the live feed body. Version + reachable
++          # URLs alone don't prove the signed manifest survived the upload/CDN — a corrupted or dropped
++          # manifest_sig leaves those intact while EVERY C4 client rejects the update. This is the only
++          # cryptographic check on the real published feed.
++          printf '%s' "$FEED" > live-latest.json
++          bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
++          cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- \
++            verify --feed live-latest.json --pubkey pubkey.b64
++          echo "✅ live updater feed verified == $EXPECTED, all assets reachable, manifest signature valid"
+ 
+   bump-source:
+     name: Bump source version
+@@ -895,13 +1057,13 @@ jobs:
+           permission-contents: write
+           permission-pull-requests: write
+ 
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+         with:
+           token: ${{ steps.app-token.outputs.token }}
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+       - name: Compute next version
+         id: next
+diff --git a/.github/workflows/sdk.yml b/.github/workflows/sdk.yml
+index 4351395..6c0057b 100644
+--- a/.github/workflows/sdk.yml
++++ b/.github/workflows/sdk.yml
+@@ -3,7 +3,7 @@ name: SDK
+ on:
+   workflow_dispatch:
+   pull_request:
+-    branches: [main]
++    branches: [main, security-hardening]
+ 
+ # Cancel a superseded in-flight run when a new commit is pushed to the same PR.
+ concurrency:
+@@ -18,8 +18,8 @@ jobs:
+     outputs:
+       relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: dorny/paths-filter@v4
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
+         id: filter
+         with:
+           filters: |
+@@ -45,11 +45,11 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -64,11 +64,11 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+@@ -83,11 +83,11 @@ jobs:
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+-      - uses: actions/checkout@v6
+-      - uses: oven-sh/setup-bun@v2
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
+-      - uses: actions/cache@v5
++          bun-version: 1.3.14
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+diff --git a/.github/workflows/warm-playwright-cache.yml b/.github/workflows/warm-playwright-cache.yml
+index df5780f..e1c5d4a 100644
+--- a/.github/workflows/warm-playwright-cache.yml
++++ b/.github/workflows/warm-playwright-cache.yml
+@@ -36,13 +36,13 @@ jobs:
+     # (composite uses `timeout 1800`). This job is non-blocking + rerunnable.
+     timeout-minutes: 45
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+ 
+-      - uses: oven-sh/setup-bun@v2
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+         with:
+-          bun-version: latest
++          bun-version: 1.3.14
+ 
+-      - uses: actions/cache@v5
++      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+         with:
+           path: ~/.bun/install/cache
+           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+diff --git a/.github/workflows/warm-rust-cache.yml b/.github/workflows/warm-rust-cache.yml
+index 5c07d18..0ca7dd0 100644
+--- a/.github/workflows/warm-rust-cache.yml
++++ b/.github/workflows/warm-rust-cache.yml
+@@ -35,7 +35,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/src-tauri
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+@@ -51,7 +51,7 @@ jobs:
+       run:
+         working-directory: packages/accelerator/server
+     steps:
+-      - uses: actions/checkout@v6
++      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+       - uses: ./.github/actions/setup-accelerator
+         with:
+           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu

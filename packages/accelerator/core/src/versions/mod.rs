@@ -10,9 +10,12 @@ mod downloader;
 mod release_metadata;
 mod version_policy;
 
-pub use cache_layout::{bb_binary_name, list_cached_versions, version_bb_path, versions_base_dir};
+pub use cache_layout::{
+    bb_binary_name, list_cached_versions, verify_cached_bb, version_bb_path, versions_base_dir,
+};
 pub use downloader::download_bb;
 pub use release_metadata::{current_platform, download_url};
 pub use version_policy::{
-    cleanup_old_versions, is_valid_version, versions_to_evict, AztecVersion, NetworkTier,
+    check_version_selectable, cleanup_old_versions, is_valid_version, versions_to_evict,
+    AztecVersion, NetworkTier, VersionRejection,
 };

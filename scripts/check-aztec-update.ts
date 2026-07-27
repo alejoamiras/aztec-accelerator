@@ -8,7 +8,7 @@
  * Output: JSON with { current, latest, needsUpdate }
  */
 
-const distTag = process.argv[2];
+const distTag = process.argv[2] ?? "";
 if (!distTag) {
   console.error("Usage: bun scripts/check-aztec-update.ts <dist-tag>");
   console.error("Examples:");

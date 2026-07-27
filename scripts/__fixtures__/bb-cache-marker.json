@@ -1,0 +1,7 @@
+{
+  "schema": "aztec-accelerator/bb-cache-marker@1",
+  "version": "5.0.0-rc.2",
+  "platform": "amd64-linux",
+  "archive_sha256": "c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842",
+  "binary_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

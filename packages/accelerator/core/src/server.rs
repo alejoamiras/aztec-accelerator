@@ -22,13 +22,19 @@ use tokio::sync::Semaphore;
 mod bind;
 pub use bind::bind_with_retry;
 mod probe;
-pub use probe::healthy_aztec_on_port;
+pub use probe::{healthy_aztec_on_port, healthy_aztec_version_on_port};
 mod auth;
 mod host;
 mod prove;
 
 const PORT: u16 = 59833;
 pub const HTTPS_PORT: u16 = 59834;
+
+/// F-009: cap on concurrently in-flight + waiting authorized `/prove` requests (one holds the
+/// prove permit; the rest wait to buffer their body). Bounds the total queue so a burst of slow
+/// uploaders can't stack fresh per-request read timeouts and starve a legitimate request for
+/// minutes — excess authorized requests are shed immediately with 429 instead of queueing.
+pub(crate) const MAX_INFLIGHT_PROVE: usize = 8;
 
 /// Fallback Aztec bb version reported by `/health` + used as the proving default when no version is
 /// injected via `HeadlessState.bundled_version`. Core is `build.rs`-free, so this replaces the old
@@ -41,6 +47,18 @@ pub const DEFAULT_BB_VERSION: &str = "unknown";
 /// contract — shared so the server-side timeout and the popup auto-deny can't drift (windows.rs
 /// imports this).
 pub const AUTH_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// C9 (D18): absolute upper bound on how long a `/prove` request blocks waiting for a decision. The REAL
+/// per-popup 60 s deadline is enforced by the popup's ACTIVATION-armed auto-deny timer (windows.rs) — so a
+/// request queued behind a busy popup is NOT denied at 60 s-from-enqueue (the starvation bug). This
+/// backstop only bounds the total queued wait — at most `MAX_PENDING_ORIGINS` popups each taking up to
+/// `AUTH_DECISION_TIMEOUT` — so a queued request that somehow never surfaces can't block forever.
+pub const AUTH_QUEUE_BACKSTOP: Duration = Duration::from_secs(
+    // `MAX_PENDING_ORIGINS + 1` (not exactly ×MAX): the last-queued request only becomes active after the
+    // MAX-1 ahead of it each drain a full 60 s, so a bare ×MAX would make its /prove backstop coincide with
+    // the END of its own 60 s activation window. The +1 gives it a full window of margin (code-review).
+    AUTH_DECISION_TIMEOUT.as_secs() * (crate::authorization::MAX_PENDING_ORIGINS as u64 + 1),
+);
 
 /// Status surfaced to the tray via the `on_status` callback during a `/prove` request.
 /// `display_text()` MUST stay byte-identical to the legacy `"Status: …"` string literals — the
@@ -102,6 +120,10 @@ pub struct HeadlessState {
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
     pub prove_semaphore: Arc<Semaphore>,
+    /// F-009: bounds total in-flight + waiting authorized `/prove` requests (`MAX_INFLIGHT_PROVE`).
+    /// Acquired (try, non-blocking) right after origin auth and held for the whole request, so a
+    /// burst of slow uploaders is shed with 429 rather than stacking per-request read timeouts.
+    pub prove_waiters: Arc<Semaphore>,
 }
 
 /// Full app state: the headless `core` plus the optional GUI callbacks. `Deref`s to `core`, so the
@@ -133,6 +155,7 @@ impl Default for HeadlessState {
             config: None,
             auth_manager: None,
             prove_semaphore: Arc::new(Semaphore::new(1)),
+            prove_waiters: Arc::new(Semaphore::new(MAX_INFLIGHT_PROVE)),
         }
     }
 }
@@ -154,6 +177,7 @@ impl HeadlessState {
             config,
             auth_manager,
             prove_semaphore: Arc::new(Semaphore::new(1)),
+            prove_waiters: Arc::new(Semaphore::new(MAX_INFLIGHT_PROVE)),
         }
     }
 }
@@ -321,13 +345,29 @@ async fn health(
 #[derive(Debug)]
 pub(crate) enum ProveError {
     InvalidVersion(String),
+    /// codex audit #3: the requested version is well-formed but refused by the downgrade policy
+    /// (older than bundled, a dev/unknown-channel build, build metadata, …). Distinct from
+    /// `InvalidVersion` (malformed/traversal) so a legitimate integrator sees WHY their pin was denied.
+    VersionNotAllowed {
+        version: String,
+        reason: &'static str,
+    },
     PayloadTooLarge(String),
+    /// F-009: the request body did not finish arriving within the read timeout while holding
+    /// the single prove permit (slowloris / stalled upload). Distinct from PayloadTooLarge.
+    BodyReadTimeout,
     ServiceUnavailable,
-    DownloadFailed { version: String, detail: String },
+    DownloadFailed {
+        version: String,
+        detail: String,
+    },
     ProveFailed(String),
     InvalidOrigin,
     OriginDenied(String),
     TooManyRequests,
+    /// F-009: the authorized-`/prove` waiter cap (`MAX_INFLIGHT_PROVE`) is full — shed with 429
+    /// rather than queueing behind slow uploaders. Distinct from `TooManyRequests` (auth backlog).
+    ProveQueueFull,
     AuthorizationTimeout,
     AuthorizationCancelled,
 }
@@ -340,10 +380,20 @@ impl IntoResponse for ProveError {
                 "invalid_version",
                 format!("Invalid x-aztec-version header (got '{v}')"),
             ),
+            ProveError::VersionNotAllowed { version, reason } => (
+                StatusCode::FORBIDDEN,
+                "version_not_allowed",
+                format!("Requested bb version '{version}' is not selectable: {reason}"),
+            ),
             ProveError::PayloadTooLarge(e) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
                 format!("Body too large or unreadable: {e}"),
+            ),
+            ProveError::BodyReadTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "body_read_timeout",
+                "Timed out while reading request body".to_string(),
             ),
             ProveError::ServiceUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -370,6 +420,11 @@ impl IntoResponse for ProveError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_requests",
                 "Too many pending authorization requests".to_string(),
+            ),
+            ProveError::ProveQueueFull => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "prove_queue_full",
+                "Too many concurrent proving requests; retry shortly".to_string(),
             ),
             ProveError::AuthorizationTimeout => (
                 StatusCode::FORBIDDEN,

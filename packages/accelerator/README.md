@@ -96,12 +96,27 @@ Because the accelerator downloads `bb` at runtime (above), it is **decoupled fro
 
 ### bb Binary Resolution
 
-When no specific version is requested, the accelerator looks for the `bb` binary in this order:
+When **no specific version** is requested (or the bundled version is), the accelerator looks for the `bb` binary in this order:
 
 1. **`BB_BINARY_PATH` env var** — explicit override (CI, testing)
 2. **Sidecar** — bundled with the app (`binaries/bb`)
 3. **`~/.bb/bb`** — user-installed via the Aztec CLI
 4. **`PATH`** — system-wide installation
+
+When a **specific version is requested**, the *only* acceptable source is the marker-verified version cache — the accelerator never falls back to the sidecar/`~/.bb`/`PATH` for a requested version (that would silently run the wrong or an unverified `bb` over your private witness).
+
+### Cache Integrity (F-007)
+
+Every cached `bb` is verified end-to-end. On download (both the runtime and `bun run bb:download`), the tarball is checked against the GitHub release asset's published SHA-256 digest, decompressed under a cumulative size cap (gzip-bomb defense) into a private, owner-only staging directory (rejecting symlink/hardlink/non-regular/extra members), ad-hoc re-signed on macOS, then published alongside a `bb.sha256.json` **marker** recording the archive + final-binary digests. Publish is fail-closed delete-then-rename (a crash leaves no live entry ⇒ verified re-download next use), not an atomic replacement. Before every prove, the runtime **re-hashes** the cached binary against its marker; a missing, malformed, or mismatched marker fails closed and triggers a fresh verified re-download.
+
+- **Legacy caches** (populated before this change, with no marker) re-download on first use.
+- **Offline** machines with an unmarked cache fail closed until an online verified re-download.
+- **`BB_BINARY_PATH`** is a trusted, unverified operator override — the one documented exception to "nothing unverified runs" (whoever sets the process environment already controls the process).
+- Only releases that expose an asset digest (GitHub added these June 2025) are downloadable; older releases fail closed.
+
+### Windows bb.exe pin provenance (F-008)
+
+Windows has no npm `bb`, so `bb.exe` ships as a sidecar fetched from a GitHub release and pinned by SHA-256 in `scripts/copy-bb.ts` (`WINDOWS_BB_CHECKSUMS`). Pins are **never auto-generated** — auto-downloading and recording the hash is circular ("trust whatever arrived"). Each pin is a structured `{ sha256, provenance, note }`; the resolver only accepts `provenance: "manual-review"` (a human reviewed the release + recorded the hash) and fails closed on anything else. A new bb version with no pin leaves the `@aztec` bump PR **open** (`merge_mode: none`) with a red Windows gate until a human adds a reviewed pin. `manual-review` is a **change-detector**, not cryptographic proof — AztecProtocol does not yet sign/attest bb releases (the same upstream-signing gap as F-007); `attestation` provenance is reserved for when they do. See `implementations-plan/security-hardening/clusters/C7-runbook.md` for how to add a pin + the ruleset-bypass readback the fail-closed guarantee depends on.
 
 ## Site Authorization
 

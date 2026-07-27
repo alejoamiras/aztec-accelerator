@@ -1,0 +1,1137 @@
+diff --git a/packages/accelerator/core/src/win_acl.rs b/packages/accelerator/core/src/win_acl.rs
+new file mode 100644
+index 0000000..f9a4c4e
+--- /dev/null
++++ b/packages/accelerator/core/src/win_acl.rs
+@@ -0,0 +1,402 @@
++//! F-003 Windows tail: owner-only ACLs on the private prove workspace (+ witness), the leaf TLS key, and
++//! `config.json`. On Unix these paths are already `0o700`/`0o600` at creation; on Windows the mode bits are
++//! a no-op, so without this a file inherits its parent's (potentially group-readable) ACL.
++//!
++//! Design (folds the dual-audit + codex-final FFI conditions):
++//! - **Reparse-safe + existence-atomic**: objects are created with `CREATE_NEW` / `CreateDirectoryW`, which
++//!   FAIL if anything already exists at the path — so a pre-planted symlink/junction can't be adopted.
++//! - **PROTECTED DACL**: the ACL is applied to the OPEN HANDLE via `SetSecurityInfo` with
++//!   `PROTECTED_DACL_SECURITY_INFORMATION`, which strips inherited parent ACEs (handle-based does NOT follow
++//!   names, unlike `SetNamedSecurityInfoW`). The narrow window between create and apply carries only the
++//!   default per-user `%LOCALAPPDATA%` ACL (owner+SYSTEM+Admins, never world).
++//! - **Fail-closed readback**: after applying, the effective DACL is read back off the handle and asserted
++//!   owner-only; a FAT/exFAT/network volume that silently no-ops ACL calls therefore returns an error rather
++//!   than a falsely-"secured" path.
++//! - **Memory hygiene**: the token handle is `CloseHandle`d; the `SetEntriesInAclW` ACL and every
++//!   `GetSecurityInfo` security descriptor are `LocalFree`d exactly once on every path (RAII guards); the
++//!   SID is copied out of the token buffer (never aliased/freed separately).
++#![cfg(windows)]
++
++use std::io;
++use std::os::windows::ffi::OsStrExt;
++use std::os::windows::io::FromRawHandle;
++use std::path::Path;
++
++use windows_sys::Win32::Foundation::{
++    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, GENERIC_WRITE, HANDLE,
++    INVALID_HANDLE_VALUE,
++};
++use windows_sys::Win32::Security::Authorization::{
++    GetSecurityInfo, SetEntriesInAclW, SetSecurityInfo, EXPLICIT_ACCESS_W, SET_ACCESS,
++    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
++};
++use windows_sys::Win32::Security::{
++    CopySid, EqualSid, GetAce, GetLengthSid, GetTokenInformation, IsWellKnownSid, TokenUser,
++    WinBuiltinUsersSid, WinWorldSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
++    DACL_SECURITY_INFORMATION, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
++    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY,
++    TOKEN_USER,
++};
++
++/// `ACCESS_ALLOWED_ACE_TYPE` (winnt.h `0x0`) — not re-exported by windows-sys under this path, so pinned
++/// to its documented value. Only this ACE type has the `SidStart` layout `verify_owner_only` reads.
++const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
++use windows_sys::Win32::Storage::FileSystem::{
++    CreateDirectoryW, CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
++    CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
++    FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING, WRITE_OWNER,
++};
++use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
++
++/// RAII: close a kernel handle exactly once.
++struct HandleGuard(HANDLE);
++impl Drop for HandleGuard {
++    fn drop(&mut self) {
++        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
++            unsafe { CloseHandle(self.0) };
++        }
++    }
++}
++
++/// RAII: `LocalFree` a `LocalAlloc`-owned pointer (SetEntriesInAclW ACL, GetSecurityInfo descriptor).
++struct LocalFreeGuard(*mut core::ffi::c_void);
++impl Drop for LocalFreeGuard {
++    fn drop(&mut self) {
++        if !self.0.is_null() {
++            unsafe { LocalFree(self.0) };
++        }
++    }
++}
++
++fn last_err() -> io::Error {
++    io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
++}
++
++/// Reject a handle that refers to a reparse point (junction/symlink). Closes the create→open TOCTOU on
++/// `secure_create_dir` + `harden_existing`: a path swapped for a junction between create and open is opened
++/// as the link itself (FILE_FLAG_OPEN_REPARSE_POINT), so its handle carries FILE_ATTRIBUTE_REPARSE_POINT.
++unsafe fn reject_if_reparse(handle: HANDLE) -> io::Result<()> {
++    let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
++    if GetFileInformationByHandle(handle, &mut info) == 0 {
++        return Err(last_err());
++    }
++    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "path is a reparse point (junction/symlink) — refusing to apply an owner-only ACL",
++        ));
++    }
++    Ok(())
++}
++
++/// Wide-encode a path with a trailing NUL for the `*W` Win32 APIs.
++fn wide(path: &Path) -> Vec<u16> {
++    path.as_os_str()
++        .encode_wide()
++        .chain(std::iter::once(0))
++        .collect()
++}
++
++/// The current process user's SID, copied into an owned buffer (so it outlives the token buffer it was
++/// read from — the SID inside `TOKEN_USER` is a pointer INTO that buffer).
++fn current_user_sid() -> io::Result<Vec<u8>> {
++    unsafe {
++        let mut token: HANDLE = std::ptr::null_mut();
++        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
++            return Err(last_err());
++        }
++        let _tguard = HandleGuard(token);
++
++        // Two-call sizing.
++        let mut len: u32 = 0;
++        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len);
++        if len == 0 {
++            return Err(last_err());
++        }
++        let mut buf = vec![0u8; len as usize];
++        if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, len, &mut len) == 0 {
++            return Err(last_err());
++        }
++        // `buf` is a `Vec<u8>` (align 1) but `TOKEN_USER` contains a pointer (align 8) — taking a
++        // `&TOKEN_USER` reference to a possibly-misaligned address is UB. Read the `User.Sid` pointer field
++        // via `addr_of!` + `read_unaligned` (no reference is ever formed). (codex post-impl #1)
++        let tu = buf.as_ptr() as *const TOKEN_USER;
++        let sid_ptr: PSID = std::ptr::addr_of!((*tu).User.Sid).read_unaligned();
++        let sid_len = GetLengthSid(sid_ptr);
++        let mut sid = vec![0u8; sid_len as usize];
++        if CopySid(sid_len, sid.as_mut_ptr() as PSID, sid_ptr) == 0 {
++            return Err(last_err());
++        }
++        Ok(sid)
++    }
++}
++
++/// Apply an owner-only PROTECTED DACL (current user, full control) to an open handle, then read it back and
++/// assert it took effect. `inheritable` adds container/object inheritance (for directories, so children are
++/// private at creation).
++unsafe fn apply_and_verify_owner_only(handle: HANDLE, inheritable: bool) -> io::Result<()> {
++    // Close the create/open TOCTOU (codex post-impl #3): if the path was swapped for a junction between
++    // creation and this open, the handle (opened FILE_FLAG_OPEN_REPARSE_POINT) is a reparse point — refuse
++    // rather than secure the link while real accesses follow it to a non-owner-only target.
++    reject_if_reparse(handle)?;
++    let mut sid = current_user_sid()?;
++
++    // One EXPLICIT_ACCESS: grant full control to the current user, inheritance per `inheritable`.
++    let mut ea: EXPLICIT_ACCESS_W = std::mem::zeroed();
++    ea.grfAccessPermissions = FILE_ALL_ACCESS;
++    ea.grfAccessMode = SET_ACCESS;
++    ea.grfInheritance = if inheritable {
++        SUB_CONTAINERS_AND_OBJECTS_INHERIT
++    } else {
++        NO_INHERITANCE
++    };
++    ea.Trustee = std::mem::zeroed::<TRUSTEE_W>();
++    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
++    ea.Trustee.TrusteeType = TRUSTEE_IS_USER;
++    ea.Trustee.ptstrName = sid.as_mut_ptr() as *mut u16;
++
++    let mut acl: *mut ACL = std::ptr::null_mut();
++    let rc = SetEntriesInAclW(1, &ea, std::ptr::null_mut(), &mut acl);
++    if rc != 0 {
++        return Err(io::Error::from_raw_os_error(rc as i32));
++    }
++    let _acl_guard = LocalFreeGuard(acl as *mut _);
++
++    // PROTECTED_DACL strips inherited ACEs; handle-based SetSecurityInfo does not follow the name.
++    // codex #6 / F-003: ALSO set the OWNER to the current user. The Windows owner ALWAYS holds implicit
++    // READ_CONTROL + WRITE_DAC, so a foreign owner (e.g. Administrators as the default owner for an
++    // elevated creator) could rewrite our owner-only DACL regardless of the ACEs — set + verify the owner
++    // to close that bypass. Setting the owner to our own token SID needs WRITE_OWNER (requested at open).
++    let rc = SetSecurityInfo(
++        handle,
++        SE_FILE_OBJECT,
++        OWNER_SECURITY_INFORMATION
++            | DACL_SECURITY_INFORMATION
++            | PROTECTED_DACL_SECURITY_INFORMATION,
++        sid.as_mut_ptr() as PSID,
++        std::ptr::null_mut(),
++        acl,
++        std::ptr::null_mut(),
++    );
++    if rc != 0 {
++        return Err(io::Error::from_raw_os_error(rc as i32));
++    }
++
++    // Fail-closed readback: catches FAT/exFAT / network volumes that silently ignore ACLs, AND a foreign
++    // owner that would retain WRITE_DAC over our DACL.
++    verify_owner_only(handle, &sid)?;
++    verify_owner_sid(handle, &sid)
++}
++
++/// Read the OWNER back off the handle and assert it is the current user. The Windows owner ALWAYS has
++/// implicit `READ_CONTROL` + `WRITE_DAC`, so a non-owner-only DACL is meaningless if a foreign principal
++/// owns the object — it can simply rewrite the DACL. Fail-closed if the owner is absent or foreign
++/// (codex audit #6).
++unsafe fn verify_owner_sid(handle: HANDLE, sid: &[u8]) -> io::Result<()> {
++    let mut owner: PSID = std::ptr::null_mut();
++    let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
++    let rc = GetSecurityInfo(
++        handle,
++        SE_FILE_OBJECT,
++        OWNER_SECURITY_INFORMATION,
++        &mut owner,
++        std::ptr::null_mut(),
++        std::ptr::null_mut(),
++        std::ptr::null_mut(),
++        &mut sd,
++    );
++    if rc != 0 {
++        return Err(io::Error::from_raw_os_error(rc as i32));
++    }
++    let _sd_guard = LocalFreeGuard(sd);
++    if owner.is_null() {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "object has no owner after applying owner-only ACL",
++        ));
++    }
++    if EqualSid(owner, sid.as_ptr() as PSID) == 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "object owner is not the current user (foreign owner retains WRITE_DAC)",
++        ));
++    }
++    Ok(())
++}
++
++/// Read the effective DACL back off the handle and assert it grants EXACTLY the given SID — no
++/// `BUILTIN\Users`, no `Everyone`. Errors (fail-closed) if the DACL is absent or any ACE is foreign.
++unsafe fn verify_owner_only(handle: HANDLE, sid: &[u8]) -> io::Result<()> {
++    let mut dacl: *mut ACL = std::ptr::null_mut();
++    let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
++    let rc = GetSecurityInfo(
++        handle,
++        SE_FILE_OBJECT,
++        DACL_SECURITY_INFORMATION,
++        std::ptr::null_mut(),
++        std::ptr::null_mut(),
++        &mut dacl,
++        std::ptr::null_mut(),
++        &mut sd,
++    );
++    if rc != 0 {
++        return Err(io::Error::from_raw_os_error(rc as i32));
++    }
++    let _sd_guard = LocalFreeGuard(sd);
++    if dacl.is_null() {
++        // A null DACL means "everyone full access" — the FAT/exFAT no-op case. Fail closed.
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "owner-only ACL not applied (null DACL — unsupported filesystem?)",
++        ));
++    }
++    let ace_count = (*dacl).AceCount as u32;
++    if ace_count == 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "owner-only ACL not applied (empty DACL)",
++        ));
++    }
++    let want: PSID = sid.as_ptr() as PSID;
++    for i in 0..ace_count {
++        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
++        if GetAce(dacl, i, &mut ace) == 0 {
++            return Err(last_err());
++        }
++        // Verify the ACE TYPE before casting: only ACCESS_ALLOWED_ACE has the SidStart layout we read.
++        // Anything else (a DENY/AUDIT/OBJECT ACE we never set) means the DACL isn't the owner-only ACL we
++        // applied → fail closed rather than misparse a foreign ACE's bytes as a SID.
++        let header = &*(ace as *const ACE_HEADER);
++        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
++            return Err(io::Error::new(
++                io::ErrorKind::PermissionDenied,
++                "unexpected ACE type after applying owner-only ACL",
++            ));
++        }
++        let allowed = &*(ace as *const ACCESS_ALLOWED_ACE);
++        let ace_sid = &allowed.SidStart as *const u32 as PSID;
++        if EqualSid(ace_sid, want) == 0 {
++            // Reject a foreign ACE — especially well-known world/users SIDs.
++            if IsWellKnownSid(ace_sid, WinWorldSid) != 0
++                || IsWellKnownSid(ace_sid, WinBuiltinUsersSid) != 0
++            {
++                return Err(io::Error::new(
++                    io::ErrorKind::PermissionDenied,
++                    "world/users ACE present after applying owner-only ACL",
++                ));
++            }
++            return Err(io::Error::new(
++                io::ErrorKind::PermissionDenied,
++                "foreign ACE present after applying owner-only ACL",
++            ));
++        }
++        // Our ACE must grant FULL control — verify the access mask, not just the SID. (codex post-impl #2)
++        if allowed.Mask & FILE_ALL_ACCESS != FILE_ALL_ACCESS {
++            return Err(io::Error::new(
++                io::ErrorKind::PermissionDenied,
++                "owner ACE does not grant full control after applying owner-only ACL",
++            ));
++        }
++    }
++    Ok(())
++}
++
++/// Create a directory with an owner-only PROTECTED, INHERITABLE DACL. Fails if the path already exists
++/// (reparse/symlink pre-plant defense).
++pub fn secure_create_dir(path: &Path) -> io::Result<()> {
++    let w = wide(path);
++    unsafe {
++        if CreateDirectoryW(w.as_ptr(), std::ptr::null_mut()) == 0 {
++            let e = GetLastError();
++            // ERROR_ALREADY_EXISTS ⇒ something is already at the path; fail closed.
++            return Err(io::Error::from_raw_os_error(e as i32));
++        }
++        // Open a handle to the just-created directory to apply the DACL + owner (WRITE_OWNER, codex #6).
++        let handle = CreateFileW(
++            w.as_ptr(),
++            windows_sys::Win32::Storage::FileSystem::WRITE_DAC
++                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL
++                | WRITE_OWNER,
++            0,
++            std::ptr::null_mut(),
++            OPEN_EXISTING,
++            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
++            std::ptr::null_mut(),
++        );
++        if handle == INVALID_HANDLE_VALUE {
++            return Err(last_err());
++        }
++        let _hg = HandleGuard(handle);
++        apply_and_verify_owner_only(handle, true)
++    }
++}
++
++/// Create a NEW file with an owner-only PROTECTED DACL and return it (ready to write). `CREATE_NEW` fails
++/// if the path exists, so a pre-planted file/symlink is rejected; the ACL is applied to the empty file
++/// BEFORE any content is written.
++pub fn secure_create_file(path: &Path) -> io::Result<std::fs::File> {
++    let w = wide(path);
++    unsafe {
++        let handle = CreateFileW(
++            w.as_ptr(),
++            GENERIC_WRITE
++                | windows_sys::Win32::Storage::FileSystem::WRITE_DAC
++                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL
++                | WRITE_OWNER,
++            0, // no sharing
++            std::ptr::null_mut(),
++            CREATE_NEW,
++            FILE_FLAG_OPEN_REPARSE_POINT,
++            std::ptr::null_mut(),
++        );
++        if handle == INVALID_HANDLE_VALUE {
++            let e = GetLastError();
++            let _ = ERROR_ALREADY_EXISTS; // documented reason: CREATE_NEW fails if it exists
++            return Err(io::Error::from_raw_os_error(e as i32));
++        }
++        // Do NOT put this handle in a guard: on success we hand it to std::fs::File which owns/closes it.
++        if let Err(e) = apply_and_verify_owner_only(handle, false) {
++            CloseHandle(handle);
++            return Err(e);
++        }
++        Ok(std::fs::File::from_raw_handle(handle as *mut _))
++    }
++}
++
++/// Harden an EXISTING file we did not create atomically (e.g. `config.json`'s temp file written by std,
++/// before its rename). Opens with reparse-open (does not traverse a reparse), applies the owner-only DACL.
++pub fn harden_existing_file(path: &Path) -> io::Result<()> {
++    harden_existing(path, false)
++}
++
++/// Harden an EXISTING directory (e.g. the persistent `prove-tmp` parent, or a `tempfile`-created child that
++/// already inherits owner-only from its hardened parent). Inheritable so children stay private.
++pub fn harden_existing_dir(path: &Path) -> io::Result<()> {
++    harden_existing(path, true)
++}
++
++fn harden_existing(path: &Path, is_dir: bool) -> io::Result<()> {
++    let w = wide(path);
++    let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
++    if is_dir {
++        flags |= FILE_FLAG_BACKUP_SEMANTICS; // required to obtain a directory handle
++    }
++    unsafe {
++        let handle = CreateFileW(
++            w.as_ptr(),
++            windows_sys::Win32::Storage::FileSystem::WRITE_DAC
++                | windows_sys::Win32::Storage::FileSystem::READ_CONTROL
++                | WRITE_OWNER,
++            0,
++            std::ptr::null_mut(),
++            OPEN_EXISTING,
++            flags,
++            std::ptr::null_mut(),
++        );
++        if handle == INVALID_HANDLE_VALUE {
++            return Err(last_err());
++        }
++        let _hg = HandleGuard(handle);
++        apply_and_verify_owner_only(handle, is_dir)
++    }
++}
+diff --git a/packages/accelerator/src-tauri/src/certs.rs b/packages/accelerator/src-tauri/src/certs.rs
+index 9df1990..fc42f92 100644
+--- a/packages/accelerator/src-tauri/src/certs.rs
++++ b/packages/accelerator/src-tauri/src/certs.rs
+@@ -8,6 +8,7 @@ use std::path::PathBuf;
+ use std::sync::Arc;
+ use time::OffsetDateTime;
+ use tokio_rustls::rustls;
++use zeroize::Zeroizing;
+ 
+ /// Returns `~/.aztec-accelerator/certs/`.
+ pub fn certs_dir() -> PathBuf {
+@@ -135,20 +136,28 @@ pub fn certs_exist() -> bool {
+ }
+ 
+ /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
+-/// The CA private key is generated in memory, signs the leaf, and is dropped at function end —
+-/// **never written to disk.** Writing to caller-chosen paths lets rotation stage a new set
++/// The CA private key is generated in memory (`Zeroizing`), signs the leaf, and is dropped+scrubbed
++/// EARLY — right after signing, before the file writes (F-016) — and is **never written to disk.**
++/// Writing to caller-chosen paths lets rotation stage a new set
+ /// (`*.new`) and atomically swap it in only after the new anchor is trusted.
+ fn write_new_cert_set(paths: &CertPaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+     let now = OffsetDateTime::now_utc();
+-    let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
++    // F-016: wrap the CA signing key in `Zeroizing` so rcgen scrubs its serialized-DER copy on drop (a
++    // plain drop scrubs nothing), and drop it as EARLY as possible — right after it signs the leaf, before
++    // the fallible file writes.
++    let ca_key = Zeroizing::new(KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?);
+     let ca_cert = ca_params(now).self_signed(&ca_key)?;
+     let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+     let leaf_cert = leaf_params(now)?.signed_by(&leaf_key, &ca_cert, &ca_key)?;
++    // Scrub rcgen's serialized-DER CA key now. RESIDUAL (F-016): `Zeroizing` wipes ONLY that `Vec` — the
++    // ring backend's ECDSA scalar/nonce, key-generation temporaries, swap pages, and any core dump are NOT
++    // scrubbed, so this is best-effort post-use reduction, not a guarantee the CA key is unrecoverable. The
++    // CA key is never written to disk; the leaf key is persisted at 0600 by design.
++    drop(ca_key);
+ 
+     write_pem_file(&paths.ca_cert, &ca_cert.pem())?;
+     write_pem_file(&paths.leaf_cert, &leaf_cert.pem())?;
+     write_pem_file(&paths.leaf_key, &leaf_key.serialize_pem())?;
+-    // `ca_key` drops here — the only copy of the CA signing key is gone.
+     Ok(())
+ }
+ 
+@@ -239,7 +248,15 @@ fn write_pem_file(
+                 .mode(0o600)
+                 .open(&tmp)?
+         };
+-        #[cfg(not(unix))]
++        // F-003 Windows tail: the leaf TLS key (localhost.key) is a real private key — write the temp with
++        // an owner-only DACL (the SD travels with the same-volume rename). Clear any stale temp for
++        // CREATE_NEW. Applies to the cert siblings too (harmless — they're per-user files).
++        #[cfg(windows)]
++        let mut file = {
++            let _ = std::fs::remove_file(&tmp);
++            accelerator_core::win_acl::secure_create_file(&tmp)?
++        };
++        #[cfg(all(not(unix), not(windows)))]
+         let mut file = std::fs::File::create(&tmp)?;
+         file.write_all(contents.as_bytes())?;
+         file.sync_all()?;
+diff --git a/packages/accelerator/src-tauri/src/crash_recovery.rs b/packages/accelerator/src-tauri/src/crash_recovery.rs
+index d8a5f53..5e1e237 100644
+--- a/packages/accelerator/src-tauri/src/crash_recovery.rs
++++ b/packages/accelerator/src-tauri/src/crash_recovery.rs
+@@ -14,13 +14,19 @@
+ /// result on Windows (where the updater MUST know the always-armed task is gone before NSIS mutates
+ /// files).
+ pub trait CrashRecovery {
+-    fn enable(&self);
++    /// Arm crash recovery. C8: returns `Err` if the ARMING genuinely failed (so a caller mid-transaction
++    /// can roll back) and `Ok` for an idempotent already-armed state — see each `enable_impl`'s per-exit
++    /// classification in `implementations-plan/security-hardening/closeout-followups/lessons/phase-1.md`.
++    fn enable(&self) -> Result<(), String>;
+     fn disable(&self) -> bool;
+ }
+ 
+ /// Enable crash recovery for the current platform (thin dispatch to the platform `CrashRecovery`).
+-pub fn enable_crash_recovery() {
+-    PlatformRecovery.enable();
++/// C8: `Err` on a real arming failure — callers that arm as part of a transaction (`set_autostart`)
++/// roll back on it; the log-and-continue callers (`main.rs` startup rearm, `updater.rs` post-update
++/// rearm) must NOT abort on it.
++pub fn enable_crash_recovery() -> Result<(), String> {
++    PlatformRecovery.enable()
+ }
+ 
+ /// Disable crash recovery. See [`CrashRecovery::disable`] for the `bool` contract — callers that must
+@@ -35,14 +41,88 @@ pub fn disable_crash_recovery() -> bool {
+ pub struct PlatformRecovery;
+ 
+ impl CrashRecovery for PlatformRecovery {
+-    fn enable(&self) {
+-        enable_impl();
++    fn enable(&self) -> Result<(), String> {
++        enable_impl()
+     }
+     fn disable(&self) -> bool {
+         disable_impl()
+     }
+ }
+ 
++/// C8 (D13/D20): run the autostart-enable transaction with rollback, generic over injected closures so
++/// the ordering + completeness + failure modes are unit-testable on Linux CI without a real `AppHandle`.
++///
++/// Forward: `plugin_enable` (the tauri-plugin-autostart launcher entry) then `crash_arm`
++/// (`enable_crash_recovery`). On ANY forward failure, roll back **failure-observably**:
++/// - run BOTH `crash_disarm` and (only if we changed it — i.e. `!prior_enabled`) `plugin_disable`,
++///   executing both even if one fails (no short-circuit),
++/// - do NOT unconditionally disable: if `prior_enabled` the launcher was already on before this call, so
++///   leave it (restore prior state) rather than clobbering it,
++/// - return a combined `Err` naming the failing step and every rollback sub-result.
++pub fn enable_transaction<E, A, D, R>(
++    prior_enabled: bool,
++    plugin_enable: E,
++    crash_arm: A,
++    plugin_disable: D,
++    crash_disarm: R,
++) -> Result<(), String>
++where
++    E: FnOnce() -> Result<(), String>,
++    A: FnOnce() -> Result<(), String>,
++    D: FnOnce() -> Result<(), String>,
++    R: FnOnce() -> bool,
++{
++    // Step 1 — plugin launcher entry, ONLY when not already enabled. codex r2 #3: re-running the plugin
++    // enable when it is ALREADY on is not merely redundant — on macOS the pinned autostart plugin
++    // RECREATES the LaunchAgent plist, stripping the existing `KeepAlive` (crash-recovery) keys. A
++    // re-enable that then failed at `crash_arm` would therefore destroy the user's recovery even though
++    // we "kept" the plugin. Skipping it when already on leaves the prior plist (and its KeepAlive) intact,
++    // and `crash_arm` below is idempotent for an already-armed recovery. If this fails on a FRESH enable
++    // the plugin state is unchanged; disarm any partial recovery and surface the failure.
++    if !prior_enabled {
++        if let Err(e) = plugin_enable() {
++            let disarmed = crash_disarm();
++            return Err(format!(
++                "autostart enable failed at plugin step: {e}; rollback: crash_disarm={}",
++                disarm_word(disarmed, false)
++            ));
++        }
++    }
++    // Step 2 — arm crash recovery. On failure, roll back to the PRIOR state:
++    // - plugin: disable it only if we turned it on (`!prior_enabled`); if it was already on, keep it.
++    // - crash recovery: codex #7 — do NOT disarm when `prior_enabled`. If autostart was already on before
++    //   this call, crash recovery was armed as part of that prior state, and a failed *idempotent re-arm*
++    //   must RESTORE the prior recovery, not destroy the user's existing recovery path. Only disarm the
++    //   partial recovery we were creating on a fresh enable.
++    // Both sub-rollbacks run regardless of either's outcome (no short-circuit).
++    if let Err(e) = crash_arm() {
++        let disarmed = if prior_enabled { true } else { crash_disarm() };
++        let plugin_rolled = if prior_enabled {
++            "kept (was already enabled — never re-run; plist + KeepAlive intact)".to_string()
++        } else {
++            match plugin_disable() {
++                Ok(()) => "disabled".to_string(),
++                Err(de) => format!("FAILED ({de}) — autostart may still be active"),
++            }
++        };
++        return Err(format!(
++            "autostart enable failed at crash-recovery step: {e}; rollback: crash_disarm={}, plugin={plugin_rolled}",
++            disarm_word(disarmed, prior_enabled)
++        ));
++    }
++    Ok(())
++}
++
++fn disarm_word(disarmed: bool, skipped_because_prior: bool) -> &'static str {
++    if skipped_because_prior {
++        "skipped (prior enabled)"
++    } else if disarmed {
++        "confirmed"
++    } else {
++        "NOT confirmed"
++    }
++}
++
+ /// Must match `productName` in tauri.conf.json — the auto-launch crate uses this
+ /// (not the identifier) as the LaunchAgent plist filename.
+ #[cfg(target_os = "macos")]
+@@ -59,34 +139,27 @@ const SYSTEMD_NAME: &str = "aztec-accelerator";
+ /// Previous implementation used `.replace("</dict>", ...)` which replaced ALL occurrences
+ /// and could corrupt plists with nested dicts.
+ #[cfg(target_os = "macos")]
+-fn enable_impl() {
++fn enable_impl() -> Result<(), String> {
+     let plist_path = macos_plist_path();
+-    match std::fs::read_to_string(&plist_path) {
+-        Ok(content) => {
+-            if content.contains("<key>KeepAlive</key>") {
+-                tracing::debug!("LaunchAgent already has KeepAlive");
+-                return;
+-            }
+-            match patch_plist_with_keepalive(&content) {
+-                Some(patched) => {
+-                    if let Err(e) = std::fs::write(&plist_path, &patched) {
+-                        tracing::warn!("Failed to write patched LaunchAgent plist: {e}");
+-                    } else {
+-                        tracing::info!("LaunchAgent patched with KeepAlive (crash recovery)");
+-                    }
+-                }
+-                None => {
+-                    tracing::warn!("Could not find closing </dict> in LaunchAgent plist");
+-                }
+-            }
+-        }
+-        Err(e) => {
+-            tracing::warn!(
+-                path = %plist_path.display(),
+-                "Cannot read LaunchAgent plist (not yet enabled?): {e}"
+-            );
+-        }
++    // read failure ⇒ the plugin's plist isn't where we expect ⇒ arming did NOT happen ⇒ Err.
++    let content = std::fs::read_to_string(&plist_path).map_err(|e| {
++        format!(
++            "cannot read LaunchAgent plist {}: {e}",
++            plist_path.display()
++        )
++    })?;
++    if content.contains("<key>KeepAlive</key>") {
++        tracing::debug!("LaunchAgent already has KeepAlive");
++        return Ok(()); // idempotent already-armed ⇒ success, NOT a failure (must not trigger rollback).
+     }
++    // no closing </dict> ⇒ patch impossible ⇒ arming failed ⇒ Err.
++    let patched = patch_plist_with_keepalive(&content)
++        .ok_or_else(|| "could not find closing </dict> in LaunchAgent plist".to_string())?;
++    // write failure ⇒ arming failed ⇒ Err.
++    std::fs::write(&plist_path, &patched)
++        .map_err(|e| format!("failed to write patched LaunchAgent plist: {e}"))?;
++    tracing::info!("LaunchAgent patched with KeepAlive (crash recovery)");
++    Ok(())
+ }
+ 
+ /// Insert KeepAlive and ThrottleInterval keys before the last `</dict>` in a plist string.
+@@ -127,31 +200,72 @@ fn macos_plist_path() -> std::path::PathBuf {
+         .join(format!("{APP_NAME}.plist"))
+ }
+ 
++/// F-010: conservative cross-platform preflight for enabling autostart. Rejects a path whose bytes could
++/// INJECT into any OS launcher serializer (systemd unit / `.desktop` / plist XML / Windows Run-key): a
++/// non-absolute path, non-UTF-8 (systemd rejects it; the plugin serializes it lossily), or any control /
++/// newline / DEL byte (the injection vector for line/element-based unit + plist formats). Platform-specific
++/// NON-injection formatting quirks in the third-party `auto-launch` crate (e.g. space-splitting in a raw
++/// `.desktop` `Exec=` / Run-key) are a documented ROBUSTNESS residual, not a same-process injection we can
++/// close without patching that crate. `set_autostart` calls this BEFORE invoking the plugin, refusing (and
++/// disabling) rather than letting an unsafe path be serialized.
++pub fn autostart_path_is_safe(exe: &std::path::Path) -> bool {
++    match exe.to_str() {
++        None => false, // non-UTF-8
++        Some(s) => exe.is_absolute() && !s.bytes().any(|b| b < 0x20 || b == 0x7f),
++    }
++}
++
++/// F-010: serialize an absolute executable path into a safe systemd `ExecStart` value, or `None` if the
++/// path is not representable. systemd's `string_is_safe` REJECTS a decoded executable containing controls,
++/// `\`, `"`, `'`, or a glob introducer (`*`/`?`/`[`), and requires valid UTF-8 — those are not escapable, so
++/// we fail closed. The returned value uses the `:` prefix (disables systemd `$`-environment expansion) INSIDE
++/// the quoted first token, and doubles `%` (systemd specifier). No `\`/`"` escaping is needed because they
++/// are rejected. Result form: `":/path/with %% doubled"`.
++#[cfg(target_os = "linux")]
++fn systemd_exec_start(exe: &std::path::Path) -> Option<String> {
++    let s = exe.to_str()?; // None ⇒ non-UTF-8
++    if !exe.is_absolute() || s.ends_with('/') {
++        return None; // must be an absolute file path, not a directory shape
++    }
++    if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
++        return None; // controls / newline / DEL
++    }
++    if s.chars()
++        .any(|c| matches!(c, '\\' | '"' | '\'' | '*' | '?' | '['))
++    {
++        return None; // systemd `string_is_safe` forbids these in the executable path
++    }
++    Some(format!("\":{}\"", s.replace('%', "%%")))
++}
++
+ /// Create and enable a systemd user service with `Restart=on-failure`.
+ /// Call this after `manager.enable()`.
+ #[cfg(target_os = "linux")]
+-fn enable_impl() {
+-    let exe = match std::env::current_exe() {
+-        Ok(p) => p,
+-        Err(e) => {
+-            tracing::warn!("Cannot determine executable path for systemd service: {e}");
+-            return;
+-        }
+-    };
+-
+-    let service_dir = match dirs::config_dir() {
+-        Some(d) => d.join("systemd/user"),
++fn enable_impl() -> Result<(), String> {
++    let exe = std::env::current_exe()
++        .map_err(|e| format!("cannot determine executable path for systemd service: {e}"))?;
++
++    let service_dir = dirs::config_dir()
++        .ok_or_else(|| "cannot determine config dir for systemd service".to_string())?
++        .join("systemd/user");
++
++    std::fs::create_dir_all(&service_dir)
++        .map_err(|e| format!("cannot create systemd user dir: {e}"))?;
++
++    // F-010: build a systemd-escaped ExecStart. An unsafe path (systemd would reject or it could inject
++    // a directive) fails CLOSED — remove any stale unit and report the failure (Err), never write a
++    // corrupt/injected unit.
++    let exec_start = match systemd_exec_start(&exe) {
++        Some(v) => v,
+         None => {
+-            tracing::warn!("Cannot determine config dir for systemd service");
+-            return;
++            disable_impl();
++            return Err(
++                "executable path is not representable as a safe systemd ExecStart; removed any stale unit"
++                    .to_string(),
++            );
+         }
+     };
+ 
+-    if let Err(e) = std::fs::create_dir_all(&service_dir) {
+-        tracing::warn!("Cannot create systemd user dir: {e}");
+-        return;
+-    }
+-
+     let service_path = service_dir.join(format!("{SYSTEMD_NAME}.service"));
+     let service_content = format!(
+         "[Unit]\n\
+@@ -160,20 +274,17 @@ fn enable_impl() {
+          \n\
+          [Service]\n\
+          Type=simple\n\
+-         ExecStart=\"{exe}\"\n\
++         ExecStart={exec_start}\n\
+          Restart=on-failure\n\
+          RestartSec=5\n\
+          StartLimitBurst=5\n\
+          \n\
+          [Install]\n\
+          WantedBy=default.target\n",
+-        exe = exe.display()
+     );
+ 
+-    if let Err(e) = std::fs::write(&service_path, &service_content) {
+-        tracing::warn!("Failed to write systemd service: {e}");
+-        return;
+-    }
++    std::fs::write(&service_path, &service_content)
++        .map_err(|e| format!("failed to write systemd service: {e}"))?;
+ 
+     // Reload and enable
+     let _ = std::process::Command::new("systemctl")
+@@ -186,14 +297,14 @@ fn enable_impl() {
+     match result {
+         Ok(output) if output.status.success() => {
+             tracing::info!("systemd user service enabled (crash recovery)");
++            Ok(())
+         }
+-        Ok(output) => {
+-            let stderr = String::from_utf8_lossy(&output.stderr);
+-            tracing::warn!("systemctl enable failed: {stderr}");
+-        }
+-        Err(e) => {
+-            tracing::warn!("Failed to run systemctl: {e}");
+-        }
++        // `systemctl enable` is the actual arming step — a failure here is Err (D16/cond.3).
++        Ok(output) => Err(format!(
++            "systemctl enable failed: {}",
++            String::from_utf8_lossy(&output.stderr)
++        )),
++        Err(e) => Err(format!("failed to run systemctl: {e}")),
+     }
+ }
+ 
+@@ -204,17 +315,30 @@ fn disable_impl() -> bool {
+     let _ = std::process::Command::new("systemctl")
+         .args(["--user", "disable", SYSTEMD_NAME])
+         .output();
+-    let _ = std::process::Command::new("systemctl")
+-        .args(["--user", "daemon-reload"])
+-        .output();
+ 
++    // F-010: remove the unit file BEFORE the final daemon-reload (so the reload reflects the removal), and
++    // report whether disarm is CONFIRMED — a missing file is success; a file that cannot be removed is not.
++    let mut removed = true;
+     if let Some(config_dir) = dirs::config_dir() {
+         let service_path = config_dir.join(format!("systemd/user/{SYSTEMD_NAME}.service"));
+-        let _ = std::fs::remove_file(&service_path);
++        if let Err(e) = std::fs::remove_file(&service_path) {
++            if service_path.exists() {
++                tracing::warn!(
++                    "Failed to remove systemd unit (crash recovery not confirmed disarmed): {e}"
++                );
++                removed = false;
++            }
++        }
+     }
+ 
+-    tracing::info!("systemd user service disabled (crash recovery)");
+-    true
++    let _ = std::process::Command::new("systemctl")
++        .args(["--user", "daemon-reload"])
++        .output();
++
++    if removed {
++        tracing::info!("systemd user service disabled (crash recovery)");
++    }
++    removed
+ }
+ 
+ // ── Windows ──────────────────────────────────────────────────────────────────
+@@ -254,16 +378,11 @@ fn schtasks_exe() -> std::path::PathBuf {
+ 
+ /// Register the Task Scheduler crash-recovery task. Call after `manager.enable()`.
+ #[cfg(target_os = "windows")]
+-fn enable_impl() {
++fn enable_impl() -> Result<(), String> {
+     use std::io::Write;
+ 
+-    let exe = match std::env::current_exe() {
+-        Ok(p) => p,
+-        Err(e) => {
+-            tracing::warn!("Cannot determine executable path for Task Scheduler: {e}");
+-            return;
+-        }
+-    };
++    let exe = std::env::current_exe()
++        .map_err(|e| format!("cannot determine executable path for Task Scheduler: {e}"))?;
+ 
+     // schtasks /XML expects UTF-16LE with a BOM.
+     let mut bytes = vec![0xFFu8, 0xFE];
+@@ -274,25 +393,15 @@ fn enable_impl() {
+     // Random temp filename (not a predictable %TEMP% path a local user could pre-create or
+     // symlink), written + closed before schtasks reads it, auto-deleted when it drops.
+     let xml_path = {
+-        let mut tmp = match tempfile::Builder::new()
++        let mut tmp = tempfile::Builder::new()
+             .prefix("aztec-accel-recovery-")
+             .suffix(".xml")
+             .tempfile()
+-        {
+-            Ok(f) => f,
+-            Err(e) => {
+-                tracing::warn!("Failed to create Task Scheduler XML temp file: {e}");
+-                return;
+-            }
+-        };
+-        if let Err(e) = tmp.write_all(&bytes) {
+-            tracing::warn!("Failed to write Task Scheduler XML: {e}");
+-            return;
+-        }
+-        if let Err(e) = tmp.flush() {
+-            tracing::warn!("Failed to flush Task Scheduler XML: {e}");
+-            return;
+-        }
++            .map_err(|e| format!("failed to create Task Scheduler XML temp file: {e}"))?;
++        tmp.write_all(&bytes)
++            .map_err(|e| format!("failed to write Task Scheduler XML: {e}"))?;
++        tmp.flush()
++            .map_err(|e| format!("failed to flush Task Scheduler XML: {e}"))?;
+         // Close our handle so schtasks can open it; the file persists until this drops.
+         tmp.into_temp_path()
+     };
+@@ -306,12 +415,13 @@ fn enable_impl() {
+     match result {
+         Ok(output) if output.status.success() => {
+             tracing::info!("Task Scheduler crash-recovery task registered");
++            Ok(())
+         }
+-        Ok(output) => {
+-            let stderr = String::from_utf8_lossy(&output.stderr);
+-            tracing::warn!("schtasks /Create failed: {stderr}");
+-        }
+-        Err(e) => tracing::warn!("Failed to run schtasks: {e}"),
++        Ok(output) => Err(format!(
++            "schtasks /Create failed: {}",
++            String::from_utf8_lossy(&output.stderr)
++        )),
++        Err(e) => Err(format!("failed to run schtasks: {e}")),
+     }
+ }
+ 
+@@ -401,6 +511,249 @@ fn xml_escape(s: &str) -> String {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[allow(unused_imports)]
++    use std::path::Path;
++
++    use super::enable_transaction;
++    use std::cell::Cell;
++
++    // C8 (D13/D20): the enable transaction's rollback ordering + completeness + failure-observability,
++    // exercised with injected closures — no real AppHandle / OS calls, so it runs on every platform's CI.
++
++    #[test]
++    fn enable_transaction_happy_path_no_rollback() {
++        let disable_called = Cell::new(false);
++        let disarm_called = Cell::new(false);
++        let r = enable_transaction(
++            false,
++            || Ok(()),
++            || Ok(()),
++            || {
++                disable_called.set(true);
++                Ok(())
++            },
++            || {
++                disarm_called.set(true);
++                true
++            },
++        );
++        assert!(r.is_ok());
++        assert!(!disable_called.get(), "no rollback on success");
++        assert!(!disarm_called.get(), "no rollback on success");
++    }
++
++    #[test]
++    fn enable_transaction_arm_fails_prior_disabled_rolls_back_both() {
++        let disable_called = Cell::new(false);
++        let disarm_called = Cell::new(false);
++        let r = enable_transaction(
++            false, // prior disabled
++            || Ok(()),
++            || Err("arm boom".to_string()),
++            || {
++                disable_called.set(true);
++                Ok(())
++            },
++            || {
++                disarm_called.set(true);
++                true
++            },
++        );
++        let msg = r.unwrap_err();
++        assert!(
++            disable_called.get(),
++            "prior-disabled ⇒ plugin_disable rolls back the enable"
++        );
++        assert!(disarm_called.get(), "crash_disarm always runs on rollback");
++        assert!(
++            msg.contains("arm boom") && msg.contains("plugin=disabled"),
++            "combined error: {msg}"
++        );
++    }
++
++    #[test]
++    fn enable_transaction_arm_fails_prior_enabled_keeps_plugin_and_recovery() {
++        let enable_called = Cell::new(false);
++        let disable_called = Cell::new(false);
++        let disarm_called = Cell::new(false);
++        let r = enable_transaction(
++            true, // prior ENABLED (autostart + crash recovery were both already on)
++            || {
++                enable_called.set(true);
++                Ok(())
++            },
++            || Err("arm boom".to_string()),
++            || {
++                disable_called.set(true);
++                Ok(())
++            },
++            || {
++                disarm_called.set(true);
++                true
++            },
++        );
++        let msg = r.unwrap_err();
++        // codex r2 #3: never RE-RUN the plugin enable when already on — on macOS it recreates the
++        // LaunchAgent plist and strips the existing KeepAlive (destroying recovery before crash_arm).
++        assert!(
++            !enable_called.get(),
++            "prior-enabled ⇒ do NOT re-run plugin_enable (would strip the plist's KeepAlive on macOS)"
++        );
++        assert!(
++            !disable_called.get(),
++            "prior-enabled ⇒ do NOT disable (restore prior state)"
++        );
++        // codex #7: the key regression guard — a failed idempotent re-arm must NOT destroy the
++        // pre-existing crash recovery that was armed as part of the prior enabled state.
++        assert!(
++            !disarm_called.get(),
++            "prior-enabled ⇒ do NOT disarm the user's pre-existing crash recovery"
++        );
++        assert!(
++            msg.contains("kept") && msg.contains("skipped (prior enabled)"),
++            "error notes plugin kept + disarm skipped: {msg}"
++        );
++    }
++
++    #[test]
++    fn enable_transaction_plugin_enable_fails_no_arm_no_disable() {
++        let arm_called = Cell::new(false);
++        let disable_called = Cell::new(false);
++        let disarm_called = Cell::new(false);
++        let r = enable_transaction(
++            false,
++            || Err("plugin boom".to_string()),
++            || {
++                arm_called.set(true);
++                Ok(())
++            },
++            || {
++                disable_called.set(true);
++                Ok(())
++            },
++            || {
++                disarm_called.set(true);
++                true
++            },
++        );
++        let msg = r.unwrap_err();
++        assert!(
++            !arm_called.get(),
++            "crash_arm never runs if the launcher didn't enable"
++        );
++        assert!(
++            !disable_called.get(),
++            "nothing to disable — the enable failed"
++        );
++        assert!(
++            disarm_called.get(),
++            "defensively disarm any stale recovery on a fresh-enable attempt"
++        );
++        assert!(
++            msg.contains("plugin boom") && msg.contains("plugin step"),
++            "error: {msg}"
++        );
++    }
++
++    #[test]
++    fn enable_transaction_rollback_disable_failure_is_surfaced() {
++        let r = enable_transaction(
++            false,
++            || Ok(()),
++            || Err("arm boom".to_string()),
++            || Err("disable boom".to_string()), // rollback disable ALSO fails
++            || false,                           // and disarm not confirmed
++        );
++        let msg = r.unwrap_err();
++        assert!(
++            msg.contains("disable boom"),
++            "rollback disable failure surfaced: {msg}"
++        );
++        assert!(
++            msg.contains("autostart may still be active"),
++            "warns state may be unclean: {msg}"
++        );
++        assert!(
++            msg.contains("NOT confirmed"),
++            "disarm-not-confirmed surfaced: {msg}"
++        );
++    }
++
++    /// F-010: reproduce systemd's ExecStart decode (unquote → strip `:` prefix → specifier-expand `%%`→`%`)
++    /// to prove the serializer round-trips exactly to the intended path — i.e. no injection, exact argv0.
++    #[cfg(target_os = "linux")]
++    fn decode_systemd_exec_start(value: &str) -> String {
++        // Our serializer always emits `":<...>"` — one double-quoted token.
++        let inner = value
++            .strip_prefix('"')
++            .and_then(|s| s.strip_suffix('"'))
++            .expect("quoted token");
++        let after_prefix = inner.strip_prefix(':').expect(": prefix"); // strip the exec prefix
++        after_prefix.replace("%%", "%") // specifier expansion (only %% appears)
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    fn systemd_exec_start_serializes_and_round_trips() {
++        // Plain path.
++        let v = super::systemd_exec_start(Path::new("/usr/bin/aztec-accelerator")).unwrap();
++        assert_eq!(v, "\":/usr/bin/aztec-accelerator\"");
++        assert_eq!(decode_systemd_exec_start(&v), "/usr/bin/aztec-accelerator");
++        // The serialized value can NEVER contain a newline (the unit-injection vector) for any accepted path.
++        assert!(!v.contains('\n'));
++        // A `%`, a space, and a `$` all survive as literals (— `%` doubled, `:` disables `$` expansion).
++        let v = super::systemd_exec_start(Path::new("/opt/my app/100% $HOME/bb")).unwrap();
++        assert_eq!(v, "\":/opt/my app/100%% $HOME/bb\"");
++        assert_eq!(decode_systemd_exec_start(&v), "/opt/my app/100% $HOME/bb");
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    fn systemd_exec_start_rejects_unrepresentable_paths() {
++        for bad in [
++            "relative/bb",                 // not absolute
++            "/dir/",                       // directory shape
++            "/x/\nExecStartPre=/bin/evil", // newline injection
++            "/x/\tbb",                     // control
++            "/x/a\"b",                     // quote (systemd rejects)
++            "/x/a\\b",                     // backslash
++            "/x/a'b",                      // single quote
++            "/x/a*b",                      // glob
++            "/x/a?b",
++            "/x/a[b",
++        ] {
++            assert!(
++                super::systemd_exec_start(Path::new(bad)).is_none(),
++                "should reject {bad:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn autostart_preflight_rejects_injection_and_accepts_normal_paths() {
++        // A PLATFORM-absolute path is accepted (Windows `is_absolute` needs a drive prefix, so `/usr/...`
++        // is NOT absolute there — the test binary runs on Windows CI too).
++        #[cfg(unix)]
++        let (ok1, ok2, inj_nl, inj_del) = (
++            "/usr/bin/aztec-accelerator",
++            "/opt/my app/aztec",
++            "/x/\nInject",
++            "/x/\u{7f}bb",
++        );
++        #[cfg(windows)]
++        let (ok1, ok2, inj_nl, inj_del) = (
++            r"C:\Program Files\Aztec\aztec.exe",
++            r"C:\my app\aztec.exe", // space + backslash are fine (formatting), not injection
++            "C:\\x\\\nInject",
++            "C:\\x\\\u{7f}bb",
++        );
++        assert!(super::autostart_path_is_safe(Path::new(ok1)));
++        assert!(super::autostart_path_is_safe(Path::new(ok2)));
++        assert!(!super::autostart_path_is_safe(Path::new("relative/bb"))); // not absolute (both platforms)
++        assert!(!super::autostart_path_is_safe(Path::new(inj_nl))); // newline injection
++        assert!(!super::autostart_path_is_safe(Path::new(inj_del))); // DEL control
++    }
++
+     #[test]
+     #[cfg(target_os = "windows")]
+     fn task_xml_uses_repeating_trigger_and_escapes_exe() {
