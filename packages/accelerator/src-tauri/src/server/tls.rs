@@ -23,8 +23,9 @@ pub async fn start_https(
     tls_config: Arc<tokio_rustls::rustls::ServerConfig>,
     ready: tokio::sync::oneshot::Sender<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Capture the shared bind-state flag before `router_for_port` consumes `state`.
+    // Capture the shared bind-state flag + served-cert slot before `router_for_port` consumes `state`.
     let https_bound = state.https_bound.clone();
+    let state_fingerprint = state.served_ca_fingerprint.clone();
     // Pass HTTPS_PORT so the loopback-Host guard accepts `127.0.0.1:59834` (Safari) and rejects a
     // `:59833` authority replayed onto the HTTPS listener.
     let app = router_for_port(state, HTTPS_PORT);
@@ -44,6 +45,11 @@ pub async fn start_https(
     // The listener bound — mark HTTPS live so /health advertises https_port (Q7). The CALLER owns the
     // lifecycle lock and holds it until it has finished committing state (e.g. `https_enabled = true`);
     // it releases once this `ready` signal resolves, so the endless serving loop below runs unlocked.
+    //
+    // Record WHICH cert identity this listener holds: the acceptor is fixed for the life of the loop,
+    // so after a later rotation the files on disk no longer describe what we serve. A re-enable
+    // consults this to avoid committing "enabled" over a listener serving a since-untrusted cert.
+    *state_fingerprint.write() = crate::certs::live_ca_fingerprint();
     https_bound.store(true, Ordering::Relaxed);
     let _ = ready.send(true);
 

@@ -127,6 +127,13 @@ pub struct HeadlessState {
     /// no fixed timeout can bound it correctly. Held only until the bind resolves; the serving loop
     /// runs unlocked (see the GUI's `start_https`).
     pub https_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    /// Fingerprint of the CA the RUNNING listener is actually serving (set when it binds). `https_bound`
+    /// only says a listener exists — it cannot say *which* cert identity that listener holds, because a
+    /// rotation swaps the files while the in-memory `TlsAcceptor` keeps the old leaf until relaunch. A
+    /// re-enable that skips rebinding on `https_bound` alone could therefore commit "HTTPS enabled"
+    /// while the listener serves a cert whose anchor was since removed (post-impl codex Medium).
+    /// Compared against `certs::live_ca_fingerprint()` to detect exactly that.
+    pub served_ca_fingerprint: Arc<RwLock<Option<String>>>,
     pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
@@ -164,6 +171,7 @@ impl Default for HeadlessState {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             https_bound: Arc::new(AtomicBool::new(false)),
             https_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            served_ca_fingerprint: Arc::new(RwLock::new(None)),
             config: None,
             auth_manager: None,
             prove_semaphore: Arc::new(Semaphore::new(1)),
@@ -187,6 +195,7 @@ impl HeadlessState {
             bundled_version,
             https_bound: Arc::new(AtomicBool::new(false)),
             https_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            served_ca_fingerprint: Arc::new(RwLock::new(None)),
             config,
             auth_manager,
             prove_semaphore: Arc::new(Semaphore::new(1)),

@@ -353,7 +353,15 @@ async fn enable_https_inner(
     let lifecycle = crate::server::claim_https_lifecycle(shared_state).await;
     // The owner we waited for may have completed the whole bring-up. Re-read the live bind state
     // rather than assuming what we saw before the wait.
+    //
+    // "Bound" is NOT sufficient on its own: a rotation swaps the cert files while the running
+    // listener keeps serving the OLD identity until relaunch, so a re-enable could otherwise commit
+    // "enabled" over a listener presenting a cert whose anchor has since been removed — HTTPS then
+    // serves untrusted (normal mode falls back to HTTP; `httpsOnly` fails) until restart (post-impl
+    // codex Medium). Treat a serving-identity mismatch as "needs a restart" further down.
     let already_bound = shared_state.https_bound.load(Ordering::Relaxed);
+    let serving_stale_identity =
+        already_bound && *shared_state.served_ca_fingerprint.read() != certs::live_ca_fingerprint();
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
@@ -400,6 +408,21 @@ async fn enable_https_inner(
                     .to_string(),
             );
         }
+    }
+
+    // A listener serving a stale identity can't be fixed in-process — the acceptor is fixed for the
+    // life of the loop and the port is held by us, so there is nothing to rebind. Persist the enable
+    // (the certs + trust ARE set up) and tell the user a restart finishes it, rather than silently
+    // reporting success while HTTPS presents an untrusted cert.
+    if serving_stale_identity {
+        mutate_config(config, |cfg| cfg.https_enabled = true)?;
+        tracing::warn!("HTTPS is running with a previous certificate — restart required");
+        drop(lifecycle);
+        return Err(
+            "HTTPS is set up, but the running server is still using a previous \
+                    certificate. Restart Aztec Accelerator to finish enabling it."
+                .to_string(),
+        );
     }
 
     mutate_config(config, |cfg| cfg.https_enabled = true)?;

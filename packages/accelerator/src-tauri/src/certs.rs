@@ -422,6 +422,23 @@ pub fn live_ca_cert_path() -> PathBuf {
     CertPaths::live().ca_cert
 }
 
+/// Content fingerprint (SHA-256 hex of the DER) of the CA cert currently ON DISK. `None` if it can't
+/// be read or parsed.
+///
+/// Used to answer a question `https_bound` cannot: *is the running listener still serving the CURRENT
+/// cert identity?* A rotation swaps the files but the in-memory `TlsAcceptor` keeps serving the OLD
+/// leaf until relaunch, so "bound" does not imply "serving what's on disk" (post-impl codex Medium).
+pub fn live_ca_fingerprint() -> Option<String> {
+    ca_fingerprint_at(&CertPaths::live().ca_cert)
+}
+
+fn ca_fingerprint_at(path: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    let (_, pem) = x509_parser::pem::parse_x509_pem(&bytes).ok()?;
+    Some(hex::encode(Sha256::digest(&pem.contents)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
