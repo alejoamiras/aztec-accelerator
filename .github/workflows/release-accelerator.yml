@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       auth_probe:
-        description: "F-005: prove the release OIDC role assumes correctly, then STOP — only validate + the AWS trust preflight run (no build/e2e/tag/release/publish)"
+        description: "Probe only: verify the release AWS role still assumes correctly, then stop. Runs validate + the AWS trust preflight; skips build/e2e/tag/release/publish."
         required: false
         type: boolean
         default: false
