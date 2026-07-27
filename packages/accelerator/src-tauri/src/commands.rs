@@ -370,19 +370,20 @@ async fn enable_https_inner(
     // (post-impl codex High: a swallowed bind failure used to report success while Safari/strict
     // users silently fell back / failed).
     if !shared_state.https_bound.load(Ordering::Relaxed) {
-        let tls_config =
-            certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
-        // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping
-        // it after a successful bind is visible to /health — no https_port propagation needed. (Q7)
-        //
-        // Success = HTTPS is LIVE, not "our spawn is the one that bound it". `spawn_https` returns
-        // None when the launch gate (or another enable) is ALREADY starting HTTPS — its
-        // compare-and-swap guarantees only one listener attempt exists, so we never race a second bind
-        // into AddrInUse and then wrongly report failure while HTTPS is up (post-impl codex Medium).
-        let bound = match crate::server::spawn_https(shared_state.clone(), tls_config) {
-            // We own the attempt: its outcome is authoritative.
-            Some(ready) => matches!(ready.await, Ok(true)),
-            // Someone else owns it: wait (bounded) for THEIR bind to land.
+        // Success = HTTPS is LIVE, not "our spawn is the one that bound it". Claim the lifecycle
+        // BEFORE loading the cert set so the load can't race the launch gate's rotation / a partially
+        // renamed set (post-impl codex); `None` ⇒ someone else owns the sequence, so wait on the
+        // shared flag instead of racing a second bind into AddrInUse and wrongly reporting failure.
+        let bound = match crate::server::try_claim_https_start(shared_state) {
+            Some(claim) => {
+                // The claim drops (releasing the slot) if the TLS load fails below.
+                let tls_config = certs::load_rustls_config()
+                    .map_err(|e| format!("Failed to load TLS config: {e}"))?;
+                // The clone shares the Arc'd https_bound flag with the managed state, so start_https
+                // flipping it after a successful bind is visible to /health. (Q7)
+                let ready = crate::server::spawn_https(shared_state.clone(), tls_config, claim);
+                matches!(ready.await, Ok(true))
+            }
             None => wait_for_https_bound(shared_state).await,
         };
         if !bound {
