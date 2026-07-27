@@ -1,13 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "onboarding",
-  "description": "F-012: the first-run onboarding wizard (label onboarding) may invoke ONLY its own commands. No core:default / autostart / updater plugin grants — the frontend calls Rust wrappers that drive plugins natively (enable_https / set_autostart_inner / config writes), and the window is closed from Rust.",
+  "description": "F-012: the first-run onboarding wizard (label onboarding) may invoke ONLY its own commands. No core:default / autostart / updater plugin grants \u2014 the frontend calls Rust wrappers that drive plugins natively (enable_https / set_autostart_inner / config writes), and the window is closed from Rust.",
   "local": true,
-  "platforms": ["linux", "macOS", "windows"],
-  "windows": ["onboarding"],
+  "platforms": [
+    "linux",
+    "macOS",
+    "windows"
+  ],
+  "windows": [
+    "onboarding"
+  ],
   "permissions": [
     "allow-get-onboarding-state",
-    "allow-complete-onboarding",
-    "allow-dismiss-onboarding"
+    "allow-complete-onboarding"
   ]
 }

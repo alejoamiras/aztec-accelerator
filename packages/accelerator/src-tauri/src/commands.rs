@@ -569,7 +569,12 @@ pub struct OnboardingResult {
 
 /// Execute the wizard's choices. Each runs independently; the onboarding marker is set ONLY when all
 /// requested actions succeed (marker discipline, R4). A failed HTTPS leaves the marker unset so the
-/// wizard returns next launch — unless the user explicitly dismisses via [`dismiss_onboarding`].
+/// wizard returns next launch.
+///
+/// This is the wizard's ONLY exit that sets the marker. There is deliberately no separate "skip"
+/// command: unchecking the toggles and pressing the primary button expresses the same outcome more
+/// deliberately, and it keeps the marker tied to an actual decision. Closing the window instead leaves
+/// the marker unset, so the wizard reappears — the reversible escape hatch.
 #[tauri::command]
 pub async fn complete_onboarding(
     window: tauri::WebviewWindow,
@@ -621,26 +626,6 @@ pub async fn complete_onboarding(
         auto_update: auto_update_res,
         completed,
     })
-}
-
-/// Mark onboarding complete without (further) action — the explicit "Continue without HTTPS" (after a
-/// failed cert install) and "Skip for now" paths (R4). The ONLY unconditional marker set.
-#[tauri::command]
-pub fn dismiss_onboarding(
-    window: tauri::WebviewWindow,
-    config: tauri::State<'_, ConfigState>,
-) -> Result<(), String> {
-    require_label(window.label(), ONBOARDING_LABEL)?;
-    mutate_config(&config, |cfg| {
-        cfg.onboarding_version = crate::config::ONBOARDING_VERSION
-    })?;
-    tracing::info!("Onboarding dismissed (marker set)");
-    // F-012: closed from Rust (the page has no core:window grant); a failed close propagates so
-    // wireButton re-enables Skip (merge-audit Low). The marker set above is idempotent on retry.
-    window
-        .close()
-        .map_err(|e| format!("dismissed, but the window could not be closed: {e}"))?;
-    Ok(())
 }
 
 // ── Certificate renewal (macOS/Windows renewal consent window — §7) ──

@@ -58,7 +58,6 @@ const defaults = {
     auto_update: { Ok: null },
     completed: true,
   }),
-  dismiss_onboarding: () => null,
   open_onboarding: () => null,
   renew_cert: () => null,
   record_renewal_prompt: () => null,

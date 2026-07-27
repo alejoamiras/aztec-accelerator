@@ -65,10 +65,11 @@ test("Start invokes complete_onboarding with the toggle states; on success the p
 }) => {
   await page.goto("/onboarding.html");
   // The toggle <input> is visually hidden under the slider span, so Playwright's native uncheck()
-  // (a real click) times out — set the property directly, as the settings specs do. onboarding.html
-  // reads `.checked` at Start time (no change listener), so no dispatchEvent is needed.
+  // (a real click) times out — set the property directly, as the settings specs do, and dispatch
+  // `change` so the adaptive primary label updates too.
   await page.locator("#opt-auto-update").evaluate((el: HTMLInputElement) => {
     el.checked = false;
+    el.dispatchEvent(new Event("change"));
   });
   await page.locator("#start").click();
 
@@ -76,9 +77,8 @@ test("Start invokes complete_onboarding with the toggle states; on success the p
   expect(calls.length).toBe(1);
   expect(calls[0].args).toEqual({ https: true, autostart: true, autoUpdate: false });
   // completed:true (mock default) → Rust closes the window (F-012 — the page can't close itself);
-  // the frontend leaves both buttons disabled while it waits for that close.
+  // the frontend leaves the button disabled while it waits for that close.
   await expect(page.locator("#start")).toBeDisabled();
-  await expect(page.locator("#skip")).toBeDisabled();
 });
 
 test("partial cert failure: HTTPS shown off with Retry, other choices still applied", async ({
@@ -98,10 +98,11 @@ test("partial cert failure: HTTPS shown off with Retry, other choices still appl
   await expect(page.locator("#https-result")).toContainText("certutil not found");
   await expect(page.locator("#opt-https")).not.toBeChecked();
   await expect(page.locator("#https-retry")).toBeVisible();
-  await expect(page.locator("#skip")).toHaveText("Continue without HTTPS");
-  // completed:false → Rust does NOT close the window; Start/Skip are re-enabled for Retry/Continue.
+  // completed:false → Rust does NOT close the window; the primary button is re-enabled so the user can
+  // Retry, or press it again (HTTPS now unchecked) to continue without HTTPS. With HTTPS off but the
+  // other two still on, the label stays "Start".
   await expect(page.locator("#start")).toBeEnabled();
-  await expect(page.locator("#skip")).toBeEnabled();
+  await expect(page.locator("#start")).toHaveText("Start");
 });
 
 test("Retry re-checks HTTPS and re-enables Start", async ({ page }) => {
@@ -122,10 +123,47 @@ test("Retry re-checks HTTPS and re-enables Start", async ({ page }) => {
   await expect(page.locator("#https-retry")).not.toBeVisible();
 });
 
-test("Skip dismisses onboarding (Rust sets the marker and closes the window)", async ({ page }) => {
+/** Set a visually-hidden toggle and fire `change` (what the adaptive label listens for). */
+async function setToggle(page: Page, id: string, checked: boolean) {
+  await page.locator(id).evaluate((el: HTMLInputElement, value: boolean) => {
+    el.checked = value;
+    el.dispatchEvent(new Event("change"));
+  }, checked);
+}
+
+const ALL_TOGGLES = ["#opt-https", "#opt-autostart", "#opt-auto-update"];
+
+test("the primary label follows the toggles (Start when any is on, Continue when all are off)", async ({
+  page,
+}) => {
+  // There is no Skip button: unchecking everything IS the decline. "Start" would read wrong for that,
+  // so the label adapts.
   await page.goto("/onboarding.html");
-  await page.locator("#skip").click();
-  expect((await callsFor(page, "dismiss_onboarding")).length).toBe(1);
-  // dismiss_onboarding succeeded → wireButton leaves Skip disabled while Rust closes the window.
-  await expect(page.locator("#skip")).toBeDisabled();
+  await expect(page.locator("#start")).toHaveText("Start");
+
+  for (const id of ALL_TOGGLES) await setToggle(page, id, false);
+  await expect(page.locator("#start")).toHaveText("Continue");
+
+  // Any single toggle back on flips it back.
+  await setToggle(page, "#opt-autostart", true);
+  await expect(page.locator("#start")).toHaveText("Start");
+});
+
+test("declining everything is an explicit, recorded choice", async ({ page }) => {
+  // The old Skip button set the marker while changing nothing. Now the same outcome goes through
+  // complete_onboarding with all three false, so the decision is explicit AND persisted.
+  await page.goto("/onboarding.html");
+  for (const id of ALL_TOGGLES) await setToggle(page, id, false);
+  await page.locator("#start").click();
+
+  const calls = await callsFor(page, "complete_onboarding");
+  expect(calls.length).toBe(1);
+  expect(calls[0].args).toEqual({ https: false, autostart: false, autoUpdate: false });
+});
+
+test("the wizard offers no Skip affordance", async ({ page }) => {
+  // Guards the decision: a second route to "no" beside the primary action invites reflexive
+  // dismissal, and closing the window (marker unset → wizard returns) is the intended escape.
+  await page.goto("/onboarding.html");
+  await expect(page.locator("#skip")).toHaveCount(0);
 });

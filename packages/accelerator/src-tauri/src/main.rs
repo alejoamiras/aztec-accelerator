@@ -598,7 +598,6 @@ fn main() {
             commands::remove_https_trust,
             commands::get_onboarding_state,
             commands::complete_onboarding,
-            commands::dismiss_onboarding,
             open_onboarding,
             commands::renew_cert,
             commands::record_renewal_prompt,

@@ -155,7 +155,6 @@ fn main() {
         "remove_https_trust",
         "get_onboarding_state",
         "complete_onboarding",
-        "dismiss_onboarding",
         "open_onboarding",
         "renew_cert",
         "record_renewal_prompt",

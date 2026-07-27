@@ -155,7 +155,7 @@ const WINDOW_MATRIX: Record<string, string[]> = {
   ],
   authorize: ["get_verified_info", "get_pending_auth", "respond_auth"],
   "update-prompt": ["respond_update_prompt"],
-  onboarding: ["get_onboarding_state", "complete_onboarding", "dismiss_onboarding"],
+  onboarding: ["get_onboarding_state", "complete_onboarding"],
   renewal: ["renew_cert", "record_renewal_prompt"],
 };
 const snakeToPerm = (cmd: string) => `allow-${cmd.replace(/_/g, "-")}`;
@@ -242,7 +242,7 @@ describe("F-012 P3 — per-window capability ACL", () => {
 
     expect(buildCommands).toEqual(handlers); // declared surface == registered surface
     expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
-    expect(handlers.length).toBe(20);
+    expect(handlers.length).toBe(19);
   });
 
   test("tauri.conf.json pins the capability allowlist to exactly the 5", async () => {
