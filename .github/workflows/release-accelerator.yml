@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       auth_probe:
-        description: "F-005: prove the release OIDC role assumes correctly, then STOP (no build/tag/release/publish)"
+        description: "F-005: prove the release OIDC role assumes correctly — tag/release/bump are guarded off; builds still START, so cancel the run once the preflight passes"
         required: false
         type: boolean
         default: false
