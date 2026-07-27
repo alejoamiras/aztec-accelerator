@@ -620,7 +620,14 @@ pub async fn renew_cert(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), RENEWAL_LABEL)?;
+    // Renewal MUTATES the cert set (`rotate_now` stages a new CA/leaf/key, trusts it, then swaps),
+    // so it must take the same bring-up lock as launch + enable. The renewal and onboarding windows
+    // can be open at once; without this, a rotation could swap the files while another path is
+    // reading or writing them, recreating exactly the MIXED-set corruption the lock exists to prevent
+    // (post-impl codex Medium). Held across the rotation only — released before the restart below.
+    let lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
     crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
+    drop(lifecycle);
     let _ = mutate_config(&config, |cfg| {
         cfg.last_rotation_prompt_at = Some(now_unix_secs());
     });

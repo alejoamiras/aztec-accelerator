@@ -82,13 +82,18 @@ fn classify_launch_https(
     }
 }
 
-/// Try to start the HTTPS server if Safari Support is configured and certs are valid + trusted.
-/// Uses a clone of the full `AppState` so the HTTPS server has auth, config, and callbacks.
-/// `start_https` flips the shared `https_bound` flag once the listener actually binds, so `/health`
-/// advertises `https_port` from the real bind state rather than the config flag.
-fn try_start_https(state: &AppState) {
+/// The BLOCKING half of the launch-time HTTPS bring-up: classify the gate, rotate (Linux), load TLS.
+///
+/// **Must be called while holding the HTTPS lifecycle lock.** Every cert read and write in here —
+/// `certs_exist`, `is_ca_trusted`, the rotation's `swap_into`, the TLS load — has to be serialized
+/// against the enable and renewal paths, or launch can observe a MIXED new-leaf/old-key set mid-swap
+/// and then reset `https_enabled` over an enable that just succeeded (post-impl codex Medium).
+/// `None` ⇒ don't start a listener.
+fn prepare_launch_https(
+    state: &AppState,
+) -> Option<std::sync::Arc<tokio_rustls::rustls::ServerConfig>> {
     let cfg = config::load();
-    // q7e3-F-01: the pre-load gate is now a tested pure classifier; the load-failure reset stays below
+    // q7e3-F-01: the pre-load gate is a tested pure classifier; the load-failure reset stays below
     // (it depends on load_rustls_config's Result, not on these three booleans).
     //
     // Linux (plan R3): trust is inherently per-browser/partial, and a bound-but-untrusted loopback
@@ -101,62 +106,78 @@ fn try_start_https(state: &AppState) {
     #[cfg(not(target_os = "linux"))]
     let ca_trusted = certs::is_ca_trusted;
     match classify_launch_https(cfg.https_enabled, certs::certs_exist, ca_trusted) {
-        LaunchHttpsGate::Disabled => return,
+        LaunchHttpsGate::Disabled => return None,
         LaunchHttpsGate::MissingCertsReset => {
             tracing::warn!("HTTPS enabled but certs missing/invalid — resetting config");
             reset_https_enabled(state);
-            return;
+            return None;
         }
         LaunchHttpsGate::UntrustedSkip => {
             tracing::warn!("CA not trusted in Keychain — skipping HTTPS");
-            return;
+            return None;
         }
         LaunchHttpsGate::Ready => {}
     }
 
-    // Claim the HTTPS lifecycle BEFORE rotating or loading the cert set — the claim must cover the
-    // whole rotate → load → bind sequence, not just the bind (post-impl codex). Otherwise the enable
-    // path could load the pre-rotation set (or, between `swap_into`'s sequential renames, a MIXED
-    // leaf/key) while we rotate, and win the bind — serving a stale leaf all session or failing to
-    // load. `None` ⇒ an enable path is already starting HTTPS; nothing for launch to do. The claim
-    // releases on drop, so every early return below frees it.
-    let Some(claim) = aztec_accelerator::server::try_claim_https_lifecycle(state) else {
-        tracing::debug!("HTTPS already being started elsewhere — launch gate stands down");
-        return;
-    };
-
     // Pre-expiry renewal (§7). Linux: SILENT rotation (user NSS needs no prompt) done BEFORE loading +
-    // binding the TLS config, so the FRESH leaf is what we serve. Doing it after the bind (as before)
-    // left the acceptor holding the OLD leaf for the whole session — a long-running tray app would
-    // eventually serve an EXPIRED cert (post-impl codex Medium). `try_start_https` already runs off the
-    // setup thread (spawn_blocking), so this synchronous rotation never blocks launch or the HTTP
-    // server. macOS/Windows do NOT rotate here — the setup closure surfaces a renewal *consent window*
-    // instead of a surprise background OS trust prompt.
+    // binding the TLS config, so the FRESH leaf is what we serve. Doing it after the bind left the
+    // acceptor holding the OLD leaf for the whole session — a long-running tray app would eventually
+    // serve an EXPIRED cert (post-impl codex Medium). macOS/Windows do NOT rotate here — the setup
+    // closure surfaces a renewal *consent window* instead of a surprise background OS trust prompt.
     #[cfg(target_os = "linux")]
     if let Err(e) = certs::regenerate_leaf_if_expiring() {
         tracing::warn!("Background leaf renewal: {e}");
     }
 
-    let tls_config = match certs::load_rustls_config() {
-        Ok(c) => c,
+    match certs::load_rustls_config() {
+        Ok(c) => Some(c),
         Err(e) => {
             // A broken/mismatched cert set (e.g. a crash mid-rotation leaving a new leaf with the old
             // key) must NOT silently wedge HTTPS. Reset https_enabled so the user re-enables and a
             // fresh, matched, trusted set is generated, instead of HTTPS being dead every launch.
-            // (`claim` drops here, releasing the lifecycle slot for that re-enable.)
             tracing::warn!("Failed to load TLS config ({e}) — resetting https_enabled to recover");
             reset_https_enabled(state);
-            return;
+            None
         }
-    };
+    }
+}
 
-    // Launch path is fire-and-forget: it does not await the bind (a dropped receiver just makes
-    // start_https's `ready.send` a no-op). The Settings/onboarding enable path is the one that awaits
-    // the outcome. The claim moves into the spawned task.
+/// Launch-time HTTPS bring-up, fully serialized against the enable and renewal paths.
+///
+/// Runs entirely off the setup thread. It **waits** for the HTTPS lifecycle lock rather than standing
+/// down on a failed try-lock: renewal can own that lock without ever binding a listener, so standing
+/// down would leave HTTPS unstarted for the whole session (post-impl codex Medium). After acquiring
+/// it, re-check `https_bound` — an enable path may have completed the entire bring-up while we waited.
+/// The blocking cert work then runs on a blocking thread so it never occupies an async worker.
+async fn launch_https(state: AppState) {
+    // Cheap config read — no lock needed to learn HTTPS is simply off.
+    if !config::load().https_enabled {
+        return;
+    }
+
+    let guard = aztec_accelerator::server::claim_https_lifecycle(&state).await;
+
+    if state.https_bound.load(Ordering::Relaxed) {
+        tracing::debug!("HTTPS already bound by another path — launch gate has nothing to do");
+        return; // `guard` drops here
+    }
+
+    let prep_state = state.clone();
+    let tls_config =
+        match tauri::async_runtime::spawn_blocking(move || prepare_launch_https(&prep_state)).await
+        {
+            Ok(Some(tls)) => tls,
+            Ok(None) => return, // gate said no (or reset) — `guard` drops
+            Err(e) => {
+                tracing::error!("HTTPS prepare task failed: {e}");
+                return;
+            }
+        };
+
+    // Fire-and-forget: launch does not await the bind (a dropped receiver just makes `ready.send` a
+    // no-op). The guard moves into the spawned task, which releases it once the bind resolves.
     drop(aztec_accelerator::server::spawn_https(
-        state.clone(),
-        tls_config,
-        claim,
+        state, tls_config, guard,
     ));
 }
 
@@ -640,15 +661,14 @@ fn main() {
             // still-trusted anchor is the exposure we're closing. HTTP is unaffected. Idempotent.
             match certs::migrate_legacy_ca_key() {
                 Ok(()) => {
-                    // Run the HTTPS gate OFF the setup thread. On macOS/Windows it makes a SYNCHRONOUS
-                    // trust-store query (`is_ca_trusted` shells out to `security`/`certutil`) with no
-                    // timeout; the setup thread must still reach the HTTP-server spawn below regardless
-                    // — HTTP is the critical path and must never be blocked by a slow/hung HTTPS trust
-                    // query (post-impl codex Medium). HTTPS binds a different port, so there's no race
-                    // with the HTTP listener. (Linux's gate is trust-free, so this only matters on
-                    // macOS/Windows.)
+                    // Run the HTTPS bring-up OFF the setup thread. It waits on the lifecycle lock and
+                    // then does SYNCHRONOUS trust-store queries (`is_ca_trusted` shells out to
+                    // `security`/`certutil`) with no timeout — on its own blocking thread, so the setup
+                    // thread still reaches the HTTP-server spawn below regardless. HTTP is the critical
+                    // path and must never be blocked by a slow/hung HTTPS trust query (post-impl codex
+                    // Medium). HTTPS binds a different port, so there's no race with the HTTP listener.
                     let https_state = state.clone();
-                    tauri::async_runtime::spawn_blocking(move || try_start_https(&https_state));
+                    tauri::async_runtime::spawn(launch_https(https_state));
                 }
                 Err(e) => tracing::error!(error = %e,
                     "SECURITY: legacy ca.key could not be removed — HTTPS NOT started (HTTP unaffected)"),
