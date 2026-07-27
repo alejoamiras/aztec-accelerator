@@ -150,7 +150,6 @@ const WINDOW_MATRIX: Record<string, string[]> = {
     "enable_https",
     "disable_https",
     "remove_https_trust",
-    "open_onboarding",
     "remove_approved_origin",
   ],
   authorize: ["get_verified_info", "get_pending_auth", "respond_auth"],
@@ -223,9 +222,9 @@ describe("F-012 P3 — per-window capability ACL", () => {
     expect(commandsBlock, "build.rs COMMANDS block").toBeTruthy();
     const buildCommands = [...commandsBlock![1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).sort();
 
-    // main.rs: the generate_handler! command list. Entries are `commands::<name>,` EXCEPT the handful
-    // defined in main.rs itself (e.g. `open_onboarding,`), which appear bare — so match an optional
-    // `commands::` prefix and require the trailing comma every entry has.
+    // main.rs: the generate_handler! command list. Every entry is `commands::<name>,` today, but a
+    // command defined in main.rs itself would appear bare — so match an optional `commands::` prefix
+    // and require the trailing comma every entry has.
     const handlerBlock = mainRs.match(/generate_handler!\[([\s\S]*?)\]/);
     expect(handlerBlock, "main.rs generate_handler!").toBeTruthy();
     const handlers = [...handlerBlock![1].matchAll(/(?:commands::)?([a-z_]+)\s*,/g)]
@@ -242,7 +241,7 @@ describe("F-012 P3 — per-window capability ACL", () => {
 
     expect(buildCommands).toEqual(handlers); // declared surface == registered surface
     expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
-    expect(handlers.length).toBe(19);
+    expect(handlers.length).toBe(18);
   });
 
   test("tauri.conf.json pins the capability allowlist to exactly the 5", async () => {

@@ -107,7 +107,9 @@ pub fn open_settings_window(app: &AppHandle) {
             url: "settings.html".to_string(),
             title: "Aztec Accelerator Settings",
             width: 500.0,
-            height: 520.0,
+            // 600, not 520: the Encrypted Connection section adds rows, and at 520 the speed slider
+            // was clipped by the bottom edge.
+            height: 600.0,
             always_on_top: false,
             focus_if_open: true,
             focus_on_create: true,

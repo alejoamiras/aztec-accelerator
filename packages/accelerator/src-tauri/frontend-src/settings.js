@@ -59,12 +59,12 @@ async function loadSettings() {
   }
   document.getElementById("auto-update").checked = config.auto_update === true;
 
-  // HTTPS row: all three desktop OSes now have a trust backend (macOS Keychain / Linux user NSS /
-  // Windows CurrentUser Root). F-012: rows are `hidden` in markup + `.row[hidden]` in CSS.
+  // The Encrypted Connection section (toggle + the disclosed certificate action) shows on all three
+  // desktop OSes — each now has a trust backend (macOS Keychain / Linux user NSS / Windows
+  // CurrentUser Root). F-012: hidden via the `hidden` attribute, never an inline style.
   if (["macos", "linux", "windows"].includes(sysInfo.platform)) {
-    document.getElementById("https-row").hidden = false;
+    document.getElementById("https-section").hidden = false;
     document.getElementById("https").checked = config.https_enabled;
-    document.getElementById("remove-trust-row").hidden = false;
   }
 
   const idx = speedToIndex(config.speed || "full");
@@ -112,13 +112,9 @@ wireToggle("https", (checked) => ({
   cmd: checked ? "enable_https" : "disable_https",
 }));
 
-// "Run setup again" — reopen the first-run onboarding wizard (an external-module property handler,
-// not a CSP inline-string handler, so `script-src 'self'` permits it).
-document.getElementById("run-setup").addEventListener("click", () => {
-  invoke("open_onboarding").catch((err) => console.error("open_onboarding failed:", err));
-});
-
-// "Remove certificate trust" (D5) — remove the local CA from all browser stores + turn HTTPS off.
+// Removing the certificate (D5) — takes the local CA out of every browser store and turns HTTPS off.
+// Lives behind the "Manage certificate" disclosure: it is the documented recovery path for a
+// partially-trusted install, not an everyday control.
 wireButton("remove-trust", {
   onClick: async () => {
     await invoke("remove_https_trust");

@@ -197,16 +197,6 @@ fn reset_https_enabled(state: &AppState) {
     }
 }
 
-/// Settings "Run setup again" — reopen the onboarding wizard on demand. F-012: only the Settings
-/// window may trigger this (the first-run auto-show calls `show_onboarding_window` directly, not this
-/// IPC command).
-#[tauri::command]
-fn open_onboarding(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
-    commands::require_label(window.label(), commands::SETTINGS_LABEL)?;
-    windows::show_onboarding_window(&app);
-    Ok(())
-}
-
 // ── Auto-update ──────────────────────────────────────────────────────────
 
 /// Whether the background update poller should run.
@@ -598,7 +588,6 @@ fn main() {
             commands::remove_https_trust,
             commands::get_onboarding_state,
             commands::complete_onboarding,
-            open_onboarding,
             commands::renew_cert,
             commands::record_renewal_prompt,
             commands::set_auto_update,

@@ -55,7 +55,7 @@ test("shows approved origins list", async ({ page }) => {
   await expect(page.getByText("https://example.com")).toBeVisible();
 
   // Empty state should be hidden
-  await expect(page.getByText("No approved sites yet.")).not.toBeVisible();
+  await expect(page.getByText("No approved sites yet")).not.toBeVisible();
 });
 
 test("shows empty state when no origins", async ({ page }) => {
@@ -69,7 +69,10 @@ test("shows empty state when no origins", async ({ page }) => {
   });
   await page.goto("/settings.html");
 
-  await expect(page.getByText("No approved sites yet.")).toBeVisible();
+  await expect(page.getByText("No approved sites yet")).toBeVisible();
+  // Regression guard: the message must sit INSIDE the bordered well. It used to render below an
+  // unbordered fixed-height list, which read as a black void with a stranded caption.
+  await expect(page.locator(".well #origins-empty")).toHaveCount(1);
 });
 
 test("remove origin calls invoke and re-renders", async ({ page }) => {
@@ -92,8 +95,9 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
   await expect(page.getByText("https://example.com")).toBeVisible();
 
   // Click Remove
-  // `exact` so this matches only the origin-list "Remove", not the "Remove certificate trust" button.
-  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  // Scoped to the list: the certificate action is also named "Remove" (inside a closed disclosure),
+  // so an unscoped role query would be ambiguous under Playwright strict mode.
+  await page.locator("#origins").getByRole("button", { name: "Remove" }).click();
 
   // Should call remove_approved_origin then reload settings
   const removeCalls = await callsFor(page, "remove_approved_origin");
@@ -101,7 +105,7 @@ test("remove origin calls invoke and re-renders", async ({ page }) => {
   expect(removeCalls[0].args).toEqual({ origin: "https://example.com" });
 
   // After re-render, empty state should show
-  await expect(page.getByText("No approved sites yet.")).toBeVisible();
+  await expect(page.getByText("No approved sites yet")).toBeVisible();
 });
 
 test("speed slider input event updates label without IPC", async ({ page }) => {
@@ -172,12 +176,12 @@ test("toggle error reverts checkbox and shows hint", async ({ page }) => {
   await expect(page.locator(".error-hint")).toHaveText("Failed — try again");
 });
 
-test("https row visible on macOS", async ({ page }) => {
+test("Encrypted Connection section visible on macOS", async ({ page }) => {
   await page.goto("/settings.html");
-  await expect(page.locator("#https-row")).toBeVisible();
+  await expect(page.locator("#https-section")).toBeVisible();
 });
 
-test("https row visible on Linux (NSS trust backend)", async ({ page }) => {
+test("Encrypted Connection section visible on Linux (NSS trust backend)", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
       platform: "linux",
@@ -186,10 +190,12 @@ test("https row visible on Linux (NSS trust backend)", async ({ page }) => {
   });
   await page.goto("/settings.html");
 
-  await expect(page.locator("#https-row")).toBeVisible();
+  await expect(page.locator("#https-section")).toBeVisible();
 });
 
-test("https row visible on Windows (CurrentUser Root trust backend)", async ({ page }) => {
+test("Encrypted Connection section visible on Windows (CurrentUser Root trust backend)", async ({
+  page,
+}) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_system_info", () => ({
       platform: "windows",
@@ -198,7 +204,22 @@ test("https row visible on Windows (CurrentUser Root trust backend)", async ({ p
   });
   await page.goto("/settings.html");
 
-  await expect(page.locator("#https-row")).toBeVisible();
+  await expect(page.locator("#https-section")).toBeVisible();
+});
+
+test("the certificate action is collapsed behind a disclosure, not sitting in the open", async ({
+  page,
+}) => {
+  // It IS a real action (the documented recovery path for a partially-trusted install), but it must
+  // not compete with the toggles for attention or invite a stray click.
+  await page.goto("/settings.html");
+  const details = page.locator("#cert-details");
+  await expect(details).toBeVisible();
+  await expect(details).not.toHaveAttribute("open", "");
+  await expect(page.locator("#remove-trust")).toBeHidden();
+
+  await details.locator("summary").click();
+  await expect(page.locator("#remove-trust")).toBeVisible();
 });
 
 test("https toggle calls enable/disable commands", async ({ page }) => {

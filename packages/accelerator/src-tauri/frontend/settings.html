@@ -10,8 +10,38 @@
 <body>
   <div class="section">
     <h2>Approved Sites</h2>
-    <ul id="origins" class="origin-list"></ul>
-    <div id="origins-empty" class="empty-state">No approved sites yet.</div>
+    <!-- The list and its empty state share ONE bordered well, so an empty list reads as an empty
+         container rather than a void with a caption underneath it. -->
+    <div class="well">
+      <ul id="origins" class="origin-list"></ul>
+      <div id="origins-empty" class="empty-state">No approved sites yet</div>
+    </div>
+  </div>
+
+  <div id="https-section" class="section" hidden>
+    <h2>Encrypted Connection</h2>
+    <div class="row">
+      <span class="row-text">
+        <span id="https-label">Use HTTPS</span>
+        <span class="row-sub">Lets browsers reach the accelerator over an encrypted channel. Required for Safari.</span>
+      </span>
+      <label class="toggle">
+        <input type="checkbox" id="https" role="switch" aria-labelledby="https-label" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <!-- The certificate action is real (it's the documented recovery path for a partially-trusted
+         install) but it is NOT an everyday control, so it stays collapsed behind a disclosure. -->
+    <details id="cert-details" class="disclosure">
+      <summary>Manage certificate</summary>
+      <div class="row">
+        <span class="row-text">
+          <span>Certificate installed</span>
+          <span class="row-sub">Removing it turns HTTPS off. You'll be asked for your password again to re-enable.</span>
+        </span>
+        <button type="button" id="remove-trust" class="btn btn-danger">Remove</button>
+      </div>
+    </details>
   </div>
 
   <div class="section">
@@ -32,17 +62,6 @@
         <span class="slider"></span>
       </label>
     </div>
-    <div id="https-row" class="row" hidden>
-      <span id="https-label">Encrypted Connection (HTTPS)</span>
-      <label class="toggle">
-        <input type="checkbox" id="https" role="switch" aria-labelledby="https-label" />
-        <span class="slider"></span>
-      </label>
-    </div>
-    <div id="remove-trust-row" class="row" hidden>
-      <span>Certificate</span>
-      <button type="button" id="remove-trust" class="link-button">Remove certificate trust</button>
-    </div>
     <div class="speed-section">
       <div class="speed-header">
         <span>Proving Speed</span>
@@ -59,10 +78,6 @@
         </div>
       </div>
       <div class="speed-description" id="speed-desc"></div>
-    </div>
-    <div class="row">
-      <span>Setup</span>
-      <button type="button" id="run-setup" class="link-button">Run setup again</button>
     </div>
   </div>
 </body>
