@@ -93,17 +93,31 @@ async function readJsonBounded(response: Response): Promise<unknown> {
       void reader.cancel().catch(() => {});
     }, HEALTH_BODY_TIMEOUT_MS);
     const started = performance.now();
+    // A stream that endlessly enqueues ZERO-LENGTH chunks resolves every read() immediately, starving
+    // the microtask loop so the `setTimeout` deadline never fires and `total` never grows (codex).
+    // Three defences: an in-loop wall-clock check that does not depend on the timer; never RETAINING
+    // empty chunks (their repro accumulated ~936 MB); and a hard cap on how many we tolerate, so the
+    // spin ends immediately rather than burning CPU until the deadline.
+    const MAX_EMPTY_CHUNKS = 64;
+    let emptyChunks = 0;
     try {
       for (;;) {
         const { done, value } = await reader.read();
-        if (done) break;
-        // A stream that endlessly enqueues ZERO-LENGTH chunks resolves every read() immediately, so
-        // the microtask loop starves the `setTimeout` and neither the deadline nor the byte cap ever
-        // fires (codex Low). An in-loop wall-clock check does not depend on the timer running.
+        // Elapsed check BEFORE `done`: a stream that spams empty chunks past the deadline and THEN
+        // closes would otherwise reach `done` first, skip this check, clear the still-unfired timer,
+        // and get parsed as healthy (codex Medium).
         if (performance.now() - started > HEALTH_BODY_TIMEOUT_MS) {
           timedOut = true;
           void reader.cancel().catch(() => {});
           return undefined;
+        }
+        if (done) break;
+        if (value.byteLength === 0) {
+          if (++emptyChunks > MAX_EMPTY_CHUNKS) {
+            void reader.cancel().catch(() => {});
+            return undefined;
+          }
+          continue; // never retained — empty chunks carry no body bytes
         }
         total += value.byteLength;
         if (total > HEALTH_BODY_MAX_BYTES) {

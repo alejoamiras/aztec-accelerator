@@ -299,13 +299,14 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
     logger.info("Using accelerated prover");
 
-    // Capture the endpoint generation BEFORE probing. A probe that started against endpoint A and
-    // completes after `setAcceleratorConfig(B)` has its pin/cache commit discarded, but it still
-    // RETURNS `available: true` — proving on that basis would POST the witness to B, which was never
-    // probed (post-impl codex High). Re-check after the probe and degrade to WASM if it moved.
-    const detectGen = this.#transport.generation;
-
+    // Capture the endpoint generation immediately BEFORE probing — but AFTER the "detect" callback, so
+    // a handler that synchronously reconfigures there is honoured (the probe below then targets the
+    // NEW endpoint, and rejecting that valid result would force a needless WASM fallback — codex Low).
+    // A probe that started against A and completes after `setAcceleratorConfig(B)` has its pin/cache
+    // commit discarded but still RETURNS `available: true`; proving on that basis would POST the
+    // witness to the never-probed B (codex High), so re-check after the probe and degrade if it moved.
     this.#onPhase?.("detect");
+    const detectGen = this.#transport.generation;
     const status = await this.checkAcceleratorStatus();
 
     if (!status.available) {

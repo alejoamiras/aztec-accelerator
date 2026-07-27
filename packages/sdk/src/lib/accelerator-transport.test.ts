@@ -462,6 +462,36 @@ describe("AcceleratorTransport", () => {
       expect(performance.now() - started).toBeLessThan(6_000);
     }, 15_000);
 
+    test("empty chunks past the deadline followed by close are NOT accepted as healthy", async () => {
+      // codex Medium (round 3): the `done` branch was evaluated BEFORE the in-loop clock check, so a
+      // stream that emitted valid JSON, spammed empty chunks past the deadline, and only THEN closed
+      // reached `done` first, cleared the still-unfired timer, and parsed as healthy. (Their repro
+      // also accumulated ~936MB by retaining the empty chunks — now they are never pushed.)
+      globalThis.fetch = mock(async () => {
+        let emitted = 0;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (emitted === 0) {
+              controller.enqueue(new TextEncoder().encode(JSON.stringify(HEALTHY)));
+              emitted++;
+              return;
+            }
+            // Spam empties; close only well after the 2s body deadline.
+            if (emitted++ < 5_000) {
+              controller.enqueue(new Uint8Array(0));
+              return;
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }) as any;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const { body } = await t.probeHealth();
+      expect(body).toBeUndefined();
+    }, 15_000);
+
     test("unreachable HTTPS rejects (→ caller maps to offline), never touching http", async () => {
       const urls: string[] = [];
       globalThis.fetch = mock(async (input: any) => {
