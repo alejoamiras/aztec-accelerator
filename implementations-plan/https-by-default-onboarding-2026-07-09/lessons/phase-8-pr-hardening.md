@@ -129,6 +129,32 @@ ONE attempt ever runs; a caller that loses the CAS waits on `https_bound` via th
 `wait_for_https_bound` (~3s, exits early if the owner released without binding) instead of concluding
 failure. This also removes the AddrInUse path that made the rotate-before-serve race reachable.
 
+## Round-4 (final convergence) — folded
+
+**SDK — codex verdict: DONE.** Two last findings, both fixed and regression-tested:
+- *Medium*: the `done` branch was evaluated BEFORE the in-loop clock check, so a stream that emitted
+  valid health JSON, spammed zero-length chunks past the deadline, and only THEN closed reached `done`
+  first, cleared the still-unfired timer, and parsed as healthy — their repro also accumulated **~936
+  MB RSS** by retaining the empty chunks. Now: elapsed-check before `done`, empty chunks are never
+  retained, and a 64-empty-chunk cap ends the spin immediately instead of burning CPU to the deadline.
+- *Low*: `detectGen` was captured BEFORE the `"detect"` callback, so a handler that synchronously
+  reconfigured there had its valid, freshly-probed result rejected into a needless WASM fallback.
+
+**Rust:** the CAS was claimed INSIDE `spawn_https`, i.e. after rotation and the TLS load. On Linux an
+expiring cert plus onboarding completing during startup rotation let the enable path load the
+pre-rotation set — or, between `swap_into`'s sequential renames, a MIXED leaf/key — and win the bind.
+Fixed by hoisting the claim ahead of rotate/load in both callers as a **RAII guard**
+(`HttpsStartClaim`, releases on `Drop`), so the whole sequence is single-owner and every early return
+(failed rotation, failed TLS load, the `?` on the load) frees the slot automatically rather than
+relying on a manual release a future edit could miss.
+
+**Self-review caught one the audits hadn't yet:** `wait_for_https_bound` polled for ~3s while
+`bind_with_retry` legitimately retries a busy port for up to **5s** — the waiter would have given up
+first and reported a false failure, exactly the bug the CAS was meant to close. Budget raised to 10s.
+(codex independently flagged the same thing next round and confirmed the fix.) Also tightened
+`httpsOnly` to not even *construct* an unused `http://` retry URL, keeping the documented contract
+literally true.
+
 **Accepted residuals (documented, not fixed — all degrade gracefully):**
 - *macOS removal query-error fails open*: a `find-certificate` that ERRORS mid-removal-postcheck (vs
   "not found") can report removed. The login keychain is essentially always unlocked while the app
