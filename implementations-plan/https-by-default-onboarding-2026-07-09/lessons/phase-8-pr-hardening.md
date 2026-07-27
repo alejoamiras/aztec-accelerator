@@ -187,6 +187,23 @@ bind), removal (remove → `https_enabled=false`), renewal (rotate). The serving
 `bind_with_retry` legitimately retries 5s — the waiter would have reported a false failure, exactly
 the bug it was added to prevent. (codex independently flagged it the next round and confirmed the fix.)
 
+- **R8 (final)**: `https_bound` proves a listener EXISTS, not which cert identity it holds — the
+  acceptor is fixed for the life of the serving loop, so after a rotation the on-disk files no longer
+  describe what we serve. Reachable on macOS/Windows: renewal rotates A→B but defers its restart
+  because a proof is in flight (still serving A) → trust removal deletes A and B → same-session
+  re-enable installs only live CA B, sees `already_bound`, skips rebinding, commits "enabled" → HTTPS
+  serves untrusted A until restart. `start_https` now records the served CA fingerprint at bind and
+  enable compares it against the live files; on a mismatch it persists the enable (certs + trust ARE
+  set up) but returns an actionable "restart to finish enabling" error. In-process rebinding is
+  impossible — we hold the port ourselves.
+
+**Loop closed after R8.** The findings had fully transitioned from feature bugs (R1–R3: pin poisoning,
+the macOS `verify-cert -l` breakage, trust identity, bind-swallowing) to concurrency-model bugs in the
+fixes themselves (R4–R8), and the model is now coherent: one transaction per path, every cert
+reader/writer participating, plus an explicit served-identity check for the one thing a lock cannot
+express (what an already-running listener is holding). Further rounds would be chasing diminishing
+returns rather than reachable defects.
+
 **Accepted residuals (documented, not fixed — all degrade gracefully):**
 - *macOS removal query-error fails open*: a `find-certificate` that ERRORS mid-removal-postcheck (vs
   "not found") can report removed. The login keychain is essentially always unlocked while the app
