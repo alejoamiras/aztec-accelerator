@@ -155,6 +155,38 @@ first and reported a false failure, exactly the bug the CAS was meant to close. 
 `httpsOnly` to not even *construct* an unused `http://` retry URL, keeping the documented contract
 literally true.
 
+## Rounds 5–7 — the HTTPS bring-up became one transaction
+
+Rounds 4–7 all found bugs in the FIXES, not the feature. That's the loop earning its cost, and the
+pattern is worth recording: **each fix widened the critical section, which put another path outside
+it.** Chasing that one path at a time was the wrong move; the right one was to change the shape.
+
+- **R5**: cert *work* still started before the claim (`certs_exist()` reads leaf+key,
+  `generate_and_save()` writes a whole set) — two paths could write cert sets concurrently and corrupt
+  the live one. And the 10s poll no longer covered a critical section that now includes rotation
+  (timeout-free `certutil` per NSS store) and can include an OS password dialog — **no fixed budget is
+  honest for an operation gated on a human typing**. Replaced the atomic+polling with a
+  `tokio::sync::Mutex`: a waiter blocks exactly as long as the owner takes. `wait_for_https_bound` deleted.
+- **R6**: launch *classified* before locking (so it could observe a mixed set and reset
+  `https_enabled` over a successful enable), and renewal bypassed the lock entirely. Both now
+  participate. Consequence codex flagged and we folded: once a NON-binding operation (renewal) can own
+  the lock, launch standing down on a failed try-lock would leave HTTPS unstarted all session — so
+  launch now *awaits* the lock (moved from `spawn_blocking` to an async task that waits, then does the
+  blocking cert work via `spawn_blocking`).
+- **R7**: "Remove certificate trust" — offered in the same Settings window as the HTTPS toggle — took
+  no lock. And merely adding one was insufficient: the guard was released at the BIND, before enable
+  committed `https_enabled = true`, so removal could interleave (remove trust, save false) and be
+  overwritten by enable's true, leaving **"enabled" HTTPS with an untrusted CA**.
+
+**Final shape:** the guard spans each path's whole transaction, not its bind. `spawn_https` no longer
+takes it and `start_https` no longer releases it; every caller holds it across bind *and* config
+commit — enable (certs → trust → bind → `https_enabled=true`), launch (classify → rotate → load →
+bind), removal (remove → `https_enabled=false`), renewal (rotate). The serving loop runs unlocked.
+
+**Also caught in self-review, not by the audits:** `wait_for_https_bound` polled 3s while
+`bind_with_retry` legitimately retries 5s — the waiter would have reported a false failure, exactly
+the bug it was added to prevent. (codex independently flagged it the next round and confirmed the fix.)
+
 **Accepted residuals (documented, not fixed — all degrade gracefully):**
 - *macOS removal query-error fails open*: a `find-certificate` that ERRORS mid-removal-postcheck (vs
   "not found") can report removed. The login keychain is essentially always unlocked while the app
