@@ -349,7 +349,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     // witness to the unprobed B (post-impl codex High). Every POST below uses these snapshots.
     const attemptUrl = `${this.#transport.baseUrl}/prove`;
     const attemptWasHttps = attemptUrl.startsWith("https:");
-    const httpRetryUrl = this.#transport.proveUrlFor("http");
+    // Only snapshot the HTTP retry target when a retry is actually permitted. In strict `httpsOnly`
+    // mode an `http://` URL is never even CONSTRUCTED — that's the documented contract, so keep it
+    // literally true rather than computing a string we'd never use.
+    const httpRetryUrl =
+      attemptWasHttps && !this.#transport.httpsOnly ? this.#transport.proveUrlFor("http") : null;
 
     logger.info("Accelerator available, proving natively", { url: attemptUrl });
 
@@ -407,7 +411,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         // Retry THIS request explicitly over HTTP (independent of the shared pin, so a concurrent
         // failure that already cleared the pin doesn't stop us). `demoteHttpsPin()` only hints FUTURE
         // probes to re-check; the retry itself targets the http URL for this attempt's generation.
-        if (attemptWasHttps && !this.#transport.httpsOnly) {
+        // `httpRetryUrl` is non-null exactly when this attempt went over HTTPS in non-strict mode —
+        // guarding on it (rather than re-deriving the condition) also narrows the type.
+        if (httpRetryUrl) {
           this.#transport.demoteHttpsPin();
           logger.warn("HTTPS /prove failed at the network layer; retrying once over HTTP", {
             error: String(err),
