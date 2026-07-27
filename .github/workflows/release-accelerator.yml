@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       auth_probe:
-        description: "F-005: prove the release OIDC role assumes correctly — tag/release/bump are guarded off; builds still START, so cancel the run once the preflight passes"
+        description: "F-005: prove the release OIDC role assumes correctly, then STOP — only validate + the AWS trust preflight run (no build/e2e/tag/release/publish)"
         required: false
         type: boolean
         default: false
@@ -91,6 +91,8 @@ jobs:
   e2e-webdriver:
     name: Pre-release E2E Gate
     needs: validate
+    # F-005: skipped in auth_probe mode — a trust probe needs no e2e gate.
+    if: ${{ !inputs.auth_probe }}
     uses: ./.github/workflows/_e2e-webdriver.yml
     with:
       runner: macos-latest
@@ -121,6 +123,8 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: [validate]
+    # F-005: skipped in auth_probe mode — a trust probe must not burn a 45-min build.
+    if: ${{ !inputs.auth_probe }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -277,6 +281,8 @@ jobs:
   build-headless:
     name: Build Headless (${{ matrix.platform }})
     needs: [validate]
+    # F-005: skipped in auth_probe mode — a trust probe must not burn a 45-min build.
+    if: ${{ !inputs.auth_probe }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -498,7 +504,7 @@ jobs:
     # arch's (DMG-independent) updater artifact, so a flaky DMG on one arch
     # (e.g. macos-15-intel) must not suppress the healthy arch's updater signal.
     # Run whenever validate produced its outputs and the run isn't cancelled.
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -544,7 +550,7 @@ jobs:
   update-smoke-linux:
     name: Updater Smoke (linux-x86_64 / positive)
     needs: [validate, build, e2e-webdriver]
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-linux.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
@@ -566,7 +572,7 @@ jobs:
     # must NOT skip Windows validation. If the windows build leg itself failed, its artifact is
     # absent → the download-artifact step fails → correctly BLOCKS tag/release (this job is now in
     # tag.needs + release.needs).
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
@@ -583,7 +589,7 @@ jobs:
     # must NOT skip Windows validation. If the windows build leg itself failed, its artifact is
     # absent → the download-artifact step fails → correctly BLOCKS tag/release (this job is now in
     # tag.needs + release.needs).
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
