@@ -127,7 +127,11 @@ pub fn show_onboarding_window(app: &AppHandle) {
             url: "onboarding.html".to_string(),
             title: "Welcome to Aztec Accelerator",
             width: 520.0,
-            height: 600.0,
+            // 510, not 600: 600 was sized around a footer paragraph that has since been removed,
+            // leaving ~110px of dead space under the button. This fits the three choices + the CTA;
+            // the per-row result lines that appear after "Start" push past it, which is why the page
+            // is `body.scrollable` rather than sized for its tallest possible state.
+            height: 510.0,
             always_on_top: false,
             focus_if_open: true,
             // Standalone window (not part of the C9 auth-popup arbiter) — create it focused.

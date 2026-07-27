@@ -30,6 +30,25 @@ body {
   user-select: none;
 }
 
+/* Windows whose content can legitimately outgrow the frame: Settings when the certificate
+   disclosure opens, the wizard when per-row results appear. Sizing the window for the tallest
+   possible state would leave dead space in the common one, so these scroll instead. The popups keep
+   `overflow: hidden` — they manage their own inner scroll so their buttons stay pinned (F-014). */
+body.scrollable {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+body.scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+
+body.scrollable::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
 h2 {
   font-size: 14px;
   font-weight: 600;
