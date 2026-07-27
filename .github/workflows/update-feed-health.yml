@@ -59,7 +59,7 @@ jobs:
           # 3. The F-004 signed envelope is actually present. An empty signature would mean
           #    clients fall back to trusting the plain feed body.
           if [ -z "$(jq -r '.manifest_sig // empty' feed.json)" ]; then
-            echo "::error::manifest_sig is empty — the F-004 signed-manifest envelope is broken"
+            echo "::error::manifest_sig is empty — the signed-manifest envelope is broken"
             exit 1
           fi
 
