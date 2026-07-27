@@ -1,0 +1,107 @@
+name: Update Feed Health
+
+# The updater feed at aztec-accelerator.dev/releases/latest.json is what every INSTALLED app
+# polls to discover a new version. It was silently dead for ~6 weeks after deploy-landing's
+# `s3 sync --delete` wiped it (fixed by adding `--exclude "releases*"` + an IAM Deny), and
+# nothing surfaced it — the release pipeline only writes the feed, it never reads it back on a
+# later day. This is the standing read-back that turns a dead or STALE feed into a next-day
+# discovery instead of a months-later one.
+#
+# Deliberately credential-free: the feed is a public URL, so this needs no AWS role, no secrets
+# and no checkout — only the default GITHUB_TOKEN (contents: read) to look up the latest release
+# for the staleness comparison. Nothing here can be leveraged if the workflow is ever tampered
+# with, which is why it is safe to run on a schedule without review.
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-feed-health
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: Probe latest.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch and validate the live updater feed
+        env:
+          FEED: https://aztec-accelerator.dev/releases/latest.json
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 1. Reachable at all — this is the check that would have caught the 6-week outage.
+          code=$(curl -sS --max-time 30 -o feed.json -w '%{http_code}' "$FEED")
+          if [ "$code" != "200" ]; then
+            echo "::error::updater feed returned HTTP $code (expected 200) — $FEED"
+            exit 1
+          fi
+
+          # 2. Structurally intact (catches a truncated or half-written upload).
+          if ! jq -e . feed.json >/dev/null 2>&1; then
+            echo "::error::updater feed is not valid JSON"
+            exit 1
+          fi
+          for k in manifest manifest_sig version platforms; do
+            if ! jq -e --arg k "$k" 'has($k)' feed.json >/dev/null; then
+              echo "::error::updater feed is missing top-level key: $k"
+              exit 1
+            fi
+          done
+
+          # 3. The F-004 signed envelope is actually present. An empty signature would mean
+          #    clients fall back to trusting the plain feed body.
+          if [ -z "$(jq -r '.manifest_sig // empty' feed.json)" ]; then
+            echo "::error::manifest_sig is empty — the signed-manifest envelope is broken"
+            exit 1
+          fi
+
+          # 4. NOT STALE. A feed frozen at an old version still returns a perfectly healthy 200
+          #    while silently stranding every installed app, so compare against the real latest
+          #    stable release. This is the failure mode a naive uptime check cannot see.
+          feed_ver=$(jq -r .version feed.json)
+          latest_tag=$(gh release list --exclude-pre-releases --limit 20 --json tagName \
+            --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
+          latest_ver="${latest_tag#accelerator-v}"
+          if [ -z "$latest_ver" ]; then
+            echo "::error::could not resolve the latest stable accelerator release to compare against"
+            exit 1
+          fi
+          if [ "$feed_ver" != "$latest_ver" ]; then
+            echo "::error::feed advertises $feed_ver but the latest stable release is $latest_ver — feed is stale"
+            exit 1
+          fi
+
+          # 5. Every platform present AND its artifact actually downloadable. A partial upload
+          #    leaves one OS silently unable to update while the other three look fine.
+          for p in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
+            url=$(jq -r --arg p "$p" '.platforms[$p].url // empty' feed.json)
+            if [ -z "$url" ]; then
+              echo "::error::updater feed is missing platform: $p"
+              exit 1
+            fi
+            # Range-request a single byte: proves the asset resolves without pulling ~90MB.
+            acode=$(curl -sSL --max-time 60 -o /dev/null -w '%{http_code}' -r 0-0 "$url")
+            case "$acode" in
+              200 | 206) ;;
+              *)
+                echo "::error::$p artifact returned HTTP $acode — $url"
+                exit 1
+                ;;
+            esac
+          done
+
+          {
+            echo "### ✅ Updater feed healthy"
+            echo ""
+            echo "- version: \`$feed_ver\` (matches latest stable \`$latest_tag\`)"
+            echo "- platforms: 4/4 present and downloadable"
+            echo "- \`manifest_sig\`: present"
+          } >> "$GITHUB_STEP_SUMMARY"

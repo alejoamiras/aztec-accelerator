@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       auth_probe:
-        description: "F-005: prove the release OIDC role assumes correctly, then STOP (no build/tag/release/publish)"
+        description: "Probe only: verify the release AWS role still assumes correctly, then stop. Runs validate + the AWS trust preflight; skips build/e2e/tag/release/publish."
         required: false
         type: boolean
         default: false
@@ -32,6 +32,18 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
+      # F-005 (Codex GATE-3 H2): reject any dispatch not on refs/heads/main BEFORE any
+      # build/tag/release. Every other job depends on `validate` (directly or transitively),
+      # so this gates the whole run, and it matches the release role's `sub=main` + `workflow`
+      # OIDC trust — without it an off-main dispatch still builds and SIGNS artifacts with the
+      # production updater key before failing later at the AWS step.
+      - name: Assert main ref
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Release Accelerator must be dispatched from refs/heads/main (got $GITHUB_REF)"
+            exit 1
+          fi
+
       - name: Validate and output version
         id: version
         env:
@@ -79,6 +91,8 @@ jobs:
   e2e-webdriver:
     name: Pre-release E2E Gate (${{ matrix.runner }})
     needs: validate
+    # F-005: skipped in auth_probe mode — a trust probe needs no e2e gate.
+    if: ${{ !inputs.auth_probe }}
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +129,8 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: [validate]
+    # F-005: skipped in auth_probe mode — a trust probe must not burn a 45-min build.
+    if: ${{ !inputs.auth_probe }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -271,6 +287,8 @@ jobs:
   build-headless:
     name: Build Headless (${{ matrix.platform }})
     needs: [validate]
+    # F-005: skipped in auth_probe mode — a trust probe must not burn a 45-min build.
+    if: ${{ !inputs.auth_probe }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -492,7 +510,7 @@ jobs:
     # arch's (DMG-independent) updater artifact, so a flaky DMG on one arch
     # (e.g. macos-15-intel) must not suppress the healthy arch's updater signal.
     # Run whenever validate produced its outputs and the run isn't cancelled.
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -538,7 +556,7 @@ jobs:
   update-smoke-linux:
     name: Updater Smoke (linux-x86_64 / positive)
     needs: [validate, build, e2e-webdriver]
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-linux.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
@@ -560,7 +578,7 @@ jobs:
     # must NOT skip Windows validation. If the windows build leg itself failed, its artifact is
     # absent → the download-artifact step fails → correctly BLOCKS tag/release (this job is now in
     # tag.needs + release.needs).
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
@@ -577,7 +595,7 @@ jobs:
     # must NOT skip Windows validation. If the windows build leg itself failed, its artifact is
     # absent → the download-artifact step fails → correctly BLOCKS tag/release (this job is now in
     # tag.needs + release.needs).
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !inputs.auth_probe && !cancelled() && needs.validate.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
@@ -938,10 +956,16 @@ jobs:
           # Strip leading whitespace from each line (YAML indentation artifact)
           sed -i 's/^          //' /tmp/release-notes.md
 
+          # F-005 (Codex GATE-3 H1): --verify-tag makes `gh release create` FAIL when the tag
+          # does not already exist (pushed by the `tag` job) instead of silently auto-creating
+          # it from HEAD. A release must never be published when `tag` was skipped — e.g. after
+          # a failed release-auth-preflight — because the auto-created tag would point at
+          # whatever HEAD happened to be rather than the reviewed commit.
           if [ "$IS_PRERELEASE" = "true" ]; then
             gh release create "$RELEASE_TAG" \
               --title "Aztec Accelerator $VERSION" \
               --notes-file /tmp/release-notes.md \
+              --verify-tag \
               --prerelease \
               --latest=false \
               "${FILES[@]}"
@@ -949,6 +973,7 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --title "Aztec Accelerator $VERSION" \
               --notes-file /tmp/release-notes.md \
+              --verify-tag \
               --latest \
               "${FILES[@]}"
           fi

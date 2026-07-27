@@ -215,10 +215,10 @@ jobs:
           #    MUST reject (OuterMismatch). A pass here is a regression.
           jq '.version = "9.9.9"' "$work/signed.json" > "$work/tampered.json"
           if tool verify --feed "$work/tampered.json" --pubkey "$work/pubkey.b64"; then
-            echo "::error::version-splice feed VERIFIED but must have been rejected (F-004 regression)"
+            echo "::error::version-splice feed VERIFIED but must have been rejected — signed-manifest downgrade protection regressed"
             exit 1
           fi
-          echo "splice-reject OK (F-004 downgrade attack correctly refused)"
+          echo "splice-reject OK (downgrade attack correctly refused)"
 
   lint:
     name: Lint
@@ -240,7 +240,7 @@ jobs:
       - run: bun run lint
       - name: Unit-test build scripts (copy-bb supply-chain gate)
         run: bun run --cwd packages/accelerator test:unit
-      - name: Unit-test root scripts (download-bb F-007 cache-integrity gate)
+      - name: Unit-test root scripts (download-bb cache-integrity gate)
         run: bun run test:scripts
 
   smoke:

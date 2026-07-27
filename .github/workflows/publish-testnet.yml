@@ -25,6 +25,22 @@ permissions:
   contents: read
 
 jobs:
+  # F-005 (Codex GATE-3 H4): gate all side effects (npm publish + AWS deploy) on a main-ref
+  # dispatch. The playground OIDC role trusts only main, so the AWS leg fails on its own — but
+  # npm does NOT check the ref, and `publish-sdk` runs BEFORE `deploy-app`. Without this a
+  # feature-ref dispatch would irreversibly publish the SDK to npm and only then fail at AWS.
+  assert-main:
+    name: Assert main ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Assert dispatched from main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Publish Testnet must be dispatched from refs/heads/main (got $GITHUB_REF)"
+            exit 1
+          fi
+
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -54,7 +70,7 @@ jobs:
       build_accelerator: ${{ inputs.skip_sdk_publish != true }}
 
   publish-sdk:
-    needs: [changes, e2e]
+    needs: [assert-main, changes, e2e]
     # Skip when deploying the playground only. The SDK publishes on the `testnet`
     # dist-tag; npm `latest` moves ONLY via promote-latest.yml, after the live
     # acceptance smoke (_publish-sdk.yml has no latest capability at all).
@@ -71,8 +87,11 @@ jobs:
 
   deploy-app:
     # Deploy playground unless E2E explicitly failed — skip on cancel, proceed on skip/success.
-    if: ${{ !cancelled() && needs.e2e.result != 'failure' }}
-    needs: e2e
+    # The explicit assert-main success check is REQUIRED, not redundant: `!cancelled()` overrides
+    # GitHub's normal skipped-needs propagation, so without it this job would still deploy after
+    # assert-main failed (F-005 H4).
+    if: ${{ !cancelled() && needs.e2e.result != 'failure' && needs.assert-main.result == 'success' }}
+    needs: [assert-main, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

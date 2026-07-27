@@ -64,9 +64,10 @@ aws s3api list-objects-v2 --bucket aztec-accelerator-site --prefix landing/relea
 gh workflow run publish-testnet.yml --repo "$REPO" --ref main -f skip_sdk_publish=true
 gh run watch "$(gh run list --repo "$REPO" --workflow publish-testnet.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 
-# Release role — auth_probe (no tag/release/publish side effects):
+# Release role — auth_probe (side-effect-free):
 gh workflow run release-accelerator.yml --repo "$REPO" --ref main -f version=0.0.0-authprobe -f auth_probe=true
-# watch that `Release AWS trust preflight` PASSES; then cancel the run (build jobs may still be going).
+# probe mode runs ONLY validate + `Release AWS trust preflight` (builds/e2e/smokes/tag/release all
+# skipped) — watch the preflight PASS; the run completes green on its own, no cancel needed.
 
 # IAM policy simulation (trust policies are NOT simulated → also rely on the real assumes above + the
 # negative test below):
