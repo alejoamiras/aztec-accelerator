@@ -41,22 +41,23 @@ pub fn try_claim_https_lifecycle(state: &AppState) -> Option<HttpsLifecycleGuard
 /// spawn+error-log wrapper is unified; each caller keeps its own (intentionally divergent) TLS-load
 /// and failure-handling preamble upstream. (F-09)
 ///
-/// Takes the caller's [`HttpsLifecycleGuard`] (proof it owns the bring-up) and hands it to
-/// `start_https`, which releases it the instant the bind resolves — so the lock covers the bind but
-/// NOT the serving loop. Returns a receiver resolving to that bind outcome (`true` = listener live,
-/// `false` = port unavailable). The enable path awaits it before persisting `https_enabled`; the
-/// launch path drops it (a dropped receiver just makes the `send` a no-op — it does not cancel).
+/// The CALLER must hold a [`HttpsLifecycleGuard`] and keep holding it until it has awaited the
+/// returned receiver AND committed any resulting state (`https_enabled = true`). Releasing at the bind
+/// instead would let the Settings "Remove certificate trust" action slip in between the bind and that
+/// config write — removing the anchor and saving `false`, only to be overwritten by the enable's
+/// `true`, leaving "enabled" HTTPS with an untrusted CA (post-impl codex Medium).
+///
+/// Returns a receiver resolving to the bind outcome (`true` = listener live, `false` = port
+/// unavailable). A dropped receiver just makes the `send` a no-op — it does not cancel the listener.
 pub fn spawn_https(
     state: AppState,
     tls_config: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
-    guard: HttpsLifecycleGuard,
 ) -> tokio::sync::oneshot::Receiver<bool> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = start_https(state, tls_config, tx, guard).await {
+        if let Err(e) = start_https(state, tls_config, tx).await {
             // start_https only returns Err before it can send `ready`; the dropped `tx` makes the
             // awaiting receiver observe a bind failure (RecvError), which the caller treats as such.
-            // The guard it owns is dropped with it, releasing the lock.
             tracing::error!("HTTPS server error: {e}");
         }
     });

@@ -174,11 +174,15 @@ async fn launch_https(state: AppState) {
             }
         };
 
-    // Fire-and-forget: launch does not await the bind (a dropped receiver just makes `ready.send` a
-    // no-op). The guard moves into the spawned task, which releases it once the bind resolves.
-    drop(aztec_accelerator::server::spawn_https(
-        state, tls_config, guard,
-    ));
+    // Await the bind while still HOLDING the guard, so no other path can start a competing bring-up
+    // or mutate the cert set while our listener is coming up. `guard` drops at end of scope,
+    // releasing the lock for enable/renewal/removal; the serving loop itself runs unlocked.
+    let ready = aztec_accelerator::server::spawn_https(state, tls_config);
+    match ready.await {
+        Ok(true) => tracing::info!("HTTPS listener started at launch"),
+        _ => tracing::warn!("HTTPS listener did not bind at launch — continuing HTTP-only"),
+    }
+    drop(guard);
 }
 
 /// Disable HTTPS in config (certs missing/invalid/untrusted) so the user can re-enable to

@@ -388,9 +388,11 @@ async fn enable_https_inner(
         let tls_config =
             certs::load_rustls_config().map_err(|e| format!("Failed to load TLS config: {e}"))?;
         // The clone shares the Arc'd https_bound flag with the managed state, so start_https flipping
-        // it after a successful bind is visible to /health. (Q7) The guard moves into the spawned
-        // task, which releases it as soon as the bind resolves.
-        let ready = crate::server::spawn_https(shared_state.clone(), tls_config, lifecycle);
+        // it after a successful bind is visible to /health. (Q7) We keep holding `lifecycle` across
+        // the bind AND the `https_enabled = true` commit below — releasing at the bind would let
+        // "Remove certificate trust" slip in between, remove the anchor and save `false`, only for our
+        // `true` to overwrite it, leaving "enabled" HTTPS with an untrusted CA (post-impl codex).
+        let ready = crate::server::spawn_https(shared_state.clone(), tls_config);
         if !matches!(ready.await, Ok(true)) {
             return Err(
                 "Certificates are ready, but the HTTPS server could not start \
@@ -402,6 +404,9 @@ async fn enable_https_inner(
 
     mutate_config(config, |cfg| cfg.https_enabled = true)?;
     tracing::info!("HTTPS enabled");
+    // `lifecycle` drops HERE — after the config commit, so the whole transaction (certs → trust →
+    // bind → `https_enabled = true`) is atomic with respect to removal/renewal/launch.
+    drop(lifecycle);
     Ok(())
 }
 
@@ -469,11 +474,19 @@ pub fn disable_https(
 /// Explicitly remove the local CA from every browser trust store (the "Remove certificate trust"
 /// Settings action — D5). Also flips HTTPS off so the app stops presenting a now-untrusted cert.
 #[tauri::command]
-pub fn remove_https_trust(
+pub async fn remove_https_trust(
     window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
+    // Removal MUTATES trust state, so it joins the same serialization as launch/enable/renewal. The
+    // Settings window offers this button and the HTTPS toggle at once (and enable can sit on a
+    // Keychain dialog), so without the lock a removal could delete every anchor and report success
+    // while a concurrent enable/renewal installed a new one — or interleave with enable's final
+    // config commit and leave "enabled" HTTPS with an untrusted CA (post-impl codex Medium). Held
+    // across BOTH the removal and the `https_enabled = false` write, mirroring enable's transaction.
+    let _lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
     let report = crate::trust::remove_ca_trust(&crate::certs::live_ca_cert_path());
     // Stop serving the now-to-be-untrusted cert regardless of whether every store could be cleaned.
     mutate_config(&config, |cfg| cfg.https_enabled = false)?;
