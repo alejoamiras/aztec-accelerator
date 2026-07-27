@@ -173,3 +173,33 @@ Both auditors returned **conditional approve**. Every High+/Critical is folded a
 - **R13 (LOW, fable L-1) — ADOPTED.** `CONFIG_VERSION` bump is decorative; framing on duplicate-key configs corrected to "matches existing malformed-config policy" (P1).
 - **Rejected/neutralized:** codex's `sha1` crate (R6 obviates); the "NSIS needs certutil regardless" fact (false — removed from D3); "exit codes are a certutil API contract" (downgraded to CI-pinned tool behavior). Nothing High+ left unaddressed.
 - **Residual LOWs accepted (documented, not fixed):** L-3 (renewal window at launch reads as a "prompt" — copy nuance), L-4 (release-mode 3-OS WebDriver is new cost/flake surface — accepted for the release-blocking wizard flow).
+
+## 13. Final implementation status (2026-07-27)
+
+**All 7 phases landed, plus a PR-hardening phase (§lessons/phase-8) covering the rebase onto main's
+security-hardening campaign and four PR-scoped codex bug-hunt rounds.**
+
+Two plan-level decisions changed during implementation, both owner-approved:
+
+- **D14 — no migration (supersedes P1's alias approach).** The `safari_support` → `https_enabled`
+  rename ships as a **clean install**: the serde alias is dropped, an older config's key is ignored,
+  `https_enabled` defaults off, and the once-shown wizard re-enables it. This deletes the
+  duplicate-key-resets-config edge (R13's "matches existing malformed-config policy" framing is now
+  moot) and the whole migrated-upgrader edge-case cluster that several audit findings lived in.
+- **D15 — the SDK's health contract is `status:"ok"` + `api_version:1`.** §4's "ok + parseable body"
+  proved too weak: field-presence let a same-port squatter steal the protocol pin. The SDK now mirrors
+  the app's own `core/src/server/probe.rs` classifier, enforced in `httpsOnly` mode too. `httpsOnly`'s
+  guarantee is documented honestly in the SDK README (encrypted channel + browser-trusted loopback
+  cert; **not** cryptographic pairing with a specific install).
+
+**Certainty ladder (§10 delta).** Shipped: **Tier 1** — `tests/tls_handshake.rs`, an in-process rustls
+handshake against the real generated cert set (verified by `localhost` AND `127.0.0.1`), wired into the
+3-OS cert-trust matrix; **Tier 4** — a static guard pinning the NSIS `$UpdateMode` guard (R1). The
+Linux `cert-trust` leg additionally validates real NSS **trust flags** (`-V -u L`), not mere presence,
+and asserts **confirmed** removal. Deferred with a documented approach: **Tier 2** (real-browser E2E on
+3 OSes, seeded via each OS's silently-writable admin/system root store) and **Tier 3** (Windows
+`certutil` arg-shape against the non-prompting `CurrentUser\CA` store).
+
+**Irreducibly manual (unchanged):** the Windows CurrentUser-Root prompt and the macOS Keychain password
+dialog — that dialog *is* the consent, so it cannot be answered headlessly. Both plus uninstall stay on
+the pre-release runbook.
