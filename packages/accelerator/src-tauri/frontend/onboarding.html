@@ -11,13 +11,13 @@
   <body>
     <div class="wiz">
       <h1>Let's get you set up</h1>
-      <p class="sub">Three quick choices. You can change any of these later in Settings.</p>
+      <p class="sub">Three quick choices, all changeable later in Settings. Skipping changes nothing.</p>
 
       <div class="opt">
         <div class="ic">🔒</div>
         <div class="meta">
           <div class="name">Encrypted Connection (HTTPS)</div>
-          <div class="desc" id="https-desc">Lets your browser talk to the accelerator over an encrypted channel — and is required for Safari.</div>
+          <div class="desc" id="https-desc">Lets your browser talk to the accelerator over an encrypted channel. Required for Safari.</div>
           <div class="desc warn" id="https-warn"></div>
           <div class="result" id="https-result"></div>
           <button type="button" class="retry" id="https-retry">Retry</button>
@@ -32,7 +32,7 @@
         <div class="ic">🚀</div>
         <div class="meta">
           <div class="name">Start on Login</div>
-          <div class="desc">Runs quietly in your menu bar so proving is instant — no manual launch.</div>
+          <div class="desc">Runs quietly in your menu bar so proving is instant, with no manual launch.</div>
           <div class="result" id="autostart-result"></div>
         </div>
         <label class="toggle">
@@ -56,9 +56,8 @@
 
       <div class="cta">
         <button type="button" class="primary" id="start">Start</button>
-        <button type="button" class="ghost" id="skip">Skip for now</button>
+        <button type="button" class="ghost" id="skip">Skip</button>
       </div>
-      <div class="foot">Encryption protects the channel between your browser and this app on your own machine.</div>
     </div>
   </body>
 </html>

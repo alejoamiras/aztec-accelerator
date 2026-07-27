@@ -2,9 +2,9 @@ import { invoke, wireButton } from "./bridge.js";
 
 // Per-OS copy for the HTTPS certificate step (the wizard's one consequential action).
 const HTTPS_WARN = {
-  macos: "⚠ Installs a local certificate — macOS will ask for your password once.",
+  macos: "⚠ Installs a local certificate. macOS will ask for your password once.",
   windows: "⚠ Installs a local certificate into your browsers when you click Start.",
-  linux: "⚠ Installs a certificate into your browsers — no separate prompt will appear.",
+  linux: "⚠ Installs a certificate into your browsers. No separate prompt will appear.",
 };
 
 async function load() {

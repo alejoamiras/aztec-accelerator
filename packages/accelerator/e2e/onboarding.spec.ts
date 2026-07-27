@@ -41,7 +41,8 @@ test("HTTPS explanation shows the per-OS certificate copy", async ({ page }) => 
     }));
   });
   await page.goto("/onboarding.html");
-  await expect(page.locator("#https-warn")).toContainText("no separate prompt");
+  // Substring only (not the full sentence) so wording tweaks don't break the per-OS-copy assertion.
+  await expect(page.locator("#https-warn")).toContainText("separate prompt");
 });
 
 test("HTTPS stays pre-checked for an upgrader on any platform (A9)", async ({ page }) => {

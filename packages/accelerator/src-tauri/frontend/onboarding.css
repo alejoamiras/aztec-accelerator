@@ -18,4 +18,3 @@
 .wiz .cta .primary { flex: 1; background: #f0a020; color: #231a06; }
 .wiz .cta .ghost { background: transparent; border: 1px solid var(--line, #e3e6ea); color: var(--muted, #6b7280); }
 .retry { display: none; margin-top: 6px; background: transparent; border: 1px solid var(--line, #e3e6ea); border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.8rem; cursor: pointer; }
-.foot { color: var(--muted, #6b7280); font-size: 0.76rem; margin-top: 12px; text-align: center; }
