@@ -10,6 +10,9 @@
     }
   },
   "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "required_linear_history" },
     {
       "type": "pull_request",
       "parameters": {
@@ -17,18 +20,20 @@
         "require_code_owner_review": false,
         "require_last_push_approval": false,
         "required_approving_review_count": 0,
-        "required_review_thread_resolution": false
+        "required_review_thread_resolution": true,
+        "allowed_merge_methods": ["squash", "rebase"]
       }
     },
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": false,
+        "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": true,
         "required_status_checks": [
           { "context": "SDK Status", "integration_id": 15368 },
           { "context": "App Status", "integration_id": 15368 },
-          { "context": "Accelerator Status", "integration_id": 15368 }
+          { "context": "Accelerator Status", "integration_id": 15368 },
+          { "context": "Actionlint Status", "integration_id": 15368 }
         ]
       }
     }

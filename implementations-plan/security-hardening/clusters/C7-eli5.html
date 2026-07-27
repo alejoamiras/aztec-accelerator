@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C7 / F-008 — Windows bb pin provenance — ELI5</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --hair:#e2e2e2; --surface:#f7f7f8; --code:#eef;
+          --link:#2b6cb0; --warn:#b7791f; --warn-bg:#fffaf0; --ok:#2f855a; --ok-bg:#f0fff4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181c; --fg:#e6e6e6; --muted:#9aa0a6; --hair:#2c2f36; --surface:#1e2127; --code:#232838;
+            --link:#7fb3ff; --warn:#e0a94b; --warn-bg:#2a2213; --ok:#68d391; --ok-bg:#12241a; } }
+  body { background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         max-width:820px; margin:0 auto; padding:2rem 1.2rem 5rem; }
+  h1 { font-size:1.7rem; margin:.2rem 0 .4rem; } h2 { font-size:1.25rem; margin:2rem 0 .6rem; border-bottom:1px solid var(--hair); padding-bottom:.3rem; }
+  h3 { font-size:1.05rem; margin:1.3rem 0 .3rem; } code { background:var(--code); padding:.1rem .35rem; border-radius:4px; font-size:.88em; }
+  .muted { color:var(--muted); } a { color:var(--link); }
+  .card { background:var(--surface); border:1px solid var(--hair); border-radius:8px; padding:1rem 1.2rem; margin:.8rem 0; }
+  .gate { font-size:.9rem; color:var(--muted); border-left:3px solid var(--hair); padding-left:.7rem; margin-top:.5rem; }
+  .warn { background:var(--warn-bg); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1.1rem; margin:.9rem 0; }
+  .ok { background:var(--ok-bg); border:1px solid var(--ok); border-radius:8px; padding:.8rem 1.1rem; margin:.9rem 0; }
+  pre { background:var(--code); padding:.9rem; border-radius:8px; overflow-x:auto; font-size:.82rem; }
+  ul { padding-left:1.3rem; } li { margin:.25rem 0; }
+</style>
+</head>
+<body>
+
+<h1>C7 — Trusting the Windows <code>bb.exe</code> we ship</h1>
+<p class="muted">Cluster C7 · Finding F-008 · mid-tier blueprint · branch <code>sechard/bb-windows-provenance</code></p>
+
+<p>On macOS/Linux the prover binary <code>bb</code> comes from an npm package (with a 7-day quarantine + a
+locked integrity hash). But <strong>Windows</strong> has no npm build, so we fetch <code>bb.exe</code> from a
+GitHub release and pin its SHA-256 in the repo as a supply-chain check. The problem: the way that pin gets
+created is <em>circular</em>, and the way version-bump PRs can merge is <em>too eager</em>.</p>
+
+<div class="warn">
+<strong>The bug in one breath.</strong> <code>update-aztec-version.ts</code> auto-creates the Windows pin by
+downloading the file and recording whatever hash came back (that's not verification — it's "trust whatever
+arrived"). And <code>_aztec-update.yml</code> on <code>auto_merge:false</code> ran <code>gh pr merge
+--squash</code> — an <em>immediate</em> merge that lands the bump before CI even checks it.
+</div>
+
+<h2>What we found (and confirmed by hand)</h2>
+<ul>
+<li><strong>No independent proof exists today.</strong> We checked: AztecProtocol publishes no build
+attestation (<code>gh attestation verify</code> → 404) and no signed checksum file. The current
+<code>rc.2</code> pin is byte-for-byte "the file we downloaded." So a pin can only ever be a
+<em>human-reviewed change-detector</em> right now — honest labeling matters.</li>
+<li><strong>The auto-pin isn't even committed by the bump workflow</strong> (it only <code>git add</code>s
+package.json + lockfile) — so it's mostly a footgun for someone running the script locally. But it's the
+mechanism by which a circular pin would ever enter the tree, so it goes.</li>
+</ul>
+
+<h2>Why mid tier</h2>
+<p>Security-sensitivity HIGH (supply chain of a shipped binary) + external-coupling HIGH (GitHub release +
+npm). Contained to a few files. Both the codex and fable audits <strong>rejected the first draft</strong> and
+a third pass rejected the second — each time sharpening it, not reversing direction. That's the dual audit
+doing its job.</p>
+
+<h2>The fix</h2>
+<div class="card"><strong>1. Stop auto-creating pins.</strong> Delete the download-and-write. A new Windows
+version simply has no pin until a human adds a reviewed one — and the Windows CI gate stays red until they
+do.</div>
+<div class="card"><strong>2. Make the pin's provenance machine-enforced, not a comment.</strong> Each pin
+becomes <code>{ sha256, provenance, note }</code>. The resolver <em>only</em> accepts
+<code>manual-review</code> today and throws on anything it doesn't recognize. <code>attestation</code> is
+reserved for the future — when Aztec signs releases, we wire up <code>gh attestation verify</code>.</div>
+<div class="card"><strong>3. Leave the bump PR open.</strong> Replace the confusing <code>auto_merge</code>
+boolean with <code>merge_mode: none|auto</code> (default <code>none</code>): <code>none</code> creates the PR
+and stops — a human reviews before merge. No more immediate merge.</div>
+<div class="card"><strong>4. Delete the ungated path.</strong> The nightlies bump targeted a branch no CI
+gate watches (and the branch is unused). Deleting <code>aztec-nightlies.yml</code> removes the only caller
+that could dodge the Windows gate — only the gated <code>stable → main</code> path remains.</div>
+
+<div class="ok">
+<strong>The honest part.</strong> This does NOT make <code>bb.exe</code> cryptographically verifiable — that
+needs Aztec to sign their releases (the same upstream-signing gap F-007 hit, tracked as SEC-02). What it DOES
+do: stop the <em>automation</em> from silently accepting + merging an unverified binary, and make a human look
+at every new Windows pin. That's the achievable win today.</div>
+
+<h2>Phases &amp; how each proves itself</h2>
+<h3>Phase 1 — structured provenance + remove auto-pin</h3>
+<div class="gate">Proves itself by: <code>bun test packages/accelerator/scripts/</code> (resolver accepts
+manual-review; rejects missing / reserved-attestation / unrecognized / malformed) +
+<code>bun test scripts/update-aztec-version.test.ts</code> (no pin logic, no network) + lint.</div>
+<h3>Phase 2 — leave-PR-open + post-install pin check + least-privilege + delete nightlies</h3>
+<div class="gate">Proves itself by: <code>check-windows-bb-pin</code> test (present vs required, no network) +
+<code>lint:actions</code> + a static check that the <code>none</code> path never calls <code>gh pr
+merge</code> + an invalid-forced-input guard.</div>
+<h3>Phase 3 — provenance policy docs + ruleset runbook</h3>
+<div class="gate">Proves itself by: full <code>bun run test</code> + <code>lint:actions</code>.</div>
+
+<h2>Open questions (decided)</h2>
+<ul>
+<li><strong>Block all Windows, or keep current pins usable?</strong> Keep them usable as honestly-labeled
+change-detectors — hard-blocking would break Windows with no path forward until Aztec signs. The block
+applies to the <em>automation</em>, not to existing reviewed pins.</li>
+<li><strong>Is the CI gate actually enforced?</strong> It depends on the C5 main ruleset being live (human-
+applied) with the release-bot not on the bypass list — a documented human-gated dependency + a runbook
+readback, not something the repo can prove by itself.</li>
+</ul>
+
+<h2>Seed strings</h2>
+<pre>/goal  F-008 fixed — auto-pin removed (no fetch/write), WINDOWS_BB_CHECKSUMS
+       structured + resolver fail-closed on unrecognized provenance, merge_mode:none
+       leaves the PR open, aztec-nightlies.yml deleted, provenance policy + bypass
+       runbook documented; each gate green; post-impl codex xhigh folded; PR into
+       security-hardening CI green.</pre>
+<pre>/loop 15m  Drive C7 — structured resolver-enforced provenance (manual-review only) +
+           remove auto-pin + post-install pin-status check + merge_mode:none leave-open
+           + validate-input-before-output + delete nightlies. After each edit run the
+           touched test + lint (+ lint:actions). Commit/push. Consult codex on the schema.</pre>
+
+<p class="muted">Full plan: <a href="C7-plan.md">C7-plan.md</a> · audits: <a href="C7-audit-codex.md">codex</a>,
+<a href="C7-audit-fable.md">fable</a> · master: <a href="../plan.md">plan.md</a></p>
+</body>
+</html>

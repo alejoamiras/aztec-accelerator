@@ -94,7 +94,9 @@ function handleProverPhase(ascii: AsciiController, phase: string, _data?: unknow
 
 function setActionButtonsDisabled(disabled: boolean): void {
   $btn("deploy-btn").disabled = disabled;
-  $btn("token-flow-btn").disabled = disabled;
+  // The token flow needs a session-deployed sender (see pickSessionSender) — an enabled
+  // button must imply the action can succeed, so it stays disabled until one exists.
+  $btn("token-flow-btn").disabled = disabled || state.sessionAddresses.length === 0;
 }
 
 // ── Deploy ──
@@ -209,7 +211,7 @@ async function initWallet(): Promise<void> {
       networkLabel.textContent = "proofs simulated";
       networkLabel.className =
         "text-brand-text-muted/50 text-[10px] uppercase tracking-wider ml-auto";
-      appendLog("Ready. Deploy a test account or run the token flow", "success");
+      appendLog("Ready. Deploy a test account to get started", "success");
     }
   } else {
     $("wallet-state").textContent = "failed";

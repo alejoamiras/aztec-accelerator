@@ -96,7 +96,10 @@ try {
   $Served = Join-Path $ServeDir $NName
   Copy-Item $NZip.FullName $Served
   $NSigText = (Get-Content $NSig.FullName -Raw).Trim()
-  Log "N artifact: $NName"
+  # Byte size of the GENUINE artifact (before any negative-mode tamper) — bound into the signed
+  # manifest (F-004 Layer A + SEC-03).
+  $NSize = $NZip.Length
+  Log "N artifact: $NName ($NSize bytes)"
 
   # Negative control: tamper the served zip (append a byte) but keep the GENUINE sig,
   # so the minisign check over the tampered bytes MUST fail against the embedded pubkey.
@@ -127,14 +130,40 @@ try {
   # ── Scoped Defender exclusion (the UNSIGNED installer/exe) ──
   Add-MpPreference -ExclusionPath $InstallRoot, $ServeDir -ErrorAction SilentlyContinue
 
-  # ── Synthesize latest.json for N ──
-  $latest = [ordered]@{
-    version  = $NVersion
-    notes    = "updater smoke $NVersion"
-    pub_date = "2026-01-01T00:00:00Z"
-    platforms = [ordered]@{ $PlatformKey = [ordered]@{ signature = $NSigText; url = "https://$FeedHost/releases/download/$NName" } }
-  } | ConvertTo-Json -Depth 6
-  Set-Content -Path (Join-Path $Work "latest.json") -Value $latest
+  # ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
+  # A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry manifest/manifest_sig
+  # signed with the SAME (prod) key N-1 embeds. The synthetic N-1 keeps the committed prod pubkey, so
+  # the manifest key is the prod key — provided to THIS step's env (overriding the ephemeral key that
+  # only built N-1's artifacts). Encoding contract matches accelerator_core::update_manifest:
+  # manifest = base64(envelope bytes); manifest_sig = the .sig content verbatim (base64(minisign doc)).
+  $platform = [ordered]@{ signature = $NSigText; url = "https://$FeedHost/releases/download/$NName"; size = $NSize }
+  $platforms = [ordered]@{ $PlatformKey = $platform }
+  # The signed envelope shape MUST match SignedEnvelope (deny_unknown_fields): {schema, version,
+  # pub_date, platforms}. Write WITHOUT a BOM (pwsh 7 default) so the signed bytes parse.
+  $envelope = [ordered]@{
+    schema    = "aztec-accelerator-update-manifest-v1"
+    version   = $NVersion
+    pub_date  = "2026-01-01T00:00:00Z"
+    platforms = $platforms
+  }
+  $EnvPath = Join-Path $Work "envelope.json"
+  ($envelope | ConvertTo-Json -Depth 6) | Set-Content -Path $EnvPath -Encoding utf8NoBOM
+  Push-Location "$RepoRoot\packages\accelerator"
+  & bunx tauri signer sign $EnvPath
+  if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Error "tauri signer sign failed for the smoke manifest"; exit 1 }
+  Pop-Location
+  $ManifestB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($EnvPath))
+  $ManifestSig = (Get-Content "$EnvPath.sig" -Raw).Trim()
+  $latestObj = [ordered]@{
+    version      = $NVersion
+    notes        = "updater smoke $NVersion"
+    pub_date     = "2026-01-01T00:00:00Z"
+    platforms    = $platforms
+    manifest     = $ManifestB64
+    manifest_sig = $ManifestSig
+  }
+  $latest = $latestObj | ConvertTo-Json -Depth 6
+  Set-Content -Path (Join-Path $Work "latest.json") -Value $latest -Encoding utf8NoBOM
   Log "latest.json:"; Write-Host $latest
 
   # ── Start the local HTTPS feed on :443 (no sudo on Windows) ──
@@ -147,7 +176,7 @@ try {
     try { Invoke-RestMethod -Uri "https://$FeedHost/releases/latest.json" -TimeoutSec 3 | Out-Null; $feedUp = $true; break } catch { }
     Start-Sleep -Milliseconds 500
   }
-  if (-not $feedUp) { Write-Error "feed server not reachable"; Dump-Logs; exit 1 }
+  if (-not $feedUp) { Dump-Logs; Write-Error "feed server not reachable"; exit 1 }
 
   # ── Install N-1 silently (currentUser → %LOCALAPPDATA%, no UAC) ──
   # Timed (not -Wait): a non-silent NSIS prompt would hang the runner forever, so fail fast.
@@ -178,7 +207,7 @@ try {
     & schtasks /Delete /F /TN $TaskName *> $null
     & schtasks /Query /TN $TaskName *> $null
     if ($LASTEXITCODE -eq 0) {
-      Write-Error "(#97) pre-run cleanup FAILED — a stale '$TaskName' task survived /Delete; cannot prove this run armed it."; Dump-Logs; exit 1
+      Dump-Logs; Write-Error "(#97) pre-run cleanup FAILED — a stale '$TaskName' task survived /Delete; cannot prove this run armed it."; exit 1
     }
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value "`"$($Exe.FullName)`""
     Log "armed crash-recovery (stale task cleared + verified gone; autostart Run key set)"
@@ -217,11 +246,11 @@ try {
     Log "NEGATIVE: asserting /health never reports $NVersion (tampered artifact rejected), 120s"
     for ($i = 0; $i -lt 60; $i++) {
       try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3).version } catch { $got = $null }
-      if ($got -eq $NVersion) { Write-Error "NEGATIVE FAILED — a TAMPERED artifact was ACCEPTED (updated to $NVersion). The updater is not verifying signatures."; Dump-Logs; exit 1 }
+      if ($got -eq $NVersion) { Dump-Logs; Write-Error "NEGATIVE FAILED — a TAMPERED artifact was ACCEPTED (updated to $NVersion). The updater is not verifying signatures."; exit 1 }
       Start-Sleep -Seconds 2
     }
     if (-not (Select-String -Path (Join-Path $Work "feed.log") -Pattern "/releases/download/" -Quiet)) {
-      Write-Error "NEGATIVE inconclusive — the updater never downloaded the artifact, so signature rejection wasn't exercised."; Dump-Logs; exit 1
+      Dump-Logs; Write-Error "NEGATIVE inconclusive — the updater never downloaded the artifact, so signature rejection wasn't exercised."; exit 1
     }
     Log "SUCCESS (negative) — updater downloaded the tampered artifact and refused to update"
     Dump-Logs; exit 0
@@ -237,10 +266,10 @@ try {
     Start-Sleep -Seconds 2
   }
   if (-not $updated) {
-    Write-Error "updater smoke failed — /health never reported $NVersion (does Tauri's Windows updater apply the .nsis.zip? see feed/app logs)"; Dump-Logs; exit 1
+    Dump-Logs; Write-Error "updater smoke failed — /health never reported $NVersion (does Tauri's Windows updater apply the .nsis.zip? see feed/app logs)"; exit 1
   }
   if (-not (Select-String -Path (Join-Path $Work "feed.log") -Pattern "/releases/download/" -Quiet)) {
-    Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; Dump-Logs; exit 1
+    Dump-Logs; Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; exit 1
   }
   Log "SUCCESS — updated to $NVersion via the local feed (artifact downloaded + relaunched)"
 
@@ -256,7 +285,7 @@ try {
   # (#97) ARMED: the poller must have seen the task PRESENT (N-1 registered it; the stale task was
   #   cleared pre-run, so this is genuinely this run's registration — not a leftover).
   if ($sawPresent -ne 1) {
-    Write-Error "(#97) ARMING proof FAILED — '$TaskName' was never observed present; N-1 did not register the crash-recovery task (autostart Run key or startup enable_crash_recovery regressed). The update-while-armed scenario was never set up."; Dump-Logs; exit 1
+    Dump-Logs; Write-Error "(#97) ARMING proof FAILED — '$TaskName' was never observed present; N-1 did not register the crash-recovery task (autostart Run key or startup enable_crash_recovery regressed). The update-while-armed scenario was never set up."; exit 1
   }
   # (#97) DISARM: after being present, the task must have been SUSTAINED-absent (>=3 consecutive ~200ms
   #   samples ≈ >=600ms) during the update. The real disarm-before-install window is the whole NSIS
@@ -264,7 +293,7 @@ try {
   #   If it stayed armed throughout, disable_crash_recovery() never disarmed — the race is live (and the
   #   end-state re-arm check below would still pass, hiding it: the exact #96 gap).
   if ($maxAbsentStreak -lt 3) {
-    Write-Error "(#97) DISARM proof FAILED — '$TaskName' was never observed sustained-absent during the update (longest consecutive-absent run: $maxAbsentStreak samples). disable_crash_recovery() did not disarm before install; the half-written-binary race is live."; Dump-Logs; exit 1
+    Dump-Logs; Write-Error "(#97) DISARM proof FAILED — '$TaskName' was never observed sustained-absent during the update (longest consecutive-absent run: $maxAbsentStreak samples). disable_crash_recovery() did not disarm before install; the half-written-binary race is live."; exit 1
   }
   Log "(#97) armed + disarmed — task seen present, then sustained-absent ($maxAbsentStreak samples) across the install"
 
@@ -276,7 +305,7 @@ try {
     Start-Sleep -Seconds 2
   }
   if (-not $rearmed) {
-    Write-Error "update succeeded but '$TaskName' is ABSENT — the guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; Dump-Logs; exit 1
+    Dump-Logs; Write-Error "update succeeded but '$TaskName' is ABSENT — the guard did not re-arm (updater.rs rearm path or N-startup enable_crash_recovery failed)."; exit 1
   }
   Log "(#97) re-armed — full armed→disarm→re-arm cycle proven"
   exit 0

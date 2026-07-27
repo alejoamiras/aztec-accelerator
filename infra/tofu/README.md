@@ -81,7 +81,19 @@ After `tofu apply`, set these in the repo's GitHub settings:
 
 | Secret | Value |
 |--------|-------|
-| `AWS_ROLE_ARN` | `tofu output ci_role_arn` |
+| `AWS_ROLE_ARN_LANDING` | `tofu output -raw landing_deploy_role_arn` |
+| `AWS_ROLE_ARN_RELEASE` | `tofu output -raw release_feed_role_arn` |
+| `AWS_ROLE_ARN_PLAYGROUND` | `tofu output -raw playground_testnet_role_arn` |
 | `AWS_REGION` | `us-east-1` |
 | `S3_BUCKET_NAME` | `tofu output s3_bucket_name` |
 | `CLOUDFRONT_DISTRIBUTION_ID` | `tofu output cloudfront_distribution_id` |
+
+**F-005 (C5) per-pipeline deploy roles.** The single `AWS_ROLE_ARN` (from `ci_role_arn`) is replaced by
+three least-privilege, per-pipeline roles, each trusting ONLY its own workflow (the OIDC `workflow` NAME
+claim) on `main`. Only the release pipeline may write `landing/releases/latest.json` (the F-004 update
+feed); the landing role is explicitly denied it. **Cutover is staged + human-applied** — see the C5
+runbook (`implementations-plan/security-hardening/clusters/C5-runbook.md`): apply roles (legacy retained,
+trust-narrowed) → set the 3 new secrets → land the workflow cutover on `main` → smoke (incl. a negative
+cross-role AssumeRole test) → delete the legacy role + `AWS_ROLE_ARN` in a separate PR. `deploy-landing`
+must keep `--exclude "releases"`/`"releases/*"` on its `sync --delete` (the IAM Deny enforces it too).
+Adding a second release-feed object requires updating the release role's exact-object policy.

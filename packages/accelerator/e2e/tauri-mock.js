@@ -1,10 +1,17 @@
 /**
- * Mock for window.__TAURI__ — injected via addInitScript BEFORE page scripts load.
- * tauri-bridge.js destructures window.__TAURI__.core on line 9 during <head>,
- * so this MUST be installed before any page navigation.
+ * Mock for Tauri IPC — injected via addInitScript BEFORE page scripts load.
+ *
+ * F-012: the pages now run with `withGlobalTauri: false`, so there is NO `window.__TAURI__`.
+ * The bundled `@tauri-apps/api/core` `invoke` delegates to `window.__TAURI_INTERNALS__.invoke(cmd, args)`
+ * — that is the seam we mock. We deliberately do NOT define `window.__TAURI__`; the trust-boundary
+ * tests assert it stays undefined.
  *
  * Pure JavaScript — no TypeScript syntax. Playwright's addInitScript does not transpile.
  */
+
+// C9 (A): disable the click-steal guard in the mock env so tests can click immediately (the guard's real
+// 700 ms timing is exercised in the WebDriver E2E against a real window, not here).
+window.__CLICK_GUARD_MS__ = 0;
 
 // Call counter per command for sequencing support
 const callCounts = {};
@@ -29,6 +36,9 @@ const defaults = {
   set_auto_update: () => null,
   remove_approved_origin: () => null,
   respond_auth: () => null,
+  // C9 (D8/D15): the popup now sources its origin + actionable-state from the server, not the URL param.
+  // Default = an active popup for example.com; per-test overrides set specific origins / queued state.
+  get_pending_auth: () => ({ origin: "https://example.com", active: true }),
   respond_update_prompt: () => null,
   enable_safari_support: () => null,
   disable_safari_support: () => null,
@@ -46,19 +56,14 @@ window.__TAURI_MOCK__ = {
   },
 };
 
-window.__TAURI__ = {
-  core: {
-    invoke: async (cmd, args) => {
-      callCounts[cmd] = (callCounts[cmd] || 0) + 1;
-      const callIndex = callCounts[cmd];
-      window.__TAURI_MOCK__.calls.push({ cmd, args, callIndex, timestamp: Date.now() });
-      const handler = handlers[cmd] || defaults[cmd];
-      if (!handler) throw new Error("Unmocked command: " + cmd);
-      return handler(args, callIndex);
-    },
-  },
-  event: {
-    listen: async () => () => {},
-    emit: async () => {},
+// The `@tauri-apps/api/core` `invoke` calls `window.__TAURI_INTERNALS__.invoke(cmd, args, options)`.
+window.__TAURI_INTERNALS__ = {
+  invoke: async (cmd, args) => {
+    callCounts[cmd] = (callCounts[cmd] || 0) + 1;
+    const callIndex = callCounts[cmd];
+    window.__TAURI_MOCK__.calls.push({ cmd, args, callIndex, timestamp: Date.now() });
+    const handler = handlers[cmd] || defaults[cmd];
+    if (!handler) throw new Error("Unmocked command: " + cmd);
+    return handler(args, callIndex);
   },
 };

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint ELI5 — C1 workflow-input-hardening (F-006)</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1,h2,h3 { font-weight: 600; } h1 { font-size: 1.6rem; } h2 { font-size: 1.2rem; margin-top: 2rem; } h3 { font-size: 1rem; color: #444; }
+    code, pre { font-family: ui-monospace, Menlo, monospace; font-size: 0.9rem; }
+    pre { background: #f6f6f6; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+    .phase { margin: 1.25rem 0; padding: 0.9rem 1.1rem; border-left: 3px solid #ccc; background: #fafafa; }
+    .approval { background: #eef6ff; padding: 1rem 1.1rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>C1 — workflow-input-hardening (F-006)</h1>
+  <p>The SDK publish workflow (<code>_publish-sdk.yml</code>) takes a text input, <code>dist_tag</code>, and pastes it straight into shell commands that hold the npm and GitHub tokens. Because GitHub substitutes the text <em>before</em> the shell runs, whoever can start that workflow could type a command instead of a tag and steal the tokens (or publish a fake package). The fix: check <code>dist_tag</code> against a strict allowlist and pass it as a quoted environment variable so it can only ever be data, never a command.</p>
+
+  <h2>Why this tier was chosen</h2>
+  <p><strong>light.</strong> One file, one finding, a well-known fix. Only one risk dimension is high (it touches the token-bearing publish pipeline); everything else — novelty, reversibility, migration, external coupling — is low. So: one plan, one Codex audit, then implement.</p>
+
+  <h2>Phase 1 — validate + quote <code>dist_tag</code></h2>
+  <div class="phase">
+    <p>Add an early step that rejects any <code>dist_tag</code> not matching <code>^[a-z0-9._-]+$</code> (real tags like <code>testnet</code>/<code>nightlies</code>/<code>latest</code> pass; spaces, <code>;</code>, backticks, <code>$</code>, quotes don't). Then pass <code>dist_tag</code> into the publish and release-notes steps as a quoted env var (<code>"$DIST_TAG"</code>) instead of raw <code>${{ … }}</code> in the shell.</p>
+    <p class="muted">Proves itself by: <code>bun run lint:actions</code> (actionlint) green, no <code>${{ inputs.dist_tag }}</code> left inside any <code>run:</code> block, and the validate step running before any token-bearing step — plus <code>actionlint.yml</code> green in CI.</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p>This is part of the security-hardening campaign; it's driven by the campaign-level <code>/goal</code> + <code>/loop</code> (one cluster at a time, each blueprinted, audited by Codex, and merged only on green). This page documents cluster C1 specifically.</p>
+
+  <h2>Open questions</h2>
+  <ul>
+    <li>Whether to also env-quote the computed <code>version</code> interpolation at L108 as cheap defense-in-depth (it's an internal output, not user input) — decided with the Codex audit.</li>
+  </ul>
+
+  <div class="approval">
+    <h2>Approval</h2>
+    <p>This cluster runs under the campaign's autonomous <code>/goal</code> + <code>/loop</code>; the per-cluster gate is the Codex <code>light</code> audit (verdict recorded in <code>audit-codex.md</code>) rather than an interactive human approval. Merge happens only when the audit is clean AND local (actionlint) AND CI are green.</p>
+  </div>
+
+  <p class="muted"><a href="C1-workflow-input-hardening.md">Full C1 plan</a> · <a href="../plan.md">campaign plan (/goal + /loop)</a> · <a href="./lessons/">lessons</a></p>
+</body>
+</html>

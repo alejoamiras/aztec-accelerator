@@ -177,6 +177,162 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the disable_safari_support command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-disable-safari-support",
+          "markdownDescription": "Enables the disable_safari_support command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the enable_safari_support command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-enable-safari-support",
+          "markdownDescription": "Enables the enable_safari_support command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_autostart_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-autostart-enabled",
+          "markdownDescription": "Enables the get_autostart_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-config",
+          "markdownDescription": "Enables the get_config command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_pending_auth command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-pending-auth",
+          "markdownDescription": "Enables the get_pending_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_system_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-system-info",
+          "markdownDescription": "Enables the get_system_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_verified_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-verified-info",
+          "markdownDescription": "Enables the get_verified_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the remove_approved_origin command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-remove-approved-origin",
+          "markdownDescription": "Enables the remove_approved_origin command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the respond_auth command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-respond-auth",
+          "markdownDescription": "Enables the respond_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the respond_update_prompt command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-respond-update-prompt",
+          "markdownDescription": "Enables the respond_update_prompt command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_auto_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-auto-update",
+          "markdownDescription": "Enables the set_auto_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_autostart command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-autostart",
+          "markdownDescription": "Enables the set_autostart command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_speed command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-speed",
+          "markdownDescription": "Enables the set_speed command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the disable_safari_support command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-disable-safari-support",
+          "markdownDescription": "Denies the disable_safari_support command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the enable_safari_support command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-enable-safari-support",
+          "markdownDescription": "Denies the enable_safari_support command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_autostart_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-autostart-enabled",
+          "markdownDescription": "Denies the get_autostart_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-config",
+          "markdownDescription": "Denies the get_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_pending_auth command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-pending-auth",
+          "markdownDescription": "Denies the get_pending_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_system_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-system-info",
+          "markdownDescription": "Denies the get_system_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_verified_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-verified-info",
+          "markdownDescription": "Denies the get_verified_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_approved_origin command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-remove-approved-origin",
+          "markdownDescription": "Denies the remove_approved_origin command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the respond_auth command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-respond-auth",
+          "markdownDescription": "Denies the respond_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the respond_update_prompt command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-respond-update-prompt",
+          "markdownDescription": "Denies the respond_update_prompt command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_auto_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-auto-update",
+          "markdownDescription": "Denies the set_auto_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_autostart command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-autostart",
+          "markdownDescription": "Denies the set_autostart command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_speed command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-speed",
+          "markdownDescription": "Denies the set_speed command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",

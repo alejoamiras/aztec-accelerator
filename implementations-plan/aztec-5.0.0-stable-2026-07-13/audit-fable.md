@@ -1,0 +1,58 @@
+# Fable audit (mid — Fable 5, Plan subagent, independent context) — 2026-07-13
+
+Verdict: **conditional approve** (5 conditions — all folded into plan.md; see decision ledger). Audited the pre-fold draft (same artifact codex round-1 saw). Every Fact independently re-verified against repo code, npm registry, CDN tarballs, live testnet RPC, live playground headers, and the `accelerator-v1.0.6` git tag; precedent plans read in full.
+
+---
+
+**Verified-true up front** (so the findings below are read in proportion): 5.0.0 publish time `2026-07-13T09:39:46Z` and upstream `latest`→5.0.0 (npm); our dist-tags `latest=4.3.1`, `testnet=5.0.0-rc.2`, `5.0.0` unpublished (npm); `createSchnorrAccount(secret: Fr, salt: Fr, signingKey: Fq, alias?)` required-third-arg in `@aztec/wallets@5.0.0` (CDN `dest/embedded/embedded_wallet.d.ts:92`) vs optional in installed rc.2; SponsoredFPC artifact sha `57b124ba…` (local rc.2, recomputed) → `648b856a…` (5.0.0 CDN, recomputed) so the salt=0 address moved and P3a is genuinely required; live node `nodeVersion: 5.0.0, rollupVersion: 1821665230, l1ChainId: 11155111`; **the entire `packages/accelerator/core/` crate is diff-empty `accelerator-v1.0.6..HEAD`** (stronger than the plan's server*/bb.rs/versions claim); COOP `same-origin` / COEP `credentialless` live on `playground.aztec-accelerator.dev`; 24 pins = 11 sdk + 13 playground; all 13 distinct `@aztec` packages exist at `5.0.0` on npm (so `findMissingPackages` will report zero skips); `publish-testnet.yml:52` hardcodes `latest: false` with the stale rc comment at `:46-47`; `_publish-sdk.yml:103-108` already implements the `latest` dist-tag step; `update-aztec-version.ts:8` accepts plain `5.0.0`, auto-bumps CRS (`:70-77,135`) and auto-pins the Windows bb checksum (`:80-98`); the `v5.0.0` GitHub release carries the full `barretenberg-*` matrix; all cited gate commands exist (note the test is `download_and_verify_bb`, `downloader.rs:584` — `cargo test download_and_verify` works via substring match); `setup-aztec/action.yml` auto-detects the sandbox version from the sdk pin, so P2's e2e genuinely runs a 5.0.0 sandbox; all publish/bump workflows are `workflow_dispatch`-only (no push-triggered playground deploy, no scheduled bump bot) so P3's sequencing cannot be raced; `.gitignore:6-8` covers `.env`/`.env.*`.
+
+## 1. ADVERSARIAL / SECURITY
+
+**S1 — Medium — The `latest`-flip "rollback is cheap" claim is illusory; state the real recovery story.** The only `<prev>` is `4.3.1` (current dist-tags) — a v4-line SDK that cannot talk to the current v5 network, i.e. rollback restores a *differently broken* default install. The actual recovery is fix-forward, and the version scheme makes that lopsided: `scripts/get-sdk-publish-version.ts:36-49` produces `5.0.0-revision.N` for a stable base already taken — a semver **prerelease** of 5.0.0, which `^5.0.0` range consumers will never resolve. A fix-forward reaches only bare/`latest` installers. Not a blocker (the flip is still low-blast-radius precisely *because* today's `latest` is already stale/broken), but the mitigation as written would mislead an implementer mid-incident.
+
+**S2 — Medium — The published artifact is not pinned to the audited SHA, and the publish dispatch's own e2e gate is weaker than the PR gate.** P3 dispatches `publish-testnet.yml --ref main` at whatever HEAD is at dispatch time. Its `e2e` job calls `_e2e.yml` with no `build_accelerator` (`publish-testnet.yml:39-42`), and `_e2e.yml`'s default is `false` (`_e2e.yml:16-20`) — so the publish-time gate exercises the WASM fallback only; the native-bb 5.0.0 proof lives solely in P2's PR-time `sdk.yml` run. The rc.1 plan explicitly flagged this exact gap (rc.1 plan, P7) — dropped in rc.2 and dropped again here. Minimum fix: "dispatch immediately after the bump PR merge with nothing else queued"; better: `build_accelerator: true` on the publish gate.
+
+**S3 — Low — Min-age override: mitigations correct and precedented, but the compensating control isn't checkable as written.** Make it concrete: for each new/changed non-`@aztec` entry in the `bun.lock` diff, `npm view <pkg>@<ver> time --json` and flag anything published after 2026-07-06.
+
+**S4 — Low — L1 Sepolia key: env-only handling holds** (`deploy-sponsored-fpc.ts:47-56` env-only, exits if absent; prints only the derived address at `:81`), with one documentation tension: the script header (`:17-19`) advertises a `scripts/.env` file — persisted-on-disk though non-committable (`.gitignore:6`, `git check-ignore` confirms). The plan's "never persist" should either say "inline env, not the `.env` pattern" or accept the gitignored `.env` explicitly.
+
+**S5 — Low — Workflow change is least-privilege sound.** Default-false input, no new secrets/permissions; `_publish-sdk.yml:129-136` keeps GitHub releases `--latest=false` unconditionally, so the npm flip cannot steal the app's GitHub "Latest" badge. Residual, correctly ledgered: static `NPM_TOKEN` instead of OIDC — standing item stands.
+
+**S6 — Low — FPC redeploy adversarial surface: plan's analysis holds; one unstated cost.** Front-running the canonical salt=0 deploy is a donation; both the P3a pre-check and the script's own already-deployed check (`:198-207`) handle it; `--salt 0x0` mandatory is correct (default `Fr.random()`, `:43`). Unstated: a *funded* public sponsor FPC is drainable by anyone (that is its function) — the bridged amount is the exposure ceiling; make funding size a conscious choice.
+
+## 2. ASSUMPTION ATTACK
+
+**Facts — F1 (High): "exactly 3 call sites" is FALSE — there are five.** `aztec.ts:473`, `:649`, `e2e-helpers.ts:25` (in plan) + `deploy-sponsored-fpc.ts:149` and `batch-fund-fpc.ts:250` (**missed**, the former P3a-critical). `typecheck:scripts` would catch both, but "verified" Facts that failed to grep `packages/playground/scripts/` are the error class Facts sections exist to prevent. Also: `e2e-helpers.ts:10` imports only `Fr`; the migration needs `Fq` (same subpath exports it — verified in 5.0.0).
+**F2:** everything else checked out (publish times, signatures, hashes, node info, workflow lines, tool behavior, gate commands, byte-identical prove code).
+**F3 (Low):** the SQLite-OPFS Fact is directionally right but asserted more precisely than the evidence supports: `@aztec/kv-store@5.0.0` confirms the switch (`./sqlite-opfs` export; IndexedDB demoted to `./deprecated/indexeddb`), but the 5.0.0 `EmbeddedWalletDBOptions` doc still says the *wallet's own* DB default is "IndexedDB (browser)" — the OPFS default (and lock) may apply to the PXE store only, or the upstream comment is stale. Downgrade to Inference.
+
+**Inferences — I1 (Medium):** "other changelog items miss our surface" independently re-verified to hold (zero grep hits; `BaseWallet.registerContract(instance, artifact?)` survives in 5.0.0) — **except the "non-interactive handshake default" appears nowhere in the plan**: a runtime *behavioral* change to note tagging/discovery, invisible to grep and tsc, landing exactly in the playground's private `transfer(bob, 500n)` (`aztec.ts:713-729`). See P-2.
+**I2 (Medium):** OPFS is scoped as a UX nuisance (second tab) but also silently kills the playground's stale-state recovery: the 3-attempt retry clears **IndexedDB only** (`aztec.ts:129-145`, invoked `:267`; comment `:153` asserts the wallet/PXE DBs are covered) — post-bump a no-op for the main store (and on a locked second tab it pointlessly deletes the bb.js CRS `keyval-store` up to 3×). The draft only rewords `:238`. No gate detects this.
+**I3:** fine ("live rc.2 playground may still function" is explicitly non-load-bearing; the FeeJuice claim shape is gated by `typecheck:scripts` + the real P3a run).
+
+**Asks:** 1 and 2 properly surfaced ✓. Ask 3 fine as deferred but should absorb I2's recovery decision (correctness, not polish). **MISSING ASK (Medium):** publish-timing and `latest`-timing are separable; the obvious hybrid — publish `testnet` + playground + FPC now, flip `latest` 2026-07-20 after the soak — costs one dist-tag move and preserves every urgency argument. Counterweight the user should see: current `latest` (4.3.1) is already v5-incompatible, so flipping sooner arguably fixes the default install. Must be a visible decision, not inherited from a Phase-0 answer that never presented split timing.
+
+## 3. PLAN-STRUCTURE
+
+**P-1 (High):** P1 migration list wrong (F1): five sites + `Fq` imports.
+**P-2 (Medium):** No gate between here and the `latest` flip exercises the token transfer/tagging path on 5.0.0 (SDK e2e deploys accounts only — `proving.test.ts:92,112`; local-network Playwright token tests are `test.skip`'d — `demo.local-network.spec.ts:43,70`; mocked project mocks the chain; P3a exercises bridging/claim/deploy, not transfers). The one unassessed changelog item (I1) lands exactly there. **Zero-infra fix:** move the manual deploy+transfer smoke (via `dev:testnet`, WASM minimum) to between P3a and the publish dispatch; keep the released-1.0.6 smoke as final post-deploy acceptance.
+**P-3 (Medium):** OPFS recovery-path work item missing from P1 (I2): extend the retry-clear to OPFS or explicitly accept + fix BOTH stale comments (`:153`, `:238`) + file the follow-up.
+**P-4 (Low):** restore rc.1's explicit pin-grep gate (guards `findMissingPackages`' silent skip, `update-aztec-version.ts:116-119`).
+**P-5 (Low):** S2 restated: dispatch-immediately note or `build_accelerator: true` on the publish e2e.
+**P-6 (Low):** A beats B as documented; **neither is optimal — the A+deferred-`latest` hybrid beats both** on the single new axis this cycle. Everything else in A correctly sequenced (FPC-before-publish ✓, e2e-before-merge ✓, no raceable auto-triggers ✓, loop-seed holds match the Asks ✓).
+**P-7 (Low):** single-browser smoke — COEP `credentialless` has historically incomplete Safari support and the store change raises stakes; add one Safari pass.
+
+## 4. VERDICT
+
+**conditional approve** (with conditions:
+1. Correct the census to **5** `createSchnorrAccount` sites incl. both scripts + `Fq` imports. Checkable: repo-wide grep shows every call passing a signing key; `typecheck:scripts` green.
+2. Reorder P3: manual deploy+transfer smoke vs v5 testnet (via `dev:testnet`, WASM minimum) **after P3a and before the publish dispatch**; released-1.0.6 smoke stays post-deploy. Checkable: plan.md lists the pre-publish smoke as a named step whose failure holds the publish.
+3. Add a P1 work item for the OPFS-invalidated recovery path (extend the clear to OPFS **or** document acceptance + fix `:153` and `:238` + file the follow-up). Checkable: plan.md P1 names the item + records the decision.
+4. Replace the "rollback = dist-tag to `<prev>`" mitigation with the real story (4.3.1 v4-incompatible; fix-forward `5.0.0-revision.N` unreachable by `^5.0.0` ranges). Checkable: Security section states this.
+5. Add an explicit `latest`-timing Ask (same-day vs 2026-07-20 deferral) with both framings; default if unspecified: defer. Checkable: Ask in plan.md; loop seed branches on it.)
+
+Non-blocking recommendations (all also adopted): P1 pin-grep gate; `build_accelerator: true` on the publish e2e; concrete `npm view <pkg>@<ver> time --json` scrutiny; Safari smoke; `download_and_verify_bb` naming; OPFS wallet-DB claim Fact→Inference.
+
+---
+
+*Post-audit note (main agent): conditions 1–5 all folded into plan.md; condition 3 satisfied by the stronger `ephemeral: true` adoption (from codex round-1) + both comment fixes + a P1 coverage-verification step. Ask-3 default deliberately left to the user (codex leaned same-day, fable leaned defer) — recorded as the plan's one disputed item.*

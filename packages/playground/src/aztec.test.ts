@@ -4,6 +4,11 @@ import { checkAccelerator, checkAztecNode, setUiMode, state } from "./aztec";
 // ── fetch mocking ──
 const originalFetch = globalThis.fetch;
 
+// Bun's `typeof fetch` includes `preconnect`, which the test doubles don't need.
+function setFetchMock(impl: () => Promise<Response>): void {
+  globalThis.fetch = mock(impl) as unknown as typeof fetch;
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   // Reset state
@@ -11,59 +16,62 @@ afterEach(() => {
   state.wallet = null;
   state.embeddedWallet = null;
   state.registeredAddresses = [];
-  state.selectedAccountIndex = 0;
+  state.sessionAddresses = [];
   state.uiMode = "accelerated";
   state.proofsRequired = false;
   state.feePaymentMethod = undefined;
 });
 
 // ── checkAztecNode ──
+// Health check is the node_getNodeInfo JSON-RPC POST (5.0.0 nodes 405 a plain GET /status).
 describe("checkAztecNode", () => {
-  test("returns reachable when status responds 200", async () => {
-    let callCount = 0;
-    globalThis.fetch = mock(() => {
-      callCount++;
-      if (callCount === 1) return Promise.resolve(new Response("OK", { status: 200 }));
-      // RPC call for node version
-      return Promise.resolve(
-        new Response(JSON.stringify({ result: { nodeVersion: "4.1.0-rc.2" } }), { status: 200 }),
-      );
-    });
-    expect(await checkAztecNode()).toEqual({ reachable: true, nodeVersion: "4.1.0-rc.2" });
+  test("returns reachable with version when the RPC responds", async () => {
+    setFetchMock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ result: { nodeVersion: "5.0.0" } }), { status: 200 }),
+      ),
+    );
+    expect(await checkAztecNode()).toEqual({ reachable: true, nodeVersion: "5.0.0" });
   });
 
-  test("returns reachable without version when RPC fails", async () => {
-    let callCount = 0;
-    globalThis.fetch = mock(() => {
-      callCount++;
-      if (callCount === 1) return Promise.resolve(new Response("OK", { status: 200 }));
-      return Promise.reject(new Error("rpc failed"));
-    });
+  test("returns reachable without version when the RPC responds without a result", async () => {
+    setFetchMock(() => Promise.resolve(new Response(JSON.stringify({}), { status: 200 })));
     expect(await checkAztecNode()).toEqual({ reachable: true });
   });
 
-  test("returns not reachable when status responds 500", async () => {
-    globalThis.fetch = mock(() => Promise.resolve(new Response("", { status: 500 })));
+  test("returns not reachable when the RPC responds 500", async () => {
+    setFetchMock(() => Promise.resolve(new Response("", { status: 500 })));
     expect(await checkAztecNode()).toEqual({ reachable: false });
   });
 
   test("returns not reachable when fetch throws", async () => {
-    globalThis.fetch = mock(() => Promise.reject(new Error("network error")));
+    setFetchMock(() => Promise.reject(new Error("network error")));
     expect(await checkAztecNode()).toEqual({ reachable: false });
+  });
+});
+
+// Real-node integration check: mocks missed the 5.0.0 GET-/status-405 change that broke
+// the deployed playground — this closes that loop against an actual node when one is
+// configured (AZTEC_NODE_URL=https://... bun test src/aztec.test.ts).
+describe.skipIf(!process.env.AZTEC_NODE_URL)("checkAztecNode (live node)", () => {
+  test("real node answers the node_getNodeInfo probe", async () => {
+    const result = await checkAztecNode();
+    expect(result.reachable).toBe(true);
+    expect(result.nodeVersion).toBeDefined();
   });
 });
 
 // ── checkAccelerator ──
 describe("checkAccelerator", () => {
   test("returns true when health check succeeds", async () => {
-    globalThis.fetch = mock(() =>
+    setFetchMock(() =>
       Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 })),
     );
     expect(await checkAccelerator()).toBe(true);
   });
 
   test("returns false when fetch throws", async () => {
-    globalThis.fetch = mock(() => Promise.reject(new Error("connection refused")));
+    setFetchMock(() => Promise.reject(new Error("connection refused")));
     expect(await checkAccelerator()).toBe(false);
   });
 });
@@ -76,7 +84,7 @@ describe("setUiMode", () => {
   });
 
   test("sets uiMode to accelerated", () => {
-    state.uiMode = "local";
+    setUiMode("local");
     setUiMode("accelerated");
     expect(state.uiMode).toBe("accelerated");
   });

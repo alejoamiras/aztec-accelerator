@@ -1,0 +1,22 @@
+# F-015: SHA-pinning actions removes the mutable-tag attack but also disables GitHub's
+# vulnerability alerts for those actions (alerts key off version ranges, not SHAs). Dependabot is
+# the maintenance counterpart: it bumps `@<sha> # vX.Y.Z` pins (updating both the SHA and the
+# comment) on a schedule, restoring a review-gated update path without reintroducing mutable tags.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    # `directories` (plural + globs) so the composite actions under .github/actions/*/action.yml
+    # are covered too — a plain `directory: "/"` only scans .github/workflows/.
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      # One grouped PR for all action bumps keeps the update reviewable in a single diff.
+      github-actions:
+        patterns:
+          - "*"

@@ -3,7 +3,7 @@ name: Accelerator
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main]
+    branches: [main, security-hardening]
 
 # Cancel a superseded in-flight run when a new commit is pushed to the same PR.
 concurrency:
@@ -19,8 +19,8 @@ jobs:
       desktop: ${{ steps.override.outputs.relevant || steps.filter.outputs.desktop }}
       integration: ${{ steps.override.outputs.relevant || steps.filter.outputs.integration }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
         id: filter
         with:
           filters: |
@@ -31,6 +31,8 @@ jobs:
             # affect the accelerator's Rust/app build).
             desktop:
               - 'packages/accelerator/**'
+              - 'scripts/download-bb*.ts'
+              - 'scripts/__fixtures__/**'
               - 'packages/sdk/package.json'
               - 'biome.json'
               - 'package.json'
@@ -44,6 +46,8 @@ jobs:
             # runs on SDK src changes (what `desktop` skips) AND everything else.
             integration:
               - 'packages/accelerator/**'
+              - 'scripts/download-bb*.ts'
+              - 'scripts/__fixtures__/**'
               - 'packages/sdk/src/**'
               - 'packages/sdk/package.json'
               - 'biome.json'
@@ -68,7 +72,7 @@ jobs:
       run:
         working-directory: packages/accelerator/src-tauri
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
@@ -94,7 +98,7 @@ jobs:
       run:
         working-directory: packages/accelerator/src-tauri
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
@@ -106,6 +110,66 @@ jobs:
       # accelerator-core's own unit tests (113) — not exercised by `cargo test` in src-tauri.
       - run: cargo test --manifest-path ../core/Cargo.toml
 
+  # F-004: full updater-feed sign/verify round-trip with a THROWAWAY key (no prod secret). Guards the
+  # version-binding property end-to-end against tauri-CLI drift and any change to the update-manifest
+  # tool: happy path (envelope -> tauri signer sign -> splice -> verify) must pass, and the F-004 splice
+  # attack (bump the OUTER version while the signed envelope stays put) must be rejected. The rejection
+  # logic itself is also unit-covered by accelerator-core tests above; this proves the real signing path.
+  updater-feed-e2e:
+    name: Updater Feed Sign/Verify E2E
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/core -> target
+          rust-components: ""
+          # Only the pure core example + the tauri signer are exercised — no GTK stack, no bb sidecar.
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
+      - name: Round-trip sign + verify (throwaway key)
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+
+          # 1. Throwaway updater keypair (never a prod secret; empty password for CI). tauri writes the
+          #    private key + a .pub whose CONTENT is already base64(minisign .pub doc) — the exact format
+          #    tauri.conf.json.plugins.updater.pubkey uses, so the app verifies against this same shape.
+          ( cd packages/accelerator && bunx tauri signer generate --ci -p "" -w "$work/test.key" )
+          cp "$work/test.key.pub" "$work/pubkey.b64"
+          export TAURI_SIGNING_PRIVATE_KEY
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$work/test.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+
+          # 2. Representative unsigned feed (artifact `signature` values are opaque to the manifest
+          #    binding — only the manifest signature is cryptographically checked here).
+          jq -n '{version:"1.2.3", notes:"ci", pub_date:"2026-01-01T00:00:00Z", platforms:{
+            "linux-x86_64":{signature:"art-linux", url:"https://example.test/app.AppImage", size:111},
+            "darwin-aarch64":{signature:"art-mac", url:"https://example.test/app.tar.gz", size:222}
+          }}' > "$work/latest.json"
+
+          tool() { cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- "$@"; }
+
+          # 3. Happy path: envelope -> sign -> splice -> verify (must exit 0).
+          tool envelope --feed "$work/latest.json" > "$work/envelope.json"
+          ( cd packages/accelerator && bunx tauri signer sign "$work/envelope.json" )
+          tool splice --feed "$work/latest.json" --envelope "$work/envelope.json" --sig "$work/envelope.json.sig" > "$work/signed.json"
+          tool verify --feed "$work/signed.json" --pubkey "$work/pubkey.b64"
+          echo "happy-path verify OK"
+
+          # 4. F-004 splice attack: bump the OUTER version; the signed envelope stays at 1.2.3. verify
+          #    MUST reject (OuterMismatch). A pass here is a regression.
+          jq '.version = "9.9.9"' "$work/signed.json" > "$work/tampered.json"
+          if tool verify --feed "$work/tampered.json" --pubkey "$work/pubkey.b64"; then
+            echo "::error::version-splice feed VERIFIED but must have been rejected (F-004 regression)"
+            exit 1
+          fi
+          echo "splice-reject OK (F-004 downgrade attack correctly refused)"
+
   lint:
     name: Lint
     needs: changes
@@ -113,11 +177,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
-      - uses: actions/cache@v5
+          bun-version: 1.3.14
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -126,6 +190,8 @@ jobs:
       - run: bun run lint
       - name: Unit-test build scripts (copy-bb supply-chain gate)
         run: bun run --cwd packages/accelerator test:unit
+      - name: Unit-test root scripts (download-bb F-007 cache-integrity gate)
+        run: bun run test:scripts
 
   smoke:
     name: Smoke
@@ -137,7 +203,7 @@ jobs:
       run:
         working-directory: packages/accelerator/src-tauri
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
@@ -220,7 +286,7 @@ jobs:
       run:
         working-directory: packages/accelerator/src-tauri
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
@@ -248,11 +314,11 @@ jobs:
     # cache hit, so this ceiling is a safety net that normal runs never approach.
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
-      - uses: actions/cache@v5
+          bun-version: 1.3.14
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -288,6 +354,19 @@ jobs:
       runner: ${{ matrix.runner }}
       mode: dev
 
+  # F-012 (D8): the dev matrix above runs `tauri dev`, which is `is_dev()==true` and never exercises the
+  # SHIPPED custom-protocol asset/CSP path. This Linux-only lane does a real `tauri build --debug` so the
+  # trust-boundary spec's CSP + per-window ACL assertions run against a production-mode binary. Linux-only
+  # keeps the extra full-compile cost to one job (the 3-OS dev matrix covers per-platform WebView/IPC diffs).
+  e2e-webdriver-builtdebug:
+    name: E2E WebDriver (built-debug, linux)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    uses: ./.github/workflows/_e2e-webdriver.yml
+    with:
+      runner: ubuntu-latest
+      mode: built-debug
+
   windows-prebuild:
     name: Windows Prebuild Smoke
     needs: changes
@@ -295,11 +374,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
-      - uses: actions/cache@v5
+          bun-version: 1.3.14
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -341,7 +420,7 @@ jobs:
       run:
         working-directory: packages/accelerator/src-tauri
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
         with:
           rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
@@ -349,6 +428,10 @@ jobs:
           rust-components: ""
       - name: Compile + unit-test the app crate on Windows
         run: cargo test
+      # accelerator-core on Windows: exercises the bb.exe name, platform binding, marker/publish, and
+      # directory-replacement paths that the app crate doesn't cover (F-007).
+      - name: Compile + unit-test accelerator-core on Windows
+        run: cargo test --manifest-path ../core/Cargo.toml
       - name: Build the Tauri app (NSIS installer)
         working-directory: packages/accelerator
         shell: bash
@@ -423,12 +506,14 @@ jobs:
         changes,
         clippy,
         test,
+        updater-feed-e2e,
         lint,
         smoke,
         release-smoke,
         desktop-ui,
         e2e,
         e2e-webdriver,
+        e2e-webdriver-builtdebug,
         windows-prebuild,
         windows-build,
       ]
@@ -437,7 +522,7 @@ jobs:
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
+          results="${{ needs.changes.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.updater-feed-e2e.result }} ${{ needs.lint.result }} ${{ needs.smoke.result }} ${{ needs.release-smoke.result }} ${{ needs.desktop-ui.result }} ${{ needs.e2e.result }} ${{ needs.e2e-webdriver.result }} ${{ needs.e2e-webdriver-builtdebug.result }} ${{ needs.windows-prebuild.result }} ${{ needs.windows-build.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

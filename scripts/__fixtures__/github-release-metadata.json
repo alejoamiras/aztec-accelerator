@@ -1,0 +1,15 @@
+{
+  "tag_name": "v5.0.0-rc.2",
+  "name": "v5.0.0-rc.2",
+  "immutable": false,
+  "assets": [
+    {
+      "name": "barretenberg-amd64-linux.tar.gz",
+      "digest": "sha256:c0bf2429821453a2314d82ddd5d7ac25e28db35e9865a5b55fb126a1d94a7842"
+    },
+    {
+      "name": "barretenberg-arm64-darwin.tar.gz",
+      "digest": "sha256:7fd01446b4d23810ab76163e500729d1a5310df4dcb8e9e03259ad477183c4dd"
+    }
+  ]
+}

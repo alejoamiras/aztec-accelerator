@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -63,15 +63,20 @@ jobs:
           AZTEC_BB_VERSION="$(cat packages/accelerator/src-tauri/AZTEC_VERSION)"
           echo "AZTEC_BB_VERSION=$AZTEC_BB_VERSION" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # F-015: pin the action to a master-history SHA (NOT the @stable-generated commit, which
+      # upstream may GC) and select the channel explicitly via `toolchain:` — @stable was the
+      # channel selector, so pinning the ref alone would break the toolchain resolution.
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         if: inputs.build_accelerator
+        with:
+          toolchain: stable
 
       # This job builds the server crate FROM packages/accelerator/server, so
       # Cargo writes all artifacts (incl. the src-tauri path-dep) under
       # server/target. Cache that dir only. Use the SAME `shared-key` as the
       # other linux server builds (smoke / release-smoke / release build-headless
       # + setup-accelerator) so they cross-warm one shared server cache.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: inputs.build_accelerator
         with:
           workspaces: packages/accelerator/server -> target
@@ -116,7 +121,7 @@ jobs:
 
       - name: Upload Aztec logs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: aztec-node-logs-sdk
           path: /tmp/aztec-node.log
@@ -125,7 +130,7 @@ jobs:
 
       - name: Upload accelerator logs
         if: failure() && inputs.build_accelerator
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: accelerator-logs
           path: /tmp/accelerator.log

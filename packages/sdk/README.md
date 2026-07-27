@@ -213,11 +213,20 @@ const prover = new AcceleratorProver({
 
 | Browser | Works | Notes |
 |---------|-------|-------|
-| Chrome | Yes | HTTP localhost exempt from mixed-content restrictions |
+| Chrome | Yes* | HTTP localhost exempt from mixed-content restrictions; Chrome 142+ shows a Local Network Access permission prompt (see below) |
 | Firefox | Yes | HTTP localhost exempt from mixed-content restrictions |
 | Safari | Yes* | Requires HTTPS mode enabled in the accelerator app |
 
 Safari blocks `fetch()` from HTTPS pages to `http://127.0.0.1`. The SDK works around this by probing both HTTP and HTTPS in parallel — Chrome/Firefox use HTTP, Safari uses HTTPS. See the [accelerator README](../../packages/accelerator/README.md#safari-support-macos-only) for setup instructions.
+
+### Chrome Local Network Access (Chrome 142+)
+
+Starting with Chrome 142 (October 2025), requests from a public website to loopback addresses are gated behind a **Local Network Access permission prompt** ("… wants to access devices on your local network"). Chrome 145 splits this into separate `local-network` and `loopback-network` permissions. This applies to the SDK's health probe and prove requests:
+
+- If the user **allows**, everything works as before.
+- If the user **blocks** (or dismisses) the prompt, the probe fails and the SDK reports the accelerator as unavailable — proving silently falls back to WASM (`fallback` phase), which is indistinguishable from the accelerator not running. To recover, the user must re-allow the permission via the icon in Chrome's address bar (Site settings).
+
+Note this is about the destination address space, not the scheme — enabling HTTPS mode on the accelerator does **not** bypass the prompt.
 
 ## Version Compatibility
 

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aztec Accelerator Update</title>
   <link rel="stylesheet" href="style.css" />
-  <script src="tauri-bridge.js"></script>
+  <script type="module" src="assets/update-prompt.js"></script>
 </head>
 <body>
   <div class="popup-container">
@@ -20,27 +20,5 @@
       <button class="btn btn-primary" id="update">Update Now</button>
     </div>
   </div>
-
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const currentVersion = params.get("current") || "unknown";
-    const newVersion = params.get("version") || "unknown";
-    document.getElementById("version").textContent =
-      "v" + currentVersion + "  \u2192  v" + newVersion;
-
-    wireButton("update", {
-      disableAlso: "later",
-      loadingText: "Updating\u2026",
-      onClick: () => {
-        const autoUpdate = document.getElementById("auto-update").checked;
-        return invoke("respond_update_prompt", { action: "update", autoUpdate });
-      },
-    });
-
-    wireButton("later", {
-      disableAlso: "update",
-      onClick: () => invoke("respond_update_prompt", { action: "later", autoUpdate: false }),
-    });
-  </script>
 </body>
 </html>

@@ -2,16 +2,32 @@ import { expect, test } from "@playwright/test";
 
 // ── Helpers ──
 
-/** Block all service requests so the app stays in "services unavailable" state. */
+// The app's node health check is the node_getNodeInfo JSON-RPC POST to /aztec
+// (5.0.0 nodes 405 a plain GET /status, so there is no /status probe anymore).
+
+/** Block the node RPC so the app stays in "services unavailable" state. */
 async function mockServicesOffline(page: import("@playwright/test").Page) {
-  await page.route("**/aztec/status", (route) =>
+  await page.route("**/aztec", (route) =>
     route.fulfill({ status: 503, body: "Service Unavailable" }),
   );
 }
 
-/** Mock Aztec node as healthy. Wallet init will still fail (no real Aztec node). */
+/**
+ * Answer the health probe (node_getNodeInfo) as healthy; every other RPC 500s
+ * so wallet init fails gracefully (there is no real node behind the mock).
+ */
 async function mockServicesOnline(page: import("@playwright/test").Page) {
-  await page.route("**/aztec/status", (route) => route.fulfill({ status: 200, body: "OK" }));
+  await page.route("**/aztec", (route) => {
+    const req = route.request();
+    if (req.method() === "POST" && req.postData()?.includes("node_getNodeInfo")) {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, result: { nodeVersion: "5.0.0" } }),
+      });
+    }
+    return route.fulfill({ status: 500, body: "not a real node" });
+  });
 }
 
 // ── JS error safety net — catches runtime errors across all mocked tests ──
@@ -64,16 +80,8 @@ test("mode buttons toggle active state", async ({ page }) => {
 });
 
 test("service dots show online when Aztec node responds OK", async ({ page }) => {
+  // Health probe answers; every other RPC 500s so wallet init fails gracefully.
   await mockServicesOnline(page);
-
-  // Block all further RPC calls so wallet init fails gracefully
-  await page.route("**/aztec", (route) => {
-    if (route.request().method() === "POST") {
-      return route.fulfill({ status: 500, body: "not a real node" });
-    }
-    return route.continue();
-  });
-
   await page.goto("/");
 
   // Aztec dot should be online

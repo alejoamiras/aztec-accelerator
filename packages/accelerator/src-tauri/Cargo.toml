@@ -25,6 +25,11 @@ path = "src/main.rs"
 
 [dependencies]
 accelerator-core = { path = "../core" }
+# F-004: SemVer comparison for the monotonic update version floor (same crate/major the core uses).
+semver = "1"
+# F-004 B2: cross-process advisory file lock serialising the updater transaction (check→install→
+# floor-commit) across concurrent app instances. Battle-tested, stable flock primitive.
+fs2 = "0.4"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 axum = "0.8"
@@ -48,9 +53,14 @@ reqwest = { version = "0.12", features = ["stream", "json"] }
 flate2 = "1"
 tar = "0.4"
 hex = "0.4"
-# `zeroize`: scrub the in-memory CA private key on drop (it is never written to disk; hardens against
-# a heap/core-dump attacker recovering it from process memory). See safari-tls-ca-removal plan.
+# F-016: `rcgen`'s `zeroize` feature makes `KeyPair` impl `Zeroize` (scrubs its serialized-DER copy). We
+# wrap the in-memory CA signing key in `Zeroizing` and early-drop it after leaf signing — best-effort
+# post-use scrubbing (the ring backend scalar/nonce + swap + core dumps are NOT covered; documented in
+# certs.rs). The CA key is never written to disk.
 rcgen = { version = "0.13", features = ["pem", "x509-parser", "zeroize"] }
+# Direct dep so we can name `Zeroizing` (rcgen does not re-export it); already locked at 1.8.2 transitively
+# via rcgen, so this adds no new package version.
+zeroize = "1"
 x509-parser = "0.18"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
@@ -69,6 +79,8 @@ serial_test = "3"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
 
 [profile.release]
 strip = true
