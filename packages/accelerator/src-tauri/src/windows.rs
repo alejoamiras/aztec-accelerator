@@ -127,11 +127,14 @@ pub fn show_onboarding_window(app: &AppHandle) {
             url: "onboarding.html".to_string(),
             title: "Welcome to Aztec Accelerator",
             width: 520.0,
-            // 510, not 600: 600 was sized around a footer paragraph that has since been removed,
-            // leaving ~110px of dead space under the button. This fits the three choices + the CTA;
-            // the per-row result lines that appear after "Start" push past it, which is why the page
-            // is `body.scrollable` rather than sized for its tallest possible state.
-            height: 510.0,
+            // Bracketed from real feedback, not computed: 600 left an obvious dead band under the
+            // button (it was sized around a footer that no longer exists) and 510 clipped the
+            // content, so the pre-Start layout lands between the two. 560 clears it with a little
+            // breathing room. The taller post-Start state (three result lines + Retry) is handled by
+            // `body.scrollable` rather than by sizing the window for a state it holds for seconds.
+            // NOTE: this could not be measured here — Playwright refuses to install a browser on
+            // Ubuntu 26.04 — so it is a judgement call; see the README note on measuring it exactly.
+            height: 560.0,
             always_on_top: false,
             focus_if_open: true,
             // Standalone window (not part of the C9 auth-popup arbiter) — create it focused.
