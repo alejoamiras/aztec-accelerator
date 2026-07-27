@@ -416,9 +416,27 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         // guarding on it (rather than re-deriving the condition) also narrows the type.
         if (httpRetryUrl) {
           this.#transport.demoteHttpsPin();
-          logger.warn("HTTPS /prove failed at the network layer; retrying once over HTTP", {
-            error: String(err),
-          });
+          // VALIDATE the HTTP endpoint before sending it the witness. A healthy HTTPS probe says
+          // nothing about who is listening on the HTTP port; without this check a foreign responder
+          // there receives the serialized witness the instant HTTPS fails (post-impl codex Critical).
+          // Re-check the generation too, since this probe is another await point.
+          const httpIsOurs = await this.#transport.isProtocolHealthy("http");
+          if (!httpIsOurs || this.#transport.generation !== attemptGen) {
+            logger.warn(
+              "HTTPS /prove failed, but the HTTP endpoint did not answer the accelerator's health " +
+                "contract — refusing to downgrade; falling back to WASM",
+            );
+            return this.#fallbackToWasm(
+              executionSteps,
+              "Local proof completed after transport failure",
+            );
+          }
+          logger.warn(
+            "HTTPS /prove failed at the network layer; retrying once over validated HTTP",
+            {
+              error: String(err),
+            },
+          );
           try {
             // The SNAPSHOT http url (captured at attempt entry), not a freshly-derived one — the
             // retry must target the same endpoint this attempt probed, never a reconfigured host/port.

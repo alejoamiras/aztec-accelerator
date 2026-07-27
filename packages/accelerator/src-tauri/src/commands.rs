@@ -354,14 +354,7 @@ async fn enable_https_inner(
     // The owner we waited for may have completed the whole bring-up. Re-read the live bind state
     // rather than assuming what we saw before the wait.
     //
-    // "Bound" is NOT sufficient on its own: a rotation swaps the cert files while the running
-    // listener keeps serving the OLD identity until relaunch, so a re-enable could otherwise commit
-    // "enabled" over a listener presenting a cert whose anchor has since been removed — HTTPS then
-    // serves untrusted (normal mode falls back to HTTP; `httpsOnly` fails) until restart (post-impl
-    // codex Medium). Treat a serving-identity mismatch as "needs a restart" further down.
     let already_bound = shared_state.https_bound.load(Ordering::Relaxed);
-    let serving_stale_identity =
-        already_bound && *shared_state.served_ca_fingerprint.read() != certs::live_ca_fingerprint();
 
     // SEC-08 (post-impl codex M1): the startup path runs this same fail-closed migration before it
     // brings up HTTPS (main.rs). Without mirroring it here, a Settings off→on toggle would re-enable
@@ -384,6 +377,15 @@ async fn enable_https_inner(
     } else {
         tracing::info!("Certs already present + trusted — skipping re-install");
     }
+
+    // Is the RUNNING listener still serving the identity that's now on disk? Computed HERE, after the
+    // cert work above, not before it: `generate_and_save()` may have just minted a new set, so a
+    // fingerprint sampled earlier would compare against the pre-regeneration files and wrongly report
+    // "still current" (post-impl codex High). `https_bound` alone can't answer this — the acceptor is
+    // fixed for the life of the serving loop, so after any rotation the files no longer describe what
+    // we serve, and committing "enabled" over that would present a cert whose anchor may be gone.
+    let serving_stale_identity =
+        already_bound && *shared_state.served_ca_fingerprint.read() != certs::live_ca_fingerprint();
 
     // Ensure the HTTPS listener is LIVE. If launch already bound it, don't double-spawn; otherwise
     // spawn and AWAIT the real bind, persisting `https_enabled = true` ONLY once the listener is up
@@ -484,11 +486,16 @@ fn set_autostart_inner(app: &tauri::AppHandle, enabled: bool) -> Result<(), Stri
 /// anchors are left in place (removing them is the separate [`remove_https_trust`] action, so a
 /// re-enable doesn't re-prompt — D5/A4).
 #[tauri::command]
-pub fn disable_https(
+pub async fn disable_https(
     window: tauri::WebviewWindow,
     config: tauri::State<'_, ConfigState>,
+    shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
+    // Every OTHER HTTPS state transition takes this lock; disable skipping it was the hole. Trigger:
+    // disable while another window's enable is parked on an OS trust dialog — disable reports success,
+    // then the older enable finishes and overwrites `https_enabled` back to true (post-impl codex).
+    let _lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
     mutate_config(&config, |cfg| cfg.https_enabled = false)?;
     tracing::info!("HTTPS disabled via Settings (HTTPS stops on next restart)");
     Ok(())
@@ -641,42 +648,42 @@ pub async fn renew_cert(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), RENEWAL_LABEL)?;
-    // Renewal MUTATES the cert set (`rotate_now` stages a new CA/leaf/key, trusts it, then swaps),
-    // so it must take the same bring-up lock as launch + enable. The renewal and onboarding windows
-    // can be open at once; without this, a rotation could swap the files while another path is
-    // reading or writing them, recreating exactly the MIXED-set corruption the lock exists to prevent
-    // (post-impl codex Medium). Held across the rotation only — released before the restart below.
+
+    // Claim the prove permit BEFORE rotating, not after.
+    //
+    // Rotating is only useful if we can then restart: the running listener serves the OLD leaf from an
+    // in-memory TlsAcceptor that is never hot-reloaded, so a rotation without a restart leaves the new
+    // leaf unused — and, because we would also record the prompt throttle, unprompted. Renewal then
+    // reported success while changing nothing observable, and the old leaf could expire with the tray
+    // app still open (post-impl codex High).
+    //
+    // Rotating first and *then* discovering we cannot restart is the bug; deciding first is the fix.
+    // The permit is held across the (diverging) restart, which also stops a proof from starting in the
+    // gap — Tauri's restart calls exit(0), skipping bb's `kill_on_drop` and the prove-workspace
+    // TempDir destructors, so restarting mid-proof would orphan `bb` and leave the witness on disk.
+    let Ok(_prove_permit) = shared_state.prove_semaphore.try_acquire() else {
+        tracing::info!("Renewal requested while a proof is in flight — asking the user to retry");
+        return Err(
+            "A proof is running right now. Renewing restarts the app, so please try again in a \
+             moment — your certificate is still valid."
+                .to_string(),
+        );
+    };
+
+    // Renewal MUTATES the cert set (`rotate_now` stages a new CA/leaf/key, trusts it, then swaps), so
+    // it takes the same bring-up lock as launch + enable. The renewal and onboarding windows can be
+    // open at once; without this a rotation could swap the files while another path reads or writes
+    // them, recreating exactly the MIXED-set corruption the lock exists to prevent.
     let lifecycle = crate::server::claim_https_lifecycle(&shared_state).await;
     crate::certs::rotate_now().map_err(|e| format!("Certificate renewal failed: {e}"))?;
     drop(lifecycle);
+
     let _ = mutate_config(&config, |cfg| {
         cfg.last_rotation_prompt_at = Some(now_unix_secs());
     });
-    // The running HTTPS listener still serves the OLD leaf from an in-memory TlsAcceptor that isn't
-    // hot-reloaded (see certs::rotate) — the freshly-rotated leaf only takes effect on the next launch.
-    // A restart serves it immediately, BUT Tauri's restart calls exit(0), skipping bb's `kill_on_drop`
-    // + the prove-workspace TempDir destructors: restarting mid-proof would orphan `bb` and leave the
-    // witness on disk (post-impl codex High). So only restart when NO proof is in flight — try_acquire
-    // the single prove permit: holding it across the (diverging) restart also prevents a proof from
-    // starting in the gap. If a proof IS running, defer: the old leaf is still valid (renewal runs ~30
-    // days before expiry), so the new one applies on the next natural launch.
-    match shared_state.prove_semaphore.try_acquire() {
-        Ok(_permit) => {
-            tracing::info!(
-                "Certificate renewed via consent window — restarting to serve the new leaf"
-            );
-            window.app_handle().restart();
-        }
-        Err(_) => {
-            tracing::info!(
-                "Certificate renewed while a proof is in flight — the new leaf applies on next launch"
-            );
-            window
-                .close()
-                .map_err(|e| format!("renewed, but the window could not be closed: {e}"))?;
-            Ok(())
-        }
-    }
+
+    tracing::info!("Certificate renewed via consent window — restarting to serve the new leaf");
+    window.app_handle().restart();
 }
 
 /// Record that the renewal window was shown/declined (throttles re-prompting).

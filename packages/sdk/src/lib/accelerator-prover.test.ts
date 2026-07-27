@@ -767,19 +767,17 @@ describe("AcceleratorProver", () => {
       expect(healthCalls).toBeLessThanOrEqual(2);
     });
 
-    test("pinned-HTTPS /prove network failure demotes the pin and retries once over HTTP", async () => {
+    test("pinned-HTTPS /prove network failure retries over HTTP once that endpoint VALIDATES", async () => {
       const serSpy = mockSerializer();
       const { fetchedUrls } = mockFetch({
-        // HTTP /health refused → HTTPS wins the probe → pin https.
-        "http://127.0.0.1:59833/health": () => {
-          throw new TypeError("connection refused");
-        },
+        // Both endpoints are ours and healthy; HTTPS wins the probe by preference.
+        "http://127.0.0.1:59833/health": () => healthyBody(),
         "https://127.0.0.1:59834/health": () => healthyBody(),
         // HTTPS /prove dies at the network layer (trust/listener changed since /health)...
         "https://127.0.0.1:59834/prove": () => {
           throw new TypeError("TLS handshake failed");
         },
-        // ...and the HTTP endpoint still proves fine.
+        // ...and the HTTP endpoint, re-validated first, still proves fine.
         "http://127.0.0.1:59833/prove": () => Response.json({ proof: "" }),
       });
 
@@ -791,6 +789,33 @@ describe("AcceleratorProver", () => {
       }
       expect(fetchedUrls).toContain("https://127.0.0.1:59834/prove");
       expect(fetchedUrls).toContain("http://127.0.0.1:59833/prove");
+      serSpy.mockRestore();
+    });
+
+    test("the witness is NEVER downgraded to an HTTP endpoint that fails the health contract", async () => {
+      // codex CRITICAL: the demotion retry used to POST straight to HTTP without validating it. A
+      // healthy HTTPS probe says nothing about who is listening on the HTTP port, so a foreign
+      // responder there received the serialized witness the moment HTTPS failed.
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const { fetchedUrls } = mockFetch({
+        // Something else is on the HTTP port: 200 JSON, but NOT the accelerator's contract.
+        "http://127.0.0.1:59833/health": () => Response.json({ hello: "not the accelerator" }),
+        "https://127.0.0.1:59834/health": () => healthyBody(),
+        "https://127.0.0.1:59834/prove": () => {
+          throw new TypeError("TLS handshake failed");
+        },
+        // If this is ever reached, the witness has gone to the foreign responder.
+        "http://127.0.0.1:59833/prove": () => Response.json({ proof: "" }),
+      });
+
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test", // WASM fallback was reached instead
+      );
+      expect(fetchedUrls).toContain("https://127.0.0.1:59834/prove");
+      expect(fetchedUrls).not.toContain("http://127.0.0.1:59833/prove");
+      wasmSpy.mockRestore();
       serSpy.mockRestore();
     });
 

@@ -61,7 +61,10 @@ rcgen = { version = "0.13", features = ["pem", "x509-parser", "zeroize"] }
 # Direct dep so we can name `Zeroizing` (rcgen does not re-export it); already locked at 1.8.2 transitively
 # via rcgen, so this adds no new package version.
 zeroize = "1"
-x509-parser = "0.18"
+# `verify` gates X509Certificate::verify_signature, used to prove the live leaf is actually signed
+# by the live CA (a partial cert swap otherwise passes every other check). It pulls `ring`, which
+# tokio-rustls already brings in, so this adds no new package.
+x509-parser = { version = "0.18", features = ["verify"] }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 time = "0.3"

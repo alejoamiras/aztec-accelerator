@@ -510,14 +510,63 @@ pub fn current_anchor(live_ca: &Path) -> AnchorRef {
     AnchorRef(nickname_for(live_ca))
 }
 
-/// Trust the freshly-staged anchor in every store; success = installed in ≥1 store (Linux trust is
-/// inherently partial). `Err` only if certutil is absent or no store accepted it.
+/// Trust the freshly-staged anchor, requiring it to land in **every store that trusts the anchor we
+/// are about to replace** — not merely in one of them.
+///
+/// "Any store succeeded" was wrong for a ROTATION (post-impl codex High, raised in three separate
+/// audits). Trust here is per-browser: if Chromium accepts the new anchor while a Firefox profile's DB
+/// is locked or password-protected, `any_installed()` is true, the caller swaps the cert identity, and
+/// that Firefox — still trusting only the old anchor — silently loses HTTPS at the next launch, with
+/// no path back except removing and re-adding trust by hand.
+///
+/// Rotation is already fail-closed (the caller discards the staging and keeps the still-valid old set
+/// on `Err`), so refusing here costs one deferred rotation and protects a working browser. First
+/// install is unaffected: nothing trusts the old anchor yet, so the required set is empty and the
+/// ≥1-store rule still applies.
 pub fn trust_new_anchor(staged_ca: &Path) -> Result<(), String> {
+    let Some(bin) = certutil_bin() else {
+        return Err("certutil not found — cannot install the new anchor".into());
+    };
+    let Some(home) = dirs::home_dir() else {
+        return Err("no home directory".into());
+    };
+    let old_nick = nickname_for(&crate::certs::live_ca_cert_path());
+
+    // Which stores trust the OUTGOING anchor right now? Those are the ones a rotation must not break.
+    let required: Vec<String> = match &old_nick {
+        Some(nick) => discover_stores(&home)
+            .iter()
+            .filter(|s| s.dir.join("cert9.db").exists())
+            .filter(|s| is_trusted_in_store(&bin, s, nick))
+            .map(|s| s.label.clone())
+            .collect(),
+        None => Vec::new(),
+    };
+
     let report = install(staged_ca);
-    if report.any_installed() {
+    if !report.any_installed() {
+        return Err("no NSS store accepted the new anchor".into());
+    }
+
+    let missed: Vec<&str> = required
+        .iter()
+        .filter(|label| {
+            !report
+                .stores
+                .iter()
+                .any(|s| &s.store == *label && s.installed)
+        })
+        .map(String::as_str)
+        .collect();
+
+    if missed.is_empty() {
         Ok(())
     } else {
-        Err("no NSS store accepted the new anchor".into())
+        Err(format!(
+            "the new certificate could not be installed in {} — which currently trusts the old one. \
+             Keeping the existing certificate so those browsers keep working; close them and retry.",
+            missed.join(", ")
+        ))
     }
 }
 

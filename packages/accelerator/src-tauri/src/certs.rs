@@ -44,13 +44,19 @@ impl CertPaths {
         }
     }
 
-    /// The staged set (`*.new`) under `dir`, written + trusted (per-OS via [`crate::trust`]) before the
-    /// atomic swap.
+    /// The staged set under `dir`, written + trusted (per-OS via [`crate::trust`]) before the atomic
+    /// swap. Staging names are unique PER PROCESS (`.new.<pid>`), not the fixed `*.new` they used to
+    /// be: the lifecycle mutex only serializes rotations WITHIN one process, and a second resident
+    /// instance (the crash-recovery relaunch can briefly overlap the outgoing one) would otherwise
+    /// stage over the same three paths — interleaving two rotations into a mixed CA/leaf/key set and
+    /// corrupting HTTPS (post-impl codex High). Distinct names make the worst case two independent
+    /// stagings, one of which simply loses the swap.
     fn staged(dir: &std::path::Path) -> Self {
+        let pid = std::process::id();
         Self {
-            ca_cert: dir.join("ca.pem.new"),
-            leaf_cert: dir.join("localhost.pem.new"),
-            leaf_key: dir.join("localhost.key.new"),
+            ca_cert: dir.join(format!("ca.pem.new.{pid}")),
+            leaf_cert: dir.join(format!("localhost.pem.new.{pid}")),
+            leaf_key: dir.join(format!("localhost.key.new.{pid}")),
         }
     }
 
@@ -142,6 +148,40 @@ pub fn certs_exist() -> bool {
     CertPaths::live().exists()
         && leaf_secs_remaining().map(|s| s > 0).unwrap_or(false)
         && load_rustls_config().is_ok()
+        && leaf_matches_ca()
+}
+
+/// Is the live leaf actually SIGNED BY the live CA?
+///
+/// `load_rustls_config()` proves leaf↔key, and nothing more. `swap_into` renames three files in
+/// sequence, so a crash (or a Windows file lock) between them can leave `ca = B` with `leaf/key = A` —
+/// a set that passes every other check while chaining to an anchor that isn't installed. The listener
+/// then records B's fingerprint and, after a trust removal + re-enable installs only B, the app
+/// reports success while serving untrusted A (post-impl codex High). Verifying the signature is what
+/// makes a partial swap detectable, so `generate_and_save` regenerates instead of adopting it.
+fn leaf_matches_ca() -> bool {
+    let live = CertPaths::live();
+    let Ok(leaf_pem) = std::fs::read(&live.leaf_cert) else {
+        return false;
+    };
+    let Ok(ca_pem) = std::fs::read(&live.ca_cert) else {
+        return false;
+    };
+    let (Ok((_, leaf_pem)), Ok((_, ca_pem))) = (
+        x509_parser::pem::parse_x509_pem(&leaf_pem),
+        x509_parser::pem::parse_x509_pem(&ca_pem),
+    ) else {
+        return false;
+    };
+    let (Ok((_, leaf)), Ok((_, ca))) = (
+        x509_parser::parse_x509_certificate(&leaf_pem.contents),
+        x509_parser::parse_x509_certificate(&ca_pem.contents),
+    ) else {
+        return false;
+    };
+    // Fail closed: an unverifiable pair is treated as mismatched, so we regenerate rather than serve
+    // something we cannot prove chains correctly.
+    leaf.verify_signature(Some(ca.public_key())).is_ok()
 }
 
 /// Generate a CA + leaf and write the CA cert + leaf cert + leaf key to the three given paths.
@@ -556,6 +596,37 @@ mod tests {
         std::fs::write(&junk, b"not a certificate").unwrap();
         assert!(ca_fingerprint_at(&junk).is_none());
         assert!(ca_fingerprint_at(&dir.path().join("missing.pem")).is_none());
+    }
+
+    #[test]
+    fn leaf_signature_check_detects_a_partial_swap() {
+        // `swap_into` renames three files in sequence, so a crash between them can leave `ca = B` with
+        // `leaf/key = A`. That set loads into rustls perfectly well (leaf↔key still match), which is
+        // why the leaf↔CA SIGNATURE is the only thing that can catch it (post-impl codex High).
+        let (ca_a, _ka, leaf_a, _la) = build_test_ca_and_leaf();
+        let (ca_b, _kb, _leaf_b, _lb) = build_test_ca_and_leaf();
+
+        let parse = |pem: &str| {
+            let (_, p) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+            p
+        };
+        let (pa, pb, pl) = (parse(&ca_a.pem()), parse(&ca_b.pem()), parse(&leaf_a.pem()));
+        let (_, ca_a_cert) = x509_parser::parse_x509_certificate(&pa.contents).unwrap();
+        let (_, ca_b_cert) = x509_parser::parse_x509_certificate(&pb.contents).unwrap();
+        let (_, leaf_a_cert) = x509_parser::parse_x509_certificate(&pl.contents).unwrap();
+
+        assert!(
+            leaf_a_cert
+                .verify_signature(Some(ca_a_cert.public_key()))
+                .is_ok(),
+            "a matched leaf/CA pair must verify"
+        );
+        assert!(
+            leaf_a_cert
+                .verify_signature(Some(ca_b_cert.public_key()))
+                .is_err(),
+            "leaf A against CA B (a half-completed swap) must NOT verify"
+        );
     }
 
     #[test]

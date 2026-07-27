@@ -302,9 +302,15 @@ export class AcceleratorTransport {
     const httpsUrl = `https://${this.#host}:${this.#httpsPort}/health`;
 
     const fire = (url: string, protocol: AcceleratorProtocol): Promise<ProbeResult> =>
-      ky(url, { retry: 0, throwHttpErrors: false, timeout: HEALTH_PROBE_TIMEOUT_MS }).then(
-        async (response) => ({ response, protocol, body: await readJsonBounded(response) }),
-      );
+      ky(url, {
+        retry: 0,
+        throwHttpErrors: false,
+        timeout: HEALTH_PROBE_TIMEOUT_MS,
+        // A 307/308 is a downgrade vector: fetch preserves the method AND body across those,
+        // so an https->http redirect would carry the request off the endpoint we validated —
+        // and in strict mode, off HTTPS entirely (post-impl codex High). Never follow.
+        redirect: "error",
+      }).then(async (response) => ({ response, protocol, body: await readJsonBounded(response) }));
 
     const probe = () => {
       // Strict mode: probe HTTPS ONLY — never even *construct* an http URL (contract compliance).
@@ -397,6 +403,36 @@ export class AcceleratorTransport {
     throw new Error("both /health probes failed");
   }
 
+  /**
+   * Probe ONE protocol's `/health` and report whether it answers the accelerator's health contract.
+   *
+   * This exists for the `/prove` downgrade path, which must NEVER hand the witness to an endpoint it
+   * has not itself validated. A healthy HTTPS probe says nothing about who is listening on the HTTP
+   * port — a foreign responder there would otherwise receive the serialized witness the moment HTTPS
+   * failed (post-impl codex Critical). Bounded exactly like the dual probe: `ky` timeout for headers,
+   * {@link readJsonBounded} for the body.
+   */
+  async isProtocolHealthy(protocol: AcceleratorProtocol): Promise<boolean> {
+    // Strict mode never speaks plaintext, so it must not even probe it.
+    if (protocol === "http" && this.#httpsOnly) return false;
+    const url =
+      protocol === "https"
+        ? `https://${this.#host}:${this.#httpsPort}/health`
+        : `http://${this.#host}:${this.#port}/health`;
+    try {
+      const response = await ky(url, {
+        retry: 0,
+        throwHttpErrors: false,
+        timeout: HEALTH_PROBE_TIMEOUT_MS,
+        redirect: "error",
+      });
+      if (!response.ok) return false;
+      return isRecognizedHealthBody(await readJsonBounded(response));
+    } catch {
+      return false;
+    }
+  }
+
   /** The `/prove` URL for an EXPLICIT protocol, independent of the current pin — used by the demotion
    * retry so a mid-proof `configure()` (generation change) can't redirect the retried witness. */
   proveUrlFor(protocol: AcceleratorProtocol): string {
@@ -420,6 +456,9 @@ export class AcceleratorTransport {
       body,
       timeout: PROVE_TIMEOUT_MS,
       retry: 0,
+      // Never follow a redirect with the witness in the body: 307/308 preserve method + body, so a
+      // redirect here would forward it to an endpoint we never validated (post-impl codex High).
+      redirect: "error",
       headers: {
         "content-type": "application/octet-stream",
         ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
