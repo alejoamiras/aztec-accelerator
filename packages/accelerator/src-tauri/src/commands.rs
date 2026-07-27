@@ -405,10 +405,13 @@ async fn enable_https_inner(
 /// listener is live, or `false` once the attempt has finished without binding / the budget expires.
 async fn wait_for_https_bound(state: &crate::server::AppState) -> bool {
     use std::sync::atomic::Ordering;
-    // ~3s total: `bind_with_retry` retries a briefly-held port (an in-place update relaunch), so the
-    // budget must outlast a normal retry burst while never hanging the wizard's "Start" click.
+    // The budget MUST outlast `bind_with_retry`'s own 5s AddrInUse budget (core/src/server/bind.rs) —
+    // a shorter wait would time out while the owner is still legitimately retrying a briefly-held port
+    // (an in-place update relaunch) and report a false failure, which is the very bug this closes. 10s
+    // gives that 5s plus margin. It is only ever paid in the pathological case: the normal failure path
+    // exits early below the instant the owner releases `https_starting` without binding.
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-    const ATTEMPTS: u32 = 60;
+    const ATTEMPTS: u32 = 200;
     for _ in 0..ATTEMPTS {
         if state.https_bound.load(Ordering::Acquire) {
             return true;
