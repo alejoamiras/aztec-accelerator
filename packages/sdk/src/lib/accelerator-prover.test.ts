@@ -191,6 +191,42 @@ describe("AcceleratorProver", () => {
       serializeSpy.mockRestore();
     });
 
+    test("a 200 whose body cannot be decoded degrades to WASM instead of breaking the dApp", async () => {
+      // The decode sits outside the transport catch (a bad body is not a transport failure and must
+      // not re-trigger the HTTPS→HTTP demotion). It used to ESCAPE from there, so an accelerator that
+      // answered 200 with garbage failed the caller outright — while the identical body on the HTTP
+      // retry path was absorbed into a WASM fallback. A 200 we can't parse says nothing about WASM's
+      // ability to finish the proof, so both paths degrade.
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            api_version: 1,
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+        "/prove": () => new Response("not json at all", { status: 200 }),
+      });
+      const serializeSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const phases: string[] = [];
+
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        onPhase: (phase) => phases.push(phase),
+      });
+
+      // Reaching the WASM prover at all is the assertion — the mock is what throws, not the decode.
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test",
+      );
+      expect(phases).toContain("fallback");
+      expect(wasmSpy).toHaveBeenCalled();
+
+      wasmSpy.mockRestore();
+      serializeSpy.mockRestore();
+    });
+
     test("falls back to WASM with denied phase on 403 (origin not authorized)", async () => {
       mockFetch({
         "/health": () =>

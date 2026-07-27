@@ -41,3 +41,6 @@ yarn.lock
 # Claude Code local runtime state (settings.local.json is already ignored globally)
 .claude/scheduled_tasks.lock
 .playwright-mcp/
+
+# NSIS hook-guard harness build output (packages/accelerator/src-tauri/nsis/harness.test.nsi)
+hooks-harness-setup.exe

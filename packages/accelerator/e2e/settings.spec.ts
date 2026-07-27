@@ -242,6 +242,63 @@ test("https toggle calls enable/disable commands", async ({ page }) => {
   expect(disableCalls.length).toBe(1);
 });
 
+test("a failed enable_https shows the persisted state, not the failure", async ({ page }) => {
+  // The restart-required path: `enable_https` persists `https_enabled = true` and STILL returns Err
+  // ("restart to finish enabling"). An optimistic revert showed the switch OFF while the config — and
+  // the next launch — said ON, and re-toggling only reproduced the error. The panel must re-read.
+  await page.addInitScript(() => {
+    let enabled = false;
+    (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({
+      config_version: 1,
+      https_enabled: enabled,
+      approved_origins: [],
+      speed: "full",
+    }));
+    (window as any).__TAURI_MOCK__.setHandler("enable_https", () => {
+      enabled = true; // committed...
+      throw "HTTPS is set up, but the running server is still using a previous certificate."; // ...then failed
+    });
+  });
+  await page.goto("/settings.html");
+  await expect(page.locator("#https")).not.toBeChecked();
+
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
+    el.checked = true;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  // Reflects what the backend actually stored...
+  await expect(page.locator("#https")).toBeChecked();
+  // ...and says why, in the backend's own words — "Failed — try again" would hide the restart.
+  await expect(page.getByText("still using a previous certificate")).toBeVisible();
+});
+
+test("the certificate action and the https toggle disable each other while one runs", async ({
+  page,
+}) => {
+  // Both routes into the same Rust lifecycle mutex. It serializes them correctly, but leaving the
+  // other control live let the user queue an operation against state they could no longer see.
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler(
+      "enable_https",
+      () => new Promise((resolve) => setTimeout(() => resolve(null), 300)),
+    );
+  });
+  await page.goto("/settings.html");
+  await page.locator("#cert-details summary").click();
+
+  await page.locator("#https").evaluate((el: HTMLInputElement) => {
+    el.checked = true;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  await expect(page.locator("#remove-trust")).toBeDisabled();
+  await expect(page.locator("#https")).toBeDisabled();
+  // Both come back once the operation settles.
+  await expect(page.locator("#remove-trust")).toBeEnabled();
+  await expect(page.locator("#https")).toBeEnabled();
+});
+
 test("auto-update toggle calls set_auto_update", async ({ page }) => {
   await page.goto("/settings.html");
 

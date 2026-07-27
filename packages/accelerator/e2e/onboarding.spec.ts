@@ -81,6 +81,28 @@ test("Start invokes complete_onboarding with the toggle states; on success the p
   await expect(page.locator("#start")).toBeDisabled();
 });
 
+test("a declined option is confirmed back as Off, not On", async ({ page }) => {
+  // `complete_onboarding` returns Ok for "set it off" exactly as for "set it on", so a hardcoded "On"
+  // told a user who had just unchecked Start-on-Login that it was enabled (post-impl codex Low).
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("complete_onboarding", () => ({
+      https: { Ok: null },
+      autostart: { Ok: null },
+      auto_update: { Ok: null },
+      completed: false, // keeps the window open so the result rows stay readable
+    }));
+  });
+  await page.goto("/onboarding.html");
+  await page.locator("#opt-autostart").evaluate((el: HTMLInputElement) => {
+    el.checked = false;
+    el.dispatchEvent(new Event("change"));
+  });
+  await page.locator("#start").click();
+
+  await expect(page.locator("#autostart-result")).toHaveText("Off");
+  await expect(page.locator("#auto-update-result")).toHaveText("On");
+});
+
 test("partial cert failure: HTTPS shown off with Retry, other choices still applied", async ({
   page,
 }) => {

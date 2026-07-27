@@ -204,15 +204,61 @@ reader/writer participating, plus an explicit served-identity check for the one 
 express (what an already-running listener is holding). Further rounds would be chasing diminishing
 returns rather than reachable defects.
 
-**Accepted residuals (documented, not fixed — all degrade gracefully):**
+## Re-aimed audits: one Critical, every High, every Medium
+
+The loop above had converged on the concurrency model, so the last audits were re-aimed at the
+surfaces it had never pointed at: the SDK transport and the frontend/IPC layer. That found the worst
+bug in the whole PR.
+
+**Critical — the witness went to an unvalidated endpoint.** On an HTTPS `/prove` network failure the
+retry POSTed the serialized witness to `http://127.0.0.1:59833/prove` with nothing having validated
+that endpoint. A healthy HTTPS probe says nothing about who holds the HTTP port; anything squatting
+it received the witness the instant HTTPS hiccuped. The retry now re-probes HTTP against the
+accelerator's health contract (and re-checks the generation) before sending, and degrades to WASM
+otherwise. Adding `redirect: "error"` closed the same downgrade by another route — fetch preserves
+method AND body across 307/308, so a redirect could walk an HTTPS request down to plaintext, and in
+strict mode take it off HTTPS entirely.
+
+**The lesson worth keeping: an audit only finds what you aim it at.** Eight rounds of "audit this PR"
+kept landing on the concurrency model because that is where the previous round had just been. The
+Critical had been sitting in `#proveRemote` the entire time, in code that predated the loop. Naming a
+surface the audits had NOT covered surfaced it on the first round.
+
+**Two of the three residuals below were not actually acceptable.** Both were closed rather than
+carried:
+- *Windows Disallowed precedence* — `live_present()` now requires the anchor in Root AND absent from
+  Disallowed, since a serial in Root is not trusted if the same cert is also in Disallowed.
+- *Linux partial-store renewal* — `trust_new_anchor()` now requires EVERY store that trusted the
+  outgoing anchor to accept the new one. Chromium succeeding while a Firefox profile was locked used
+  to commit the swap and silently break that Firefox. It was fail-closed already, so refusing costs
+  one deferred rotation out of a ~2-year window. Three separate audits flagged it; it was accepted
+  twice before being fixed. Recording that: "degrades gracefully" is a reason to not PANIC about a
+  finding, not a reason to keep it.
+
+**The NSIS Medium was real, and `$UpdateMode` alone never covered it.** Reading the Tauri NSIS
+template settled what could not be settled by argument: `$UpdateMode` is set from the INSTALLER's own
+`/UPDATE` flag, and forwarded to the old uninstaller only when the installer received it
+(`${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE"`). The in-app updater passes it. A user who
+downloads the installer and double-clicks it — the only upgrade route once auto-update is off — does
+not, so the hook wiped their trust anchor on a routine upgrade. `_?=` IS appended unconditionally on
+that path, and the registered `UninstallString` is a bare `"$INSTDIR\uninstall.exe"`, so it never
+appears on an Add/Remove-Programs run. The guard now requires both.
+
+Because a release cannot fix its own uninstaller, this one is not left to a static test. The Windows
+`cert-trust` leg builds a real NSIS uninstaller around the ACTUAL hook macro
+(`nsis/harness.test.nsi`) and runs it under all three command lines, using the hook's own `RMDir`
+target as the observable. The static shape test stays as the fast companion.
+
+**Also worth recording: "can't run locally" was wrong.** The Playwright desktop-ui suite had been
+declared CI-only on this machine twice, because `playwright install` fails on Ubuntu 26.04. The
+browser cache already held a newer usable revision — pointing `executablePath` at it runs all 49
+specs in 3.5s. Two of the fixes in this round are covered by specs that would otherwise have shipped
+unrun.
+
+**Accepted residuals (documented, not fixed):**
 - *macOS removal query-error fails open*: a `find-certificate` that ERRORS mid-removal-postcheck (vs
   "not found") can report removed. The login keychain is essentially always unlocked while the app
   runs, and the delete-FAILURE path IS covered; the query-error residual is low. (The CLI conflates
   "not found" and "error" in its exit code, so a clean fix isn't possible.)
-- *Windows presence ≠ effective trust (Disallowed store precedence)*: a serial in Root is trusted
-  UNLESS the same cert is also in CurrentUser\Disallowed. Self-inflicted; and the SDK's HTTP fallback
-  covers the served-untrusted-leaf case. Not worth an unverifiable-on-Linux Windows chain-policy call.
-- *Linux partial-store renewal*: rotation succeeds if ANY NSS store accepts the new anchor; a store
-  that was trusted but temporarily unavailable during the ~2-year rotation could reject the new chain
-  next launch. Recoverable via "Remove certificate trust" + re-enable. Full prior-coverage tracking
-  wasn't worth the risk to the rotation path.
+(The Windows Disallowed and Linux partial-store residuals listed here previously are now
+fixed — see above.)

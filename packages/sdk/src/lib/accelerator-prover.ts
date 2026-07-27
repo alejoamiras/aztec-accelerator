@@ -474,7 +474,23 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       throw err;
     }
 
-    return this.#decodeProof(res, start);
+    // Decode OUTSIDE the transport try/catch — a decode failure is not a transport failure and must
+    // not be mistaken for one (re-entering that catch would re-run the HTTPS→HTTP demotion logic for
+    // a request that actually got a 200). But it still has to degrade rather than escape: the retry
+    // path already falls back on a bad body, and it would be incoherent for the SAME malformed
+    // response to break the dApp on the primary path and be absorbed on the retry (post-impl codex
+    // Medium). Nothing about a 200 with an undecodable body says WASM can't finish the proof.
+    try {
+      return await this.#decodeProof(res, start);
+    } catch (decodeErr) {
+      logger.warn("Accelerator returned a proof that could not be decoded, falling back to WASM", {
+        error: String(decodeErr),
+      });
+      return this.#fallbackToWasm(
+        executionSteps,
+        "Local proof completed after a malformed response",
+      );
+    }
   }
 
   /**

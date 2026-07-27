@@ -256,26 +256,42 @@ describe("F-012 P3 — per-window capability ACL", () => {
   });
 });
 
-// Tier-4 certainty (audit R1 / C-1): the Windows NSIS uninstall hook must NEVER wipe the CA trust +
-// certs during an AUTO-UPDATE (Tauri runs the previous version's uninstaller on every update). This is
-// unverifiable in headless CI (it needs a real Windows install/update cycle), so a static guard pins
-// the load-bearing property: the `-delstore Root` (+ cert RMDir) live INSIDE an `${If} $UpdateMode <> 1`
-// block, so they only fire on a genuine uninstall. A refactor that drops the guard fails here.
-describe("NSIS uninstall hook — auto-update must not wipe trust", () => {
+// Tier-4 (audit R1 / C-1): the Windows NSIS uninstall hook must NEVER wipe the CA trust + certs during
+// an UPGRADE — Tauri runs the previous version's uninstaller when installing over an existing install.
+// The Windows leg of the `cert-trust` CI job now runs the real hook under all three command lines
+// (nsis/harness.test.nsi); this static test is the cheap companion that pins the SHAPE, so a refactor
+// that drops a guard fails on every platform in milliseconds rather than only in the Windows leg.
+//
+// TWO guards are load-bearing, not one. `$UpdateMode` is set from the installer's own `/UPDATE` flag
+// and forwarded to the old uninstaller only when the installer received it — so a manually downloaded
+// installer (the only upgrade route once auto-update is off) leaves it 0. `_?=` is appended on that
+// path unconditionally, and never appears on an Add/Remove-Programs run. Both must be checked.
+describe("NSIS uninstall hook — an upgrade must not wipe trust", () => {
   const HOOKS = path.join(SRC_TAURI, "nsis", "hooks.nsi");
 
-  test("the -delstore Root + cert removal are guarded by ${If} $UpdateMode <> 1", async () => {
+  test("the -delstore Root + cert removal require BOTH $UpdateMode <> 1 and no _?=", async () => {
     const nsi = await read(HOOKS);
+    const detectInstallOver = nsi.search(/\$\{GetOptions\}\s+\$CMDLINE\s+"_\?="/);
     const guardOpen = nsi.search(/\$\{If\}\s*\$UpdateMode\s*<>\s*1/);
+    const andGuard = nsi.search(/\$\{AndIf\}/);
     const delstore = nsi.search(/-delstore\s+Root/i);
     const rmdir = nsi.search(/RMDir\s+\/r/i);
-    const guardClose = nsi.search(/\$\{EndIf\}/);
+    // The LAST ${EndIf} closes the destructive block; earlier ones close the _?= detection.
+    const guardClose = nsi.lastIndexOf("${EndIf}");
 
-    expect(guardOpen, "an ${If} $UpdateMode <> 1 guard must exist").toBeGreaterThanOrEqual(0);
-    expect(delstore, "-delstore Root must exist and sit AFTER the guard opens").toBeGreaterThan(
+    expect(
+      detectInstallOver,
+      "the hook must detect the installer-driven uninstall via _?= on $CMDLINE",
+    ).toBeGreaterThanOrEqual(0);
+    expect(detectInstallOver, "_?= must be resolved BEFORE the guard is evaluated").toBeLessThan(
       guardOpen,
     );
-    expect(rmdir, "the cert RMDir must sit AFTER the guard opens").toBeGreaterThan(guardOpen);
+    expect(guardOpen, "an ${If} $UpdateMode <> 1 guard must exist").toBeGreaterThanOrEqual(0);
+    expect(andGuard, "the _?= result must be ANDed into the SAME condition").toBeGreaterThan(
+      guardOpen,
+    );
+    expect(delstore, "-delstore Root must sit AFTER both guards").toBeGreaterThan(andGuard);
+    expect(rmdir, "the cert RMDir must sit AFTER both guards").toBeGreaterThan(andGuard);
     expect(guardClose, "the guard must close AFTER the destructive ops").toBeGreaterThan(delstore);
     expect(guardClose).toBeGreaterThan(rmdir);
   });

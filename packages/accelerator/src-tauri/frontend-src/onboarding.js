@@ -57,16 +57,12 @@ async function runStart() {
       asOk(res.https),
       asOk(res.https) ? "Encrypted connection enabled" : `Failed: ${res.https.Err}`,
     );
-  showResult(
-    "autostart-result",
-    asOk(res.autostart),
-    asOk(res.autostart) ? "On" : `Failed: ${res.autostart.Err}`,
-  );
-  showResult(
-    "auto-update-result",
-    asOk(res.auto_update),
-    asOk(res.auto_update) ? "On" : `Failed: ${res.auto_update.Err}`,
-  );
+  // Report the state the user CHOSE, not a fixed "On". `complete_onboarding` returns Ok for "set it
+  // off" just as much as for "set it on", so declining Start-on-Login used to be confirmed back as
+  // "On" — the wizard reporting the opposite of what it just did (post-impl codex Low).
+  const applied = (chosen, r) => (asOk(r) ? (chosen ? "On" : "Off") : `Failed: ${r.Err}`);
+  showResult("autostart-result", asOk(res.autostart), applied(autostart, res.autostart));
+  showResult("auto-update-result", asOk(res.auto_update), applied(autoUpdate, res.auto_update));
 
   if (res.completed) {
     // F-012: Rust closes the wizard window on success (the page has no core:window grant), so leave
