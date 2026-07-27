@@ -283,3 +283,14 @@ unrun.
   "not found" and "error" in its exit code, so a clean fix isn't possible.)
 (The Windows Disallowed and Linux partial-store residuals listed here previously are now
 fixed — see above.)
+
+## Closed
+
+Merged 2026-07-27 as `27805ef` (PR #375 squashed), 35/35 checks green. Owner confirmed on real
+macOS hardware: the first-run wizard through the actual Keychain prompt, and Safari loading the
+HTTPS endpoint with no warning — the one path no test in this repo can reach, and the one the
+`verify-cert -l` bug broke.
+
+Still untested by anything, and worth remembering as such: **declining** the macOS auth prompt, and
+**Remove certificate trust** on real hardware. Both are covered logically (mocked IPC specs) and
+structurally (the Rust unit + trust integration tests), but neither has been through a real Keychain.
