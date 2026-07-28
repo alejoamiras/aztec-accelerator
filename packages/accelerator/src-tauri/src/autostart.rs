@@ -1332,6 +1332,17 @@ pub fn enable_entry_at(desired: &Path) -> Result<(), String> {
     backend::enable_write(desired)
 }
 
+/// L3 test surface: capture the exact prior state `set_enabled`'s rollback would restore, apply it
+/// back, and report whether the round-trip was faithful. Exists because the rollback mechanism
+/// (which on Windows must carry the `StartupApproved` blob AND the Run value's registry type) is
+/// otherwise only reachable through a crash-recovery arming failure, which an integration test
+/// cannot induce — leaving the most safety-critical code in the module unexercised.
+pub fn snapshot_restore_roundtrip_for_tests(mutate: &dyn Fn()) -> Result<(), String> {
+    let prior = backend::snapshot()?;
+    mutate();
+    backend::restore(prior)
+}
+
 /// L3 test surface: remove the artifact alone (idempotent), without the crash-recovery disarm.
 pub fn remove_entry() -> Result<(), String> {
     let _lock = acquire_autostart_lock()?;

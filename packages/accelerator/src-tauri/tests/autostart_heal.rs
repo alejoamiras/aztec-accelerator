@@ -7,7 +7,7 @@
 
 use aztec_accelerator::autostart::{
     enable_entry_at, heal_if_broken_at, intent_enabled_now, read_stored_target, remove_entry,
-    HealOutcome, StoredTarget,
+    snapshot_restore_roundtrip_for_tests, HealOutcome, StoredTarget,
 };
 use std::path::{Path, PathBuf};
 
@@ -164,6 +164,31 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
             StoredTarget::Unreadable { .. } | StoredTarget::Broken { .. }
         ));
     }
+
+    // 7c. Rollback mechanism: whatever `set_enabled`'s failure path captures must restore the
+    // artifact byte-for-byte. Only reachable in production via a crash-recovery arming failure,
+    // which an integration test cannot induce — so drive the mechanism directly.
+    enable_entry_at(&elsewhere).expect("re-enable for the rollback check");
+    let pristine = std::fs::read(&desktop).unwrap();
+    snapshot_restore_roundtrip_for_tests(&|| {
+        std::fs::write(&desktop, b"[Desktop Entry]\nExec=/clobbered\n").unwrap();
+    })
+    .expect("restore");
+    assert_eq!(
+        std::fs::read(&desktop).unwrap(),
+        pristine,
+        "rollback must restore the artifact byte-for-byte"
+    );
+    // …and restoring an ABSENT prior must remove the artifact, not leave a stale one behind.
+    remove_entry().expect("clear");
+    snapshot_restore_roundtrip_for_tests(&|| {
+        enable_entry_at(&elsewhere).expect("write during the mutate window");
+    })
+    .expect("restore-to-absent");
+    assert!(
+        !desktop.exists(),
+        "rollback from an absent prior must remove the artifact"
+    );
 
     // 8. OFF removes; Absent never resurrects (§9 "never resurrect").
     remove_entry().expect("remove");
@@ -649,6 +674,41 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
         intent_enabled_now().unwrap(),
         "explicit ON resets StartupApproved"
     );
+
+    // 5b. Rollback mechanism (the code the post-impl audit rewrote): a failed enable must restore
+    //     the Run value AND the StartupApproved blob. Restoring only the former would leave a
+    //     failed enable having destroyed the user's Task-Manager OFF.
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+        use winreg::RegKey;
+        let read_sa = || {
+            RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey_with_flags(SA_KEY, KEY_READ)
+                .ok()
+                .and_then(|k| k.get_raw_value(VALUE).ok())
+                .map(|v| (v.vtype as u32, v.bytes))
+        };
+        let prior_run = read_raw_run_value();
+        let prior_sa = read_sa();
+        snapshot_restore_roundtrip_for_tests(&|| {
+            write_raw_run_value("C:\\clobbered.exe");
+            let _ = RegKey::predef(HKEY_CURRENT_USER)
+                .create_subkey(SA_KEY)
+                .map(|(k, _)| k.delete_value(VALUE));
+        })
+        .expect("restore");
+        assert_eq!(
+            read_raw_run_value(),
+            prior_run,
+            "Run value must be restored"
+        );
+        assert_eq!(
+            read_sa(),
+            prior_sa,
+            "the StartupApproved blob must be restored too — a failed enable must not destroy a \
+             Task-Manager OFF"
+        );
+    }
 
     // 6. OFF deletes the Run value but leaves StartupApproved (§4.5); Absent never resurrects;
     //    OFF is idempotent (the removed plugin errored on an already-absent value).
