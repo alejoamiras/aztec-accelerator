@@ -217,6 +217,16 @@ h2 {
   border-radius: 2px;
 }
 
+/* The stored-origin text in Settings -> Approved Sites. Mirrors `.origin-line` in the authorization
+   popup: now that Allow is permanent, this list is the only way to revoke, so a look-alike must not be
+   able to disguise itself here either. */
+.origin-text {
+  unicode-bidi: isolate;
+  -webkit-user-select: text;
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
 .origin-item {
   display: flex;
   align-items: center;
@@ -547,4 +557,14 @@ h2 {
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* Disclosure that approving is permanent (authorize.html #permanence). Replaces the "Always allow"
+   checkbox as the thing that tells the user what Allow actually does. Sized to read as consequential
+   copy, not fine print — it is the primary compensating control for a permanent grant. */
+.popup-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }

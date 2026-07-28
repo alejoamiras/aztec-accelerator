@@ -50,12 +50,12 @@ test("allow calls respond_auth with the SERVER origin + URL requestId", async ({
 
   const calls = await callsFor(page, "respond_auth");
   expect(calls.length).toBe(1);
-  // requestId from the URL (SEC-06 opaque id); origin from the server (D8). remember default-UNCHECKED (F-014).
+  // requestId from the URL (SEC-06 opaque id); origin from the server (D8). No `remember`: Allow is
+  // unconditionally persistent, so there is no per-decision flag for the renderer to send.
   expect(calls[0].args).toEqual({
     requestId: "req-abc",
     origin: "https://example.com",
     allowed: true,
-    remember: false,
   });
 });
 
@@ -70,27 +70,26 @@ test("deny calls respond_auth with the server origin", async ({ page }) => {
     requestId: "req-abc",
     origin: "https://example.com",
     allowed: false,
-    remember: false,
   });
 });
 
-test("remember defaults unchecked; checking 'Always allow' sends remember: true", async ({
+test("the popup discloses that approving is permanent, and offers no per-decision opt-out", async ({
   page,
 }) => {
+  // The "Always allow this site" checkbox used to carry this meaning: ticking it WAS the disclosure
+  // AND the notification that something was being written. Removing it without saying anything would
+  // let a mis-click persist a look-alike origin silently — the property F-014 actually bought. This
+  // copy is now the primary compensating control, so it is pinned here.
   await mockPending(page, "https://test.com");
   await page.goto("/authorize.html?requestId=req-xyz");
 
-  await expect(page.locator("#remember")).not.toBeChecked();
-  await page.locator("#remember").check();
-  await page.getByRole("button", { name: "Allow" }).click();
-
-  const calls = await callsFor(page, "respond_auth");
-  expect(calls[0].args).toEqual({
-    requestId: "req-xyz",
-    origin: "https://test.com",
-    allowed: true,
-    remember: true,
-  });
+  await expect(page.locator("#remember")).toHaveCount(0);
+  await expect(page.locator("#permanence")).toHaveText(
+    "Stays approved until you remove it in Settings.",
+  );
+  // Deliberately NOT "will be saved" — persisting is best-effort (core warns and continues on a
+  // config-write error), so the copy must not promise the write succeeded.
+  await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0);
 });
 
 // ── Arbiter: active vs queued (C9 D15/D19) ──
@@ -107,8 +106,6 @@ test("a QUEUED popup keeps its buttons disabled until promoted", async ({ page }
   await page.goto("/authorize.html?requestId=req-abc");
   await expect(page.getByRole("button", { name: "Allow" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Deny" })).toBeDisabled();
-  // C9 (audit fix): Remember is a consequential control too — a queued popup must not let it be pre-armed.
-  await expect(page.locator("#remember")).toBeDisabled();
 });
 
 test("buttons disabled after invoke prevents double-click", async ({ page }) => {

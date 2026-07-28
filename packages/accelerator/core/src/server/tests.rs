@@ -603,6 +603,18 @@ async fn health_minimal_for_unapproved_cross_origin() {
 fn auth_state_with_popup(
     popup_tx: std::sync::mpsc::Sender<(String, String)>,
 ) -> (AppState, Arc<crate::authorization::AuthorizationManager>) {
+    auth_state_with_popup_at(popup_tx, None)
+}
+
+/// As [`auth_state_with_popup`], but persists approvals to `config_path` when given.
+///
+/// Approving is unconditional now, so ANY test that drives an Allow through `authorize_origin` also
+/// drives a config write. Without a destination that write lands in the developer's real
+/// `~/.aztec-accelerator/config.json` (post-impl codex).
+fn auth_state_with_popup_at(
+    popup_tx: std::sync::mpsc::Sender<(String, String)>,
+    config_path: Option<std::path::PathBuf>,
+) -> (AppState, Arc<crate::authorization::AuthorizationManager>) {
     let auth = Arc::new(crate::authorization::AuthorizationManager::new());
     let auth_for_state = auth.clone();
     let cfg = crate::config::AcceleratorConfig::default();
@@ -610,6 +622,7 @@ fn auth_state_with_popup(
         core: Arc::new(HeadlessState {
             auth_manager: Some(auth_for_state),
             config: Some(Arc::new(RwLock::new(cfg))),
+            config_path,
             ..Default::default()
         }),
         show_auth_popup: Some(Arc::new(
@@ -675,10 +688,7 @@ async fn prove_triggers_popup_for_unknown_origin() {
             .await
             .unwrap();
         let _ = popup_seen_tx.send(origin);
-        auth_clone.resolve(
-            &request_id,
-            crate::authorization::AuthDecision::Allow { remember: false },
-        );
+        auth_clone.resolve(&request_id, crate::authorization::AuthDecision::Allow);
     });
 
     let response: axum::http::Response<_> = app
@@ -1184,4 +1194,57 @@ async fn prove_sheds_with_429_when_waiter_cap_full() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "prove_queue_full");
+}
+
+/// Allow PERSISTS the origin — asserted by reloading the config FROM DISK, not from memory.
+///
+/// This path had no fast test at all: only the slow WebDriver suite proved click -> persisted, and
+/// `prove_approves_remembered_origin` (despite its name) merely pre-seeds `approved_origins` and
+/// checks no popup fires. It matters more now that Allow is unconditionally permanent — that write IS
+/// what the user consented to when the popup said "stays approved until you remove it in Settings".
+///
+/// Asserting the in-memory config would be insufficient: `authorize_origin` deliberately warns and
+/// continues if the save fails (a disk error must never fail an already-approved proof), so the
+/// in-memory copy can hold the origin while nothing reached disk (post-impl codex).
+#[tokio::test]
+async fn allow_persists_the_origin_to_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+
+    let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+    let (state, auth) = auth_state_with_popup_at(popup_tx, Some(cfg_path.clone()));
+    let app = router(state);
+
+    let auth_clone = auth.clone();
+    tokio::spawn(async move {
+        let (_origin, request_id) = tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
+            .await
+            .unwrap();
+        auth_clone.resolve(&request_id, crate::authorization::AuthDecision::Allow);
+    });
+
+    let response: axum::http::Response<_> = app
+        .oneshot(
+            Request::builder()
+                .header("host", "127.0.0.1:59833")
+                .method("POST")
+                .uri("/prove")
+                .header("content-type", "application/octet-stream")
+                .header("origin", "https://persisted-site.example")
+                .body(Body::from(vec![0u8; 10]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+
+    let on_disk = crate::config::load_from(&cfg_path);
+    assert!(
+        on_disk
+            .approved_origins
+            .iter()
+            .any(|o| o.as_str() == "https://persisted-site.example"),
+        "Allow must write the origin to disk; on-disk approved_origins = {:?}",
+        on_disk.approved_origins
+    );
 }

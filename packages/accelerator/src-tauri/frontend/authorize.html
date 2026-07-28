@@ -24,17 +24,20 @@
              (never decoded to Unicode homoglyphs). -->
         <div id="origin" class="origin-line" tabindex="0" dir="ltr" role="group" aria-label="Requesting origin"></div>
       </div>
-      <label class="popup-remember">
-        <!-- codex r2 #1: ship DISABLED so a click landing before the deferred module runs cannot pre-check
-             it (a disabled checkbox ignores clicks). authorize.js enables it only once this popup is the
-             active, past-the-click-guard request. -->
-        <input type="checkbox" id="remember" disabled />
-        Always allow this site
-      </label>
+      <!-- Approving is PERMANENT, so it has to say so. This line replaces the "Always allow this site"
+           checkbox that used to carry that meaning: with a checkbox, ticking it WAS the disclosure and
+           the notification; without one, an Allow would write to disk with nothing telling the user.
+           That, not the re-prompt friction, is what F-014's opt-in actually bought — see
+           implementations-plan/pre-release-polish/decision-allow-once.md.
+           Deliberately does not promise the write succeeds: persisting is best-effort (core's
+           authorize_origin warns and continues on a config-save error, so an approved proof is never
+           failed by a disk problem). The failure mode is being asked again — safer than promised,
+           never less safe. -->
+      <p id="permanence" class="popup-note">Stays approved until you remove it in Settings.</p>
     </div>
     <div class="popup-buttons">
       <button class="btn btn-secondary" id="deny">Deny</button>
-      <button class="btn btn-primary" id="allow">Allow once</button>
+      <button class="btn btn-primary" id="allow">Allow</button>
     </div>
   </div>
 </body>

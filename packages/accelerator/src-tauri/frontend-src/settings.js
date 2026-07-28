@@ -87,7 +87,15 @@ function renderOrigins(origins) {
     const li = document.createElement("li");
     li.className = "origin-item";
 
+    // Removing "allow once" made Allow permanent, which promotes THIS list to a load-bearing
+    // security control: it is now the only way to end a grant. It therefore needs the same F-014
+    // treatment the popup's origin line already had and this list never did — bidi isolation so
+    // RTL/format characters cannot visually reorder a stored origin into a look-alike, `dir=ltr`,
+    // and selectable text so the user can copy it out to inspect it. Two visually-confusable rows
+    // here means removing the wrong one.
     const span = document.createElement("span");
+    span.className = "origin-text";
+    span.dir = "ltr";
     span.textContent = origin;
 
     const btn = document.createElement("button");
