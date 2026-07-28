@@ -140,6 +140,31 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
     );
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), dup);
 
+    // 7b. …and an unreadable artifact must still leave the user BOTH controls. The first fix for
+    // this only stopped `status()` returning Err on the classification, while `intent_enabled`
+    // still re-parsed the file underneath and Err'd anyway — so assert the tolerant path directly,
+    // on artifacts that no parser can read. (The Playwright twin mocks the status object and is
+    // structurally unable to catch this.)
+    for hostile in [
+        &b"\xff\xfe not valid utf-8 at all"[..],
+        b"[Desktop Entry]\nExec=\n",
+        b"total garbage, no groups",
+    ] {
+        std::fs::write(&desktop, hostile).unwrap();
+        assert!(
+            intent_enabled_now().is_ok(),
+            "an unparseable artifact must not make intent unreadable"
+        );
+        assert!(
+            intent_enabled_now().unwrap(),
+            "present-but-unparseable still means the user asked for autostart"
+        );
+        assert!(matches!(
+            read_stored_target(Some(&elsewhere)),
+            StoredTarget::Unreadable { .. } | StoredTarget::Broken { .. }
+        ));
+    }
+
     // 8. OFF removes; Absent never resurrects (§9 "never resurrect").
     remove_entry().expect("remove");
     assert!(!desktop.exists());

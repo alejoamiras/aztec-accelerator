@@ -724,9 +724,13 @@ mod backend {
         }
     }
 
-    /// Presence WITHOUT parsing (plan D13): the tolerant question the crash-recovery rearm asks.
+    /// Presence WITHOUT reading or parsing (plan D13): the tolerant question the crash-recovery
+    /// rearm asks. Existence only — reading could fail for reasons that say nothing about whether
+    /// the user asked for autostart.
     pub(super) fn artifact_present() -> Result<bool, String> {
-        Ok(read_raw()?.is_some())
+        artifact_path()?
+            .try_exists()
+            .map_err(|e| format!("cannot stat LaunchAgent plist: {e}"))
     }
 
     pub(super) fn read_stored_program() -> Result<Option<String>, String> {
@@ -736,10 +740,13 @@ mod backend {
         }
     }
 
+    /// Parse-TOLERANT: a plist we cannot parse cannot assert a `Disabled` override, so it reads as
+    /// not-disabled. Propagating the parse error here would re-brick the Settings switch through
+    /// `status()`'s Unreadable arm, which exists precisely to keep it usable.
     pub(super) fn platform_disabled() -> Result<bool, String> {
-        match read_raw()? {
-            None => Ok(false),
-            Some(bytes) => plist_disabled(&bytes),
+        match read_raw() {
+            Ok(None) | Err(_) => Ok(false),
+            Ok(Some(bytes)) => Ok(plist_disabled(&bytes).unwrap_or(false)),
         }
     }
 
@@ -776,7 +783,13 @@ mod backend {
         }
     }
 
-    pub(super) fn restore_raw(snapshot: Option<Vec<u8>>) -> Result<(), String> {
+    pub(super) type Snapshot = Option<Vec<u8>>;
+
+    pub(super) fn snapshot() -> Result<Snapshot, String> {
+        read_raw()
+    }
+
+    pub(super) fn restore(snapshot: Snapshot) -> Result<(), String> {
         match snapshot {
             None => remove(),
             Some(bytes) => write_artifact_atomic(&artifact_path()?, &bytes),
@@ -806,9 +819,12 @@ mod backend {
         }
     }
 
-    /// Presence WITHOUT parsing (plan D13): the tolerant question the crash-recovery rearm asks.
+    /// Presence WITHOUT reading or parsing (plan D13). Existence only: a non-UTF-8 `.desktop`
+    /// fails `read_to_string`, which says nothing about whether the user asked for autostart.
     pub(super) fn artifact_present() -> Result<bool, String> {
-        Ok(read_raw()?.is_some())
+        artifact_path()?
+            .try_exists()
+            .map_err(|e| format!("cannot stat autostart .desktop: {e}"))
     }
 
     pub(super) fn read_stored_program() -> Result<Option<String>, String> {
@@ -822,10 +838,11 @@ mod backend {
         }
     }
 
+    /// Parse-TOLERANT (see the macOS twin): an unreadable entry cannot assert `Hidden=true`.
     pub(super) fn platform_disabled() -> Result<bool, String> {
-        Ok(match read_raw()? {
-            None => false,
-            Some(ini) => desktop_hidden(&ini),
+        Ok(match read_raw() {
+            Ok(None) | Err(_) => false,
+            Ok(Some(ini)) => desktop_hidden(&ini),
         })
     }
 
@@ -862,7 +879,13 @@ mod backend {
         }
     }
 
-    pub(super) fn restore_raw(snapshot: Option<String>) -> Result<(), String> {
+    pub(super) type Snapshot = Option<String>;
+
+    pub(super) fn snapshot() -> Result<Snapshot, String> {
+        read_raw()
+    }
+
+    pub(super) fn restore(snapshot: Snapshot) -> Result<(), String> {
         match snapshot {
             None => remove(),
             Some(ini) => write_artifact_atomic(&artifact_path()?, ini.as_bytes()),
@@ -900,9 +923,21 @@ mod backend {
         }
     }
 
-    /// Presence WITHOUT parsing (plan D13): the Run value exists, whatever its shape.
+    /// Presence WITHOUT parsing (plan D13): the Run value exists, whatever its TYPE. Uses the raw
+    /// value, so a `REG_BINARY`/`REG_DWORD` value written by another tool still reads as "present"
+    /// rather than failing the typed `String` read and bricking the Settings switch.
     pub(super) fn artifact_present() -> Result<bool, String> {
-        Ok(read_raw()?.is_some())
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let key = match hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) {
+            Ok(k) => k,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("cannot open Run key: {e}")),
+        };
+        match key.get_raw_value(APP_NAME) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("cannot read Run value: {e}")),
+        }
     }
 
     pub(super) fn read_stored_program() -> Result<Option<String>, String> {
@@ -936,23 +971,31 @@ mod backend {
     }
 
     pub(super) fn enable_write(desired: &Path) -> Result<(), String> {
+        let prior = snapshot()?;
         write_quoted(desired)?;
-        // Explicit ON resets a Task-Manager OFF, exactly as auto-launch's enable() did: the key
-        // may legitimately not exist (tolerate the open error, as the crate does), but a FAILED
-        // WRITE is not tolerable — swallowing it would report an enable that leaves the entry
-        // Task-Manager-disabled, i.e. autostart silently off.
+        // Explicit ON resets a Task-Manager OFF, as auto-launch's enable() did — but NOTHING here
+        // is swallowed. A failure to clear the override (endpoint-management ACLs are the real
+        // case) would otherwise report a successful ON that the very next status read shows as
+        // OFF: a silent ON→snaps-back loop with no explanation. Undo the Run write first so a
+        // failed enable never leaves the entry half-applied.
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(key) = hkcu.open_subkey_with_flags(STARTUP_APPROVED_KEY, KEY_SET_VALUE) {
-            key.set_raw_value(
-                APP_NAME,
-                &winreg::RegValue {
-                    vtype: winreg::enums::RegType::REG_BINARY,
-                    bytes: STARTUP_APPROVED_ENABLED.to_vec(),
-                },
-            )
-            .map_err(|e| format!("cannot clear the Task Manager startup override: {e}"))?;
+        let result = hkcu
+            .create_subkey(STARTUP_APPROVED_KEY)
+            .map_err(|e| format!("cannot open the Task Manager startup override key: {e}"))
+            .and_then(|(key, _)| {
+                key.set_raw_value(
+                    APP_NAME,
+                    &winreg::RegValue {
+                        vtype: winreg::enums::RegType::REG_BINARY,
+                        bytes: STARTUP_APPROVED_ENABLED.to_vec(),
+                    },
+                )
+                .map_err(|e| format!("cannot clear the Task Manager startup override: {e}"))
+            });
+        if result.is_err() {
+            let _ = restore(prior);
         }
-        Ok(())
+        result
     }
 
     fn write_quoted(desired: &Path) -> Result<(), String> {
@@ -987,16 +1030,49 @@ mod backend {
         }
     }
 
-    pub(super) fn restore_raw(snapshot: Option<String>) -> Result<(), String> {
-        match snapshot {
-            None => remove(),
-            Some(value) => {
-                let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-                hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
-                    .map_err(|e| format!("cannot open Run key for restore: {e}"))?
-                    .set_value(APP_NAME, &value)
-                    .map_err(|e| format!("cannot restore Run value: {e}"))
+    /// Exact prior state for rollback. BOTH values matter: `enable_write` rewrites the Run value
+    /// AND clears a Task-Manager OFF, so restoring only the former would leave a FAILED enable
+    /// having destroyed the user's explicit override — autostart armed against their wishes, which
+    /// the replaced plugin never did (its rollback deleted the Run value outright).
+    pub(super) struct Snapshot {
+        run: Option<String>,
+        approved: Option<winreg::RegValue>,
+    }
+
+    pub(super) fn snapshot() -> Result<Snapshot, String> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let approved = hkcu
+            .open_subkey_with_flags(STARTUP_APPROVED_KEY, KEY_READ)
+            .ok()
+            .and_then(|k| k.get_raw_value(APP_NAME).ok());
+        Ok(Snapshot {
+            run: read_raw()?,
+            approved,
+        })
+    }
+
+    pub(super) fn restore(snapshot: Snapshot) -> Result<(), String> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        // StartupApproved first: leaving the override behind is the harmful direction, so put it
+        // back even if the Run restore then fails.
+        if let Ok((key, _)) = hkcu.create_subkey(STARTUP_APPROVED_KEY) {
+            match &snapshot.approved {
+                Some(v) => {
+                    let _ = key.set_raw_value(APP_NAME, v);
+                }
+                None => {
+                    let _ = key.delete_value(APP_NAME);
+                }
             }
+        }
+        match snapshot.run {
+            None => remove(),
+            Some(value) => hkcu
+                .create_subkey(RUN_KEY)
+                .map_err(|e| format!("cannot open Run key for restore: {e}"))?
+                .0
+                .set_value(APP_NAME, &value)
+                .map_err(|e| format!("cannot restore Run value: {e}")),
         }
     }
 }
@@ -1233,23 +1309,33 @@ pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> 
             }
             StoredTarget::Absent | StoredTarget::Unreadable { .. } => false,
         };
-        // Snapshot for exact-prior rollback (strictly stronger than the plugin's delete-on-rollback).
+        // Snapshot for exact-prior rollback (strictly stronger than the plugin's
+        // delete-on-rollback: it restores the previous artifact, including a Task-Manager OFF).
         let snapshot = std::cell::RefCell::new(None);
-        let snap_taken = std::cell::Cell::new(false);
         crate::crash_recovery::enable_transaction(
             prior_enabled,
             || {
-                *snapshot.borrow_mut() = backend::read_raw()?;
-                snap_taken.set(true);
-                backend::enable_write(&desired)
+                let prior = backend::snapshot()?;
+                match backend::enable_write(&desired) {
+                    Ok(()) => {
+                        *snapshot.borrow_mut() = Some(prior);
+                        Ok(())
+                    }
+                    // `enable_transaction`'s step-1 failure path deliberately does NOT call the
+                    // rollback closure — sound when that step was a single plugin call, but ours
+                    // can write more than one value, so a partial failure would otherwise survive
+                    // as an armed entry after a reported-failed enable. Undo it here.
+                    Err(e) => {
+                        let _ = backend::restore(prior);
+                        Err(e)
+                    }
+                }
             },
             crate::crash_recovery::enable_crash_recovery,
-            || {
-                if snap_taken.get() {
-                    backend::restore_raw(snapshot.borrow_mut().take())
-                } else {
-                    Ok(())
-                }
+            || match snapshot.borrow_mut().take() {
+                Some(prior) => backend::restore(prior),
+                // Step 1 was skipped (already enabled) — there is nothing of ours to undo.
+                None => Ok(()),
             },
             crate::crash_recovery::disable_crash_recovery,
         )
