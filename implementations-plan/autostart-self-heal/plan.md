@@ -5,9 +5,11 @@
 Grounded in `recon.md` (Phase 0.4), whose constraints are cited as **C1**–**C8**.
 
 **Revision 5** — post-final-codex-pass. Its three sound blocking findings are folded; its fourth is
-**refuted with repo-measured evidence** (see `audit-codex-final.md`). Its scope recommendation — split
-this into three pieces — is adopted and is the open question at the gate (§11).
-Status: **draft — awaiting owner approval.**
+**refuted with repo-measured evidence** (see `audit-codex-final.md`).
+
+Status: **APPROVED (owner, 2026-07-28)** — the three-way split, piece 1 first, with the automatic
+Windows heal gated off until piece 2. Owner's implementation directive: *"implement with tests, all
+over where you can please. Validation loops."* Piece-1 scope notes in §11b.
 
 ---
 
@@ -726,6 +728,34 @@ security fix), then piece 2 lands and switches it on.
 
 This supersedes the r3 answer to Q1 — that decision was made when the marker was "roughly one extra
 phase", and it is now materially larger.
+
+**RESOLVED (owner, 2026-07-28): split approved, piece 1 first.**
+
+## 11b. Piece-1 implementation notes (what ships now vs. what waits)
+
+**In piece 1:** `autostart.rs` (pure + I/O), plugin removal, quoted enable-time writes on all
+platforms, `intent_enabled`/`AutostartStatus`/D17 UI, `repair_autostart`, `autostart.lock` (D19),
+automatic heal on **macOS + Linux only**, and layers **L1–L7**. The updater's pre-install read
+(`updater.rs:362-371`) switches to `intent_enabled` because the plugin is gone.
+
+**Deferred to piece 2:** D18 marker, D21 POSTINSTALL token, D22 marker-aware `perform_update`, the
+lock-graph steps that exist only for the marker, and switching the Windows automatic heal on.
+**Deferred to piece 3:** the `_e2e-updater-windows.yml` dispatch path and L8.
+
+**Windows in piece 1:** the automatic heal is compile-time gated off
+(`#[cfg(not(target_os = "windows"))]` at the call site, with a comment naming piece 2). Windows still
+gets: the quoting security fix (it happens at *enable* time), honest status, and the **Fix** button —
+`repair_autostart` stays available everywhere, guarded by the non-blocking updater-lock bow-out.
+Residual, accepted: a user clicking Fix in the seconds-wide post-`install()` NSIS window on Windows is
+not marker-guarded until piece 2; it requires a deliberate act inside a transient window, unlike the
+automatic heal, which is why the automatic path is the one gated.
+
+**L6 piece-1 variant:** the smoke seeds a stale spaced Run value, launches the installed app, and
+asserts the value is **unchanged** (proving the Windows gate-off and no accidental writes), then
+deletes the seeded value *and* the schtasks task the intent-keyed rearm will have armed **before** the
+`Stop-Process -Force` (F-B1). Piece 2 flips the assertion to the heal. The execute-the-value proof
+(fable's finding) moves to L3-Windows: CreateProcessW on the raw quoted value spawns the probe; on the
+raw unquoted value with a planted decoy, spawns the decoy.
 
 ---
 
