@@ -4,8 +4,8 @@
 `xhigh`), `plan-fable.md` (top-tier Claude planning subagent), and the main agent's own draft.
 Grounded in `recon.md` (Phase 0.4), whose constraints are cited as **C1**–**C8**.
 
-**Revision 2** — post-contradiction-check. Both reviewers' findings folded; see §12 for the change
-log. Status: **draft — pre-double-audit.** Not approved.
+**Revision 3** — post-contradiction-check, with both owner scope decisions folded (§11). See §12 for
+the change log. Status: **draft — pre-double-audit.** Not approved.
 
 ---
 
@@ -309,6 +309,8 @@ Linux/macOS writes go through same-dir temp + `fs::rename`, `0600`, refusing a s
 | `src-tauri/frontend-src/settings.{js,html}`, `style.css` | intent switch + health warning row + **Fix** / reopen copy (D17); `stored_path` rendered via **`textContent`, never `innerHTML`** (F-B2) |
 | `e2e/tauri-mock.js`, `e2e/settings.spec.ts` | status object; broken-state specs |
 | `.github/workflows/accelerator.yml` | bare `cargo test` on the macOS `cert-trust` leg (**D5**); `--test autostart_heal -- --ignored` on all three legs; L6 cleanup (F-B1) |
+| `.github/workflows/_e2e-updater-windows.yml` | **(r3)** add `workflow_dispatch` with an in-job N build; switch `workflow_call`'s N−1 to the real `accelerator-v1.0.7`; correct the stale "no Windows STABLE release yet" header |
+| `scripts/updater-smoke-windows.ps1` | **(r3)** the L8 barrier scenario: hold after disarm, launch an alternate exe, assert no heal and no rearm, then assert marker clearance |
 | `packages/accelerator/package.json` | `test:autostart` script |
 
 ### 4.7 Non-obvious mechanics, and one documented gap
@@ -409,14 +411,36 @@ both sides, so a forgotten `allow-repair-autostart` grant, a missing `build.rs` 
 serde camelCase drift ships green through L1–L6. Covers **macOS + Linux only**: Windows never runs
 `built-debug` WebDriver (recon §E), so L6 carries the Windows end-to-end proof.
 
-**Honest coverage limit (codex).** Codex's highest-value missing test is a native Windows N−1→N update
-with a barrier after the disarm, launching an *alternate* executable while the installed target is
-absent — i.e. its Fork B counterexample, end to end. That needs `_e2e-updater-windows.yml`, which is
-**`workflow_call`-only** (recon §E: `workflow_dispatch` was deliberately removed), so it is
-release-only today. This plan therefore covers the marker by exhaustive unit tests (L1) plus a native
-Windows integration test of its predicates (L3), and **explicitly does not claim** a PR-gated
-end-to-end proof of the updater-window property. Giving that workflow a dispatch path is queued work
-(it is already a prerequisite for the `AztecAccelerator` rename's N−1 fixture).
+**L8 — native Windows updater-window barrier** (owner-approved scope, r3). Codex's highest-value
+missing test, and the direct end-to-end proof of its Fork B counterexample: a real N−1→N update that
+stops at a barrier after the disarm, launches an **alternate executable from a different directory**
+while the installed target is absent, and asserts it **neither heals nor rearms**; then releases the
+barrier and asserts N clears the marker and the Run value still targets the installed exe.
+
+This requires giving `_e2e-updater-windows.yml` a `workflow_dispatch` path. That trigger was
+*deliberately* removed (recon §E; `windows-disarm-proof-2026-06-04/plan.md:80-81`), and the reason is
+structural, not arbitrary: the workflow's `n-artifact` input defaults to `accelerator-windows-x86_64`,
+**an artifact produced by the same run's `build` job**, so standalone it has nothing to install. The
+dispatch path must therefore build N from the checked-out ref in-job.
+
+**Trigger-split design (r3):**
+
+| Trigger | N | N−1 | Signing key |
+|---|---|---|---|
+| `workflow_call` (release, unchanged) | this run's `build` artifact | **real `accelerator-v1.0.7`** — replacing the synthetic 0.0.1 | prod |
+| `workflow_dispatch` (new — the marker gate) | built in-job from the ref | synthetic | **ephemeral throughout** |
+
+Two things fall out of this. First, the workflow header's claim *"There is no prior Windows STABLE
+release to download as N−1 yet"* has been **false since April** — seven stable releases ship a Windows
+`setup.exe` (`accelerator-v1.0.0`…`v1.0.7`) — and the file's own comment says to switch to the real-N−1
+pattern once one exists. Doing it here also delivers the fixture the queued `AztecAccelerator` rename
+already needs, so it is built once rather than twice.
+
+Second, and deliberately: the dispatch path uses an **ephemeral key for both ends**, never the prod
+updater key. Real-N−1 forces prod signing because `v1.0.7` embeds the committed prod pubkey — but the
+marker test does not need real-signature verification, only real updater-window behaviour. Keeping the
+prod key exclusively on the release path means a manually-triggerable workflow can never be induced to
+produce a prod-signed artifact (§9).
 
 ---
 
@@ -431,8 +455,13 @@ end-to-end proof of the updater-window property. Giving that workflow a dispatch
 | 5 | L3 + L7 + CI wiring (incl. the macOS bare `cargo test`) | `cargo test --test autostart_heal -- --ignored` on all three `cert-trust` legs; the macOS log shows `patch_plist_*` **running**; `test:e2e:webdriver` green; `bun run lint:actions` |
 | 6 | L4 container harness | `test:autostart` exits 0 locally; `bun run lint:shell` clean |
 | 7 | L6 Windows smoke extension **+ cleanup** | **Windows Build Smoke** (`:518`) green, twice consecutively (F-B1 is a flake, so one green proves little) |
+| 8 | L8: `workflow_dispatch` path + real-N−1 switch + the barrier scenario | `gh workflow run _e2e-updater-windows.yml --ref <branch>` green on the marker scenario; `bun run lint:actions` clean; the release `workflow_call` path re-validated unchanged |
 
 Full local gate before push: `bun run test` + `bun run lint:actions`.
+
+**Phase 8 is the one phase with no local gate** — it can only be validated by dispatching the workflow
+on a pushed branch. Budget for iteration there, and expect the first runs to fail on workflow wiring
+rather than on the marker logic.
 
 ---
 
@@ -497,6 +526,12 @@ NSIS-window TOCTOU codex identified is closed by D18.
 
 **Auditability.** Every heal logs `from`→`to` at `info`.
 
+**Least privilege on the new dispatch trigger (r3).** Making `_e2e-updater-windows.yml`
+manually-dispatchable widens *who can trigger a workflow that signs updater artifacts*. The dispatch
+path therefore uses an **ephemeral key for both N and N−1** and never requests
+`TAURI_SIGNING_PRIVATE_KEY`; the prod key stays bound to the `workflow_call` release path. A
+manually-triggered run can never emit a prod-signed artifact.
+
 ---
 
 ## 10. Known limits (stated, not solved)
@@ -505,27 +540,25 @@ NSIS-window TOCTOU codex identified is closed by D18.
   environments can suppress a `.desktop` in ways we do not model, and launchd has session/domain state
   beyond the `Disabled` key. The taxonomy is about the *stored pointer*, not a launch guarantee.
 - **macOS session gap** (§4.7): the loaded launchd job is not reloaded. Repaired at next login.
-- **No PR-gated end-to-end proof of the updater-window property** (§6) — release-only until
-  `_e2e-updater-windows.yml` gains a dispatch path.
-- **L7 covers macOS + Linux only**; Windows end-to-end rests on L6.
+- **L7 covers macOS + Linux only**; Windows end-to-end rests on L6 + L8.
+- **L8 is dispatch-gated, not PR-gated.** It proves the updater-window property on demand, not on
+  every PR — a full Windows Tauri build per run is too heavy for the PR gate. Running it is a
+  release-checklist item.
 
 ---
 
-## 11. Open scope question for the owner (Q1)
+## 11. Scope questions — resolved by the owner (r3)
 
-**The marker is now a correctness requirement, not an optional extra (D18) — but it is real scope.**
+**Q1 — the updater marker: IN this PR.** Codex's counterexample proved a heal inside the NSIS window
+can silently point autostart at a transient copy — the very failure this plan exists to eliminate — and
+the marker is the only available signal, because the updating process has already exited. Owner chose
+(a) over shipping with a documented hole. D18 stands; Phase 3 implements it.
 
-Codex's counterexample proved a heal inside the NSIS window can silently point autostart at a transient
-copy, which is the very failure this plan exists to eliminate. The marker is the only available signal,
-because the updating process is gone by then.
+**Q2 — the Windows updater E2E gap: add the `workflow_dispatch` path here.** Owner chose to build the
+gate now rather than defer it, which also delivers the real-N−1 fixture the queued `AztecAccelerator`
+rename needs. Phase 8; design in §6 L8.
 
-Cost: a new module, a cross-process state file, a version+path+rearm removal rule, a TTL, and its own
-tests — roughly one extra phase. The alternative is shipping the heal with a known, reviewer-demonstrated
-hole in it, which is not recommended.
-
-**Options: (a) marker in this PR** — recommended; **(b) marker as an immediate follow-up PR**, with the
-automatic heal disabled on Windows until it lands (the command path and macOS/Linux heal ship now);
-**(c) ship the heal with the hole documented** — not recommended.
+No open asks remain.
 
 ---
 
@@ -550,3 +583,9 @@ centralized app-name in the change map (codex).
 Ledger honesty: **D4** overstated convergence (fable); the toggle-ON-vs-Fix-button fork was unledgered
 (fable); the TM-disabled heal delta is now recorded (fable); r1's Fork B walk was incomplete even where
 its conclusion happened to hold (fable) — and then wrong (codex).
+
+**r3 — owner scope decisions.** Q1 → the marker ships in this PR (Phase 3). Q2 → `_e2e-updater-windows.yml`
+gains a `workflow_dispatch` path now (Phase 8, **L8**), which also delivers the real-N−1 fixture the
+queued `AztecAccelerator` rename needs and corrects a workflow header comment that has been false since
+April. Added the least-privilege split that keeps the prod updater signing key off the manually
+triggerable path (§9), and the note that Phase 8 has no local gate.
