@@ -603,7 +603,22 @@ async fn health_minimal_for_unapproved_cross_origin() {
 fn auth_state_with_popup(
     popup_tx: std::sync::mpsc::Sender<(String, String)>,
 ) -> (AppState, Arc<crate::authorization::AuthorizationManager>) {
-    auth_state_with_popup_at(popup_tx, None)
+    // NEVER `None`. Approving an origin is unconditional now, so ANY test that drives an Allow
+    // through `authorize_origin` also drives a config WRITE — and `None` means
+    // `config::config_path()`, i.e. the developer's real `~/.aztec-accelerator/config.json`.
+    // That is not hypothetical: this landed as `None` first and `prove_triggers_popup_for_unknown_origin`
+    // duly wrote `https://unknown-site.com` into a real machine's approved origins. Making the DEFAULT
+    // isolated (rather than opting individual tests in) is what stops the next test reintroducing it.
+    //
+    // `into_path()` deliberately disables cleanup: the directory must outlive the returned `AppState`,
+    // and threading a `TempDir` guard back through ten call sites buys nothing — these are a few bytes
+    // of JSON under the OS temp dir.
+    let dir = tempfile::Builder::new()
+        .prefix("aztec-core-auth-test-")
+        .tempdir()
+        .unwrap()
+        .into_path();
+    auth_state_with_popup_at(popup_tx, Some(dir.join("config.json")))
 }
 
 /// As [`auth_state_with_popup`], but persists approvals to `config_path` when given.
