@@ -413,9 +413,12 @@ mod win {
     }
 
     pub fn write_raw_run_value(v: &str) {
+        // create_subkey: a runner/profile that has never had a startup entry has no Run key at
+        // all (this is exactly how the production open-instead-of-create bug surfaced).
         RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
+            .create_subkey(RUN_KEY)
             .expect("open Run")
+            .0
             .set_value(VALUE, &v.to_string())
             .expect("seed Run value");
     }
@@ -504,7 +507,23 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
     let decoy = bin.path().join("Aztec.exe"); // the §9 hijack position for the unquoted value
     std::fs::copy(&probe_src, &decoy).expect("copy decoy exe");
 
-    // 1. Enable writes the QUOTED value and it classifies Healthy.
+    // 0. Fresh-profile regression: a machine that has never had a startup entry has NO Run key at
+    //    all, and merely OPENING it fails with NotFound. That made enable impossible and made a
+    //    plain absent entry read as unreadable. Delete the key outright and prove both paths cope
+    //    (this is how the bug surfaced — one CI runner had the key, the next did not).
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey(RUN_KEY);
+        assert!(
+            matches!(read_stored_target(Some(&probe)), StoredTarget::Absent),
+            "a missing Run key must read as Absent, never Unreadable"
+        );
+        assert!(!intent_enabled_now().expect("intent readable without a Run key"));
+        remove_entry().expect("OFF with no Run key must be a no-op, not an error");
+    }
+
+    // 1. Enable writes the QUOTED value and it classifies Healthy — creating the key if needed.
     enable_entry_at(&probe).expect("enable");
     let value = read_raw_run_value().expect("Run value written");
     assert_eq!(

@@ -885,9 +885,14 @@ mod backend {
 
     pub(super) fn read_raw() -> Result<Option<String>, String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let key = hkcu
-            .open_subkey_with_flags(RUN_KEY, KEY_READ)
-            .map_err(|e| format!("cannot open Run key: {e}"))?;
+        let key = match hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) {
+            Ok(k) => k,
+            // No Run key on this profile ⇒ no entry, which is NOT an I/O failure: reporting Err
+            // here would disable the Settings switch on a machine that has simply never had a
+            // startup entry.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot open Run key: {e}")),
+        };
         match key.get_value::<String, _>(APP_NAME) {
             Ok(v) => Ok(Some(v)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -953,18 +958,27 @@ mod backend {
     fn write_quoted(desired: &Path) -> Result<(), String> {
         let quoted = run_value_quote(&desired.to_string_lossy())
             .ok_or_else(|| "desired path is not representable as a Run value".to_string())?;
+        // create_subkey, not open: `…\CurrentVersion\Run` is absent on a profile that has never
+        // had a startup entry, and merely OPENING it there fails with NotFound — which made
+        // enabling autostart impossible on a fresh Windows profile (the removed plugin had the
+        // same flaw; a CI runner without the key is what surfaced it). Opens when it exists.
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
+        hkcu.create_subkey(RUN_KEY)
             .map_err(|e| format!("cannot open Run key for write: {e}"))?
+            .0
             .set_value(APP_NAME, &quoted)
             .map_err(|e| format!("cannot write Run value: {e}"))
     }
 
     pub(super) fn remove() -> Result<(), String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let key = hkcu
-            .open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
-            .map_err(|e| format!("cannot open Run key for delete: {e}"))?;
+        let key = match hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
+            Ok(k) => k,
+            // No Run key at all ⇒ nothing to remove. Idempotent OFF, and never CREATE the key
+            // just to delete from it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("cannot open Run key for delete: {e}")),
+        };
         match key.delete_value(APP_NAME) {
             Ok(()) => Ok(()),
             // Idempotent OFF: already absent is success (the removed plugin errored here).
