@@ -125,14 +125,13 @@ The accelerator uses a MetaMask-style approval flow. When a new website calls `/
 - **Allow**: the origin is saved to `~/.aztec-accelerator/config.json` and never prompted again. The
   popup says so ("Stays approved until you remove it in Settings") — approving is permanent, and
   Settings → Approved Sites is where you undo it.
-- **Deny**: the request gets a 403 and nothing is saved.
+- **Deny**: the SDK receives a `403` (nothing is saved) and automatically falls back to WASM proving
+- **Timeout** (60s): auto-denied if the user doesn't respond
 
 There is deliberately no "allow once". The option that existed until 1.0.8 persisted *nothing at
 all* — not a session, not a TTL — so it re-prompted on the very next proof; see
 `implementations-plan/pre-release-polish/decision-allow-once.md` for why it was removed and what
 replaced it.
-- **Deny**: the SDK receives a `403` and automatically falls back to WASM proving
-- **Timeout** (60s): auto-denied if the user doesn't respond
 
 Approved sites can be reviewed and removed from the Settings window.
 

@@ -381,7 +381,7 @@ async fn prove_error_responses_stay_text_plain_json_string() {
 
     // invalid_origin (400) — auth present, malformed Origin (rejected before popup)
     let (_origin_tx, _origin_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(_origin_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(_origin_tx);
     assert_error(
         router(state),
         Request::builder()
@@ -399,7 +399,7 @@ async fn prove_error_responses_stay_text_plain_json_string() {
 
     // origin_denied (403) — auth + deny
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, auth) = auth_state_with_popup(popup_tx);
+    let (state, auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let auth_clone = auth.clone();
     tokio::spawn(async move {
         let (_origin, request_id) = tokio::task::spawn_blocking(move || popup_rx.recv().unwrap())
@@ -602,23 +602,27 @@ async fn health_minimal_for_unapproved_cross_origin() {
 /// `(origin, request_id)` so tests can assert the origin AND resolve by the opaque id (SEC-06).
 fn auth_state_with_popup(
     popup_tx: std::sync::mpsc::Sender<(String, String)>,
-) -> (AppState, Arc<crate::authorization::AuthorizationManager>) {
-    // NEVER `None`. Approving an origin is unconditional now, so ANY test that drives an Allow
-    // through `authorize_origin` also drives a config WRITE — and `None` means
+) -> (
+    AppState,
+    Arc<crate::authorization::AuthorizationManager>,
+    tempfile::TempDir,
+) {
+    // NEVER a `None` config path. Approving an origin is unconditional now, so ANY test that drives
+    // an Allow through `authorize_origin` also drives a config WRITE — and `None` means
     // `config::config_path()`, i.e. the developer's real `~/.aztec-accelerator/config.json`.
-    // That is not hypothetical: this landed as `None` first and `prove_triggers_popup_for_unknown_origin`
-    // duly wrote `https://unknown-site.com` into a real machine's approved origins. Making the DEFAULT
-    // isolated (rather than opting individual tests in) is what stops the next test reintroducing it.
+    // That is not hypothetical: this landed as `None` first and
+    // `prove_triggers_popup_for_unknown_origin` duly wrote `https://unknown-site.com` into a real
+    // machine's approved origins. Making the DEFAULT isolated (rather than opting individual tests
+    // in) is what stops the next test reintroducing it.
     //
-    // `keep()` deliberately disables cleanup: the directory must outlive the returned `AppState`,
-    // and threading a `TempDir` guard back through ten call sites buys nothing — these are a few bytes
-    // of JSON under the OS temp dir.
+    // The `TempDir` guard is RETURNED so callers keep it alive for the test body and RAII removes
+    // the directory afterwards (the first fix `keep()`ed it, leaking a dir per test per run).
     let dir = tempfile::Builder::new()
         .prefix("aztec-core-auth-test-")
         .tempdir()
-        .unwrap()
-        .keep();
-    auth_state_with_popup_at(popup_tx, Some(dir.join("config.json")))
+        .unwrap();
+    let (state, auth) = auth_state_with_popup_at(popup_tx, Some(dir.path().join("config.json")));
+    (state, auth, dir)
 }
 
 /// As [`auth_state_with_popup`], but persists approvals to `config_path` when given.
@@ -653,7 +657,7 @@ fn auth_state_with_popup_at(
 #[tokio::test]
 async fn prove_auto_approves_localhost_origin() {
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(popup_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     // SEC-04: localhost auto-approve is now opt-in (desktop default is prompt-once). Enable it
     // here to exercise the auto-approve path; the flag-OFF deny is pinned by
     // `authorization::tests::is_approved_checks_both`.
@@ -691,7 +695,7 @@ async fn prove_auto_approves_localhost_origin() {
 #[tokio::test]
 async fn prove_triggers_popup_for_unknown_origin() {
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, auth) = auth_state_with_popup(popup_tx);
+    let (state, auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let app = router(state);
 
     // Spawn a task that waits for the popup signal, then auto-approves.
@@ -729,7 +733,7 @@ async fn prove_triggers_popup_for_unknown_origin() {
 #[tokio::test]
 async fn prove_returns_403_when_origin_denied() {
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, auth) = auth_state_with_popup(popup_tx);
+    let (state, auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let app = router(state);
 
     // Auto-deny by request_id once the popup fires (SEC-06: resolve by opaque id, not origin).
@@ -770,7 +774,7 @@ async fn prove_returns_403_when_origin_denied() {
 #[tokio::test]
 async fn prove_allows_no_origin_only_with_trusted_loopback_host() {
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(popup_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let app = router(state);
 
     let response: axum::http::Response<_> = app
@@ -805,7 +809,7 @@ async fn prove_allows_no_origin_only_with_trusted_loopback_host() {
 #[tokio::test]
 async fn prove_rejects_forged_host_dns_rebinding() {
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(popup_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let app = router(state);
 
     let response: axum::http::Response<_> = app
@@ -839,7 +843,7 @@ async fn prove_rejects_forged_host_dns_rebinding() {
 #[tokio::test]
 async fn prove_approves_remembered_origin() {
     let (popup_tx, popup_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(popup_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(popup_tx);
 
     // Pre-approve the origin in config
     if let Some(ref cfg) = state.config {
@@ -907,7 +911,7 @@ async fn prove_returns_403_without_popup_in_headless() {
 #[tokio::test]
 async fn prove_returns_429_when_too_many_pending_origins() {
     let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(popup_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let app = router(state.clone());
 
     // Fill the AuthorizationManager to capacity (MAX_PENDING_ORIGINS = 10)
@@ -946,7 +950,7 @@ async fn prove_returns_429_when_too_many_pending_origins() {
 #[tokio::test(start_paused = true)]
 async fn prove_returns_403_on_authorization_timeout() {
     let (popup_tx, _popup_rx) = std::sync::mpsc::channel();
-    let (state, _auth) = auth_state_with_popup(popup_tx);
+    let (state, _auth, _cfg_dir) = auth_state_with_popup(popup_tx);
     let app = router(state);
 
     // Send request from unknown origin — popup fires but nobody resolves it.

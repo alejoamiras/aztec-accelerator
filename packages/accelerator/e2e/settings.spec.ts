@@ -59,6 +59,22 @@ test("shows approved origins list", async ({ page }) => {
   await expect(page.getByText("No approved sites yet")).not.toBeVisible();
 });
 
+test("approved origins render with the popup's anti-spoof treatment", async ({ page }) => {
+  // Allow is permanent now, so this list is the only way to end a grant — a stored origin must be no
+  // more spoofable here than in the popup. Pins the F-014-style hardening (bidi isolation, dir=ltr,
+  // selectable text) that shipped for this list without a regression assertion (post-impl codex).
+  await page.goto("/settings.html");
+  const span = page.locator("#origins .origin-text").first();
+  await expect(span).toHaveText("https://example.com");
+  await expect(span).toHaveAttribute("dir", "ltr");
+  const style = await span.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { bidi: cs.unicodeBidi, select: cs.userSelect };
+  });
+  expect(style.bidi).toBe("isolate");
+  expect(style.select).toBe("text");
+});
+
 test("shows empty state when no origins", async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({

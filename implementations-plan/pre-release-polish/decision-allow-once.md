@@ -62,7 +62,9 @@ A control that works by **attrition** was exchanged for one that works by **disc
 1. **The popup discloses permanence.** *"Stays approved until you remove it in Settings."* This is now
    the primary control. Deliberately not "will be saved": persisting is best-effort — `authorize_origin`
    warns and continues on a config-write error, so an approved proof is never failed by a disk
-   problem. The failure mode is being asked again, which is safer than promised, never less safe.
+   problem. The failure mode is being asked again — and to be precise: on a save failure the
+   in-memory config still holds the origin, so the grant works until the app restarts and is
+   re-prompted after. Both directions shorten the grant relative to the promise; neither extends it.
    Pinned by `e2e/authorize.spec.ts`.
 2. **The origin display carries the weight.** F-014's treatment — full canonical origin, never
    truncated, `dir=ltr` + bidi isolation, punycode never decoded — is unchanged and still tested.
