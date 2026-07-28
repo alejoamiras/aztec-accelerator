@@ -55,6 +55,14 @@
         <span class="slider"></span>
       </label>
     </div>
+    <!-- Autostart health (plan D17): the switch above shows INTENT; this row carries HEALTH and the
+         action that fixes it. Hidden unless intent is on and something needs saying. Fix is a
+         dedicated repair_autostart call, NOT set_autostart(true) — a broken entry reads
+         prior_enabled == true, so toggle-ON is structurally a no-op there (plan D16). -->
+    <div class="row health-row" id="autostart-health" hidden>
+      <span id="autostart-health-text" role="status"></span>
+      <button id="autostart-fix" type="button" hidden>Fix</button>
+    </div>
     <div class="row">
       <span id="auto-update-label">Auto-Update</span>
       <label class="toggle">
