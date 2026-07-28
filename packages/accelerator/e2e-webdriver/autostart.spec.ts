@@ -135,19 +135,46 @@ describe("Autostart self-heal (real IPC)", () => {
 
   it("a second Fix is a no-op (convergent), and the artifact is untouched", async () => {
     const before = fs.readFileSync(artifactPath(), "utf-8");
-    // The button is hidden now (healthy) — invoke the command through the page's own bridge
-    // instead, proving NotNeeded → status round-trips cleanly too.
-    const status: Record<string, unknown> = await browser.executeAsync(
-      // biome-ignore lint/suspicious/noExplicitAny: page-context bridge access
-      (done: (v: any) => void) => {
-        (window as any).__TAURI_INTERNALS__
-          .invoke("repair_autostart")
-          .then((s: unknown) => done(s))
-          .catch((e: unknown) => done({ error: String(e) }));
+    // The button is hidden now (healthy) — invoke the command through the page's own injected
+    // primitive instead, proving NotNeeded → status round-trips cleanly too. WebKitGTK's WebDriver
+    // REJECTS execute/async ("Origin header is not a valid URL" — see trust-boundary.spec.ts), so
+    // this uses the same sync-execute-stash-then-poll pattern.
+    await browser
+      .execute(() => {
+        const w = window as unknown as {
+          __REPAIR_RESULT__?: unknown;
+          __TAURI_INTERNALS__?: { invoke?: (cmd: string) => Promise<unknown> };
+        };
+        w.__REPAIR_RESULT__ = undefined;
+        const inv = w.__TAURI_INTERNALS__?.invoke;
+        if (typeof inv !== "function") {
+          w.__REPAIR_RESULT__ = { error: "no injected primitive" };
+          return;
+        }
+        inv("repair_autostart")
+          .then((s: unknown) => {
+            w.__REPAIR_RESULT__ = s;
+          })
+          .catch((e: unknown) => {
+            w.__REPAIR_RESULT__ = { error: String(e) };
+          });
+      })
+      .catch(() => {});
+    let status: Record<string, unknown> | null = null;
+    await browser.waitUntil(
+      async () => {
+        status = await browser.execute(
+          () =>
+            ((window as unknown as { __REPAIR_RESULT__?: unknown }).__REPAIR_RESULT__ ??
+              null) as Record<string, unknown> | null,
+        );
+        return status !== null;
       },
+      { timeout: 8000, interval: 100, timeoutMsg: "repair_autostart did not settle" },
     );
-    expect(status.error).toBeUndefined();
-    expect(status.healthy).toBe(true);
+    const st = status as unknown as Record<string, unknown>;
+    expect(st.error).toBeUndefined();
+    expect(st.healthy).toBe(true);
     expect(fs.readFileSync(artifactPath(), "utf-8")).toBe(before);
   });
 });

@@ -4,8 +4,12 @@
 # What only a container can prove (the dev host can't — HOME and XDG_CONFIG_HOME coincide there):
 #   1. D9: the owned autostart module watches XDG_CONFIG_HOME, not a hardcoded $HOME/.config — the
 #      harness passes DIVERGENT dirs and the test asserts the decoy stays untouched.
-#   2. C8: with HOME and XDG unset entirely, every operation degrades to Err/Skip — the removed
-#      auto-launch crate PANICKED here (`dirs::home_dir().unwrap()`).
+#   2. C8: with home resolution UNAVAILABLE, every operation degrades to Err/Skip — the removed
+#      auto-launch crate PANICKED here (`dirs::home_dir().unwrap()`). NOTE the trigger is narrower
+#      than "HOME unset": `dirs` falls back to getpwuid, so this leg runs as `--user 12345:12345`
+#      (a uid with NO passwd entry — the k8s/random-uid case) with HOME/XDG scrubbed. The first
+#      draft used a bare `env -u HOME` and the getpwuid fallback wrote a REAL .desktop into the
+#      invoking user's profile — that is exactly why this leg exists and why it lives in Docker.
 #
 # The crate is compiled INSIDE the container (a host-built test binary would need the host's glibc).
 # First run is slow (image ~2 GB of tauri build deps + a cold cargo build); later runs reuse the
@@ -39,19 +43,26 @@ DOCKERFILE
 
 # -i is required: without stdin attached, `bash -s` reads an empty script and exits 0 — a green run
 # that tested nothing (test:nsis lesson). Named volumes keep the cargo registry + target warm.
+# The repo ROOT is mounted (not just the package): build.rs verifies the frontend bundle manifest
+# against ../package.json AND ../../../bun.lock, so the container tree must mirror the real layout.
+REPO_ROOT="$(cd "$PKG_DIR/../.." && pwd)"
 docker run --rm -i \
-  -v "$PKG_DIR":/src:ro \
+  -v "$REPO_ROOT":/src:ro \
   -v aztec-autostart-cargo-registry:/usr/local/cargo/registry \
   -v aztec-autostart-target:/target \
   -e CARGO_TARGET_DIR=/target \
   "$IMAGE" bash -s <<'RUNNER'
 set -euo pipefail
 
-# The crate tree must be writable (build.rs emits into OUT_DIR relatives) — copy out of the RO mount.
-mkdir -p /work
-cp -r /src/src-tauri /work/src-tauri
-cp -r /src/core /work/core
-cd /work/src-tauri
+# The crate tree must be writable — mirror the real layout out of the RO mount (build.rs resolves
+# ../package.json and ../../../bun.lock relative to src-tauri).
+mkdir -p /work/packages/accelerator
+cp -r /src/packages/accelerator/src-tauri /work/packages/accelerator/src-tauri
+cp -r /src/packages/accelerator/core /work/packages/accelerator/core
+cp /src/packages/accelerator/package.json /work/packages/accelerator/package.json
+cp /src/packages/accelerator/verified-sites.json /work/packages/accelerator/verified-sites.json 2>/dev/null || true
+cp /src/bun.lock /work/bun.lock
+cd /work/packages/accelerator/src-tauri
 
 echo "── build (cold runs take minutes; the /target volume keeps later runs warm) ──"
 cargo test --test autostart_heal --no-run --quiet
@@ -68,9 +79,23 @@ if find /h -name '*.desktop' | grep -q .; then
   exit 1
 fi
 
-echo "── leg 2: no HOME, no XDG at all (C8 — the removed plugin panicked here) ──"
-env -u HOME -u XDG_CONFIG_HOME AZTEC_AUTOSTART_HERMETIC=1 \
-  cargo test --test autostart_heal --quiet linux_hermetic_no_home_is_graceful -- --ignored --nocapture
-
-echo "OK — XDG divergence honoured, HOME-less runs degrade gracefully"
+# Hand the prebuilt test binary to leg 2 (run as a passwd-less uid, so no cargo there — it could
+# not write the root-owned volumes anyway). World-readable path + exec bit are already cargo's
+# defaults; stash the path where the follow-up docker run can find it.
+TESTBIN=$(find /target/debug/deps -maxdepth 1 -name 'autostart_heal-*' -type f ! -name '*.d' \
+  -newer /work/packages/accelerator/src-tauri/Cargo.toml -print -quit)
+[ -n "$TESTBIN" ] || TESTBIN=$(find /target/debug/deps -maxdepth 1 -name 'autostart_heal-*' -type f ! -name '*.d' -print -quit)
+echo "$TESTBIN" > /target/autostart-heal-testbin
+echo "leg-2 binary: $TESTBIN"
 RUNNER
+
+echo "── leg 2: unresolvable home (C8) — uid 12345 has no passwd entry, HOME/XDG scrubbed ──"
+TESTBIN=$(docker run --rm -v aztec-autostart-target:/target "$IMAGE" cat /target/autostart-heal-testbin)
+docker run --rm --user 12345:12345 \
+  -v aztec-autostart-target:/target:ro \
+  -e TMPDIR=/tmp \
+  -e AZTEC_AUTOSTART_HERMETIC=1 \
+  "$IMAGE" env -u HOME -u XDG_CONFIG_HOME \
+  "$TESTBIN" linux_hermetic_no_home_is_graceful --ignored --nocapture
+
+echo "OK — XDG divergence honoured, unresolvable-home runs degrade gracefully"

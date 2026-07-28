@@ -207,34 +207,46 @@ fn linux_hermetic_xdg_divergence() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "L4 container harness only (invoked with HOME and XDG_CONFIG_HOME unset); vacuous elsewhere"]
+#[ignore = "L4 container harness only (no-passwd uid + HOME/XDG unset); vacuous elsewhere"]
 fn linux_hermetic_no_home_is_graceful() {
     if std::env::var("AZTEC_AUTOSTART_HERMETIC").is_err() {
         eprintln!("SKIPPED (vacuous pass): not under the L4 harness");
         return;
     }
-    if std::env::var_os("HOME").is_some() || std::env::var_os("XDG_CONFIG_HOME").is_some() {
-        eprintln!("SKIPPED (vacuous pass): HOME/XDG set — this leg runs under `env -u HOME -u XDG_CONFIG_HOME`");
+    // C8's REAL trigger is narrower than "HOME unset": `dirs` falls back to getpwuid, so home
+    // resolution only fails when the uid has NO passwd entry either (the k8s/random-uid container
+    // case). The harness runs this leg as `docker run --user 12345:12345` with HOME/XDG scrubbed;
+    // anywhere home still resolves, asserting Err would be wrong — skip loudly instead. (First
+    // harness draft asserted Err under a mere `env -u HOME` and promptly wrote a REAL .desktop
+    // into the invoking user's profile via the getpwuid fallback — lesson logged.)
+    if std::env::var_os("HOME").is_some()
+        || std::env::var_os("XDG_CONFIG_HOME").is_some()
+        || dirs::home_dir().is_some()
+    {
+        eprintln!(
+            "SKIPPED (vacuous pass): home still resolves (env or passwd) — this leg needs the \
+             harness's no-passwd uid"
+        );
         return;
     }
-    // C8: the removed plugin's `dirs::home_dir().unwrap()` PANICKED here. Every owned operation
-    // must degrade to an error or a skip — never abort.
+    // The removed plugin's `dirs::home_dir().unwrap()` PANICKED exactly here. Every owned
+    // operation must degrade to an error or a skip — never abort.
     let bin = tempfile::tempdir().expect("bin dir");
     let live = make_exe(bin.path(), "app");
     assert!(
         enable_entry_at(&live).is_err(),
-        "enable without HOME must Err, not panic"
+        "enable with unresolvable home must Err, not panic"
     );
     assert!(
         intent_enabled_now().is_err(),
-        "intent without HOME must Err, not panic"
+        "intent with unresolvable home must Err, not panic"
     );
     assert!(
         matches!(
             heal_if_broken_at(&live),
             HealOutcome::Skipped(_) | HealOutcome::Failed(_)
         ),
-        "heal without HOME must skip/fail, not panic"
+        "heal with unresolvable home must skip/fail, not panic"
     );
 }
 
