@@ -46,7 +46,11 @@ dirs = "6"
 which = "7"
 tower-http = { version = "0.6", features = ["cors", "set-header"] }
 http = "1"
-tauri-plugin-autostart = "2"
+# Owned autostart (plan D7 — replaces tauri-plugin-autostart, whose Windows enable() wrote the Run
+# value unquoted, a same-user persistence-hijack primitive). `plist` mutates ProgramArguments[0]
+# with a real parser (plan D15): it is ALREADY compiled into every build via tauri-utils, so this
+# direct dependency adds zero crates.
+plist = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 reqwest = { version = "0.12", features = ["stream", "json"] }
@@ -77,6 +81,12 @@ url = "2"
 # Linux-only: geteuid() for the certutil safe-path ownership check (already locked transitively).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+# Windows-only: direct HKCU Run / StartupApproved access for the owned autostart module (plan D7).
+# Replaces the winreg 0.10 the removed auto-launch crate pulled — 0.55 was already in the lock, so
+# the net crate count goes DOWN.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

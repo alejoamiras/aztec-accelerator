@@ -16,6 +16,7 @@
     "allow-get-autostart-enabled",
     "allow-get-system-info",
     "allow-set-autostart",
+    "allow-repair-autostart",
     "allow-set-auto-update",
     "allow-set-speed",
     "allow-enable-https",

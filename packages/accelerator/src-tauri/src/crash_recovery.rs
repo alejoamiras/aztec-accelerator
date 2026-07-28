@@ -52,7 +52,7 @@ impl CrashRecovery for PlatformRecovery {
 /// C8 (D13/D20): run the autostart-enable transaction with rollback, generic over injected closures so
 /// the ordering + completeness + failure modes are unit-testable on Linux CI without a real `AppHandle`.
 ///
-/// Forward: `plugin_enable` (the tauri-plugin-autostart launcher entry) then `crash_arm`
+/// Forward: `plugin_enable` (the owned `autostart::set_enabled` launcher-entry writer) then `crash_arm`
 /// (`enable_crash_recovery`). On ANY forward failure, roll back **failure-observably**:
 /// - run BOTH `crash_disarm` and (only if we changed it — i.e. `!prior_enabled`) `plugin_disable`,
 ///   executing both even if one fails (no short-circuit),
@@ -132,7 +132,7 @@ const APP_NAME: &str = "Aztec Accelerator";
 #[cfg(target_os = "linux")]
 const SYSTEMD_NAME: &str = "aztec-accelerator";
 
-/// Patch the LaunchAgent plist created by tauri-plugin-autostart to add crash recovery keys.
+/// Patch the LaunchAgent plist created by the owned autostart writer to add crash recovery keys.
 /// Call this after `manager.enable()`.
 ///
 /// Inserts KeepAlive + ThrottleInterval before the LAST `</dict>` (the top-level one).
@@ -358,7 +358,7 @@ fn disable_impl() -> bool {
 // intentional quit from a crash. The Quit menu therefore calls disable_crash_recovery()
 // (delete this task) BEFORE exiting — see the `"quit"` handler in main.rs. A crash skips
 // that path → the task survives → relaunch; a clean quit deletes it first → stays down.
-// Logon start is handled by the autostart Run key (tauri-plugin-autostart), not this
+// Logon start is handled by the autostart Run key (the owned autostart module), not this
 // task; the Run-key-vs-tick race is absorbed by the exit-0-if-healthy guard in main.rs.
 
 #[cfg(target_os = "windows")]

@@ -7,6 +7,7 @@
 
 pub use accelerator_core::{authorization, bb, config, log_dir, versions};
 
+pub mod autostart;
 pub mod certs;
 pub mod commands;
 pub mod crash_recovery;

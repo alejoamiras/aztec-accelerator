@@ -41,7 +41,10 @@ fn updater_state_path() -> Option<std::path::PathBuf> {
 /// return `None` and the caller bows out (the periodic poller / next launch retries) rather than
 /// blocking the async runtime. The returned guard (the open, exclusively-locked file) releases the
 /// lock on drop — and, on the no-return `app.restart()` path, the OS releases it at process exit.
-fn acquire_updater_lock() -> Option<std::fs::File> {
+/// `pub(crate)`: the autostart heal takes this NON-BLOCKING to bow out while an update transaction
+/// is live (plan Fork B / D19 — the heal must never hold or wait on it; `autostart.lock` is the
+/// mutation lock, this is only the "is an update running?" probe).
+pub(crate) fn acquire_updater_lock() -> Option<std::fs::File> {
     use fs2::FileExt as _;
     let parent = updater_state_path()?.parent()?.to_path_buf();
     let _ = std::fs::create_dir_all(&parent);
@@ -361,8 +364,10 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
     // app unrecoverable; a spurious one is a harmless idempotent write).
     #[cfg(target_os = "windows")]
     let was_recovery_enabled = {
-        use tauri_plugin_autostart::ManagerExt;
-        app.autolaunch().is_enabled().unwrap_or_else(|e| {
+        // D13: INTENT (entry present AND not StartupApproved-disabled), not bare presence — bare
+        // presence would rearm the schtasks relauncher against an explicit Task-Manager OFF after
+        // every update. Err keeps the assume-enabled re-arm-safety default (codex r3 #5).
+        crate::autostart::intent_enabled(app).unwrap_or_else(|e| {
             tracing::warn!(
                 "pre-install: autostart state unreadable ({e}); assuming enabled for re-arm safety"
             );
