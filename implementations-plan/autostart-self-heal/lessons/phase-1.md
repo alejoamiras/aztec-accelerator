@@ -43,3 +43,37 @@
   matrix — watch that job specifically on the PR.
 - Background `run_in_background` tasks capture only what the command PIPES — `| tail -N` threw away
   the panic that mattered. Tee to a scratchpad file instead when the output will be diagnostic.
+
+# Lessons — post-implementation review rounds
+
+Three review rounds each found real defects **in the previous round's fixes**. Worth remembering
+when sizing ceremony for piece 2.
+
+- **Round 1 (workflow, 2.3M tokens):** one serious find — parse-strangeness and I/O failure collapsed
+  into one `Err`, so a hand-edited artifact permanently disabled the Settings switch (worse than the
+  plugin it replaced). Everything else was moderate.
+- **Round 2 (same workflow, re-verified against the new HEAD):** my round-1 fix was **incomplete** —
+  `status()` stopped Err-ing on the classification while `intent_enabled` still re-parsed the same
+  file underneath and Err'd anyway. The Playwright test I wrote for exactly this case mocks the
+  status object, so it passed while the bug was live. **A test at the wrong layer is worse than no
+  test: it buys false confidence.**
+- **Round 3 (codex):** my flag-byte parity fix was defeated by a `len < 8` guard left above it, and
+  the `Exec` args guard covered only the quoted form. Both were half-applied fixes I had already
+  reported as done.
+
+**The expensive finding classes, ranked by what actually caught them:**
+1. CI (cheapest) caught the two most severe production bugs — the Windows fresh-profile `Run` key
+   (enable impossible) and the L7 fixture premise. Neither came from a reviewer.
+2. Adversarial review caught the defect classes CI structurally cannot: a control that is *worse
+   than what it replaced*, and tests that pass for the wrong reason.
+3. Nothing caught my **destructive tests** except a reviewer explicitly asked to look for them —
+   L3-Windows deleted the shared HKCU `Run` key (other apps' startup entries), and L7 clobbered the
+   developer's real artifact while its header claimed a throwaway `$HOME`.
+
+**Rules earned here:**
+- Assert a test's precondition; never `return` out of it. The L4 no-home leg *skipped* when isolation
+  failed, so a broken harness passed silently.
+- When a fix spans a read path and its consumers, grep every consumer before declaring it done —
+  twice now the consumer underneath re-did the work the fix removed.
+- A comment claiming isolation ("throwaway $HOME", "scoped off the real profile") is a claim that
+  must be verified, not decoration. Two were false.
