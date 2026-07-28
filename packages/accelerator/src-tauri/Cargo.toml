@@ -46,7 +46,11 @@ dirs = "6"
 which = "7"
 tower-http = { version = "0.6", features = ["cors", "set-header"] }
 http = "1"
-tauri-plugin-autostart = "2"
+# Owned autostart (plan D7 — replaces tauri-plugin-autostart, whose Windows enable() wrote the Run
+# value unquoted, a same-user persistence-hijack primitive). `plist` mutates ProgramArguments[0]
+# with a real parser (plan D15): it is ALREADY compiled into every build via tauri-utils, so this
+# direct dependency adds zero crates.
+plist = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 reqwest = { version = "0.12", features = ["stream", "json"] }
@@ -78,10 +82,25 @@ url = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# Windows-only: direct HKCU Run / StartupApproved access for the owned autostart module (plan D7).
+# Replaces the winreg 0.10 the removed auto-launch crate pulled — 0.55 was already in the lock, so
+# the net crate count goes DOWN.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
 serial_test = "3"
+
+# L3 (tests/autostart_heal.rs): execute a healed Run value through REAL CreateProcessW — the same
+# semantics Run-key processing uses — so the quoting claim is proven against the OS, not against our
+# own candidate model (audit r4: "a model checked against itself"). Version already in the lock.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

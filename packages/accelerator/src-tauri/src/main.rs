@@ -20,7 +20,6 @@ use tauri::Manager;
 // AppHandle is only referenced by the (webdriver-gated) update-check fn.
 #[cfg(not(feature = "webdriver"))]
 use tauri::AppHandle;
-use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -553,10 +552,6 @@ fn main() {
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            None,
-        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
@@ -577,6 +572,7 @@ fn main() {
             commands::get_config,
             commands::get_autostart_enabled,
             commands::set_autostart,
+            commands::repair_autostart,
             commands::set_speed,
             commands::remove_approved_origin,
             commands::get_system_info,
@@ -604,14 +600,34 @@ fn main() {
                 .enabled(false)
                 .build(app)?;
 
-            // Check autostart on launch for crash recovery
+            // Startup autostart reconciliation (plan §4.4): heal FIRST, so the crash-recovery
+            // rearm below arms against the healed artifact.
             {
-                use tauri_plugin_autostart::ManagerExt;
-                // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and it
-                // must NOT be silently swallowed. codex #7: distinguish a READ ERROR from a confirmed
-                // "off". Treating an is_enabled() error as `false` would silently skip re-arming crash
-                // recovery when autostart was in fact on but momentarily unreadable.
-                match app.autolaunch().is_enabled() {
+                // Piece 1 (plan §11b): the AUTOMATIC heal runs on macOS/Linux only — Windows waits
+                // for the piece-2 update marker (a heal inside the NSIS window can point autostart
+                // at a transient copy; repair_autostart stays live everywhere). Webdriver builds
+                // skip the unattended heal (S1 — the app must not mutate a CI runner's real login
+                // items on every E2E launch; recon §G: today's block was ungated, a defect not to
+                // inherit) but keep the command path live so L7 exercises real IPC.
+                #[cfg(all(not(feature = "webdriver"), not(target_os = "windows")))]
+                match aztec_accelerator::autostart::heal_if_broken(app.handle()) {
+                    aztec_accelerator::autostart::HealOutcome::Healed { from, to } => {
+                        tracing::info!(%from, %to, "startup autostart heal applied");
+                    }
+                    aztec_accelerator::autostart::HealOutcome::Failed(e) => {
+                        tracing::warn!("startup autostart heal failed: {e}");
+                    }
+                    aztec_accelerator::autostart::HealOutcome::Skipped(reason) => {
+                        tracing::debug!("startup autostart heal skipped: {reason}");
+                    }
+                    aztec_accelerator::autostart::HealOutcome::NotNeeded => {}
+                }
+                // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch,
+                // and it must NOT be silently swallowed. codex #7: distinguish a READ ERROR from a
+                // confirmed "off". D13: keyed on INTENT (entry present AND not platform-disabled),
+                // never on health — a Broken entry still means "the user wants autostart", and
+                // keying on health would stop protecting exactly the users whose entry broke.
+                match aztec_accelerator::autostart::intent_enabled(app.handle()) {
                     Ok(true) => {
                         if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
                             tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");

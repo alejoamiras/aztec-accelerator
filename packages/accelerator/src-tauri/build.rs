@@ -144,6 +144,7 @@ fn main() {
         "get_config",
         "get_autostart_enabled",
         "set_autostart",
+        "repair_autostart",
         "set_speed",
         "remove_approved_origin",
         "get_system_info",

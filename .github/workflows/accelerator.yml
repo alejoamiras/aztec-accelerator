@@ -159,6 +159,16 @@ jobs:
       # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
       # interactive auth — spike I7, covered by the manual runbook, NOT here).
       - run: cargo test --test ${{ matrix.test }} -- --ignored --nocapture
+      # L3 (autostart plan §6): the real-OS autostart lifecycle — enable(quoted) → break → heal →
+      # platform-OFF respected → never-resurrect — on each OS's real artifact store. ONE test per
+      # OS by design (Windows mutates the real HKCU behind an RAII restore; --test-threads=1 makes
+      # the serialization explicit rather than incidental).
+      - run: cargo test --test autostart_heal -- --ignored --nocapture --test-threads=1
+      # D5 (autostart plan): a bare `cargo test` compiles + runs the crate's #[cfg(test)] blocks.
+      # Until this line NO workflow ran one on macOS, so every #[cfg(target_os = "macos")] unit
+      # test — including crash_recovery's three patch_plist_* tests — had never compiled anywhere.
+      - if: matrix.platform == 'macos'
+        run: cargo test
       # Tier-3: run the REAL NSIS uninstall hook on real Windows under each command line it has to tell
       # apart. This guard cannot be fixed after the fact — a release cannot fix its own uninstaller —
       # and getting it wrong deletes the user's trust anchor on a routine upgrade. `$UpdateMode` alone
@@ -578,6 +588,15 @@ jobs:
             Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Out-String | Write-Host
             exit 1
           }
+          # L6, piece-1 variant (autostart plan §11b): seed a STALE spaced Run value — exactly the
+          # unquoted shape the removed auto-launch plugin wrote — before launching the production
+          # build. Piece 1 gates the automatic Windows heal OFF (the piece-2 update marker must land
+          # first), so the assertion here is UNCHANGED: launching must neither heal nor clobber the
+          # value. Piece 2 flips this to assert the exactly-quoted healed path.
+          $runKey = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+          $staleValue = "$env:LOCALAPPDATA\Aztec Gone\Aztec Accelerator.exe "
+          Set-ItemProperty -Path $runKey -Name "Aztec Accelerator" -Value $staleValue
+          Write-Host "seeded stale Run value: $staleValue"
           Write-Host "launching $($exe.FullName)"
           # Kill switch so the launched app doesn't poll the PROD updater feed / pop a prompt.
           $env:AZTEC_ACCEL_NO_UPDATE = "1"
@@ -591,12 +610,32 @@ jobs:
             } catch { }
             Start-Sleep -Seconds 2
           }
+          # L6 assertion (piece 1): the seeded value is byte-identical — the Windows automatic heal
+          # is compile-time gated off, and nothing else may touch the entry on launch.
+          $after = (Get-ItemProperty -Path $runKey -Name "Aztec Accelerator" -ErrorAction SilentlyContinue)."Aztec Accelerator"
+          if ($after -cne $staleValue) {
+            Write-Error "piece-1 gate breached: the Run value changed on launch (was '$staleValue', now '$after') — the Windows automatic heal must stay OFF until the piece-2 update marker lands"
+            exit 1
+          }
+          Write-Host "OK: seeded stale Run value untouched by launch (Windows auto-heal gated off)"
+          # F-B1 cleanup — BEFORE the force-kill. The seeded entry reads as intent ON, so the
+          # startup rearm armed the real crash-recovery schtasks task; Stop-Process -Force IS a
+          # "crash", and the armed task would relaunch the app mid-/after-assertions (flake
+          # generator). Delete the task first, then the Run value.
+          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null
+          Remove-ItemProperty -Path $runKey -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
+          Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $ok) {
             Write-Error "app did not serve /health within 60s — the tray/WebView2 app may not run on a windows-latest runner (risk #1)"
             exit 1
           }
           Write-Host "OK: the Windows app installs, launches, and serves /health on the runner"
+          # Explicit success: `schtasks /Delete` above is the last NATIVE command, and Actions
+          # appends `exit $LASTEXITCODE` to pwsh steps. Cmdlets don't reset $LASTEXITCODE, so a
+          # task that was never armed (schtasks exits 1) would fail this step despite every
+          # assertion passing.
+          exit 0
 
   # NOTE: the Windows updater-smoke (positive + negative) is PROVEN green and now lives in
   # the release pipeline (release-accelerator.yml), not per-PR — it builds 4 app versions,

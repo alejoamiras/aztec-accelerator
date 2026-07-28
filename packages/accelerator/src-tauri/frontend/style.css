@@ -546,6 +546,24 @@ h2 {
   border-radius: 3px;
 }
 
+/* Autostart health row (plan D17) — the switch shows intent, this row shows health. Warning tone,
+   not error red: the state is degraded-but-recoverable, and the row carries its own action. */
+.health-row {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.health-row > span:first-child {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--warning, #c98a2d);
+  flex: 1;
+}
+
+.health-row button {
+  flex-shrink: 0;
+}
+
 /* Error hints — brief inline feedback on command failure */
 .error-hint {
   color: var(--danger);

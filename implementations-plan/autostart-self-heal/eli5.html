@@ -1,0 +1,241 @@
+<title>Autostart self-heal — plan in plain terms</title>
+
+<style>
+  :root {
+    --paper: #f4f7fb;
+    --card: #ffffff;
+    --ink: #101b28;
+    --ink-soft: #4a5a6e;
+    --rule: #cbd8e6;
+    --accent: #1a5c99;
+    --accent-soft: #e3edf7;
+    --warn: #9c5117;
+    --warn-soft: #f8ece1;
+    --ok: #2a6650;
+    --ok-soft: #e2f0ea;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --serif: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0b131d; --card: #121e2b; --ink: #e4ecf5; --ink-soft: #9aacc0;
+      --rule: #26384c; --accent: #74aede; --accent-soft: #16283a;
+      --warn: #e0a06a; --warn-soft: #2c2115; --ok: #7fc4a6; --ok-soft: #14261f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0b131d; --card: #121e2b; --ink: #e4ecf5; --ink-soft: #9aacc0;
+    --rule: #26384c; --accent: #74aede; --accent-soft: #16283a;
+    --warn: #e0a06a; --warn-soft: #2c2115; --ok: #7fc4a6; --ok-soft: #14261f;
+  }
+  :root[data-theme="light"] {
+    --paper: #f4f7fb; --card: #ffffff; --ink: #101b28; --ink-soft: #4a5a6e;
+    --rule: #cbd8e6; --accent: #1a5c99; --accent-soft: #e3edf7;
+    --warn: #9c5117; --warn-soft: #f8ece1; --ok: #2a6650; --ok-soft: #e2f0ea;
+  }
+
+  body {
+    background: var(--paper); color: var(--ink); font-family: var(--sans);
+    line-height: 1.65; margin: 0; padding: 0 1.25rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  header { padding: 4rem 0 2.5rem; border-bottom: 2px solid var(--ink); margin-bottom: 3rem; }
+  .eyebrow {
+    font-family: var(--mono); font-size: .74rem; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 1rem;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(2rem, 5vw, 2.9rem);
+    line-height: 1.12; margin: 0 0 1rem; text-wrap: balance; letter-spacing: -.015em;
+  }
+  .standfirst { font-size: 1.12rem; color: var(--ink-soft); margin: 0; max-width: 34rem; }
+  h2 {
+    font-family: var(--serif); font-weight: 600; font-size: 1.6rem; line-height: 1.25;
+    margin: 3.5rem 0 1rem; text-wrap: balance; letter-spacing: -.01em;
+  }
+  h3 { font-size: 1rem; margin: 2rem 0 .5rem; letter-spacing: -.005em; }
+  p { margin: 0 0 1.1rem; }
+  code { font-family: var(--mono); font-size: .88em; background: var(--accent-soft);
+         padding: .12em .38em; border-radius: 3px; }
+  strong { font-weight: 650; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+
+  .stage {
+    display: flex; flex-direction: column; gap: 0; background: var(--card);
+    border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; margin: 1.75rem 0;
+  }
+  .step { display: flex; gap: 1rem; padding: 1rem 1.25rem; align-items: baseline; }
+  .step + .step { border-top: 1px solid var(--rule); }
+  .step .n {
+    font-family: var(--mono); font-size: .72rem; color: var(--accent);
+    flex: 0 0 1.6rem; font-variant-numeric: tabular-nums;
+  }
+  .step .t { flex: 1; }
+  .step.bad { background: var(--warn-soft); }
+  .step.bad .n { color: var(--warn); }
+  .path { font-family: var(--mono); font-size: .82rem; color: var(--ink-soft);
+          display: block; margin-top: .3rem; overflow-wrap: anywhere; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--card);
+    padding: 1.1rem 1.25rem; margin: 1.75rem 0; border-radius: 0 8px 8px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .label {
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--accent); display: block; margin-bottom: .5rem;
+  }
+  .callout.warn .label { color: var(--warn); }
+
+  .rounds { display: flex; flex-direction: column; gap: .5rem; margin: 1.75rem 0; }
+  .round {
+    display: grid; grid-template-columns: 7.5rem 1fr; gap: 1rem;
+    background: var(--card); border: 1px solid var(--rule);
+    border-radius: 8px; padding: .9rem 1.1rem; align-items: start;
+  }
+  .round .who {
+    font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--ink-soft); padding-top: .18rem;
+  }
+  .round .what { font-size: .95rem; }
+  @media (max-width: 34rem) { .round { grid-template-columns: 1fr; gap: .3rem; } }
+
+  .tablewrap { overflow-x: auto; margin: 1.75rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .93rem; min-width: 30rem; }
+  th, td { text-align: left; padding: .7rem .8rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+       letter-spacing: .08em; color: var(--ink-soft); font-weight: 500; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .pieces { display: flex; flex-direction: column; gap: 1rem; margin: 1.75rem 0; }
+  .piece { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 1.2rem 1.35rem; }
+  .piece.lead { border-color: var(--ok); background: var(--ok-soft); }
+  .piece h3 { margin: 0 0 .4rem; font-size: 1.05rem; }
+  .piece .tag {
+    font-family: var(--mono); font-size: .68rem; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--ink-soft); display: block; margin-bottom: .45rem;
+  }
+  .piece.lead .tag { color: var(--ok); }
+  .piece p { margin: 0; font-size: .95rem; }
+
+  ul { padding-left: 1.15rem; margin: 0 0 1.1rem; }
+  li { margin-bottom: .5rem; }
+
+  pre {
+    background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
+    padding: 1rem 1.1rem; overflow-x: auto; font-family: var(--mono);
+    font-size: .82rem; line-height: 1.55; margin: 1rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  footer { margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);
+           font-size: .88rem; color: var(--ink-soft); }
+</style>
+
+<main>
+<header>
+  <p class="eyebrow">Blueprint · deep · revision 5</p>
+  <h1>The app forgets where it lives</h1>
+  <p class="standfirst">Move Aztec Accelerator to your Applications folder and “Start on Login” quietly stops working — while Settings keeps insisting it’s on.</p>
+</header>
+
+<h2>What actually goes wrong</h2>
+
+<p>When you switch on “Start on Login”, the app asks the operating system to launch a file at one exact location. It writes that location down <strong>once</strong> and never looks at it again.</p>
+
+<div class="stage">
+  <div class="step"><span class="n">1</span><span class="t">You download the app and run it from Downloads.<span class="path">~/Downloads/Aztec Accelerator.app</span></span></div>
+  <div class="step"><span class="n">2</span><span class="t">You turn on “Start on Login”. The OS notes down that exact path.</span></div>
+  <div class="step"><span class="n">3</span><span class="t">You drag the app to Applications — the normal thing everyone does. Dragging is a <em>move</em>, so the old location no longer exists.</span></div>
+  <div class="step bad"><span class="n">4</span><span class="t"><strong>Autostart is now dead.</strong> The OS is pointed at a file that isn’t there.</span></div>
+  <div class="step bad"><span class="n">5</span><span class="t"><strong>And Settings still shows it ON</strong> — because the check underneath only asks “is there an entry?”, never “does it point anywhere real?”</span></div>
+</div>
+
+<p>Step 5 is the part that makes this worth fixing properly. A broken feature is bad; a broken feature that reports itself as working is worse, because nobody goes looking for it.</p>
+
+<h2>The fix, and the one rule that shapes it</h2>
+
+<p>At every launch, the app checks whether the noted-down location still points at something real. If it doesn’t, it quietly rewrites it — <strong>editing the existing entry in place</strong> rather than deleting and recreating it, because recreating it wipes out the separate crash-recovery setup that shares the same file.</p>
+
+<div class="callout">
+  <span class="label">The rule everything hangs on</span>
+  <p>Only repair when the noted-down location points at <strong>nothing</strong>. Never when it merely points somewhere <em>different</em> from where you happen to be running from.</p>
+  <p>That distinction is the whole design. My first draft had it wrong, and both independent reviewers rejected it for the same reason: a leftover copy sitting in Downloads, opened once, would have hijacked a perfectly healthy Applications entry — pointing your login item at a file you’re about to delete. Repairing only dead pointers can’t do that, and it also means two copies racing each other always agree on the answer.</p>
+</div>
+
+<p>Settings gets honest too. The switch shows what you <em>asked for</em>; a warning line underneath tells you if it isn’t currently working, with a <strong>Fix</strong> button — or, if you moved the app while it was still running, a note to reopen it from its new home, because that’s the one case the app can’t repair from where it is.</p>
+
+<h2>A security bug we found on the way</h2>
+
+<div class="callout warn">
+  <span class="label">Shipping today, on Windows</span>
+  <p>The login entry is written without quotes around it. Because the folder name has a space in it, Windows tries <code>…\AppData\Local\Aztec.exe</code> <em>before</em> the real app — and that folder is one any program running as you can write to. Drop a file there and Windows runs it at every login.</p>
+  <p>This isn’t a break-out-of-your-account flaw — it needs something already running as you. But it’s ours, and the fix is to quote the path when the entry is first written, not just when it’s repaired.</p>
+</div>
+
+<h2>What five rounds of review actually caught</h2>
+
+<p>Three plans were written independently, then checked against each other twice, then audited cold. Nearly every round overturned something the previous one had approved — including things I’d already told you were settled.</p>
+
+<div class="rounds">
+  <div class="round"><span class="who">Round 1</span><span class="what">Both reviewers, separately, rejected my “repair whenever it looks different” rule. They were right.</span></div>
+  <div class="round"><span class="who">Round 2</span><span class="what">The safety argument I gave you for skipping the update-window guard was <strong>broken by a concrete example</strong> I hadn’t considered. The guard went back in.</span></div>
+  <div class="round"><span class="who">Round 2</span><span class="what">I’d rejected a dependency on supply-chain grounds. It was already in the build on every platform — nobody had checked. Reversed.</span></div>
+  <div class="round"><span class="who">Round 3</span><span class="what">A fix I adopted from one reviewer would have <strong>broken the Settings toggle</strong> whenever an update was downloading. The other reviewer caught the cost neither of us had weighed.</span></div>
+  <div class="round"><span class="who">Round 3</span><span class="what">Nothing anywhere actually <em>launched</em> a repaired entry — so the security fix above was only ever proved against our own model of Windows, not Windows.</span></div>
+  <div class="round"><span class="who">Round 4</span><span class="what">The final reviewer claimed the whole update-window problem was hypothetical. <strong>That one was wrong</strong> — this repo measured the opposite behaviour last month, and there’s a test on a real Windows machine pinning it.</span></div>
+</div>
+
+<h2>The decision I need from you</h2>
+
+<p>This started as “re-check a path at startup.” It has grown a guard for the window while an update is installing, a new hook inside the Windows installer, changes to the updater itself, and a workflow that builds two full copies of the app to test it. Every one of those traces to a real finding — <strong>which is exactly how a plan gets too big to land safely.</strong></p>
+
+<div class="pieces">
+  <div class="piece lead">
+    <span class="tag">Piece 1 — carries the actual fix</span>
+    <h3>The autostart repair itself</h3>
+    <p>Detect and repair dead entries, honest Settings, the Fix button, the Windows quoting fix, and the test layers for all of it. Everything a user would notice.</p>
+  </div>
+  <div class="piece">
+    <span class="tag">Piece 2 — correctness</span>
+    <h3>The update-window guard</h3>
+    <p>Stops a repair from firing while the Windows installer has momentarily removed the app. Needs a new installer hook and updater changes.</p>
+  </div>
+  <div class="piece">
+    <span class="tag">Piece 3 — proof</span>
+    <h3>The Windows update test rig</h3>
+    <p>The manually-triggered workflow that proves piece 2. Supports it; doesn’t need to be in the same pull request.</p>
+  </div>
+</div>
+
+<p><strong>My recommendation:</strong> ship piece 1 first with the automatic repair switched off on Windows only, then land piece 2 and switch it on. macOS and Linux get the full fix immediately, the Fix button works everywhere, and Windows still gets the security fix — because that one happens when the entry is <em>written</em>, not when it’s repaired. Nothing ships with a known hole.</p>
+
+<p>The alternative is one large pull request with all three. It’s coherent, and every piece is justified — it’s just a lot to land and review at once.</p>
+
+<h2>What this still won’t do</h2>
+
+<ul>
+  <li>If you move the app <em>while it’s running</em>, it can’t repair itself until you reopen it from the new location. Settings will say so instead of pretending.</li>
+  <li>On macOS the repair takes effect at your next login — the already-running background job keeps its old path. That’s true today too; this doesn’t make it worse.</li>
+  <li>“Points at a real file” isn’t the same as “will definitely launch”. Desktop environments have their own ways to suppress a startup entry that we don’t model.</li>
+  <li>The rename to <code>AztecAccelerator</code> now has to ship <em>after</em> this, not alongside — it changes the very path the update guard checks against.</li>
+</ul>
+
+<h2>If you approve</h2>
+
+<pre><code>/goal Implement the autostart self-heal plan in
+implementations-plan/autostart-self-heal/plan.md, phase by phase, running each
+phase's stated gate before moving on. Repair only entries whose stored target
+does not resolve; never recreate an artifact in place of editing it.
+
+/loop Work the next unfinished phase. Run its gate command. If it fails, fix and
+re-run before continuing. Log every non-trivial attempt in
+implementations-plan/autostart-self-heal/lessons/phase-N.md. Stop and ask after
+three failures on the same step.</code></pre>
+
+<footer>
+  <p>Full plan, decision ledger and all five review records: <a href="plan.md">plan.md</a> · <a href="recon.md">recon.md</a> · <a href="audit-codex-final.md">audit-codex-final.md</a></p>
+</footer>
+</main>

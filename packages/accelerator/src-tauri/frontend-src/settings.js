@@ -49,14 +49,7 @@ async function loadSettings() {
   // its true state is CONFIRMED — so an unknown state is never presented as an actionable "off", and a
   // failure of ANY preceding request (which would throw before this block) still leaves it disabled
   // rather than at a false default. Fetched independently so a read error doesn't fail the whole panel.
-  const autostartEl = document.getElementById("autostart");
-  try {
-    autostartEl.checked = await invoke("get_autostart_enabled");
-    autostartEl.disabled = false; // known → actionable
-  } catch (e) {
-    console.error("Failed to read autostart state:", e);
-    showErrorHint(autostartEl, "Autostart state unavailable — reopen Settings to retry");
-  }
+  await loadAutostart();
   document.getElementById("auto-update").checked = config.auto_update === true;
 
   // The Encrypted Connection section (toggle + the disclosed certificate action) shows on all three
@@ -113,8 +106,94 @@ function renderOrigins(origins) {
   }
 }
 
-// Toggles — all use wireToggle from the shared bridge.
-wireToggle("autostart", (checked) => ({ cmd: "set_autostart", args: { enabled: checked } }));
+// ── Autostart: intent switch + health row (plan D3/D13/D17) ──
+//
+// get_autostart_enabled returns a STRUCTURED status, not a bool: the switch reflects the user's
+// INTENT (entry present, not platform-disabled); the health row underneath says when the entry
+// won't actually launch, and carries the action that fixes it. Turning it OFF always works — an
+// earlier draft rendered a broken entry as an unchecked switch, which took away the user's only
+// OFF control (plan D17).
+
+const autostartEl = document.getElementById("autostart");
+
+function renderAutostartStatus(st) {
+  autostartEl.checked = st.intentEnabled;
+  autostartEl.disabled = false; // known → actionable
+  const row = document.getElementById("autostart-health");
+  const text = document.getElementById("autostart-health-text");
+  const fix = document.getElementById("autostart-fix");
+  let message = "";
+  let showFix = false;
+  if (st.unreadable) {
+    // The entry exists but we can't parse it (hand-edited, or rewritten by another tool). The heal
+    // deliberately never touches it, so the way out is an explicit reset — which the switch above
+    // still performs, because it reflects intent and OFF always works.
+    message = "Start on Login's entry couldn't be read. Turn it off and on again to reset it.";
+  } else if (st.intentEnabled && !st.healthy) {
+    if (st.canRepairNow) {
+      message = "Start on Login points to a file that no longer exists.";
+      showFix = true;
+    } else {
+      // D14: our own path doesn't resolve either (the app was moved while running) — a Fix here
+      // would silently no-op, so say the one thing that will actually work instead.
+      message = "Start on Login needs repair. Reopen Aztec Accelerator from its new location.";
+    }
+  } else if (st.intentEnabled && st.pointsElsewhere) {
+    // Healthy entry for a DIFFERENT copy — never silently stolen (plan D1/D10); off→on recreates.
+    message =
+      "Start on Login points to another copy of Aztec Accelerator. Turn it off and on to use this one.";
+  }
+  // F-B2: textContent only — st fields are backend-controlled, but the rule is structural: nothing
+  // reaching this row is ever interpreted as HTML. (storedPath is already redacted in Rust — D24 —
+  // and deliberately not rendered at all.)
+  text.textContent = message;
+  row.hidden = message === "";
+  fix.hidden = !showFix;
+}
+
+async function loadAutostart() {
+  try {
+    renderAutostartStatus(await invoke("get_autostart_enabled"));
+  } catch (e) {
+    // Unreadable artifact → the backend Errs (codex #7) → switch stays DISABLED (unknown state is
+    // never an actionable "off") and the health row stays out of the way.
+    console.error("Failed to read autostart state:", e);
+    document.getElementById("autostart-health").hidden = true;
+    showErrorHint(autostartEl, "Autostart state unavailable — reopen Settings to retry");
+  }
+}
+
+// Not wireToggle: after a successful set_autostart the HEALTH may have changed too (off→on from
+// points_elsewhere recreates the entry), so re-render from the authoritative status instead of
+// trusting the optimistic flip. Failure semantics match wireToggle exactly (revert + hint).
+autostartEl.addEventListener("change", async (e) => {
+  const el = e.target;
+  el.disabled = true;
+  try {
+    await invoke("set_autostart", { enabled: el.checked });
+    await loadAutostart();
+  } catch (err) {
+    el.checked = !el.checked;
+    console.error("Failed to invoke set_autostart:", err);
+    showErrorHint(el, typeof err === "string" ? err : "Failed — try again");
+    el.disabled = false;
+  }
+});
+
+document.getElementById("autostart-fix").addEventListener("click", async (e) => {
+  const btn = e.target;
+  btn.disabled = true;
+  try {
+    // repair_autostart returns the fresh status — render from truth, not assumption.
+    renderAutostartStatus(await invoke("repair_autostart"));
+  } catch (err) {
+    console.error("Autostart repair failed:", err);
+    showErrorHint(btn, typeof err === "string" ? err : "Repair failed — try again");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 wireToggle("auto-update", (checked) => ({ cmd: "set_auto_update", args: { enabled: checked } }));
 
 // HTTPS does NOT use wireToggle's optimistic-flip-then-revert-on-error. That pattern assumes a

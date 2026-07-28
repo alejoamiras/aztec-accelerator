@@ -46,15 +46,31 @@ pub fn get_config(
 pub fn get_autostart_enabled(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
-) -> Result<bool, String> {
+) -> Result<crate::autostart::AutostartStatus, String> {
     require_label(window.label(), SETTINGS_LABEL)?;
-    use tauri_plugin_autostart::ManagerExt;
-    // codex #7: surface an I/O error rather than reporting `false` (disabled). Reading the launcher entry
-    // can fail (permissions, malformed unit); pretending "off" would mislead the user into thinking
-    // autostart is disabled when its true state is unknown.
-    app.autolaunch()
-        .is_enabled()
-        .map_err(|e| format!("cannot read autostart state: {e}"))
+    // D3/D13: a structured status, not a bare bool — the switch shows INTENT, a separate row shows
+    // health (plan §5). codex #7 preserved: an Unreadable artifact surfaces as Err rather than a
+    // false "disabled" (the switch stays disabled on unknown state). Read-only — opening Settings
+    // never writes OS state.
+    crate::autostart::status(&app)
+}
+
+/// D16: the Fix button. A dedicated command, NOT `set_autostart(true)` — a Broken entry reads
+/// `prior_enabled == true` (intent), so the enable transaction correctly SKIPS the artifact write
+/// (C1: rewriting would strip macOS KeepAlive), and toggle-ON on a broken entry is a silent no-op.
+/// Repair is the in-place patch instead. Returns the fresh status so the UI re-renders from truth.
+#[tauri::command]
+pub fn repair_autostart(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<crate::autostart::AutostartStatus, String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
+    use crate::autostart::HealOutcome;
+    match crate::autostart::heal_if_broken(&app) {
+        HealOutcome::Healed { .. } | HealOutcome::NotNeeded => crate::autostart::status(&app),
+        HealOutcome::Skipped(reason) => Err(format!("repair skipped: {reason}")),
+        HealOutcome::Failed(e) => Err(format!("repair failed: {e}")),
+    }
 }
 
 #[tauri::command]
@@ -439,49 +455,11 @@ async fn enable_https_inner(
 
 /// Shared autostart toggle (used by the outer `set_autostart` Settings command + the onboarding
 /// wizard). Window-agnostic — the caller-label guard lives in `set_autostart`; `complete_onboarding`
-/// calls this from the onboarding window. Carries main's F-010 executable-path safety + the C8
-/// crash-recovery `enable_transaction` rollback so a partial failure never leaves a half-enabled state.
+/// calls this from the onboarding window. The F-010 path preflight, the C8 `enable_transaction`
+/// rollback (now with exact-prior-artifact restore), and the D19 `autostart.lock` all live inside
+/// `autostart::set_enabled` — the owned replacement for the removed plugin (plan D7).
 fn set_autostart_inner(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    if enabled {
-        // F-010: refuse autostart if this executable's path could inject into any OS launcher serializer
-        // (systemd unit / .desktop / plist / Run-key) — BEFORE the plugin serializes it. Fail closed.
-        let exe =
-            std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
-        if !crate::crash_recovery::autostart_path_is_safe(&exe) {
-            let _ = manager.disable();
-            crate::crash_recovery::disable_crash_recovery();
-            return Err(
-                "Executable path is unsafe for autostart (control/newline/non-UTF-8); refusing to enable."
-                    .to_string(),
-            );
-        }
-        // C8 (D20): enable the launcher entry + arm crash recovery as ONE transaction; on a partial
-        // failure roll back against a known baseline. An unknown current state is undecidable → fail closed.
-        let prior_enabled = manager
-            .is_enabled()
-            .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
-        crate::crash_recovery::enable_transaction(
-            prior_enabled,
-            || manager.enable().map_err(|e| e.to_string()),
-            crate::crash_recovery::enable_crash_recovery,
-            || manager.disable().map_err(|e| e.to_string()),
-            crate::crash_recovery::disable_crash_recovery,
-        )?;
-    } else {
-        // Disable the launcher, THEN disarm crash recovery — surface a non-confirmed disarm rather than
-        // leaving the app able to relaunch on next login while the UI shows autostart as off.
-        manager.disable().map_err(|e| e.to_string())?;
-        if !crate::crash_recovery::disable_crash_recovery() {
-            return Err(
-                "Autostart launcher disabled, but crash recovery could not be confirmed disarmed — \
-                 the app may still relaunch on next login. Please retry."
-                    .to_string(),
-            );
-        }
-    }
-    Ok(())
+    crate::autostart::set_enabled(app, enabled)
 }
 
 /// Disable the encrypted (HTTPS) connection: save config off. HTTPS stops on next restart. Trust

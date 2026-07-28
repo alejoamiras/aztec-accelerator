@@ -8,6 +8,7 @@
     "frontend:build": "bun scripts/build-frontend.ts",
     "prebuild": "bun scripts/copy-bb.ts",
     "prebuild:version": "bun scripts/bb-version.ts",
+    "test:autostart": "bash scripts/autostart-test.sh",
     "test:e2e:ui": "bunx playwright test --config playwright.config.mjs",
     "test:e2e:webdriver": "npx @wdio/cli run ./wdio.conf.ts",
     "test:nsis": "bash scripts/nsis-hook-test.sh",

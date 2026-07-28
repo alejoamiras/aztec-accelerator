@@ -30,10 +30,28 @@ const defaults = {
     onboarding_version: 1,
     // auto_update intentionally omitted — matches Rust None serialization
   }),
-  get_autostart_enabled: () => false,
+  // Structured status (plan D3): the switch shows intentEnabled; healthy/pointsElsewhere drive the
+  // health row; canRepairNow gates the Fix button. Matches the Rust camelCase serialization.
+  get_autostart_enabled: () => ({
+    intentEnabled: false,
+    healthy: true,
+    unreadable: false,
+    pointsElsewhere: false,
+    canRepairNow: true,
+    storedPath: null,
+  }),
   get_system_info: () => ({ platform: "macos", cpu_count: 10 }),
   set_speed: () => null,
   set_autostart: () => null,
+  // Default: a repair succeeds and the entry is healthy afterwards.
+  repair_autostart: () => ({
+    intentEnabled: true,
+    healthy: true,
+    unreadable: false,
+    pointsElsewhere: false,
+    canRepairNow: true,
+    storedPath: "…/Aztec Accelerator.app/Contents",
+  }),
   set_auto_update: () => null,
   remove_approved_origin: () => null,
   respond_auth: () => null,

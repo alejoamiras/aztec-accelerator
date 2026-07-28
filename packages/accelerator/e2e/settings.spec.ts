@@ -193,6 +193,160 @@ test("toggle error reverts checkbox and shows hint", async ({ page }) => {
   await expect(page.locator(".error-hint")).toHaveText("Failed — try again");
 });
 
+// ── Autostart health row (plan D17: the switch shows INTENT, the row shows HEALTH) ──
+
+function autostartStatus(overrides: Record<string, unknown>) {
+  return {
+    intentEnabled: false,
+    healthy: true,
+    unreadable: false,
+    pointsElsewhere: false,
+    canRepairNow: true,
+    storedPath: null,
+    ...overrides,
+  };
+}
+
+test("health row is hidden for a healthy entry", async ({ page }) => {
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true }),
+  );
+  await page.goto("/settings.html");
+  await expect(page.locator("#autostart")).toBeChecked();
+  await expect(page.locator("#autostart-health")).toBeHidden();
+});
+
+test("broken + repairable: switch stays ON, warning row + Fix button shown, Fix repairs", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true, healthy: false, canRepairNow: true }),
+  );
+  await page.goto("/settings.html");
+
+  // D17: intent is still ON — an unchecked switch would take away the user's only OFF control.
+  await expect(page.locator("#autostart")).toBeChecked();
+  await expect(page.locator("#autostart-health")).toBeVisible();
+  await expect(page.locator("#autostart-health-text")).toHaveText(
+    "Start on Login points to a file that no longer exists.",
+  );
+  const fix = page.locator("#autostart-fix");
+  await expect(fix).toBeVisible();
+
+  // Fix goes through the DEDICATED repair command (plan D16 — set_autostart(true) is structurally
+  // a no-op on a broken entry), and the row re-renders from the returned status.
+  await fix.click();
+  const repairs = await callsFor(page, "repair_autostart");
+  expect(repairs.length).toBe(1);
+  await expect(page.locator("#autostart-health")).toBeHidden();
+  await expect(page.locator("#autostart")).toBeChecked();
+});
+
+test("broken + not repairable now: reopen copy, no Fix button", async ({ page }) => {
+  // D14: the app itself was moved while running — a Fix would silently no-op, so it isn't offered.
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true, healthy: false, canRepairNow: false }),
+  );
+  await page.goto("/settings.html");
+
+  await expect(page.locator("#autostart")).toBeChecked();
+  await expect(page.locator("#autostart-health-text")).toHaveText(
+    "Start on Login needs repair. Reopen Aztec Accelerator from its new location.",
+  );
+  await expect(page.locator("#autostart-fix")).toBeHidden();
+});
+
+test("points-elsewhere: informational copy, no Fix (a healthy entry is never stolen)", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true, pointsElsewhere: true }),
+  );
+  await page.goto("/settings.html");
+
+  await expect(page.locator("#autostart")).toBeChecked();
+  await expect(page.locator("#autostart-health-text")).toContainText("another copy");
+  await expect(page.locator("#autostart-fix")).toBeHidden();
+});
+
+test("turning OFF from a broken state still works (D17)", async ({ page }) => {
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true, healthy: false, canRepairNow: true }),
+  );
+  await page.goto("/settings.html");
+
+  await page.locator("#autostart").evaluate((el: HTMLInputElement) => {
+    el.checked = false;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  const calls = await callsFor(page, "set_autostart");
+  expect(calls.length).toBe(1);
+  expect(calls[0].args).toEqual({ enabled: false });
+});
+
+test("unreadable entry keeps the switch usable and says how to reset it", async ({ page }) => {
+  // An artifact we can't parse is NOT unknown state: the user must keep both controls. An earlier
+  // draft surfaced this as a command error, which left the switch permanently disabled with no
+  // way back — worse than the plugin it replaced.
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true, healthy: false, unreadable: true, canRepairNow: true }),
+  );
+  await page.goto("/settings.html");
+
+  const toggle = page.locator("#autostart");
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).toBeChecked();
+  await expect(page.locator("#autostart-health-text")).toContainText("couldn't be read");
+  // No Fix: the heal deliberately never rewrites an artifact it cannot parse.
+  await expect(page.locator("#autostart-fix")).toBeHidden();
+
+  // The reset path is the switch itself.
+  await toggle.evaluate((el: HTMLInputElement) => {
+    el.checked = false;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const calls = await callsFor(page, "set_autostart");
+  expect(calls[0].args).toEqual({ enabled: false });
+});
+
+test("repair failure shows a hint and keeps the row", async ({ page }) => {
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+      (window as any).__TAURI_MOCK__.setHandler("repair_autostart", () => {
+        throw "repair skipped: updater active";
+      });
+    },
+    autostartStatus({ intentEnabled: true, healthy: false, canRepairNow: true }),
+  );
+  await page.goto("/settings.html");
+
+  await page.locator("#autostart-fix").click();
+  // Backend messages are actionable — surfaced verbatim, not flattened to a generic failure.
+  await expect(page.locator(".error-hint")).toHaveText("repair skipped: updater active");
+  await expect(page.locator("#autostart-health")).toBeVisible();
+  await expect(page.locator("#autostart-fix")).toBeEnabled();
+});
+
 test("Encrypted Connection section visible on macOS", async ({ page }) => {
   await page.goto("/settings.html");
   await expect(page.locator("#https-section")).toBeVisible();
