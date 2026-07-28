@@ -37,6 +37,10 @@ function seedBrokenArtifact(): void {
   const file = artifactPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (PLATFORM === "darwin") {
+    // KeepAlive is seeded IN: production breaks this way (crash recovery armed, then the app
+    // moved), and the C1 assertion below is "the heal PRESERVES it". The first CI run seeded a
+    // bare plist and expected the startup rearm to have patched KeepAlive — impossible, since
+    // this seed deliberately happens after launch.
     fs.writeFileSync(
       file,
       `<?xml version="1.0" encoding="UTF-8"?>
@@ -49,6 +53,13 @@ function seedBrokenArtifact(): void {
   <array><string>${dead}</string></array>
   <key>RunAtLoad</key>
   <true/>
+  <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
   </dict>
 </plist>`,
     );
@@ -123,10 +134,11 @@ describe("Autostart self-heal (real IPC)", () => {
     expect(path.basename(program).startsWith("aztec-accelerator")).toBe(true);
 
     if (PLATFORM === "darwin") {
-      // The intent-keyed startup rearm patched KeepAlive into the seeded plist at launch; the heal
-      // must have preserved it (C1) — the full crash-recovery composition, end to end.
+      // C1 end-to-end: the seed included KeepAlive/ThrottleInterval (crash recovery armed when
+      // the app broke — the production composition), and the real heal must have PRESERVED both.
       const raw = fs.readFileSync(artifactPath(), "utf-8");
       expect(raw.includes("<key>KeepAlive</key>")).toBe(true);
+      expect(raw.includes("<key>ThrottleInterval</key>")).toBe(true);
     }
 
     // Switch stays ON, still intent (D13).
