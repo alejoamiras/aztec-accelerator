@@ -316,6 +316,7 @@ dependencies = [
  "url",
  "urlencoding",
  "which",
+ "windows-sys 0.61.2",
  "winreg",
  "x509-parser 0.18.1",
  "zeroize",

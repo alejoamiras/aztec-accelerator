@@ -1006,10 +1006,11 @@ pub fn read_stored_target(desired: Option<&Path>) -> StoredTarget {
 /// key off — NOT health: a Broken entry still means "the user wants autostart", and keying the
 /// rearm off health would stop protecting exactly the users whose entry broke.
 pub fn intent_enabled(_app: &tauri::AppHandle) -> Result<bool, String> {
-    intent_enabled_impl()
+    intent_enabled_now()
 }
 
-fn intent_enabled_impl() -> Result<bool, String> {
+/// `AppHandle`-free form of [`intent_enabled`] (L3 test surface).
+pub fn intent_enabled_now() -> Result<bool, String> {
     let present = match backend::read_stored_program() {
         Ok(None) => false,
         Ok(Some(_)) => true,
@@ -1047,14 +1048,14 @@ pub fn status(app: &tauri::AppHandle) -> Result<AutostartStatus, String> {
             program,
             points_elsewhere,
         } => Ok(AutostartStatus {
-            intent_enabled: intent_enabled_impl()?,
+            intent_enabled: intent_enabled_now()?,
             healthy: true,
             points_elsewhere,
             can_repair_now,
             stored_path: Some(redact_path(&program.to_string_lossy())),
         }),
         StoredTarget::Broken { program } => Ok(AutostartStatus {
-            intent_enabled: intent_enabled_impl()?,
+            intent_enabled: intent_enabled_now()?,
             healthy: false,
             points_elsewhere: false,
             can_repair_now,
@@ -1067,21 +1068,27 @@ pub fn status(app: &tauri::AppHandle) -> Result<AutostartStatus, String> {
 /// is compile-time gated off until piece 2, see main.rs; `repair_autostart` reaches this on every
 /// platform behind the updater-lock bow-out).
 pub fn heal_if_broken(app: &tauri::AppHandle) -> HealOutcome {
-    // 1. Our own desired path must exist — a relocated-while-running process has a stale
-    //    current_exe(); healing from it writes a path guaranteed dead (D14 surfaces this in the UI).
     let desired = match desired_path(app) {
         Ok(d) => d,
         Err(_) => return HealOutcome::Skipped("own path unresolvable"),
     };
+    heal_if_broken_at(&desired)
+}
+
+/// `AppHandle`-free heal core — the surface `tests/autostart_heal.rs` (L3) drives against real OS
+/// artifacts under a throwaway `$HOME`. Production reaches it only through [`heal_if_broken`].
+pub fn heal_if_broken_at(desired: &Path) -> HealOutcome {
+    // 1. Our own desired path must exist — a relocated-while-running process has a stale
+    //    current_exe(); healing from it writes a path guaranteed dead (D14 surfaces this in the UI).
     if !desired.try_exists().unwrap_or(false) {
         return HealOutcome::Skipped("own path unresolvable");
     }
     // 2. C6: the F-010 preflight now runs on the heal path too, not just at toggle time.
-    if !crate::crash_recovery::autostart_path_is_safe(&desired) {
+    if !crate::crash_recovery::autostart_path_is_safe(desired) {
         return HealOutcome::Failed("desired path is unsafe for autostart serializers".to_string());
     }
     // 3. Only Broken proceeds. Absent/Healthy → NotNeeded; Unreadable → never write.
-    match read_stored_target(Some(&desired)) {
+    match read_stored_target(Some(desired)) {
         StoredTarget::Broken { .. } => {}
         StoredTarget::Unreadable { .. } => return HealOutcome::Skipped("artifact unreadable"),
         _ => return HealOutcome::NotNeeded,
@@ -1097,13 +1104,13 @@ pub fn heal_if_broken(app: &tauri::AppHandle) -> HealOutcome {
         Ok(f) => f,
         Err(e) => return HealOutcome::Failed(e),
     };
-    let old_program = match read_stored_target(Some(&desired)) {
+    let old_program = match read_stored_target(Some(desired)) {
         StoredTarget::Broken { program } => program,
         StoredTarget::Unreadable { .. } => return HealOutcome::Skipped("artifact unreadable"),
         _ => return HealOutcome::NotNeeded,
     };
     // 6. In-place patch — never a recreate (C1: recreation strips macOS KeepAlive).
-    if let Err(e) = backend::heal_write(&desired) {
+    if let Err(e) = backend::heal_write(desired) {
         return HealOutcome::Failed(e);
     }
     let from = redact_path(&old_program);
@@ -1112,6 +1119,20 @@ pub fn heal_if_broken(app: &tauri::AppHandle) -> HealOutcome {
     // redacted (D24): no full user paths.
     tracing::info!(%from, %to, "autostart entry healed (stored target no longer resolved)");
     HealOutcome::Healed { from, to }
+}
+
+/// L3 test surface: the enable-time ARTIFACT write alone — the exact writer `set_enabled(true)`
+/// runs inside its transaction, without arming crash recovery (integration tests must not shell
+/// out to `systemctl`/`schtasks` on a runner). Quoted/escaped like every production write.
+pub fn enable_entry_at(desired: &Path) -> Result<(), String> {
+    let _lock = acquire_autostart_lock()?;
+    backend::enable_write(desired)
+}
+
+/// L3 test surface: remove the artifact alone (idempotent), without the crash-recovery disarm.
+pub fn remove_entry() -> Result<(), String> {
+    let _lock = acquire_autostart_lock()?;
+    backend::remove()
 }
 
 /// Explicit user toggle (replaces the plugin's enable/disable; plan §4.5). Runs the existing
@@ -1139,7 +1160,7 @@ pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> 
                     .to_string(),
             );
         }
-        let prior_enabled = intent_enabled_impl()
+        let prior_enabled = intent_enabled_now()
             .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
         // Snapshot for exact-prior rollback (strictly stronger than the plugin's delete-on-rollback).
         let snapshot = std::cell::RefCell::new(None);

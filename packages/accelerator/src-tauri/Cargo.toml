@@ -93,6 +93,15 @@ tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
 serial_test = "3"
 
+# L3 (tests/autostart_heal.rs): execute a healed Run value through REAL CreateProcessW — the same
+# semantics Run-key processing uses — so the quoting claim is proven against the OS, not against our
+# own candidate model (audit r4: "a model checked against itself"). Version already in the lock.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 serde_json = "1"
