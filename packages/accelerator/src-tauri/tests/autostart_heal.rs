@@ -485,10 +485,13 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
 
     let _restore = RegRestore::capture(); // panic-safe: restores the dev machine / runner state
 
-    let home = tempfile::tempdir().expect("temp HOME");
-    // SAFETY: single #[test]; scopes the autostart/updater lock files off the real profile.
-    std::env::set_var("HOME", home.path());
-    std::env::set_var("USERPROFILE", home.path());
+    // NOTE: no HOME/USERPROFILE override here — it would be theatre. `dirs::home_dir()` on Windows
+    // calls SHGetKnownFolderPath(FOLDERID_Profile) (dirs-6 → dirs-sys-0.5) and ignores both env
+    // vars, so the lock files genuinely live in the real profile. That is harmless: they are
+    // advisory locks held for one read-modify-write, and the registry state this test mutates is
+    // restored by the RAII guard above. On a dev box running the installed app, a concurrent
+    // update transaction can make the heal return Skipped("updater active") — self-explanatory if
+    // it ever happens; CI runners are throwaway and single-tenant.
 
     // A REAL executable in a spaced dir, plus a decoy at the CreateProcess prefix position.
     let bin = tempfile::tempdir().expect("bin dir");

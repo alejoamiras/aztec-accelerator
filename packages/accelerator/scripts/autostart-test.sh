@@ -82,9 +82,12 @@ fi
 # Hand the prebuilt test binary to leg 2 (run as a passwd-less uid, so no cargo there — it could
 # not write the root-owned volumes anyway). World-readable path + exec bit are already cargo's
 # defaults; stash the path where the follow-up docker run can find it.
+# Newest by mtime: a warm /target volume keeps older hashes around, and `cp` from the read-only
+# mount refreshes source mtimes, so any "newer than the sources" filter picks nothing and a
+# first-match fallback can hand leg 2 a STALE binary that silently tests old code.
 TESTBIN=$(find /target/debug/deps -maxdepth 1 -name 'autostart_heal-*' -type f ! -name '*.d' \
-  -newer /work/packages/accelerator/src-tauri/Cargo.toml -print -quit)
-[ -n "$TESTBIN" ] || TESTBIN=$(find /target/debug/deps -maxdepth 1 -name 'autostart_heal-*' -type f ! -name '*.d' -print -quit)
+  -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+[ -n "$TESTBIN" ] || { echo "no autostart_heal test binary found in /target/debug/deps" >&2; exit 1; }
 echo "$TESTBIN" > /target/autostart-heal-testbin
 echo "leg-2 binary: $TESTBIN"
 RUNNER

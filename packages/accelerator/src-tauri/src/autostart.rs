@@ -61,6 +61,9 @@ pub struct AutostartStatus {
     pub intent_enabled: bool,
     /// The stored target resolves to an executable.
     pub healthy: bool,
+    /// The artifact exists but could not be parsed (hand-edited, third-party-rewritten, corrupt).
+    /// The heal never touches it; an explicit OFF/ON resets it.
+    pub unreadable: bool,
     /// Resolves, but to a different copy than the running one. Informational only.
     pub points_elsewhere: bool,
     /// Our own desired path resolves, so a repair would succeed right now (plan D14 — false when
@@ -305,7 +308,7 @@ pub(crate) fn desktop_exec_program(exec: &str) -> Result<String, String> {
         return Err("empty Exec value".to_string());
     }
     let undoubled = exec.replace("%%", "\u{0}PCT\u{0}"); // placeholder survives the split below
-    let (raw_token, rest) = if let Some(stripped) = undoubled.strip_prefix('"') {
+    let raw_token = if let Some(stripped) = undoubled.strip_prefix('"') {
         // Quoted: scan to the closing unescaped quote.
         let mut out = String::new();
         let mut chars = stripped.chars();
@@ -327,17 +330,20 @@ pub(crate) fn desktop_exec_program(exec: &str) -> Result<String, String> {
         if !closed {
             return Err("unterminated quoted Exec".to_string());
         }
-        (out, chars.as_str().trim())
+        // Trailing arguments after a QUOTED program are not ours — neither we nor the removed
+        // plugin ever wrote any, so they are a user customization (`Exec="/opt/app" --minimized`).
+        // Fail closed, exactly like the Windows reader: the heal rewrites the whole `Exec=` line,
+        // so tolerating this would silently delete the user's flags on the next relocation.
+        if !chars.as_str().trim().is_empty() {
+            return Err("Exec has trailing arguments (not the owned format)".to_string());
+        }
+        out
     } else {
-        // Legacy unquoted (what auto-launch wrote, trailing space included): first token is the
-        // program; anything after is arguments.
-        let mut split = undoubled.splitn(2, ' ');
-        let token = split.next().unwrap_or_default().to_string();
-        (token, split.next().unwrap_or("").trim())
+        // Legacy unquoted (what auto-launch wrote, trailing space included): the OS execs the FIRST
+        // token, so classification must too — for a spaced path that token is a path fragment, and
+        // the entry is exactly the broken-legacy case the heal exists to repair.
+        undoubled.split(' ').next().unwrap_or_default().to_string()
     };
-    // Our owned format carries no arguments; legacy args are tolerated for classification but the
-    // program token is what resolves.
-    let _ = rest;
     let program = raw_token.replace("\u{0}PCT\u{0}", "%");
     if program.is_empty() {
         return Err("empty Exec program".to_string());
@@ -564,9 +570,17 @@ pub(crate) fn resolve_first(
     candidates.iter().find(|c| exists(c)).cloned()
 }
 
-/// Windows `StartupApproved` semantics (mirrors `auto-launch/windows.rs:73-95`): a missing key,
-/// missing value or short blob reads ENABLED; last-8-bytes-all-zero reads enabled; anything else
-/// is the Task-Manager OFF that must be respected (recon "off stays off").
+/// Windows `StartupApproved` semantics: a missing key, missing value or short blob reads ENABLED;
+/// otherwise the FLAG BYTE decides — Explorer writes an even flag (`0x02`/`0x06`) for enabled and
+/// an odd one (`0x03`/`0x07`) for disabled, with the following 8 bytes carrying the disable
+/// timestamp.
+///
+/// Deliberately diverges from `auto-launch/windows.rs:96-102`, which keys off "last 8 bytes all
+/// zero". That infers the flag from the timestamp and misreads in the dangerous direction: a
+/// DISABLED blob whose timestamp was zeroed (imaging / GPO / cleanup tooling) reads as enabled,
+/// which would rearm the crash-recovery relauncher against an explicit administrator OFF — exactly
+/// what "off stays off" forbids. Read-side only: the WRITE stays byte-identical to the crate's
+/// enabled blob, so nothing else in the ecosystem sees a new shape.
 #[cfg_attr(
     not(windows),
     allow(
@@ -578,7 +592,7 @@ pub(crate) fn startup_approved_blob_enabled(bytes: Option<&[u8]>) -> bool {
     match bytes {
         None => true,
         Some(b) if b.len() < 8 => true,
-        Some(b) => b.iter().rev().take(8).all(|v| *v == 0u8),
+        Some(b) => b[0] % 2 == 0,
     }
 }
 
@@ -710,6 +724,11 @@ mod backend {
         }
     }
 
+    /// Presence WITHOUT parsing (plan D13): the tolerant question the crash-recovery rearm asks.
+    pub(super) fn artifact_present() -> Result<bool, String> {
+        Ok(read_raw()?.is_some())
+    }
+
     pub(super) fn read_stored_program() -> Result<Option<String>, String> {
         match read_raw()? {
             None => Ok(None),
@@ -785,6 +804,11 @@ mod backend {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("cannot read autostart .desktop: {e}")),
         }
+    }
+
+    /// Presence WITHOUT parsing (plan D13): the tolerant question the crash-recovery rearm asks.
+    pub(super) fn artifact_present() -> Result<bool, String> {
+        Ok(read_raw()?.is_some())
     }
 
     pub(super) fn read_stored_program() -> Result<Option<String>, String> {
@@ -871,6 +895,11 @@ mod backend {
         }
     }
 
+    /// Presence WITHOUT parsing (plan D13): the Run value exists, whatever its shape.
+    pub(super) fn artifact_present() -> Result<bool, String> {
+        Ok(read_raw()?.is_some())
+    }
+
     pub(super) fn read_stored_program() -> Result<Option<String>, String> {
         match read_raw()? {
             None => Ok(None),
@@ -903,16 +932,20 @@ mod backend {
 
     pub(super) fn enable_write(desired: &Path) -> Result<(), String> {
         write_quoted(desired)?;
-        // Explicit ON resets a Task-Manager OFF, exactly as auto-launch's enable() did.
+        // Explicit ON resets a Task-Manager OFF, exactly as auto-launch's enable() did: the key
+        // may legitimately not exist (tolerate the open error, as the crate does), but a FAILED
+        // WRITE is not tolerable — swallowing it would report an enable that leaves the entry
+        // Task-Manager-disabled, i.e. autostart silently off.
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         if let Ok(key) = hkcu.open_subkey_with_flags(STARTUP_APPROVED_KEY, KEY_SET_VALUE) {
-            let _ = key.set_raw_value(
+            key.set_raw_value(
                 APP_NAME,
                 &winreg::RegValue {
                     vtype: winreg::enums::RegType::REG_BINARY,
                     bytes: STARTUP_APPROVED_ENABLED.to_vec(),
                 },
-            );
+            )
+            .map_err(|e| format!("cannot clear the Task Manager startup override: {e}"))?;
         }
         Ok(())
     }
@@ -1002,23 +1035,24 @@ pub fn read_stored_target(desired: Option<&Path>) -> StoredTarget {
 }
 
 /// D13/D20: artifact present AND not platform-disabled (`StartupApproved` / `Hidden=true` /
-/// launchd `Disabled`). This is what the startup crash-recovery rearm and `prior_enabled` (D16)
-/// key off — NOT health: a Broken entry still means "the user wants autostart", and keying the
-/// rearm off health would stop protecting exactly the users whose entry broke.
+/// launchd `Disabled`). This is what the startup crash-recovery rearm and the updater's
+/// pre-install capture key off — NOT health: a Broken entry still means "the user wants
+/// autostart", and keying the rearm off health would stop protecting exactly the users whose
+/// entry broke.
+///
+/// Deliberately keyed on PRESENCE, not parseability: an entry we cannot parse still means the user
+/// asked for autostart (the removed plugin's existence-only `is_enabled()` said so too), so an
+/// odd artifact must not silently drop those users out of crash-recovery protection. Only a real
+/// I/O failure is `Err` — codex #7's "unknown state is not a confirmed off" still holds for that.
+/// The strict, never-write-what-we-don't-understand reading lives in [`read_stored_target`], which
+/// is what the heal keys off.
 pub fn intent_enabled(_app: &tauri::AppHandle) -> Result<bool, String> {
     intent_enabled_now()
 }
 
 /// `AppHandle`-free form of [`intent_enabled`] (L3 test surface).
 pub fn intent_enabled_now() -> Result<bool, String> {
-    let present = match backend::read_stored_program() {
-        Ok(None) => false,
-        Ok(Some(_)) => true,
-        // Unknown state must surface as Err (codex #7 at commands.rs — pretending "off" would
-        // silently skip the crash-recovery rearm while autostart is actually on).
-        Err(e) => return Err(e),
-    };
-    if !present {
+    if !backend::artifact_present()? {
         return Ok(false);
     }
     Ok(!backend::platform_disabled()?)
@@ -1034,12 +1068,23 @@ pub fn status(app: &tauri::AppHandle) -> Result<AutostartStatus, String> {
         })
         .unwrap_or(false);
     match read_stored_target(desired.as_deref()) {
-        StoredTarget::Unreadable { reason } => {
-            Err(format!("cannot read autostart state: {reason}"))
-        }
+        // An artifact we cannot PARSE is not an unknown state — we know it is there, and the user
+        // must keep both controls (OFF always works; explicit ON resets it). Only a real I/O
+        // failure reaches the caller as `Err`, which is what keeps the switch disabled on genuinely
+        // unknown state (codex #7). Reporting parse-strangeness as `Err` here left the switch
+        // permanently disabled with no way back — worse than the plugin it replaced.
+        StoredTarget::Unreadable { .. } => Ok(AutostartStatus {
+            intent_enabled: intent_enabled_now()?,
+            healthy: false,
+            unreadable: true,
+            points_elsewhere: false,
+            can_repair_now,
+            stored_path: None,
+        }),
         StoredTarget::Absent => Ok(AutostartStatus {
             intent_enabled: false,
             healthy: true,
+            unreadable: false,
             points_elsewhere: false,
             can_repair_now,
             stored_path: None,
@@ -1050,6 +1095,7 @@ pub fn status(app: &tauri::AppHandle) -> Result<AutostartStatus, String> {
         } => Ok(AutostartStatus {
             intent_enabled: intent_enabled_now()?,
             healthy: true,
+            unreadable: false,
             points_elsewhere,
             can_repair_now,
             stored_path: Some(redact_path(&program.to_string_lossy())),
@@ -1057,6 +1103,7 @@ pub fn status(app: &tauri::AppHandle) -> Result<AutostartStatus, String> {
         StoredTarget::Broken { program } => Ok(AutostartStatus {
             intent_enabled: intent_enabled_now()?,
             healthy: false,
+            unreadable: false,
             points_elsewhere: false,
             can_repair_now,
             stored_path: Some(redact_path(&program)),
@@ -1160,8 +1207,18 @@ pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> 
                     .to_string(),
             );
         }
-        let prior_enabled = intent_enabled_now()
-            .map_err(|e| format!("cannot determine current autostart state: {e}"))?;
+        // `prior_enabled` answers a NARROWER question than `intent_enabled`: "is there already a
+        // sound entry I must not recreate?" (C1 — recreating a good macOS plist strips KeepAlive).
+        // An `Absent` or unparseable artifact is NOT that, so explicit ON writes a fresh one —
+        // which is the documented reset path out of a corrupt entry, and is exactly what a user
+        // toggling the switch means. Snapshot rollback below still restores the prior bytes.
+        let prior_enabled = match read_stored_target(None) {
+            StoredTarget::Healthy { .. } | StoredTarget::Broken { .. } => {
+                !backend::platform_disabled()
+                    .map_err(|e| format!("cannot determine current autostart state: {e}"))?
+            }
+            StoredTarget::Absent | StoredTarget::Unreadable { .. } => false,
+        };
         // Snapshot for exact-prior rollback (strictly stronger than the plugin's delete-on-rollback).
         let snapshot = std::cell::RefCell::new(None);
         let snap_taken = std::cell::Cell::new(false);
@@ -1526,6 +1583,31 @@ mod tests {
             "C:\\Aztec Accelerator\\app.exe"
         );
         assert_eq!(resolve_first(&candidates, &|_: &str| false), None);
+    }
+
+    #[test]
+    fn desktop_quoted_exec_with_trailing_args_is_unreadable() {
+        // A user's `Exec="/opt/app" --minimized` must fail closed: the heal rewrites the whole
+        // Exec line, so classifying it as merely Broken would silently delete the flag. Matches
+        // the Windows reader's rule for the same shape.
+        assert!(desktop_exec_program("\"/opt/app\" --minimized").is_err());
+        assert!(desktop_exec_program("\"/opt/app\"  extra").is_err());
+        // A quoted program with trailing WHITESPACE only is still ours.
+        assert_eq!(desktop_exec_program("\"/opt/app\"  ").unwrap(), "/opt/app");
+    }
+
+    #[test]
+    fn startup_approved_zeroed_timestamp_still_reads_disabled() {
+        // The regression the flag-byte rule exists for: auto-launch's "last 8 bytes all zero"
+        // heuristic reads this as ENABLED, which would rearm crash recovery against an explicit
+        // administrator OFF (imaging/GPO tooling writes exactly this shape).
+        let disabled_zeroed = [0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(!startup_approved_blob_enabled(Some(&disabled_zeroed)));
+        // And the enabled flag with a non-zero tail is still enabled.
+        let enabled_with_tail = [
+            0x02, 0, 0, 0, 0x9a, 0xde, 0x9f, 0x3e, 0x9c, 0x5c, 0xd9, 0x01,
+        ];
+        assert!(startup_approved_blob_enabled(Some(&enabled_with_tail)));
     }
 
     #[test]

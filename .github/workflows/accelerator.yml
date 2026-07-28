@@ -631,6 +631,11 @@ jobs:
             exit 1
           }
           Write-Host "OK: the Windows app installs, launches, and serves /health on the runner"
+          # Explicit success: `schtasks /Delete` above is the last NATIVE command, and Actions
+          # appends `exit $LASTEXITCODE` to pwsh steps. Cmdlets don't reset $LASTEXITCODE, so a
+          # task that was never armed (schtasks exits 1) would fail this step despite every
+          # assertion passing.
+          exit 0
 
   # NOTE: the Windows updater-smoke (positive + negative) is PROVEN green and now lives in
   # the release pipeline (release-accelerator.yml), not per-PR — it builds 4 app versions,

@@ -199,6 +199,7 @@ function autostartStatus(overrides: Record<string, unknown>) {
   return {
     intentEnabled: false,
     healthy: true,
+    unreadable: false,
     pointsElsewhere: false,
     canRepairNow: true,
     storedPath: null,
@@ -296,6 +297,34 @@ test("turning OFF from a broken state still works (D17)", async ({ page }) => {
 
   const calls = await callsFor(page, "set_autostart");
   expect(calls.length).toBe(1);
+  expect(calls[0].args).toEqual({ enabled: false });
+});
+
+test("unreadable entry keeps the switch usable and says how to reset it", async ({ page }) => {
+  // An artifact we can't parse is NOT unknown state: the user must keep both controls. An earlier
+  // draft surfaced this as a command error, which left the switch permanently disabled with no
+  // way back — worse than the plugin it replaced.
+  await page.addInitScript(
+    (st) => {
+      (window as any).__TAURI_MOCK__.setHandler("get_autostart_enabled", () => st);
+    },
+    autostartStatus({ intentEnabled: true, healthy: false, unreadable: true, canRepairNow: true }),
+  );
+  await page.goto("/settings.html");
+
+  const toggle = page.locator("#autostart");
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).toBeChecked();
+  await expect(page.locator("#autostart-health-text")).toContainText("couldn't be read");
+  // No Fix: the heal deliberately never rewrites an artifact it cannot parse.
+  await expect(page.locator("#autostart-fix")).toBeHidden();
+
+  // The reset path is the switch itself.
+  await toggle.evaluate((el: HTMLInputElement) => {
+    el.checked = false;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const calls = await callsFor(page, "set_autostart");
   expect(calls[0].args).toEqual({ enabled: false });
 });
 

@@ -35,6 +35,7 @@ const defaults = {
   get_autostart_enabled: () => ({
     intentEnabled: false,
     healthy: true,
+    unreadable: false,
     pointsElsewhere: false,
     canRepairNow: true,
     storedPath: null,
@@ -46,6 +47,7 @@ const defaults = {
   repair_autostart: () => ({
     intentEnabled: true,
     healthy: true,
+    unreadable: false,
     pointsElsewhere: false,
     canRepairNow: true,
     storedPath: "…/Aztec Accelerator.app/Contents",

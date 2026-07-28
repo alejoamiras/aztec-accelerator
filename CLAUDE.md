@@ -11,7 +11,7 @@
 - **Linting/Formatting**: Biome (lint + format), shellcheck, actionlint, sort-package-json, OpenTofu fmt, cargo fmt (Rust)
 - **Commit hygiene**: Husky + lint-staged + commitlint (conventional commits)
 - **CI**: GitHub Actions (PR gates: `accelerator.yml`, `sdk.yml`, `app.yml`, `actionlint.yml`; deploy: `deploy-landing.yml`; publish (workflow_dispatch only): `publish-testnet.yml`; reusable: `_e2e.yml`, `_e2e-app.yml`, `_e2e-webdriver.yml`, `_publish-sdk.yml`, `_aztec-update.yml`; @aztec bump tooling (workflow_dispatch only, `merge_mode: none` leaves the PR open — F-008): `aztec-stable.yml`; release: `release-accelerator.yml`)
-- **Testing**: 9 WebDriver E2E tests (macOS + Linux) via `tauri-plugin-webdriver` + WebdriverIO, 28 Playwright UI mock tests, ~90 Rust unit tests, ~96 TS unit tests. WebDriver tests run as PR gate and pre-release gate.
+- **Testing**: 12 WebDriver E2E tests (macOS + Linux + Windows) via `tauri-plugin-webdriver` + WebdriverIO, 35 Playwright UI mock tests, ~110 Rust unit tests, ~96 TS unit tests, plus `#[ignore]`d real-OS integration suites run per-OS in CI (`trust_*`, `autostart_heal`). WebDriver tests run as PR gate and pre-release gate.
 - **TypeScript**: 6.0 with ES2025 target. Biome for lint/format.
 - **Release pipeline**: `validate → e2e-webdriver gate → build (3 Tauri + 4 headless platforms) → smoke → tag → release → bump-source`. Prerelease versions (`X.Y.Z-rc.N`) skip the S3 `latest.json` upload and `bump-source` jobs and are marked `--prerelease` on GitHub.
 - **Infrastructure** (`/infra/tofu`): S3 + CloudFront for static site hosting. CloudFront function routes by Host header: `aztec-accelerator.dev` → `/landing/`, `playground.aztec-accelerator.dev` → `/playground/`

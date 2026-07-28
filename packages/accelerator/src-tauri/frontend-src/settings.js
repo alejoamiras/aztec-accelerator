@@ -124,7 +124,12 @@ function renderAutostartStatus(st) {
   const fix = document.getElementById("autostart-fix");
   let message = "";
   let showFix = false;
-  if (st.intentEnabled && !st.healthy) {
+  if (st.unreadable) {
+    // The entry exists but we can't parse it (hand-edited, or rewritten by another tool). The heal
+    // deliberately never touches it, so the way out is an explicit reset — which the switch above
+    // still performs, because it reflects intent and OFF always works.
+    message = "Start on Login's entry couldn't be read. Turn it off and on again to reset it.";
+  } else if (st.intentEnabled && !st.healthy) {
     if (st.canRepairNow) {
       message = "Start on Login points to a file that no longer exists.";
       showFix = true;
