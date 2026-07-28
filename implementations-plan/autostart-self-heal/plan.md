@@ -4,9 +4,10 @@
 `xhigh`), `plan-fable.md` (top-tier Claude planning subagent), and the main agent's own draft.
 Grounded in `recon.md` (Phase 0.4), whose constraints are cited as **C1**–**C8**.
 
-**Revision 4** — post-double-audit. Codex returned **reject** (6 blocking) and fable
-**conditional-approve** (5 blocking); both are folded. See §12. Status: **draft — pre-final-codex-pass.**
-Not approved.
+**Revision 5** — post-final-codex-pass. Its three sound blocking findings are folded; its fourth is
+**refuted with repo-measured evidence** (see `audit-codex-final.md`). Its scope recommendation — split
+this into three pieces — is adopted and is the open question at the gate (§11).
+Status: **draft — awaiting owner approval.**
 
 ---
 
@@ -35,7 +36,10 @@ the relocation trigger, which is a fresh-install scenario.
    read and our write cannot be defended against. What *is* guaranteed is that our own OFF and our own
    heal cannot interleave, because every owned mutation takes the same lock.
 5. Autostart artifact content is asserted by tests — on all three OSes — where today **nothing is**.
-6. A heal cannot fire inside the Windows NSIS install window (D18).
+6. A heal cannot fire inside the Windows NSIS install window (D18) — **bounded by the marker's
+   deadline.** Stated as a bound rather than an absolute, because the final codex pass is right that an
+   installer still alive past the deadline reopens the window, and every test at normal installer
+   duration would pass while that remained unsaid.
 
 ---
 
@@ -146,6 +150,25 @@ While a live marker exists: no process heals, no process rearms, **and no proces
    literally**: it deadlocked against "no process rearms while a marker is live", and under an OFF
    intent it could never be satisfied at all. **The removal transaction is explicitly exempt from the
    no-rearm rule** — that exemption was the missing piece, and both audits found its absence.
+
+**The lock graph, specified (r5 — final codex, finding 2).** r4 named the locks but never ordered them,
+leaving an owned race with no durable exit: candidate N reads intent ON; the user concurrently turns it
+OFF (deleting the Run value and disarming the task); N then arms recovery from its **stale** read and
+removes the marker. Final state — intent OFF but the crash-recovery task armed, and since later
+startups see OFF, nothing ever disarms it. Therefore:
+
+- The **removal transaction holds `autostart.lock` continuously** across intent-read → recovery
+  reconciliation → marker removal. No re-read gap.
+- **Updater disarm → marker creation takes the same lock in the same order.**
+- **Explicit ON is rejected while a marker is live; explicit OFF stays allowed** (OFF is always
+  available — D17).
+
+**The completion token is transaction-bound (r5 — final codex, finding 3).** A bare POSTINSTALL token
+proves only that execution *reached* that point, not that the installer exited, and with no nonce a
+**stale token from an earlier same-version attempt satisfies a later retry**. So the marker carries a
+unique **transaction ID**, and the installer hook atomically acknowledges *that* ID; the hook is
+update-only; token cleanup and failure/retry semantics are explicit. A token write that fails after a
+successful install must still have a safety-preserving exit — expiry alone merely reopens the race.
 
 **The TTL is a liveness heuristic, never a safety backstop.** Both audits: an installer hung past the
 TTL reopens the exact `P`-absent race. It exists only to recover orphaned/corrupt markers. The deadline
@@ -630,18 +653,23 @@ treatment the origin rendering received in PR #421.
 **TOCTOU / symlink.** Refuse a symlinked plist or `.desktop`; same-dir temp + `rename`, `0600`. The
 NSIS-window TOCTOU codex identified is closed by D18.
 
-**Auditability, and privacy (D24, r4).** Every heal logs `from`→`to` at `info` — but codex is right
-that `textContent` (F-B2) solves *injection*, not *privacy*. Both `stored_path` in the UI and the
-transition log expose full usernames and home paths that §5's copy does not need. Redact to the
-basename plus an elided ancestor.
+**Auditability, and privacy (D24; sharpened in r5).** Every heal logs `from`→`to` at `info` — but
+`textContent` (F-B2) solves *injection*, not *disclosure*. Both `stored_path` and the transition log
+expose full usernames and home paths that §5's copy does not need. **Redact in Rust, before the value
+crosses IPC** — not in the webview. The frontend never needs the untruncated path, so it should never
+receive it.
 
-**The marker is a new attack surface (D23, r4 — both audits).** It is same-user-writable and its whole
-purpose is to *suppress* healing and crash-recovery rearming, so an attacker who can write it gains
-**renewable suppression** of both. This is an **availability** effect, not privilege escalation — the
-same actor could simply delete the Run value — and it is stated that way rather than dressed up.
+**The marker is a new attack surface (D23; r5 correction).** It is same-user-writable and its whole
+purpose is to *suppress* healing and crash-recovery rearming — and, with D22, **to suppress updates**.
+r4 called this "no worse than deleting the Run value". **That was wrong**, and the final codex pass
+caught it: an attacker who can write the marker gains renewable suppression of **security updates**,
+which deleting a Run value does not. Still an availability effect rather than privilege escalation, but
+a materially broader one, and it is now stated that way.
+
 Controls: owner-private ACLs, bounded reads, reparse-point/symlink refusal, defined handling for
 future-dated values, and an absolute deadline stored **inside** the validated payload so mtime forging
-cannot extend it.
+cannot extend it. **The NSIS hook's token destination needs its own reparse-point/junction check** —
+Rust-side no-follow logic does not protect a path the installer writes.
 
 **Least privilege on the new dispatch trigger — r3's claim was WRONG, corrected in r4 (codex).** r3
 asserted that using an ephemeral key on the dispatch path keeps the production signing key away from a
@@ -656,9 +684,10 @@ production-signed Actions artifact.
 
 ## 10. Known limits (stated, not solved)
 
-- **"Resolves" ≠ "will launch."** D20 reads the three first-class disable overrides, but desktop
-  environments can suppress a `.desktop` in ways we do not model, and launchd has session/domain state
-  beyond the `Disabled` key. The taxonomy is about the *stored pointer*, not a launch guarantee.
+- **"Resolves" ≠ "will launch."** D20 reads the three first-class disable overrides, but a `.desktop`
+  can also be suppressed by `OnlyShowIn`, `NotShowIn` and `TryExec`, and launchd disable state can live
+  outside the plist. The taxonomy is about the *stored pointer*, not a launch guarantee — which is why
+  criterion 2 is worded as "never a bare, unqualified ON", not "never wrong".
 - **macOS session gap** (§4.7): the loaded launchd job is not reloaded. Repaired at next login.
 - **L7 covers macOS + Linux only**; Windows end-to-end rests on L6 + L8.
 - **L8 is dispatch-gated, not PR-gated.** It proves the updater-window property on demand, not on
@@ -669,6 +698,34 @@ production-signed Actions artifact.
   the same actor could delete the Run value outright.
 - **The `AztecAccelerator` rename must ship after this**, not before: it changes the install dir and
   exe name, which is precisely the marker's "expected path" (fable).
+
+---
+
+## 11a. THE OPEN QUESTION — split into three? (r5)
+
+The final fresh-context codex pass recommends splitting, and the reasoning is hard to argue with: this
+began as *"revalidate a stored path at startup"* and now also carries plugin removal, three owned
+readers/writers, a cross-process marker, a **new production NSIS hook**, marker-awareness inside
+`perform_update`, a new lock, and a workflow that builds two Tauri apps. **Every addition traces to a
+real reviewer finding — which is precisely how a plan becomes too large to land safely.**
+
+The proposed split:
+
+| Piece | Contents | Carries |
+|---|---|---|
+| **1 — core autostart fix** | owned readers/writers, plugin removal, **quoting** (§9), intent/health status + UI, `repair_autostart`, `autostart.lock`; L1–L7 | **The entire user-facing fix**, and the security fix |
+| **2 — Windows updater transaction hardening** | marker (D18), completion token (D21), update suppression (D22), recovery reconciliation, the lock graph | Closes the update-window hole |
+| **3 — updater-test infrastructure** | dispatch workflow, synthetic builds, real N−1 fixture, signing isolation | Proves piece 2; should not enlarge the product PR |
+
+Codex proposed proving the installer lifecycle first and, if the gap is real, landing **2 before 1**.
+The gap **is** real — `hooks.nsi:5-31` records it as wine-measured and it is pinned by a PR-gated
+Windows test — so D18 is not hypothetical. But "2 before 1" is not the only safe order: piece 1 can
+ship with the **automatic** Windows heal gated off (macOS/Linux auto-heal and the all-platform Fix
+button ship immediately; the Windows *quoting* fix is at enable time, so Windows still gets the
+security fix), then piece 2 lands and switches it on.
+
+This supersedes the r3 answer to Q1 — that decision was made when the marker was "roughly one extra
+phase", and it is now materially larger.
 
 ---
 
@@ -742,3 +799,29 @@ the change map named **no marker removal call site**; the queued rename would st
 marker; L3/L7 on Windows cannot isolate `HKCU` via `$HOME`; L7's Windows exclusion is a choice, not an
 impossibility; **and the highest-value missing test — nothing anywhere actually *executes* a healed
 entry**, so the quoting fix was proved only against our own model.
+
+**r5 — final fresh-context codex pass (verdict: reject; a NEW session given the plan plus the entire
+decision trail).**
+
+*Refuted, with repo evidence:* its finding 1 claimed Tauri's `/UPDATE` path skips the previous
+uninstaller, which would mean L8's barrier sits at a hook production never runs — and that the
+`P`-absent interval may not exist, making D18 hypothetical. `nsis/hooks.nsi:5-31` records the opposite,
+and not from documentation: PR #375 shipped a guard on an equally plausible wrong assumption, CI caught
+it, and the corrected behaviour was **measured under wine** and is pinned by a PR-gated test on a real
+`windows-latest` runner. The old uninstaller does run on the in-app update path. What is adopted from
+the finding is its methodological point: L8 now **asserts** `P` is non-resolving at the barrier rather
+than assuming it.
+
+*Adopted:* the lock graph, which r4 named but never ordered — leaving a race where N arms recovery from
+a stale intent read and strands an armed task under an OFF intent (finding 2); a transaction-ID nonce
+binding the completion token to one marker creation, since a stale same-version token would otherwise
+satisfy a later retry (finding 3); and honest wording for criterion 6, which was absolute while the
+deadline makes it bounded (finding 4).
+
+*Non-blocking, adopted:* the marker suppresses **security updates** too, so r4's "no worse than deleting
+the Run value" was wrong; `stored_path` is redacted **in Rust before crossing IPC**, not in the webview;
+the NSIS token destination needs its own reparse-point check; Linux `OnlyShowIn`/`NotShowIn`/`TryExec`
+join the known limits; and with a zero install base, legacy unquoted-value interpretation is **test-only**
+rather than production migration logic.
+
+*Scope:* split into three (§11a) — now the open question at the gate.
