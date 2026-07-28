@@ -4,7 +4,8 @@
 `xhigh`), `plan-fable.md` (top-tier Claude planning subagent), and the main agent's own draft.
 Grounded in `recon.md` (Phase 0.4), whose constraints are cited as **C1**–**C8**.
 
-Status: **draft — pre-contradiction-check.** Not approved.
+**Revision 2** — post-contradiction-check. Both reviewers' findings folded; see §12 for the change
+log. Status: **draft — pre-double-audit.** Not approved.
 
 ---
 
@@ -22,20 +23,22 @@ the relocation trigger, which is a fresh-install scenario.
 
 1. An entry whose stored target no longer resolves is repaired at next launch, without user action,
    without recreating the artifact, and **without stripping macOS `KeepAlive`** (C1).
-2. Settings never shows ON for an entry that will not launch. When it cannot self-repair, it says so
-   and offers the action that will.
+2. **Settings never shows a bare, unqualified ON for an entry that will not launch.** The switch
+   reflects the user's *intent*; an adjacent warning row carries *health* and the action that fixes
+   it. Turning it OFF always works. (Revised in r2 — see D17; the r1 wording implied an unchecked
+   switch for a broken entry, which took away the user's only OFF control.)
 3. A freshly-enabled Windows entry is **quoted** (§9 — today's unquoted value is a live same-user
-   persistence hijack).
-4. The heal can never *create* an autostart entry, on any path, in any state.
+   persistence-hijack primitive).
+4. **No Aztec code path can resurrect an entry that was `Absent` at its locked read.** Narrowed in r2:
+   an absolute guarantee is impossible — a foreign process deleting the artifact between our locked
+   read and our write cannot be defended against. What *is* guaranteed is that our own OFF and our own
+   heal cannot interleave, because every owned mutation takes the same lock.
 5. Autostart artifact content is asserted by tests — on all three OSes — where today **nothing is**.
+6. A heal cannot fire inside the Windows NSIS install window (D18).
 
 ---
 
 ## 3. Decision ledger
-
-The three legs converged on far more than they disputed. Convergence is recorded because two
-independent agents reaching the same answer without seeing each other is the strongest signal this
-protocol produces.
 
 ### 3.1 Converged (independent agreement, adopted)
 
@@ -44,26 +47,31 @@ protocol produces.
 | **D1** | **Heal iff the stored target does not resolve.** Never "differs from my `current_exe()`." | codex + fable, independently — both rejected the main agent's framing |
 | **D2** | Never call the plugin's `enable()` in a heal; patch the artifact **in place** | codex + fable |
 | **D3** | `get_autostart_enabled` returns a **structured status**, not a bare bool | codex + fable |
-| **D4** | Own the per-platform readers/writers; atomic same-dir temp + `rename`; quote and escape everything | codex + fable |
+| **D4** | Own the per-platform **readers**; atomic same-dir temp + `rename`; quote and escape everything | codex + fable — **but see the honesty note below** |
 | **D5** | Add a bare `cargo test` to a macOS CI leg — recon's **BONUS BUG** (no macOS job compiles `#[cfg(test)]`, so three `patch_plist_*` tests have never run anywhere) | codex + fable |
 | **D6** | **Drop the wine-Rust spike as a merge gate** (recon measured exit 53) | codex + fable, same reasoning: `windows-latest` already tests production code faithfully |
+
+**Ledger honesty note (r2, raised by fable).** D4 as written in r1 **overstated the convergence**.
+Fable owned the readers and the *heal* writer but kept the plugin's **enable-time** writer. "Own the
+writers" was therefore the substance of Fork A, not a converged point. Only the readers genuinely
+converged.
 
 **D1 is the load-bearing decision.** The main agent's diff-based framing creates a regression worse
 than the bug: a leftover copy in `~/Downloads`, double-clicked once, repoints a healthy
 `/Applications` entry at a file the user is about to delete. Resolve-based healing is a strict
-repair — it only ever replaces a *dead* pointer with a *live* one. It is also **convergent**: every
-writer writes a path that exists, so racing writers agree, which dissolves the flip-flop race
-(recon §G) with no new coordination primitive.
+repair — it only ever replaces a *dead* pointer with a *live* one. It works for the target case
+precisely because Finder's drag is a **move**. If the user *copies* instead, both exist, nothing
+heals, and autostart still launches a working app.
 
-It works for the target case precisely because Finder's drag is a **move** — the old path stops
-resolving. If the user *copies* instead, both exist, nothing heals, and autostart still launches a
-working app. Correct outcome, no write.
+Note carefully what D1 does **not** buy, which r1 wrongly assumed: convergence holds only when the
+stored target is *permanently* dead. It does **not** hold when the target is *transiently* absent —
+which is exactly what NSIS does mid-install. See D18.
 
 ### 3.2 Forks resolved
 
 **Fork A — keep the plugin (fable) vs remove it entirely (codex). → Remove. (D7)**
 
-Codex's framing wins, but on an argument neither leg made explicitly:
+Codex's position wins, on an argument neither leg made explicitly:
 
 > **The plugin's `enable()` *is* the unsafe serializer.** `auto-launch-0.5.0/src/windows.rs:37-43`
 > writes `format!("{} {}", app_path, args)` — unquoted. Keeping the plugin for enable means the
@@ -71,93 +79,111 @@ Codex's framing wins, but on an argument neither leg made explicitly:
 > repairs it after the path has already broken. Fable's own security finding (§9) is therefore only
 > half-fixed by fable's own plan.
 
-Everything else follows: we must own three readers anyway (C: the plugin cannot report the stored
-path — `AutoLaunchManager` exposes only `enable`/`disable`/`is_enabled`, and the in-memory
-`get_app_path()` is rebuilt from `current_exe()` every launch and never forwarded). Once the readers
-and safe writers are ours, what remains of the plugin is exactly: unsafe serialization, existence-only
-status, and `dirs::home_dir().unwrap()` on Linux (C8). Verified cost of removal: **5 call sites**
-(`commands.rs:51,55`, `commands.rs:445-446`, `main.rs:556`, `main.rs:609,614`), plus
-`updater.rs:362-371`. The frontend never invokes `plugin:autostart|*` — grep-confirmed — and the
-capability files already grant no autostart permissions (`capabilities/settings.json:4`), so removal
-is **frontend-invisible** apart from the new status shape.
+Fable's contradiction-check conceded this "decisively" after verifying the plugin surface itself.
 
-**Fork B — updater-window guard: non-blocking lock (fable) vs `update-disarmed.json` marker (codex).
-→ Take the lock; explicitly do NOT claim it closes the Windows gap; defer the marker. (D8)**
+Supporting evidence found during consolidation: `winreg` appears **twice** in `Cargo.lock` — `0.10.1`
+pulled by `auto-launch`, and `0.55.0` already present via another path. Removing the plugin therefore
+**drops** a crate rather than adding one.
 
-Both legs are partly right, and the consolidated position disagrees with both.
+**Cost accounting (corrected in r2 — codex found three omissions).** Removal touches
+`commands.rs:51,55,445-446`, `main.rs:23,556-557,609,614`, `updater.rs:364-365`. Adding
+`repair_autostart` *additionally* requires:
+- **`src-tauri/build.rs:143-165`** — the app-manifest command list. This is **ALL-OR-NOTHING**: Tauri
+  only enforces the per-window ACL for app-local commands when the manifest exists, so a command
+  omitted here silently escapes the F-012 trust boundary. Verified.
+- **`scripts/tauri-trust-boundary.test.ts:145,147`** — a static command set mirroring the above.
+- **Centralized app-name derivation.** With the plugin gone, `package_info().name` semantics must be
+  preserved in exactly one helper feeding all three writers *and* the artifact filename, or the three
+  platforms will drift.
 
-- Fable is right that the primitive exists: recon §F's "no instance-coordination primitive exists" is
-  **false**. `updater.rs:44 acquire_updater_lock()` is a real cross-process `fs2` exclusive lock, held
-  from `:272` across the Windows disarm at `:379` through `app.restart()` at `:434`.
-- Codex is right that **the lock provably dies on Windows** — the only platform with a disarm window.
-  `tauri-plugin-updater`'s `install()` calls `std::process::exit(0)` after dispatching the installer,
-  and the repo already knows it: `updater.rs` comments *"Windows never reaches here — install()
-  dispatched the installer and exited the process."* The lock releases at process exit while NSIS
-  keeps mutating files.
-- **But the marker is fixing a different bug.** What is hazardous inside that window is the
-  **crash-recovery rearm** at `main.rs:607-625` — a *pre-existing* defect (recon §G), untouched by
-  this plan. The **heal itself is safe in that window** by construction: it writes only a path that
-  (a) exists at write time and (b) belongs to a live process, and it is convergent. Walking the
-  Windows update sequence: a process starting mid-NSIS from the old exe finds the entry still
-  resolving (no heal); once NSIS has removed the old exe, no process can start from it at all.
+No hidden bundler dependency, no granted plugin ACL, no JS guest package — both reviewers confirmed
+independently. `e2e/tauri-mock.js:33` returns a bare bool and is already in the change map.
 
-So: promote `acquire_updater_lock` to `pub(crate)`, take it non-blocking around the read-modify-write
-(genuine serialization on macOS/Linux, cheap everywhere), and **state plainly that it does not close
-the Windows post-`install()` gap**. Codex's marker is the right fix for the crash-recovery rearm race
-and is recorded as **scope question Q1** (§11) rather than silently absorbed or silently dropped.
+**Fork B — updater-window guard. → REVERSED IN r2: codex's marker goes IN. (D18)**
 
-Note also that codex's "corrupt markers fail closed" is a permanent brick: a catastrophic NSIS failure
-would leave crash recovery disarmed forever. If Q1 is taken, the removal rule must be *"any process
-whose own path canonicalizes to the marker's expected install path may remove it"* — not
-version-matching — plus a TTL backstop.
+r1 deferred the marker, arguing the heal was safe in the NSIS window by construction. **Codex broke
+that claim with a concrete interleaving, and it is correct:**
 
-**Fork C — Linux config dir: mirror `auto-launch`'s hardcoded `$HOME/.config` (fable) vs honour
-`XDG_CONFIG_HOME` (codex). → Honour XDG. (D9)**
+> NSIS removes installed path `P`. The Run value still targets `P`. A second copy `Q` — a legitimate
+> separate copy, e.g. in `~/Downloads` — is launched. Startup reconciliation in `Q` sees `P` broken
+> and `Q` live, and writes `Q`. NSIS then restores `P`. Later the user deletes `Q`, and autostart is
+> broken.
 
-This fork was never independent: fable was *forced* to mirror the hardcoded path only because it kept
-the plugin, and reading a different file than the plugin writes would be a correctness bug. Removing
-the plugin (D7) frees the choice, and then `dirs::config_dir()` is right on all three counts — it
-matches the freedesktop autostart spec, it matches what `crash_recovery.rs:246` already does for the
-systemd unit, and it removes C8's `.unwrap()` panic. **Test isolation must set both `$HOME` and
-`XDG_CONFIG_HOME`**, since on a normal dev host they coincide and a wrong-directory bug is invisible.
+r1's walk considered only a process starting from the *old* path, never **a process starting from a
+different live path**. D1 does not save us here: the entry genuinely *is* broken at that instant,
+because NSIS deleted `P` transiently. Codex additionally notes the desired-path existence check and
+the registry write are not atomic against NSIS deletion — the same window, as a TOCTOU.
 
-**Fork D — state taxonomy. → Codex's sharper taxonomy, collapsed to one healing branch. (D10)**
+So **the marker protects autostart itself, not merely crash recovery**, and the r1 rationale for
+deferring it does not survive. Fable's contradiction-check reached the opposite verdict, but it
+worked through the same incomplete case set r1 did; codex's counterexample is strictly more general.
+
+**Design (both reviewers' corrections folded).** Windows-only — macOS/Linux `perform_update` holds
+the lock across `app.restart()`, so they are already covered; the marker exists *only* because
+Windows `install()` calls `std::process::exit(0)` and the lock dies with the process.
+
+- Written atomically after confirmed disarm, before `install()`, at
+  `~/.aztec-accelerator/update-in-progress.json` (renamed from codex's `update-disarmed.json`, since
+  it now guards two things). Contains the candidate version and the canonical expected install path.
+- While a marker is live, **no process heals and no process rearms**.
+- **Removal requires all three:** matching candidate version **AND** canonical expected install path
+  **AND** a successful rearm. r1 proposed path-only removal; codex correctly rejected it — on Windows
+  the old and new versions normally run from the *same* install path, so a surviving old process could
+  remove the marker mid-NSIS.
+- **Corrupt or stale markers expire** on filesystem age against a conservative TTL. Codex's original
+  "corrupt markers fail closed" is withdrawn by its own author — permanent fail-closed bricks crash
+  recovery forever after a catastrophic NSIS failure.
+
+**Fork C — Linux config dir. → Honour `XDG_CONFIG_HOME`. (D9)**
+
+This fork was never independent: fable was *forced* to mirror `auto-launch`'s hardcoded `$HOME/.config`
+only because it kept the plugin, and reading a different file than the plugin writes would be a
+correctness bug. D7 frees the choice, and `dirs::config_dir()` is then right on all three counts — the
+freedesktop autostart spec, parity with `crash_recovery.rs:246`, and eliminating C8's `.unwrap()`
+panic. Conceded by fable. **Test isolation must set both `$HOME` and `XDG_CONFIG_HOME`**, since on a
+dev host they coincide and a wrong-directory bug is invisible.
+
+**Fork D — state taxonomy. → Codex's taxonomy, one healing branch. (D10)**
 
 ```
-Absent      no entry                              → NEVER heal (never resurrect)
+Absent      no entry                                → NEVER heal (never resurrect)
 Healthy     stored target resolves to an executable → never heal
               └ points_elsewhere: bool  (canonicalized ≠ ours — drives Settings copy ONLY)
-Broken      parsed fine, target does not resolve   → THE ONLY HEALABLE STATE
-Unreadable  I/O or parse failure                   → never heal, never write
+Broken      parsed fine, target does not resolve    → THE ONLY HEALABLE STATE
+Unreadable  I/O or parse failure                    → never heal, never write
 ```
-
-Codex named `healthy-different` explicitly ("a healthy-different entry is not silently stolen by
-whichever copy launched last"); fable implied it via D1 without naming it. Adopted as a **flag on
-`Healthy`, not a fifth state** — it changes no behaviour, only what Settings says.
 
 ### 3.3 Decisions the consolidation made against both legs
 
 | # | Decision | Why |
 |---|---|---|
-| **D11** | **Windows writes `current_exe()` verbatim, never canonicalized.** Canonicalize only for comparison. | Codex specified "canonicalized `current_exe()`" for Windows. On Windows `canonicalize()` yields an extended-length `\\?\C:\…` path; writing that into the Run key is not a value Explorer should be handed. `current_exe()` is already absolute. |
-| **D12** | **The existence precondition applies to the *desired* path, not `current_exe()`.** | Fable's step 1 checks `current_exe()`. Under a Linux AppImage those differ: `tauri/src/process.rs:48-51` `current_binary()` prefers `env.appimage`, and `current_exe()` points inside the ephemeral `/tmp/.mount_XXXX` squashfs that vanishes at exit. Checking the wrong one would let the heal write a path guaranteed to break. (The plugin itself already uses `app.env().appimage` — `tauri-plugin-autostart/src/lib.rs:214-222` — so this is matching existing behaviour, not inventing it.) |
-| **D13** | **The startup crash-recovery rearm keys off entry *presence* (intent), not health.** | With D3, a `Broken` entry reports `enabled: false`. Naïvely feeding that to `main.rs:614` would **stop** rearming crash recovery for exactly the users whose entry is broken — a regression introduced by the honesty fix. Rearm iff the entry is present; `Unreadable` warns and skips, matching today's `Err` branch byte-for-byte. |
-| **D14** | **Status carries `can_repair_now`.** | Fable correctly identifies relocation-*while-running* as the common case, and correctly reports it honestly — but its **Fix** button would silently no-op there, because our own desired path doesn't resolve either (macOS `_NSGetExecutablePath` returns the original, now-dead path). The UI must show **Fix** only when repair can actually succeed, and otherwise *"Reopen Aztec Accelerator from its new location to repair."* |
-| **D15** | **No `plist` runtime dependency; hand-rolled fail-closed transform, with `plist` as a *dev*-dependency used as a differential oracle in tests.** | Codex wanted `plist = "1.8"` in production; fable refused any new dep (supply-chain surface, and `crash_recovery.rs:168-183 patch_plist_with_keepalive` is existing precedent). Split the difference: no new runtime attack surface, but a real independent parser asserting in tests that what we write is valid plist and round-trips — which is exactly the oracle that catches escaping bugs, and which neither leg had. |
+| **D11** | **Windows writes `current_exe()` verbatim, never canonicalized.** Canonicalize only for comparison. | Codex had specified canonicalized, and concedes. Rust's `canonicalize()` can yield an extended-length `\\?\C:\…` path. **Softened in r2:** the plan does *not* claim Explorer rejects such values — Microsoft warns only that shell components *may* not interpret extended paths, and Run values are additionally bounded at 260 chars. Compatibility is **unproven**, which is a reason to avoid it and to prove the written value natively (L6), not a reason to assert failure. |
+| **D12** | **The existence precondition applies to the *desired* path, not `current_exe()`.** | Under a Linux AppImage they differ: `tauri/src/process.rs:48-51` prefers `env.appimage`, and `current_exe()` points inside the ephemeral `/tmp/.mount_XXXX` squashfs that vanishes at exit. The plugin already does this (`tauri-plugin-autostart/src/lib.rs:214-222`). Fable conceded this was a real bug in its own leg. |
+| **D13** | **Intent ≠ presence. Define `intent_enabled` = artifact present AND not platform-disabled**, and key the startup crash-recovery rearm off *that*. | **Both reviewers flagged r1's "bare presence" as a real contradiction.** On Windows `auto-launch/windows.rs:73-95` combines Run-value presence with `StartupApproved`; bare presence would arm the schtasks relauncher against an explicit user OFF, at every launch and after every update — contradicting §4.5's own "TM-disabled stays disabled". The r1 *motivation* is verified correct: keying the rearm off *health* would stop protecting exactly the Broken-entry users whenever a heal fails. |
+| **D14** | **Status carries `can_repair_now`.** | Fable's Fix button would silently no-op when the app was relocated *while running*: macOS `current_exe()` is the exec-time `_NSGetExecutablePath` snapshot, so it goes stale on a move. Both reviewers confirmed. Codex adds: Linux `/proc/self/exe` follows same-filesystem moves, so `can_repair_now` is usually **true** there. |
+| **D15** | ~~No `plist` runtime dep~~ → **REVERSED in r2. Use `plist` in production for the macOS reader/writer.** | r1's rationale was **factually false**, and I adopted it without checking. `tauri-utils/Cargo.toml:149` declares `[dependencies.plist] version = "1"` — unconditional, non-optional — and `tauri` depends on `tauri-utils`. `plist 1.8.0` is therefore already compiled in every build on every platform, at exactly the version codex proposed; a direct dependency adds **zero crates**. Codex further notes a hand-rolled scanner would *reject binary plists* and buys byte-for-byte formatting preservation when the actual requirement is only semantic key preservation. Linux `.desktop` and Windows registry stay hand-rolled — small, line-oriented formats with no equivalent parser already present. |
+| **D16** | **`prior_enabled` := `intent_enabled`.** | New in r2. `commands.rs:462-464` computes `prior_enabled` from the plugin; under D7 it becomes ours and was undefined. It **must** be intent: if it were the health-aware flag, a `Broken` entry would read `false` and send `enable_transaction` down the full `plugin_enable` path — **recreating the macOS plist and stripping `KeepAlive`, the exact operation C1 forbids.** This makes a dedicated `repair_autostart` *structurally necessary*, not merely nicer UX. |
+| **D17** | **The Settings switch reflects intent; a warning row carries health; OFF always works.** | New in r2, from codex. r1 rendered a `Broken` entry as an *unchecked* switch while D13 treated intent as still on — so the user could not turn it OFF (clicking an unchecked switch sends ON), and `can_repair_now:false` offered no action at all. Status honesty must not cost the user their only control. |
+| **D18** | **The updater marker is in scope.** | See Fork B. Reversed from r1. |
+| **D19** | **Every owned mutation takes the same lock, `set_enabled` included.** | New in r2, from codex. r1 specified the lock only around the heal. Without it, another instance can process an OFF between our locked read and our `rename`/`set_value`, and the heal resurrects the entry — violating success criterion 4. |
+| **D20** | **Read each platform's disable override, not just Windows'.** | New in r2, from codex's "resolves ≠ will launch". Linux `.desktop` has `Hidden=true`; macOS launchd has a `Disabled` key. These are the direct analogues of Windows `StartupApproved`, and reading all three makes `intent_enabled` uniform instead of Windows-special. Known limit retained in §10. |
 
 ### 3.4 Rejected
 
 | Rejected | Why | Whose |
 |---|---|---|
 | Diff-based healing (`stored != current_exe()`) | §3.1 D1 — regression worse than the bug | main agent's original framing |
-| `manager.enable()` / disable→enable to heal | C1: macOS `enable()` recreates the plist from scratch, stripping `KeepAlive`/`ThrottleInterval` | prior rejected rounds |
-| `launchctl unload`/`load` after patching | `load` with `RunAtLoad` immediately spawns a second instance | fable |
-| `tauri-plugin-single-instance` | App-wide launch-semantics change, out of scope, and unnecessary once healing is convergent | fable |
-| A new dedicated `desktop-state.lock` | `updater.lock` already exists, is reviewed, and adding a second lock adds a second stale-lock failure mode | codex |
-| Periodic / filesystem-watcher healing | One-shot per process is what makes flip-flop structurally impossible | fable |
+| `manager.enable()` / disable→enable to heal | C1: macOS `enable()` recreates the plist, stripping `KeepAlive`/`ThrottleInterval` | prior rejected rounds |
+| `launchctl unload`/`load` after patching | `load` with `RunAtLoad` immediately spawns a second instance | fable — but see the §4.7 gap this leaves |
+| Toggle-ON as the repair path | Unledgered fork in r1 (codex proposed it, fable proposed the Fix button). D16 settles it: toggle-ON on a `Broken` entry hits the `prior_enabled` skip. Off→on remains the correct route for `points_elsewhere`, where recreation is desired. | codex |
+| `tauri-plugin-single-instance` | App-wide launch-semantics change, out of scope | fable |
+| A new dedicated `desktop-state.lock` | `updater.lock` already exists and is reviewed; a second lock adds a second stale-lock failure mode | codex |
+| Path-only marker removal | Old and new versions run from the same install path on Windows | r1's own amendment, rejected by codex |
+| Permanent fail-closed on a corrupt marker | Bricks crash recovery forever after a catastrophic NSIS failure | codex's original, withdrawn by its author |
+| Periodic / filesystem-watcher healing | One-shot per process; the marker (D18) now handles the transient-absence case | fable |
 | SMAppService (macOS) | Larger product/distribution change; does not solve the cross-platform problem | codex |
 | Migration / legacy-format code | Owner: zero install base | owner, Phase 0 |
-| Wine-Rust spike as a merge gate | Recon measured exit 53; `windows-latest` tests production code faithfully, and a green wine result on `CreateProcess` heuristics would be *misleading* | codex + fable |
+| Wine-Rust spike as a merge gate | Recon measured exit 53; a green wine result on `CreateProcess` heuristics would be *misleading* | codex + fable |
 
 ---
 
@@ -165,16 +191,16 @@ whichever copy launched last"); fable implied it via D1 without naming it. Adopt
 
 ### 4.1 Proposed architecture
 
-One new module, `packages/accelerator/src-tauri/src/autostart.rs`, owning the whole surface the
-plugin used to own. Split in two layers:
+One new module, `packages/accelerator/src-tauri/src/autostart.rs`, owning the whole surface the plugin
+used to own, split in two layers:
 
 - **Pure layer — not `#[cfg]`-gated.** All three platforms' parsers, serializers and classifiers
-  compile and unit-test on Linux CI. This is the single biggest testability win: today *no* test on
-  *any* platform asserts what the app writes to an autostart entry.
-- **I/O layer — `#[cfg]`-dispatched.** Thin: locate artifact, read bytes, write bytes atomically.
+  compile and unit-test on Linux CI. The single biggest testability win: today *no* test on *any*
+  platform asserts what the app writes to an autostart entry.
+- **I/O layer — `#[cfg]`-dispatched.** Thin: locate artifact, read, write atomically.
 
 Matches repo convention §H (pure logic factored out, closure-injected, inline `#[cfg(test)] mod
-tests`) — the same shape as `enable_transaction`, `systemd_exec_start`, `classify_launch_https`.
+tests`) — the shape of `enable_transaction`, `systemd_exec_start`, `classify_launch_https`.
 
 ### 4.2 Key interfaces
 
@@ -189,8 +215,8 @@ pub enum StoredTarget {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutostartStatus {
-    pub enabled: bool,           // entry present AND target resolves
-    pub broken: bool,            // entry present, target does not resolve
+    pub intent_enabled: bool,    // D13: artifact present AND not platform-disabled
+    pub healthy: bool,           // stored target resolves
     pub points_elsewhere: bool,  // resolves, but to another copy — informational only
     pub can_repair_now: bool,    // D14: our desired path resolves, so Fix would succeed
     pub stored_path: Option<String>,
@@ -198,24 +224,24 @@ pub struct AutostartStatus {
 
 pub enum HealOutcome { NotNeeded, Healed { from: String, to: String }, Skipped(&'static str), Failed(String) }
 
-pub fn desired_path(app: &tauri::AppHandle) -> Result<PathBuf, String>;  // D12
+pub fn desired_path(app: &tauri::AppHandle) -> Result<PathBuf, String>;   // D12
 pub fn read_stored_target(app: &tauri::AppHandle) -> StoredTarget;
+pub fn intent_enabled(app: &tauri::AppHandle) -> Result<bool, String>;    // D13/D20, drives the rearm
 pub fn status(app: &tauri::AppHandle) -> Result<AutostartStatus, String>;
-pub fn heal_if_broken(app: &tauri::AppHandle) -> HealOutcome;
-pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String>;  // replaces the plugin
-pub fn entry_present(app: &tauri::AppHandle) -> Result<bool, String>;             // D13, drives the rearm
+pub fn heal_if_broken(app: &tauri::AppHandle) -> HealOutcome;             // takes the lock (D19)
+pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String>;  // takes the lock (D19)
+fn app_name(app: &tauri::AppHandle) -> String;   // D7: the ONE derivation, feeding all three writers
 
 // pure — compiled on every OS, closure-injected `exists` per repo convention:
-pub(crate) fn plist_program(xml: &str) -> Option<String>;
-pub(crate) fn plist_rewrite_program(xml: &str, new_escaped: &str) -> Option<String>;
-pub(crate) fn plist_render_fresh(label: &str, program: &str) -> String;
 pub(crate) fn desktop_exec(ini: &str) -> Option<String>;
+pub(crate) fn desktop_hidden(ini: &str) -> bool;              // D20
 pub(crate) fn desktop_rewrite_exec(ini: &str, new_quoted: &str) -> Option<String>;
 pub(crate) fn run_value_candidates(v: &str) -> Vec<String>;   // CreateProcess unquoted search order
 pub(crate) fn resolve_first(c: &[String], exists: &dyn Fn(&str) -> bool) -> Option<String>;
-pub(crate) fn xml_escape(s: &str) -> String;                  // & < > " '
 pub(crate) fn desktop_quote(s: &str) -> Option<String>;       // freedesktop Exec quoting, incl. %%
+pub(crate) fn desktop_unquote(s: &str) -> Option<String>;     // F-B3: decode BEFORE resolving
 pub(crate) fn run_value_quote(s: &str) -> Option<String>;     // "…" — §9
+pub(crate) fn run_value_unquote(s: &str) -> Option<String>;   // F-B3
 ```
 
 ### 4.3 Desired path, per platform (D11, D12)
@@ -231,158 +257,180 @@ file; and `crash_recovery::autostart_path_is_safe(&exe)` (**C6** — today enfor
 
 ### 4.4 Control flow — `heal_if_broken`, one-shot per process
 
-1. `desired_path()` → must exist on disk (`try_exists`). Else `Skipped("own path unresolvable")`.
-   *(This is the relocated-while-running case: correct to skip, and D14 makes the UI say so.)*
-2. `autostart_path_is_safe(&desired)` — C6. Fail ⇒ `Failed`.
-3. `read_stored_target()`. Only `Broken` proceeds; `Absent`/`Healthy`/`Unreadable` return
-   `NotNeeded`/`Skipped`.
-4. `acquire_updater_lock()` non-blocking — `None` ⇒ `Skipped("updater active")`. **Does not close the
-   Windows post-`install()` gap** (D8 / Q1).
-5. Re-read under the lock, then `write_program_path(&desired)` in place.
-6. Log the `from`→`to` transition at `info` — an unexplained startup-entry rewrite must be auditable.
+1. **Windows only:** no live `update-in-progress.json` marker (D18). Else `Skipped("update in progress")`.
+2. `desired_path()` → must exist (`try_exists`). Else `Skipped("own path unresolvable")` — the
+   relocated-while-running case, which D14 surfaces in the UI.
+3. `autostart_path_is_safe(&desired)` — C6. Fail ⇒ `Failed`.
+4. `read_stored_target()`, **decoding before resolving** (F-B3). Only `Broken` proceeds.
+5. `acquire_updater_lock()` non-blocking — `None` ⇒ `Skipped("updater active")`.
+6. Re-read under the lock, then `write_program_path(&desired)` in place.
+7. Log the `from`→`to` transition at `info`.
+
+`set_enabled` takes the same lock for its whole read-modify-write (D19).
 
 ### 4.5 Writers — in-place, atomic, fail-closed
 
-- **macOS** `~/Library/LaunchAgents/Aztec Accelerator.plist` — locate `<key>ProgramArguments</key>` →
-  next `<array>` → first `<string>…</string>`, replace its contents with `xml_escape(path)`.
-  `KeepAlive`, `ThrottleInterval`, `RunAtLoad`, `Label` and any unknown keys stay **byte-identical**.
-  No `launchctl`.
-- **Linux** `${XDG_CONFIG_HOME:-$HOME/.config}/autostart/Aztec Accelerator.desktop` (D9) — rewrite the
-  `Exec=` line's program token, preserving args and every other line.
-- **Windows** `HKCU\…\CurrentVersion\Run` value `Aztec Accelerator` — `set_value` to
-  `run_value_quote(path)`. Registry writes are atomic. **A heal never touches `StartupApproved`**; an
-  explicit ON sets it (matching `auto-launch`'s `[0x02,0,…]`), and an explicit OFF deletes the Run
-  value only — preserving the crate's exact semantics so a Task-Manager-disabled entry stays disabled.
+- **macOS** `~/Library/LaunchAgents/{app_name}.plist` — parse with `plist` (D15), replace
+  `ProgramArguments[0]`, write back atomically. `KeepAlive`, `ThrottleInterval`, `RunAtLoad`, `Label`,
+  `Disabled` and any unknown keys are preserved **semantically** (`plist::Dictionary` is
+  `indexmap`-backed, so key order survives; only whitespace may differ). Handles binary plists for
+  free. No `launchctl` — see the §4.7 gap.
+- **Linux** `${XDG_CONFIG_HOME:-$HOME/.config}/autostart/{app_name}.desktop` (D9) — rewrite the
+  `Exec=` line's program token, preserving args, `Hidden`, and every other line.
+- **Windows** `HKCU\…\CurrentVersion\Run` value `{app_name}` — `set_value` to `run_value_quote(path)`.
+  **A heal never touches `StartupApproved`**; an explicit ON sets it (matching `auto-launch`'s
+  `[0x02,0,…]`), an explicit OFF deletes the Run value only — preserving the crate's exact semantics
+  so a Task-Manager-disabled entry stays disabled.
 
-macOS/Linux writes go through same-dir temp + `fs::rename`, `0600`, refusing a symlinked target.
-Atomic rename is the real serialization answer to concurrent healers and closes a TOCTOU/symlink-swap
-on a user-writable dotfile path.
+**Behavioural delta to record (fable, r2):** because the heal never reads `StartupApproved`, it *will*
+repair a Task-Manager-disabled `Broken` entry's path. That is deliberate and safe — it repairs a
+pointer without re-enabling anything, and `intent_enabled` (D13) still reports OFF, so nothing arms.
+Fable's leg skipped healing in that case; the difference is now recorded rather than silent.
+
+Linux/macOS writes go through same-dir temp + `fs::rename`, `0600`, refusing a symlinked target.
 
 ### 4.6 File-level change map
 
 | File | Change |
 |---|---|
 | `src-tauri/src/autostart.rs` | **new** — the whole module above |
+| `src-tauri/src/update_marker.rs` | **new** (D18) — write / read / expire / remove, Windows-only behaviour, pure state machine |
 | `src-tauri/tests/autostart_heal.rs` | **new** — `#[ignore]`d real-OS integration (shape copied from `tests/trust_linux.rs`) |
-| `scripts/autostart-test.sh` | **new** — Docker harness, modelled line-for-line on `nsis-hook-test.sh` |
-| `src-tauri/src/commands.rs` | `get_autostart_enabled` → `AutostartStatus`; `set_autostart_inner` drives `autostart::set_enabled`; **new** `repair_autostart` |
-| `src-tauri/src/main.rs` | drop `tauri_plugin_autostart::init` (`:556`) and the `MacosLauncher` import (`:23`); replace `:607-625` with heal-then-rearm, `#[cfg(not(feature = "webdriver"))]`-gated (recon §G: today's block is ungated and runs in E2E — gate the new work rather than inherit the defect); register `repair_autostart` |
-| `src-tauri/src/updater.rs` | `acquire_updater_lock` → `pub(crate)`; `:362-371` reads `autostart::entry_present` instead of the plugin |
+| `e2e-webdriver/autostart.spec.ts` | **new** (L7) |
+| `scripts/autostart-test.sh` | **new** — Docker harness, modelled on `nsis-hook-test.sh` |
+| `src-tauri/src/commands.rs` | `get_autostart_enabled` → `AutostartStatus`; `set_autostart_inner` drives `autostart::set_enabled` with `prior_enabled := intent_enabled` (D16); **new** `repair_autostart` |
+| `src-tauri/src/main.rs` | drop `tauri_plugin_autostart::init` (`:556`) + the `MacosLauncher` import (`:23`); replace `:607-625` with heal-then-rearm; **only the automatic heal is `#[cfg(not(feature = "webdriver"))]`-gated** (S1 — the command path stays live so L7 can exercise it); register `repair_autostart` |
+| **`src-tauri/build.rs`** | **(r2, codex)** add `repair_autostart` to the app-manifest command list at `:143`. **ALL-OR-NOTHING** — an omitted command escapes the F-012 ACL |
+| **`scripts/tauri-trust-boundary.test.ts`** | **(r2, codex)** add `repair_autostart` to the static command set at `:145` |
+| `src-tauri/src/updater.rs` | `acquire_updater_lock` → `pub(crate)`; `:364-365` reads `autostart::intent_enabled`; write/remove the marker around the Windows disarm |
 | `src-tauri/src/crash_recovery.rs` | **no logic change** — ungate the pure plist transforms so they unit-test off-macOS |
-| `src-tauri/Cargo.toml` | −`tauri-plugin-autostart`; +`winreg` (windows target); +`plist` (**dev**-dependency, D15) |
+| `src-tauri/Cargo.toml` | −`tauri-plugin-autostart`; +`winreg` (windows target, replacing the `0.10.1` copy that leaves with `auto-launch`); +`plist` (**runtime**, D15) |
 | `src-tauri/capabilities/settings.json` | +`allow-repair-autostart` |
-| `frontend-src/settings.{js,html}`, `style.css` | broken-state row + **Fix** / reopen copy (D14) |
+| `src-tauri/frontend-src/settings.{js,html}`, `style.css` | intent switch + health warning row + **Fix** / reopen copy (D17); `stored_path` rendered via **`textContent`, never `innerHTML`** (F-B2) |
 | `e2e/tauri-mock.js`, `e2e/settings.spec.ts` | status object; broken-state specs |
-| `.github/workflows/accelerator.yml` | bare `cargo test` on the macOS `cert-trust` leg (**D5**); `--test autostart_heal -- --ignored` on all three legs |
+| `.github/workflows/accelerator.yml` | bare `cargo test` on the macOS `cert-trust` leg (**D5**); `--test autostart_heal -- --ignored` on all three legs; L6 cleanup (F-B1) |
 | `packages/accelerator/package.json` | `test:autostart` script |
 
-### 4.7 Non-obvious mechanics
+### 4.7 Non-obvious mechanics, and one documented gap
 
 **Windows `CreateProcess` search order.** An unquoted Run value containing spaces is tried
-prefix-by-prefix. `C:\Users\x\AppData\Local\Aztec Accelerator\Aztec Accelerator.exe` is attempted as
+prefix-by-prefix: `C:\Users\x\AppData\Local\Aztec Accelerator\Aztec Accelerator.exe` is attempted as
 `C:\Users\x\AppData\Local\Aztec.exe` **first**. `run_value_candidates` models this exactly, so
-`resolve_first` classifies a legacy unquoted value the same way Windows would actually launch it —
-and the same table is what proves §9's finding in a unit test on Linux.
+`resolve_first` classifies a legacy unquoted value the way Windows would actually launch it — and the
+same table proves §9's finding in a unit test on Linux.
 
-**Why the macOS plist patch heals crash recovery for free.** `crash_recovery.rs:196-201` and
-`auto-launch/macos.rs:184-190` resolve to the **same file**. `ProgramArguments[0]` is shared by
-`RunAtLoad` (autostart) and `KeepAlive` (crash recovery). Patching that one string fixes recon's
-constraint-2 staleness — macOS `enable_crash_recovery()` early-returns on `KeepAlive` presence and
-never compares the path — with **zero edits to `crash_recovery.rs`**. It is the same byte.
+**macOS: the persisted path heals, the loaded job does not — GAP (r2, codex).** r1 claimed patching
+`ProgramArguments[0]` "heals crash recovery for free" because `crash_recovery.rs:196-201` and
+`auto-launch/macos.rs:184-190` resolve to the same file. **That claim was too strong.** Editing the
+plist repairs autostart for the *next* login, but does not update an **already-loaded launchd job**;
+`enable_crash_recovery()` then sees `KeepAlive` present and early-returns (C2), so the current
+session's job still targets the old executable.
+
+This is a **documented until-next-login gap, not a regression**: recon C2 records that macOS crash
+recovery is *already* permanently stale once armed. The plan improves the persisted state and leaves
+the session state exactly as it is today. Reloading via `launchctl bootout`/`bootstrap` is rejected
+(§3.4) because `RunAtLoad` would immediately spawn a second instance, and booting out a job that may
+be supervising us risks terminating the running app.
 
 ### 4.8 Trade-offs
 
 - **Owning three readers/writers vs. one dependency.** Cost: ~3 parsers, ~3 serializers, real test
-  surface. Bought: the only way to know what is stored (§3.2 Fork A), safe serialization at *enable*
-  time, and XDG correctness. Mitigated by D15's differential oracle.
-- **Heal-then-report vs. report-only.** Report-only is a trap: the user toggles ON,
-  `set_autostart_inner` reads `prior_enabled = true`, `enable_transaction` correctly *skips*
-  `plugin_enable` (C1), and nothing changes — a silent dead end. Hence a **distinct**
-  `repair_autostart`, not `set_autostart(true)`.
-- **One-shot at startup vs. continuous.** One-shot is what makes flip-flop structurally impossible.
-  Cost: relocation-while-running isn't fixed until the next launch — covered by D14's copy.
+  surface. Bought: the only way to know what is stored, safe serialization at *enable* time, and XDG
+  correctness. Net crate count goes **down** (`winreg 0.10.1` leaves; `plist` was already compiled).
+- **One-shot at startup vs. continuous.** One-shot keeps the write path trivially auditable.
+  Relocation-while-running isn't fixed until next launch — covered by D14's copy.
+- **The marker's cost.** A cross-process state file plus a state machine, for a window measured in
+  seconds. Accepted because codex's counterexample shows the failure mode is *silent autostart
+  breakage* — the exact bug this plan exists to fix.
 
 ---
 
-## 5. Status honesty and Settings
+## 5. Status honesty and Settings (D17)
 
-`enabled = entry_present && target_resolves`. `Broken` ⇒ `enabled:false, broken:true`. `Unreadable`
-still `Err`s, preserving the codex-#7 behaviour at `commands.rs:52-57` (the switch stays disabled on
-unknown state). Opening Settings **never writes OS state**.
+The switch reflects **intent**. Health is a separate, adjacent row. Turning it OFF always works.
 
-| State | Switch | Copy |
+| State | Switch | Row |
 |---|---|---|
-| `Healthy` | checked | — |
-| `Healthy`, `points_elsewhere` | checked | "Start on Login points to another copy of Aztec Accelerator. Turn it off and on to use this one." |
-| `Broken`, `can_repair_now` | unchecked | "Start on Login points to a file that no longer exists." + **Fix** → `repair_autostart` |
-| `Broken`, `!can_repair_now` | unchecked | "Start on Login needs repair. Reopen Aztec Accelerator from its new location." (D14) |
-| `Unreadable` | disabled | existing "state unavailable" treatment |
+| `Healthy` | on | — |
+| `Healthy`, `points_elsewhere` | on | "Start on Login points to another copy of Aztec Accelerator. Turn it off and on to use this one." |
+| `Broken`, `can_repair_now` | on + warning styling | "Start on Login points to a file that no longer exists." + **Fix** → `repair_autostart` |
+| `Broken`, `!can_repair_now` | on + warning styling | "Start on Login needs repair. Reopen Aztec Accelerator from its new location." (D14) |
+| platform-disabled (`StartupApproved` / `Hidden=true` / launchd `Disabled`) | off | — (respect the OS-level OFF; D20) |
+| `Unreadable` | disabled | existing "state unavailable" treatment (`commands.rs:52-57`) |
+
+Opening Settings **never writes OS state**. `stored_path` is attacker-influenceable (same-user) and is
+rendered with `textContent` (F-B2).
 
 ---
 
 ## 6. Test plan
 
-The bar the owner set: *"a lot of tests… test on Docker too… professional."* Layered so each layer
-catches something the others structurally cannot.
+**L1 — pure unit, `cargo test`, Linux, every PR.** All three formats' parse + rewrite. macOS: `plist`
+round-trip asserting `KeepAlive`/`ThrottleInterval`/unknown keys survive **structurally**, XML and
+**binary** plists both, `& < > "` in paths. Linux `Exec=` encode/decode for spaces, quotes,
+backslashes, `$`, backticks, `%`→`%%`, Unicode, controls, duplicate `Exec`, field-code injection,
+`Hidden=true`. Windows value encoding, trailing-argument rejection, `run_value_candidates` order,
+`StartupApproved` fixtures. **Decode-before-resolve (F-B3):** a healthy `&`-containing path must
+classify `Healthy`, not `Broken` — otherwise it is rewritten identically every launch while the status
+lies. Full injected-`exists` state table: absent, valid symlink, dangling symlink, directory,
+non-executable, permission error, malformed, `points_elsewhere`. Plus the D18 marker state machine,
+every early return, including expiry.
 
-**L1 — pure unit, `cargo test`, Linux, every PR.** All three formats' parse + rewrite. Plist with
-nested dicts and `KeepAlive` present (assert `KeepAlive` survives **byte-identically**); `& < > "` in
-paths round-trip; malformed arrays fail closed. Linux `Exec=` encode/decode for spaces, quotes,
-backslashes, `$`, backticks, `%`→`%%`, Unicode, controls, duplicate `Exec` fields, field-code
-injection. Windows value encoding, trailing-argument rejection, and `run_value_candidates` yielding
-the documented `CreateProcess` order. Injected `exists` closure ⇒ the full state table: absent, valid
-symlink, dangling symlink, directory, non-executable file, permission error, malformed artifact,
-`points_elsewhere`. *Catches every parser/serializer defect, on every OS, in milliseconds. **Nothing
-today tests any of this.***
+**L2 — differential oracle.** Structural assertions against `plist`-parsed output (now the production
+parser, so the oracle checks *intent*, not self-consistency).
 
-**L2 — differential oracle (D15).** Every plist our writer emits is parsed by the real `plist` crate
-(dev-dep) and asserted structurally equal to intent. *Catches escaping bugs a self-consistent
-hand-rolled round-trip cannot.*
-
-**L3 — real-OS integration, `tests/autostart_heal.rs`, `#[ignore]`d, throwaway `$HOME`.** Exact
-`trust_linux.rs` shape. Enable → relocate (delete the target) → heal → re-read, on each OS. Wired into
-the **existing PR-gated `cert-trust` matrix** (`accelerator.yml:113-136`, all three runners, already
-builds the crate on each — so this is nearly free). Windows asserts real registry semantics including
-`StartupApproved` preservation and quoting. macOS asserts `KeepAlive` survives a real patch. The same
-step adds the bare `cargo test` that finally compiles the three dead `patch_plist_*` tests (**D5**).
+**L3 — real-OS integration, `tests/autostart_heal.rs`, `#[ignore]`d, throwaway `$HOME`.** Enable →
+relocate (delete the target) → heal → re-read, on each OS. Wired into the **existing PR-gated
+`cert-trust` matrix** (`accelerator.yml:113-136`, three runners, already builds the crate — nearly
+free). Windows asserts real registry semantics, `StartupApproved` preservation, quoting. macOS asserts
+`KeepAlive` survives a real patch. Same step adds the bare `cargo test` that finally compiles the three
+dead `patch_plist_*` tests (**D5**).
 
 **L4 — Docker, `scripts/autostart-test.sh`.** `rust:bookworm`, inline heredoc Dockerfile,
-`docker run --rm -i` + `bash -s` — modelled on `nsis-hook-test.sh`, auto-covered by `lint:shell`.
-Runs the Linux leg under a hermetic `HOME=/h` with `XDG_CONFIG_HOME=/xdg` **deliberately different**.
-*Catches D9/C8: a heal that silently watches the wrong directory. On a dev host the two paths
-coincide, so only a container proves it.* Also runs once with `HOME` unset, asserting `Skipped`, not
-abort — the `.unwrap()` panic C8 names. Local-only, exactly like `test:nsis`; **not claimed as a CI
-job**.
+`docker run --rm -i` + `bash -s`, covered by `lint:shell`. Runs the Linux leg under hermetic `HOME=/h`
+with `XDG_CONFIG_HOME=/xdg` **deliberately divergent**, plus one run with `HOME` unset asserting
+`Skipped`, not abort. *The only hermetic proof of D9/C8 — on a dev host the two paths coincide.* Fable
+confirmed this is not ceremony. Local-only, like `test:nsis`; **not claimed as a CI job**.
 
-**L5 — Playwright, `e2e/settings.spec.ts`.** Mocked `{enabled:false, broken:true, canRepairNow:true}`
-⇒ warning row visible, switch unchecked, **Fix** invokes `repair_autostart`; and
-`canRepairNow:false` ⇒ reopen copy, no Fix button. *Catches the UI lying, which is half the reported
-bug.*
+**L5 — Playwright, `e2e/settings.spec.ts`.** Broken-state rows, Fix wiring, `can_repair_now:false`
+copy, and that OFF still works from a broken state (D17).
 
-**L6 — Windows Build Smoke extension** (`accelerator.yml:518`, PR-gated). Before launching the
-installed app, seed the production Run value with a missing spaced path; after launch, assert it
-became the **exactly quoted** installed executable and resolves. *End-to-end proof on the real
-shipped installer.*
+**L6 — Windows Build Smoke extension** (`accelerator.yml:518`, PR-gated). Seed the production Run
+value with a missing spaced path; assert it becomes the exactly quoted installed executable.
+**Cleanup is mandatory (F-B1):** the healed entry causes the production build to arm a real schtasks
+task, and the smoke then `Stop-Process -Force` at `:594` — a "crash" the task would answer by
+relaunching the app mid-assertion. Delete both the Run value and the schtasks task **before** the kill.
 
-Explicitly **not** claimed: `_e2e-updater-windows.yml` is `workflow_call`-only (recon §E — the
-`workflow_dispatch` trigger was deliberately removed), so it is release-only and is not named as a
-gate here.
+**L7 — WebDriver, `e2e-webdriver/autostart.spec.ts`** (S1; independently named by fable as the
+highest-value missing test). Under a throwaway `$HOME`: seed a `Broken` entry, launch the real app,
+read status through real IPC, click **Fix**, assert the artifact healed on disk. **This is the only
+layer that exercises the real command through the real capability ACL in the real binary** — L5 mocks
+both sides, so a forgotten `allow-repair-autostart` grant, a missing `build.rs` manifest entry, or
+serde camelCase drift ships green through L1–L6. Covers **macOS + Linux only**: Windows never runs
+`built-debug` WebDriver (recon §E), so L6 carries the Windows end-to-end proof.
+
+**Honest coverage limit (codex).** Codex's highest-value missing test is a native Windows N−1→N update
+with a barrier after the disarm, launching an *alternate* executable while the installed target is
+absent — i.e. its Fork B counterexample, end to end. That needs `_e2e-updater-windows.yml`, which is
+**`workflow_call`-only** (recon §E: `workflow_dispatch` was deliberately removed), so it is
+release-only today. This plan therefore covers the marker by exhaustive unit tests (L1) plus a native
+Windows integration test of its predicates (L3), and **explicitly does not claim** a PR-gated
+end-to-end proof of the updater-window property. Giving that workflow a dispatch path is queued work
+(it is already a prerequisite for the `AztecAccelerator` rename's N−1 fixture).
 
 ---
 
 ## 7. Phases and gates
 
-Every gate is a real command, and every named job is `pull_request`-triggered under the `desktop`
-paths filter, aggregating into **Accelerator Status** (`accelerator.yml:606`).
-
 | # | Work | Gate |
 |---|---|---|
 | 1 | `autostart.rs` pure layer + L1/L2 | `cargo test autostart`; `cargo clippy --all-targets -- -D warnings`; `cargo fmt --check` → **Rust Tests** (`:88`) |
-| 2 | Platform readers/writers, `heal_if_broken`, `set_enabled`; remove the plugin; `pub(crate) acquire_updater_lock` | `cargo test` green on Linux **and** `windows-build` (`:535`) |
-| 3 | `main.rs` call site (webdriver-gated) + `repair_autostart` + `AutostartStatus` + `settings.js` | `bun run --cwd packages/accelerator test:e2e:ui` → **Desktop UI Tests** (`:413`); existing `settings.spec.ts:159` still passes |
-| 4 | L3 + CI wiring (incl. the macOS bare `cargo test`) | `cargo test --test autostart_heal -- --ignored` green on all three `cert-trust` legs; the macOS log shows `patch_plist_*` **running** (they never have); `bun run lint:actions` |
-| 5 | L4 container harness | `bun run --cwd packages/accelerator test:autostart` exits 0 locally; `bun run lint:shell` clean |
-| 6 | L6 Windows smoke extension | **Windows Build Smoke** (`:518`) green with the seeded stale value |
+| 2 | Platform readers/writers, `heal_if_broken`, `set_enabled`, `intent_enabled`; remove the plugin; `build.rs` + trust-boundary command sets | `cargo test` on Linux **and** `windows-build` (`:535`); `bun run --cwd packages/accelerator test:unit` |
+| 3 | `update_marker.rs` + updater integration (D18) | `cargo test marker`; `windows-build` green |
+| 4 | `main.rs` call site + `repair_autostart` + `AutostartStatus` + `settings.js` (D17) | `test:e2e:ui` → **Desktop UI Tests** (`:413`); existing `settings.spec.ts:159` still passes |
+| 5 | L3 + L7 + CI wiring (incl. the macOS bare `cargo test`) | `cargo test --test autostart_heal -- --ignored` on all three `cert-trust` legs; the macOS log shows `patch_plist_*` **running**; `test:e2e:webdriver` green; `bun run lint:actions` |
+| 6 | L4 container harness | `test:autostart` exits 0 locally; `bun run lint:shell` clean |
+| 7 | L6 Windows smoke extension **+ cleanup** | **Windows Build Smoke** (`:518`) green, twice consecutively (F-B1 is a flake, so one green proves little) |
 
 Full local gate before push: `bun run test` + `bun run lint:actions`.
 
@@ -390,84 +438,115 @@ Full local gate before push: `bun run test` + `bun run lint:actions`.
 
 ## 8. Assumptions
 
-**Facts (source-verified in recon or during consolidation):** the plugin cannot report the stored path
-(`tauri-plugin-autostart-2.5.1/src/lib.rs:49-72`); macOS `enable()` recreates the plist and strips
-`KeepAlive` (`auto-launch/macos.rs:70-132`); `is_enabled()` is existence-only on macOS/Linux and
-existence + `StartupApproved` on Windows (`windows.rs:73-95`); the plugin writes
-`format!("{} {}", path, args)` unquoted on Windows (`windows.rs:37-43`) and unquoted `Exec=` on Linux
-(`linux.rs:39`); macOS stores a canonicalized path (`lib.rs:202`); the plugin already prefers
+**Facts (source-verified; both reviewers independently re-verified the r1 set at the cited lines):**
+the plugin cannot report the stored path (`tauri-plugin-autostart-2.5.1/src/lib.rs:49-72`); macOS
+`enable()` recreates the plist and strips `KeepAlive` (`auto-launch/macos.rs:70-132`); `is_enabled()`
+is existence-only on macOS/Linux and existence + `StartupApproved` on Windows (`windows.rs:73-95`);
+the plugin writes unquoted on Windows (`windows.rs:37-43`) and unquoted `Exec=` on Linux
+(`linux.rs:39`); macOS stores a canonicalized path (`lib.rs:202`); the plugin prefers
 `app.env().appimage` on Linux (`lib.rs:214-222`); `acquire_updater_lock` is a real `fs2` cross-process
 lock held across the disarm window (`updater.rs:44,272,379,434`); Windows `install()` exits the
-process (`updater.rs` comment, `tauri-plugin-updater/src/updater.rs:865`); `productName` is
-`"Aztec Accelerator"` (`tauri.conf.json:3`); no repo test asserts autostart artifact content; no macOS
-CI job runs a bare `cargo test`; the frontend never invokes `plugin:autostart|*`.
+process (`updater.rs` comment + `tauri-plugin-updater/src/updater.rs:865`); `productName` is
+`"Aztec Accelerator"`; `plist 1.8.0` is already an unconditional dependency via `tauri-utils:149`;
+`winreg` is in the lock twice; `build.rs:143` is all-or-nothing for the ACL; no repo test asserts
+autostart artifact content; no macOS CI job runs a bare `cargo test`; the frontend never invokes
+`plugin:autostart|*`.
 
 **Inferences (challenge these):** Finder's drag-to-`/Applications` is a move, so the old path stops
-resolving — this is the trigger. "Path resolves" means canonicalizable regular executable file.
-Racing healers converge because every writer writes a path that exists. A valid alternate copy is
-functional and must not be auto-repointed. The heal is safe inside the Windows NSIS window because it
-writes only live paths (§3.2 Fork B) — **this is the weakest inference in the plan and the one the
-contradiction-check should attack hardest.**
+resolving — the trigger. "Path resolves" means canonicalizable regular executable file. A valid
+alternate copy is functional and must not be auto-repointed. Matching candidate version **and**
+canonical expected path **and** a successful rearm is sufficient evidence NSIS finished. A conservative
+file-age TTL is a safe backstop for a corrupt marker.
 
-**Asks:** one open scope question, **Q1** below. Nothing else blocks; no implementation phase carries
-a silent ask.
+*(r1's weakest inference — "the heal is safe inside the Windows NSIS window" — was **disproven** by
+codex and is no longer load-bearing; D18 replaces it.)*
+
+**Asks:** one, **Q1** (§11) — now a scope-size question, not a design question.
 
 ---
 
 ## 9. Security & Adversarial Considerations
 
 **Live finding, shipped today.** The Windows Run value is written unquoted
-(`auto-launch/windows.rs:37-43`): `C:\Users\<u>\AppData\Local\Aztec Accelerator\Aztec Accelerator.exe`
-makes `CreateProcess` try `C:\Users\<u>\AppData\Local\Aztec.exe` **first** — a user-writable directory
-under `installMode: currentUser`. Any same-user process can drop a binary there and be launched at
-every login. **Not** a privilege-boundary crossing (same user, and same-user code can already write
-HKCU), so it is a **persistence-hijack primitive, not an EoP** — but it is a real defect, it is ours,
-and D7 is what actually fixes it, at enable time rather than after breakage. Asserted by an L1 unit
-test and by L6 on the real installer.
+(`auto-launch/windows.rs:37-43`): `…\AppData\Local\Aztec Accelerator\Aztec Accelerator.exe` makes
+`CreateProcess` try `…\AppData\Local\Aztec.exe` **first** — a user-writable directory under
+`installMode: currentUser`. Any same-user process can drop a binary there and be launched at every
+login. **Not** a privilege-boundary crossing, so it is a **persistence-hijack primitive, not an EoP**.
+Both reviewers independently confirmed this scoping as neither over- nor under-stated. D7 fixes it at
+enable time rather than after breakage.
 
-**Never resurrect.** `Absent` and `Unreadable` never heal. The heal can only rewrite a program path
-inside an entry the user already opted into; it can never create one. This is the primary abuse
-boundary — an autostart writer that can create entries *is* a persistence primitive.
+**Never resurrect.** `Absent` and `Unreadable` never heal. Scoped precisely (criterion 4): no Aztec
+path can resurrect an entry that was `Absent` at its locked read; D19 makes our own OFF and our own
+heal non-interleaving. A foreign deleter racing our locked read→write is out of scope and stated as
+such.
 
-**Never widen crash recovery.** The heal touches only the autostart artifact. On macOS it incidentally
-heals `KeepAlive`'s path because it is the same file, but it never arms recovery that was not armed
-(D13 keeps the rearm keyed to entry presence, exactly as today).
+**Never widen crash recovery.** The heal touches only the autostart artifact, and D13 keeps the rearm
+keyed to *intent*, so an OS-level OFF (`StartupApproved` / `Hidden` / launchd `Disabled`) is never
+overridden.
 
-**Injection.** Malformed attacker-controlled artifact content must never become plist, `Exec=`, or
-command-line injection. Every transform is fail-closed: anything not matching the expected shape is
-`Unreadable`, which never writes. `autostart_path_is_safe` (C6) now runs on the heal path too. No
-shell is ever invoked; reads are size-bounded.
+**Injection.** Malformed artifact content must never become plist, `Exec=`, or command-line injection.
+Every transform is fail-closed; anything off-shape is `Unreadable`, which never writes.
+`autostart_path_is_safe` (C6) now runs on the heal path. No shell is invoked; reads are size-bounded.
 
-**TOCTOU / symlink.** Refuse a symlinked plist or `.desktop`; write same-dir temp + `rename`, `0600`.
+**New surface: `stored_path` into the webview (F-B2).** Settings receives a bool today; it will now
+receive an attacker-influenceable string. Rendered with `textContent`, never `innerHTML` — the same
+treatment the origin rendering received in PR #421.
 
-**Auditability.** Every heal logs `from`→`to` at `info`. Paths are logged only under the user's own
-home; no secrets.
+**TOCTOU / symlink.** Refuse a symlinked plist or `.desktop`; same-dir temp + `rename`, `0600`. The
+NSIS-window TOCTOU codex identified is closed by D18.
 
-**Threat model boundary explicitly not claimed:** same-user malware can already alter HKCU and user
-startup files. This work does not claim to stop that. It claims that *our own writer* must not create
-the hijack, and that our reader must not turn hostile input into injection.
-
----
-
-## 10. Post-implementation
-
-`/harden security` is already scheduled by the owner as a separate pre-release pass. After merge, the
-queued chain resumes: **`mainBinaryName: "AztecAccelerator"`** (unblocked by this work — and note D7
-makes the artifact name *ours*, so the rename becomes a plain constant change with a zero install
-base), then bundle metadata, then `/harden`.
+**Auditability.** Every heal logs `from`→`to` at `info`.
 
 ---
 
-## 11. Open scope question (Q1)
+## 10. Known limits (stated, not solved)
 
-**Does the `update-disarmed.json` marker come into this PR, or ship as its own?**
+- **"Resolves" ≠ "will launch."** D20 reads the three first-class disable overrides, but desktop
+  environments can suppress a `.desktop` in ways we do not model, and launchd has session/domain state
+  beyond the `Disabled` key. The taxonomy is about the *stored pointer*, not a launch guarantee.
+- **macOS session gap** (§4.7): the loaded launchd job is not reloaded. Repaired at next login.
+- **No PR-gated end-to-end proof of the updater-window property** (§6) — release-only until
+  `_e2e-updater-windows.yml` gains a dispatch path.
+- **L7 covers macOS + Linux only**; Windows end-to-end rests on L6.
 
-It fixes a *pre-existing* crash-recovery defect (`main.rs:607-625` can rearm the Windows recovery task
-mid-NSIS, because the updater's lock dies at `install()`'s `process::exit(0)`), not an autostart one.
-The heal is safe in that window by construction (§3.2 Fork B). Taking it in adds a cross-process state
-file, a state machine, a removal rule (*"any process running from the marker's expected install path
-may remove it"*, plus a TTL — **not** codex's version-matching fail-closed, which bricks recovery
-permanently after a catastrophic NSIS failure), and its own tests.
+---
 
-Deferred in this draft, and named rather than dropped. Put to the contradiction-check first, then to
-the owner at the approval gate.
+## 11. Open scope question for the owner (Q1)
+
+**The marker is now a correctness requirement, not an optional extra (D18) — but it is real scope.**
+
+Codex's counterexample proved a heal inside the NSIS window can silently point autostart at a transient
+copy, which is the very failure this plan exists to eliminate. The marker is the only available signal,
+because the updating process is gone by then.
+
+Cost: a new module, a cross-process state file, a version+path+rearm removal rule, a TTL, and its own
+tests — roughly one extra phase. The alternative is shipping the heal with a known, reviewer-demonstrated
+hole in it, which is not recommended.
+
+**Options: (a) marker in this PR** — recommended; **(b) marker as an immediate follow-up PR**, with the
+automatic heal disabled on Windows until it lands (the command path and macOS/Linux heal ship now);
+**(c) ship the heal with the hole documented** — not recommended.
+
+---
+
+## 12. Revision log
+
+**r2 — post-contradiction-check (codex + fable, in parallel, neither seeing the other).**
+
+Reversed: **Fork B** (marker now in scope — codex's counterexample broke r1's safety claim);
+**D15** (`plist` in production — r1's supply-chain rationale was factually false, found by the main
+agent via `Cargo.lock`, and independently reaffirmed by codex).
+
+Fixed contradictions: **D13** intent≠presence (*both* reviewers); **D16** `prior_enabled` undefined and
+forced to intent by C1 (fable, sharpened during folding); **D17** broken-state UI removed the user's OFF
+control (codex); **§4.7** "heals crash recovery for free" was too strong (codex); **§2 criterion 4**
+over-claimed (codex); **D19** lock scope (codex).
+
+Added: **D20** per-platform disable overrides (codex); **L7** WebDriver (main agent, confirmed by
+fable); **L6 cleanup** (fable — r1 would have shipped a CI flake generator); **F-B2** `textContent`
+(fable); **F-B3** decode-before-resolve (fable); `build.rs` + `tauri-trust-boundary.test.ts` +
+centralized app-name in the change map (codex).
+
+Ledger honesty: **D4** overstated convergence (fable); the toggle-ON-vs-Fix-button fork was unledgered
+(fable); the TM-disabled heal delta is now recorded (fable); r1's Fork B walk was incomplete even where
+its conclusion happened to hold (fable) — and then wrong (codex).
