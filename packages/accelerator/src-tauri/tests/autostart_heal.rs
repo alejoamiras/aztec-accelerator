@@ -244,16 +244,15 @@ fn linux_hermetic_no_home_is_graceful() {
     // anywhere home still resolves, asserting Err would be wrong — skip loudly instead. (First
     // harness draft asserted Err under a mere `env -u HOME` and promptly wrote a REAL .desktop
     // into the invoking user's profile via the getpwuid fallback — lesson logged.)
-    if std::env::var_os("HOME").is_some()
-        || std::env::var_os("XDG_CONFIG_HOME").is_some()
-        || dirs::home_dir().is_some()
-    {
-        eprintln!(
-            "SKIPPED (vacuous pass): home still resolves (env or passwd) — this leg needs the \
-             harness's no-passwd uid"
-        );
-        return;
-    }
+    // Under the harness the precondition is the harness's JOB — if home still resolves, the
+    // isolation silently failed and passing would certify nothing. Fail loudly instead.
+    assert!(
+        std::env::var_os("HOME").is_none()
+            && std::env::var_os("XDG_CONFIG_HOME").is_none()
+            && dirs::home_dir().is_none(),
+        "harness precondition broken: home still resolves (env or passwd), so this leg would \
+         prove nothing — it needs `docker run --user <no-passwd-uid>` with HOME/XDG scrubbed"
+    );
     // The removed plugin's `dirs::home_dir().unwrap()` PANICKED exactly here. Every owned
     // operation must degrade to an error or a skip — never abort.
     let bin = tempfile::tempdir().expect("bin dir");
@@ -537,15 +536,36 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
     //    plain absent entry read as unreadable. Delete the key outright and prove both paths cope
     //    (this is how the bug surfaced — one CI runner had the key, the next did not).
     {
-        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
         use winreg::RegKey;
-        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey(RUN_KEY);
-        assert!(
-            matches!(read_stored_target(Some(&probe)), StoredTarget::Absent),
-            "a missing Run key must read as Absent, never Unreadable"
-        );
-        assert!(!intent_enabled_now().expect("intent readable without a Run key"));
-        remove_entry().expect("OFF with no Run key must be a no-op, not an error");
+        // Deleting the shared Run key is only safe when it holds nothing but (possibly) ours —
+        // it is a SYSTEM-WIDE list and other applications' startup entries live there. A CI
+        // runner is empty, so the assertion runs where it matters; a developer machine with real
+        // entries skips it rather than losing them.
+        let others: Vec<String> = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(RUN_KEY, KEY_READ)
+            .map(|k| {
+                k.enum_values()
+                    .filter_map(|r| r.ok().map(|(name, _)| name))
+                    .filter(|name| name != VALUE)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if others.is_empty() {
+            let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey(RUN_KEY);
+            assert!(
+                matches!(read_stored_target(Some(&probe)), StoredTarget::Absent),
+                "a missing Run key must read as Absent, never Unreadable"
+            );
+            assert!(!intent_enabled_now().expect("intent readable without a Run key"));
+            remove_entry().expect("OFF with no Run key must be a no-op, not an error");
+        } else {
+            eprintln!(
+                "SKIPPED the missing-Run-key leg: {} other startup entries present; \
+                 refusing to delete a shared key",
+                others.len()
+            );
+        }
     }
 
     // 1. Enable writes the QUOTED value and it classifies Healthy — creating the key if needed.

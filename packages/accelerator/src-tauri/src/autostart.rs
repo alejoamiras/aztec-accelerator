@@ -19,6 +19,34 @@
 
 use std::path::{Path, PathBuf};
 
+/// §9 bounded reads: an autostart artifact is a few hundred bytes; anything past this is not one,
+/// and refusing beats loading it.
+const MAX_ARTIFACT_BYTES: u64 = 1 << 20;
+
+/// Read an artifact, refusing anything implausibly large (`Ok(None)` for "not there").
+#[cfg_attr(
+    windows,
+    allow(dead_code, reason = "artifact reads are registry-backed on Windows")
+)]
+fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot stat autostart artifact: {e}")),
+    };
+    if meta.len() > MAX_ARTIFACT_BYTES {
+        return Err(format!(
+            "autostart artifact is implausibly large ({} bytes); refusing to read",
+            meta.len()
+        ));
+    }
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read autostart artifact: {e}")),
+    }
+}
+
 /// Must match `productName` in tauri.conf.json — it names the LaunchAgent plist, the `.desktop`
 /// file and the Windows Run value, exactly as the removed plugin derived them from
 /// `package_info().name`. Pinned by `app_name_matches_tauri_conf` below (plan D7: one derivation
@@ -342,7 +370,17 @@ pub(crate) fn desktop_exec_program(exec: &str) -> Result<String, String> {
         // Legacy unquoted (what auto-launch wrote, trailing space included): the OS execs the FIRST
         // token, so classification must too — for a spaced path that token is a path fragment, and
         // the entry is exactly the broken-legacy case the heal exists to repair.
-        undoubled.split(' ').next().unwrap_or_default().to_string()
+        //
+        // But the heal rewrites the WHOLE Exec line, so an entry carrying user OPTIONS must fail
+        // closed instead: neither we nor the removed plugin ever wrote arguments, and a remainder
+        // token starting with `-` is an option, not a fragment of a spaced path (which is why the
+        // plain spaced-path case still heals).
+        let mut parts = undoubled.split(' ').filter(|s| !s.is_empty());
+        let first = parts.next().unwrap_or_default().to_string();
+        if parts.any(|p| p.starts_with('-')) {
+            return Err("Exec carries arguments (not the owned format)".to_string());
+        }
+        first
     };
     let program = raw_token.replace("\u{0}PCT\u{0}", "%");
     if program.is_empty() {
@@ -591,8 +629,10 @@ pub(crate) fn resolve_first(
 pub(crate) fn startup_approved_blob_enabled(bytes: Option<&[u8]>) -> bool {
     match bytes {
         None => true,
-        Some(b) if b.len() < 8 => true,
-        Some(b) => b[0] % 2 == 0,
+        // Empty blob carries no flag ⇒ enabled. Any other length: byte 0 IS the flag, so apply
+        // parity — an earlier `len < 8 ⇒ enabled` guard defeated the whole rule, reading a bare
+        // `[0x03]` (disabled) as enabled.
+        Some(b) => b.first().map_or(true, |flag| flag % 2 == 0),
     }
 }
 
@@ -602,7 +642,11 @@ pub(crate) fn startup_approved_blob_enabled(bytes: Option<&[u8]>) -> bool {
 /// (following symlinks), with an exec bit on unix?
 fn is_regular_executable(path: &Path) -> bool {
     match std::fs::metadata(path) {
-        Err(_) => false,
+        // ONLY a definitive "not there" makes an entry Broken. A PermissionDenied (or any other
+        // I/O error) means we cannot tell — and healing on "cannot tell" would rewrite a working
+        // entry we simply could not stat.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
         Ok(md) => {
             if !md.is_file() {
                 return false;
@@ -665,9 +709,26 @@ fn acquire_autostart_lock() -> Result<std::fs::File, String> {
         .truncate(false)
         .open(dir.join("autostart.lock"))
         .map_err(|e| format!("cannot open autostart lock: {e}"))?;
-    file.lock_exclusive()
-        .map_err(|e| format!("cannot acquire autostart lock: {e}"))?;
-    Ok(file)
+    // BOUNDED, not blocking: `set_enabled` holds this across crash-recovery arming, which shells
+    // out to `systemctl`/`schtasks` and has no bound of its own. A plain blocking acquire on a
+    // synchronous IPC handler could therefore wait indefinitely and wedge the Settings window.
+    // Give up with an actionable message instead.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                return Err(
+                    "another Aztec Accelerator operation is still updating Start on Login; \
+                     please try again in a moment"
+                        .to_string(),
+                )
+            }
+        }
+    }
 }
 
 /// Atomic same-dir temp + rename, `0600`, refusing a symlinked destination (plan §4.5 —
@@ -716,12 +777,7 @@ mod backend {
     }
 
     pub(super) fn read_raw() -> Result<Option<Vec<u8>>, String> {
-        let path = artifact_path()?;
-        match std::fs::read(&path) {
-            Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("cannot read LaunchAgent plist: {e}")),
-        }
+        read_bounded(&artifact_path()?)
     }
 
     /// Presence WITHOUT reading or parsing (plan D13): the tolerant question the crash-recovery
@@ -811,11 +867,13 @@ mod backend {
     }
 
     pub(super) fn read_raw() -> Result<Option<String>, String> {
-        let path = artifact_path()?;
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Ok(Some(s)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("cannot read autostart .desktop: {e}")),
+        match read_bounded(&artifact_path()?)? {
+            None => Ok(None),
+            // Invalid UTF-8 is a PARSE failure, not an I/O one — it must classify Unreadable
+            // (switch stays usable), not propagate as unknown state.
+            Some(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| "autostart .desktop is not valid UTF-8".to_string()),
         }
     }
 
@@ -1035,7 +1093,9 @@ mod backend {
     /// having destroyed the user's explicit override — autostart armed against their wishes, which
     /// the replaced plugin never did (its rollback deleted the Run value outright).
     pub(super) struct Snapshot {
-        run: Option<String>,
+        /// RAW, not `String`: a prior `REG_EXPAND_SZ` value must be restored with its own type,
+        /// not silently rewritten as `REG_SZ`.
+        run: Option<winreg::RegValue>,
         approved: Option<winreg::RegValue>,
     }
 
@@ -1045,10 +1105,16 @@ mod backend {
             .open_subkey_with_flags(STARTUP_APPROVED_KEY, KEY_READ)
             .ok()
             .and_then(|k| k.get_raw_value(APP_NAME).ok());
-        Ok(Snapshot {
-            run: read_raw()?,
-            approved,
-        })
+        let run = match hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) {
+            Ok(k) => match k.get_raw_value(APP_NAME) {
+                Ok(v) => Some(v),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("cannot snapshot Run value: {e}")),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("cannot open Run key for snapshot: {e}")),
+        };
+        Ok(Snapshot { run, approved })
     }
 
     pub(super) fn restore(snapshot: Snapshot) -> Result<(), String> {
@@ -1071,7 +1137,7 @@ mod backend {
                 .create_subkey(RUN_KEY)
                 .map_err(|e| format!("cannot open Run key for restore: {e}"))?
                 .0
-                .set_value(APP_NAME, &value)
+                .set_raw_value(APP_NAME, &value)
                 .map_err(|e| format!("cannot restore Run value: {e}")),
         }
     }
@@ -1694,6 +1760,31 @@ mod tests {
         assert!(desktop_exec_program("\"/opt/app\"  extra").is_err());
         // A quoted program with trailing WHITESPACE only is still ours.
         assert_eq!(desktop_exec_program("\"/opt/app\"  ").unwrap(), "/opt/app");
+    }
+
+    #[test]
+    fn desktop_unquoted_exec_with_options_is_unreadable() {
+        // The heal rewrites the WHOLE Exec line, so an entry carrying user OPTIONS must fail
+        // closed — only the quoted form was guarded before, and `--minimized` was silently
+        // deleted on the next relocation.
+        assert!(desktop_exec_program("/opt/app --minimized").is_err());
+        assert!(desktop_exec_program("/opt/aztec accelerator/app --flag").is_err());
+        // A spaced PATH still heals: its remainder is a path fragment, not an option.
+        assert_eq!(
+            desktop_exec_program("/opt/aztec accelerator/bin/app ").unwrap(),
+            "/opt/aztec"
+        );
+    }
+
+    #[test]
+    fn startup_approved_short_blob_still_honours_the_flag() {
+        // `len < 8 ⇒ enabled` defeated the parity rule: a bare `[0x03]` (disabled) read as ENABLED.
+        assert!(!startup_approved_blob_enabled(Some(&[0x03])));
+        assert!(startup_approved_blob_enabled(Some(&[0x02])));
+        assert!(
+            startup_approved_blob_enabled(Some(&[])),
+            "no flag byte ⇒ enabled"
+        );
     }
 
     #[test]

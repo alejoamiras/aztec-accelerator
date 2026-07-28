@@ -6,9 +6,14 @@
  * missing build.rs app-manifest entry, or serde camelCase drift ships green through L1–L6 — this
  * spec is what catches those.
  *
- * Self-contained and ordered LAST: it seeds a broken artifact from Node, REFRESHES the settings
- * window so the page re-reads status, drives Fix, asserts the on-disk artifact healed, and cleans
- * up — earlier specs (which assert the switch unchecked) never see the seeded state.
+ * Ordered LAST: it seeds a broken artifact, REFRESHES the settings window so the page re-reads
+ * status, drives Fix, and asserts the on-disk artifact healed — earlier specs (which assert the
+ * switch unchecked) never see the seeded state.
+ *
+ * It writes the REAL autostart artifact, not one under a throwaway HOME: the app under test was
+ * launched by the harness with the ambient environment, so the artifact it reads is the ambient
+ * one. That is fine on a CI runner and NOT fine on a developer machine, so the whole suite
+ * snapshots any pre-existing artifact up front and restores it byte-for-byte afterwards.
  *
  * Windows is SKIPPED by choice, not impossibility (plan §6 r4): HKCU is global — a throwaway HOME
  * does not isolate the registry, and seeding the real Run value here would also arm the intent-keyed
@@ -93,7 +98,12 @@ describe("Autostart self-heal (real IPC)", () => {
     return;
   }
 
+  // Byte-exact snapshot of whatever was there before (usually nothing on CI) so a developer
+  // running this locally does not lose their real Start-on-Login entry.
+  let priorArtifact: Buffer | null = null;
+
   before(async () => {
+    priorArtifact = fs.existsSync(artifactPath()) ? fs.readFileSync(artifactPath()) : null;
     seedBrokenArtifact();
     await ensureSettingsWindow();
     // The page read status at load, BEFORE we seeded — refresh so loadSettings() re-runs and the
@@ -105,8 +115,12 @@ describe("Autostart self-heal (real IPC)", () => {
   });
 
   after(() => {
-    // Leave no trace for reruns (the artifact is healed, i.e. present, after the happy path).
-    fs.rmSync(artifactPath(), { force: true });
+    // Restore exactly what we found — not merely "delete ours".
+    if (priorArtifact === null) {
+      fs.rmSync(artifactPath(), { force: true });
+    } else {
+      fs.writeFileSync(artifactPath(), priorArtifact);
+    }
   });
 
   it("shows intent ON + the health row + Fix for a seeded broken entry", async () => {
