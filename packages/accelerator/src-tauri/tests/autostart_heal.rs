@@ -7,7 +7,7 @@
 
 use aztec_accelerator::autostart::{
     enable_entry_at, heal_if_broken_at, intent_enabled_now, read_stored_target, remove_entry,
-    snapshot_restore_roundtrip_for_tests, HealOutcome, StoredTarget,
+    set_enabled_at, snapshot_restore_roundtrip_for_tests, HealOutcome, StoredTarget,
 };
 use std::path::{Path, PathBuf};
 
@@ -189,6 +189,71 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
         !desktop.exists(),
         "rollback from an absent prior must remove the artifact"
     );
+
+    // 7d. The WHOLE toggle transaction, end to end — not just the artifact writer. On a runner
+    // with no systemd user session `systemctl --user enable` fails, which drives the ROLLBACK
+    // path for free; on a developer box with a session it succeeds. Both are valid contract
+    // outcomes, so assert the contract rather than the environment: success ⇒ a healthy quoted
+    // entry, failure ⇒ the prior state restored EXACTLY. Either way the real closures ran.
+    remove_entry().expect("start from a known-absent state");
+    let live = make_exe(bin.path(), "toggle-target");
+    match set_enabled_at(Some(&live), true) {
+        Ok(()) => {
+            eprintln!("toggle transaction: ARMED (crash recovery available here)");
+            assert_healthy_at(&read_stored_target(Some(&live)), &live);
+            assert!(intent_enabled_now().unwrap());
+            let ini = std::fs::read_to_string(&desktop).unwrap();
+            assert!(ini.contains("Exec=\""), "enable must write a QUOTED Exec");
+        }
+        Err(ref e) => {
+            eprintln!("toggle transaction: ROLLED BACK ({e}) — the failure path was exercised");
+            assert!(
+                !desktop.exists(),
+                "a failed enable must roll back to the prior (absent) state, not leave a \
+                 half-applied entry — got: {e}"
+            );
+        }
+    }
+    // OFF is unconditional and idempotent regardless of which branch ran above.
+    set_enabled_at(None, false).expect("toggle OFF");
+    assert!(!desktop.exists());
+
+    // 7e. D19: the lock genuinely serialises owned mutations. A foreign holder must BLOCK a
+    // mutation rather than let it race — proven by a bounded wait, not by the 10s timeout.
+    {
+        use fs2::FileExt as _;
+        let lock_path = home.path().join(".aztec-accelerator/autostart.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        // flock is per open-file-description, so a second handle in THIS process contends
+        // exactly as another process would.
+        held.lock_exclusive().expect("hold the lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = live.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(set_enabled_at(Some(&target), true));
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "a mutation must not proceed while another holds the autostart lock"
+        );
+        fs2::FileExt::unlock(&held).expect("release");
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("the mutation must proceed once the lock is released");
+        // Contract as above: either it armed, or it rolled back cleanly.
+        if outcome.is_err() {
+            assert!(!desktop.exists(), "rollback after contention must be clean");
+        }
+        let _ = set_enabled_at(None, false);
+    }
 
     // 8. OFF removes; Absent never resurrects (§9 "never resurrect").
     remove_entry().expect("remove");

@@ -1354,9 +1354,23 @@ pub fn remove_entry() -> Result<(), String> {
 /// health-aware prior would send a Broken entry down the full recreate path, stripping KeepAlive),
 /// and rollback restores the EXACT prior artifact bytes, not merely "disable".
 pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let desired = if enabled {
+        Some(desired_path(app)?)
+    } else {
+        None
+    };
+    set_enabled_at(desired.as_deref(), enabled)
+}
+
+/// `AppHandle`-free core of [`set_enabled`] — the surface L3 drives so the WHOLE transaction
+/// (prior-state derivation, artifact write, crash-recovery arming, rollback) is exercised against
+/// real artifacts, not just the artifact writer in isolation.
+pub fn set_enabled_at(desired: Option<&Path>, enabled: bool) -> Result<(), String> {
     let _lock = acquire_autostart_lock()?;
     if enabled {
-        let desired = desired_path(app)?;
+        let desired = desired
+            .ok_or_else(|| "no target path supplied for enable".to_string())?
+            .to_path_buf();
         if !desired.try_exists().unwrap_or(false) {
             return Err(
                 "the running executable's path no longer exists (was the app moved?); \
