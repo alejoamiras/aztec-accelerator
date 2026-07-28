@@ -77,3 +77,27 @@ when sizing ceremony for piece 2.
   twice now the consumer underneath re-did the work the fix removed.
 - A comment claiming isolation ("throwaway $HOME", "scoped off the real profile") is a claim that
   must be verified, not decoration. Two were false.
+
+## Accepted residuals (piece 1) — argued, not overlooked
+
+Two verification findings are deliberately NOT fixed. Recorded so a later reader sees a decision,
+not an oversight:
+
+1. **Unquoted `Exec` with POSITIONAL arguments still heals and drops them.** Options are caught
+   (a remainder token starting with `-`), positional args are not. Perfect disambiguation is
+   impossible: the legacy `auto-launch` format is `{spaced path} `, whose remainder is a path
+   fragment, so "any remainder ⇒ refuse" would break the primary heal case this work exists for.
+   The dash heuristic covers what users actually write; the residual is a user with
+   `Exec=/path/app somefile` losing `somefile` on relocation.
+2. **`set_enabled` holds `autostart.lock` across crash-recovery arming** (`systemctl`/`schtasks`),
+   which is unbounded. Narrowing it is not available on macOS, where arming patches the SAME plist
+   the lock protects — so the critical section would have to cover it anyway. Mitigated instead by
+   the bounded 10 s acquisition; the residual is a user-initiated toggle that can wait up to 10 s
+   behind a concurrent operation.
+
+Also settled: `platform_disabled` is tolerant of read failure BY CHOICE (erroring re-bricks the
+Settings switch, the exact defect the Unreadable work fixed) and now logs rather than hides it.
+
+**The lock is not reentrant** — the round-trip test's mutate closure self-deadlocked until the 10 s
+bound when it called a lock-taking API. Production is right; test helpers must clobber artifacts
+directly.

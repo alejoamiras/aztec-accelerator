@@ -29,22 +29,22 @@ const MAX_ARTIFACT_BYTES: u64 = 1 << 20;
     allow(dead_code, reason = "artifact reads are registry-backed on Windows")
 )]
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
+    use std::io::Read as _;
+    // Bound the READ itself rather than trusting a prior stat — a stat-then-read pair is a TOCTOU,
+    // and the cap exists precisely for a file that is not what we expect.
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("cannot stat autostart artifact: {e}")),
+        Err(e) => return Err(format!("cannot open autostart artifact: {e}")),
     };
-    if meta.len() > MAX_ARTIFACT_BYTES {
-        return Err(format!(
-            "autostart artifact is implausibly large ({} bytes); refusing to read",
-            meta.len()
-        ));
+    let mut buf = Vec::new();
+    file.take(MAX_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("cannot read autostart artifact: {e}"))?;
+    if buf.len() as u64 > MAX_ARTIFACT_BYTES {
+        return Err("autostart artifact is implausibly large; refusing to read".to_string());
     }
-    match std::fs::read(path) {
-        Ok(b) => Ok(Some(b)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("cannot read autostart artifact: {e}")),
-    }
+    Ok(Some(buf))
 }
 
 /// Must match `productName` in tauri.conf.json — it names the LaunchAgent plist, the `.desktop`
@@ -801,14 +801,25 @@ mod backend {
     /// `status()`'s Unreadable arm, which exists precisely to keep it usable.
     pub(super) fn platform_disabled() -> Result<bool, String> {
         match read_raw() {
-            Ok(None) | Err(_) => Ok(false),
+            Ok(None) => Ok(false),
             Ok(Some(bytes)) => Ok(plist_disabled(&bytes).unwrap_or(false)),
+            // Tolerant BY CHOICE: erroring here re-bricks the Settings switch (the whole point of
+            // the Unreadable work), and an artifact we cannot read cannot assert an override. The
+            // residual — a genuine I/O failure over a real `Disabled=true` reads as not-disabled —
+            // is logged rather than hidden.
+            Err(e) => {
+                tracing::warn!(
+                    "cannot read the macOS autostart override ({e}); assuming not disabled"
+                );
+                Ok(false)
+            }
         }
     }
 
     pub(super) fn heal_write(desired: &Path) -> Result<(), String> {
         let path = artifact_path()?;
-        let bytes = std::fs::read(&path).map_err(|e| format!("cannot re-read plist: {e}"))?;
+        let bytes = read_bounded(&path)?
+            .ok_or_else(|| "LaunchAgent plist vanished before the heal write".to_string())?;
         let patched = plist_set_program(&bytes, &desired.to_string_lossy())?;
         write_artifact_atomic(&path, &patched)
     }
@@ -899,15 +910,20 @@ mod backend {
     /// Parse-TOLERANT (see the macOS twin): an unreadable entry cannot assert `Hidden=true`.
     pub(super) fn platform_disabled() -> Result<bool, String> {
         Ok(match read_raw() {
-            Ok(None) | Err(_) => false,
+            Ok(None) => false,
             Ok(Some(ini)) => desktop_hidden(&ini),
+            // Tolerant by choice — see the macOS twin.
+            Err(e) => {
+                tracing::warn!("cannot read the autostart override ({e}); assuming not disabled");
+                false
+            }
         })
     }
 
     pub(super) fn heal_write(desired: &Path) -> Result<(), String> {
         let path = artifact_path()?;
-        let ini =
-            std::fs::read_to_string(&path).map_err(|e| format!("cannot re-read .desktop: {e}"))?;
+        let ini = read_raw()?
+            .ok_or_else(|| "autostart .desktop vanished before the heal write".to_string())?;
         let quoted = desktop_quote(&desired.to_string_lossy())
             .ok_or_else(|| "desired path is not representable in Exec".to_string())?;
         let rewritten = desktop_set_exec(&ini, &quoted)?;
@@ -1101,10 +1117,17 @@ mod backend {
 
     pub(super) fn snapshot() -> Result<Snapshot, String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let approved = hkcu
-            .open_subkey_with_flags(STARTUP_APPROVED_KEY, KEY_READ)
-            .ok()
-            .and_then(|k| k.get_raw_value(APP_NAME).ok());
+        // NOT `.ok()`: a transient read failure recorded as `None` would make restore DELETE the
+        // user's Task-Manager OFF. Absence must be proven (NotFound), never assumed.
+        let approved = match hkcu.open_subkey_with_flags(STARTUP_APPROVED_KEY, KEY_READ) {
+            Ok(k) => match k.get_raw_value(APP_NAME) {
+                Ok(v) => Some(v),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("cannot snapshot the startup override: {e}")),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("cannot open the startup override key: {e}")),
+        };
         let run = match hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) {
             Ok(k) => match k.get_raw_value(APP_NAME) {
                 Ok(v) => Some(v),
@@ -1121,15 +1144,18 @@ mod backend {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         // StartupApproved first: leaving the override behind is the harmful direction, so put it
         // back even if the Run restore then fails.
-        if let Ok((key, _)) = hkcu.create_subkey(STARTUP_APPROVED_KEY) {
-            match &snapshot.approved {
-                Some(v) => {
-                    let _ = key.set_raw_value(APP_NAME, v);
-                }
-                None => {
-                    let _ = key.delete_value(APP_NAME);
-                }
-            }
+        let (key, _) = hkcu
+            .create_subkey(STARTUP_APPROVED_KEY)
+            .map_err(|e| format!("cannot open the startup override key for restore: {e}"))?;
+        match &snapshot.approved {
+            Some(v) => key
+                .set_raw_value(APP_NAME, v)
+                .map_err(|e| format!("cannot restore the startup override: {e}"))?,
+            None => match key.delete_value(APP_NAME) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("cannot clear the startup override: {e}")),
+            },
         }
         match snapshot.run {
             None => remove(),
@@ -1338,6 +1364,7 @@ pub fn enable_entry_at(desired: &Path) -> Result<(), String> {
 /// otherwise only reachable through a crash-recovery arming failure, which an integration test
 /// cannot induce — leaving the most safety-critical code in the module unexercised.
 pub fn snapshot_restore_roundtrip_for_tests(mutate: &dyn Fn()) -> Result<(), String> {
+    let _lock = acquire_autostart_lock()?;
     let prior = backend::snapshot()?;
     mutate();
     backend::restore(prior)

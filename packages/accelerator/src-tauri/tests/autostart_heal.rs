@@ -181,8 +181,13 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
     );
     // …and restoring an ABSENT prior must remove the artifact, not leave a stale one behind.
     remove_entry().expect("clear");
+    // NB: the mutate closure runs while the round-trip holds `autostart.lock`, and that lock is
+    // NOT reentrant — so it must clobber the artifact directly rather than through a lock-taking
+    // API. (Calling `enable_entry_at` here self-deadlocked until the 10s bound, which is the lock
+    // behaving correctly.)
     snapshot_restore_roundtrip_for_tests(&|| {
-        enable_entry_at(&elsewhere).expect("write during the mutate window");
+        std::fs::create_dir_all(desktop.parent().unwrap()).unwrap();
+        std::fs::write(&desktop, b"[Desktop Entry]\nExec=/appeared-from-nowhere\n").unwrap();
     })
     .expect("restore-to-absent");
     assert!(
@@ -207,6 +212,15 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
         }
         Err(ref e) => {
             eprintln!("toggle transaction: ROLLED BACK ({e}) — the failure path was exercised");
+            // Without this the test passes for ANY pre-write failure, i.e. it would stay green if
+            // enabling were universally broken. `enable_transaction` names the step it failed at,
+            // so require that we actually reached crash-recovery arming — meaning the artifact
+            // write succeeded first and the rollback we are asserting is a REAL rollback.
+            assert!(
+                e.contains("crash-recovery step"),
+                "the rollback branch must be reached via the ARMING step, not an earlier failure; \
+                 got: {e}"
+            );
             assert!(
                 !desktop.exists(),
                 "a failed enable must roll back to the prior (absent) state, not leave a \
@@ -235,10 +249,17 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
         // exactly as another process would.
         held.lock_exclusive().expect("hold the lock");
         let (tx, rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
         let target = live.clone();
         std::thread::spawn(move || {
+            // Signal BEFORE contending: otherwise a slow thread start satisfies the window below
+            // without ever having touched the lock, and the test proves nothing.
+            started_tx.send(()).unwrap();
             let _ = tx.send(set_enabled_at(Some(&target), true));
         });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker must start");
         assert!(
             rx.recv_timeout(std::time::Duration::from_millis(500))
                 .is_err(),
@@ -481,21 +502,31 @@ mod win {
     pub const VALUE: &str = "Aztec Accelerator";
 
     pub struct RegRestore {
-        run: Option<String>,
+        /// RAW, like production's Snapshot: restoring a real `REG_EXPAND_SZ` prior via `set_value`
+        /// would silently rewrite it as `REG_SZ` on the developer's own machine.
+        run: Option<winreg::RegValue>,
         sa: Option<winreg::RegValue>,
     }
 
     impl RegRestore {
         pub fn capture() -> Self {
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-            let run = hkcu
-                .open_subkey_with_flags(RUN_KEY, KEY_READ)
-                .ok()
-                .and_then(|k| k.get_value::<String, _>(VALUE).ok());
-            let sa = hkcu
-                .open_subkey_with_flags(SA_KEY, KEY_READ)
-                .ok()
-                .and_then(|k| k.get_raw_value(VALUE).ok());
+            // `.ok()` would turn an unreadable value into "absent", and Drop would then DELETE
+            // the developer's real entry. Absence must be proven, so a read failure aborts before
+            // this test mutates anything.
+            let capture = |key: &str| -> Option<winreg::RegValue> {
+                match hkcu.open_subkey_with_flags(key, KEY_READ) {
+                    Ok(k) => match k.get_raw_value(VALUE) {
+                        Ok(v) => Some(v),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => panic!("refusing to run: cannot capture {key}\\{VALUE} ({e})"),
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => panic!("refusing to run: cannot open {key} ({e})"),
+                }
+            };
+            let run = capture(RUN_KEY);
+            let sa = capture(SA_KEY);
             Self { run, sa }
         }
     }
@@ -506,7 +537,7 @@ mod win {
             if let Ok(k) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
                 match &self.run {
                     Some(v) => {
-                        let _ = k.set_value(VALUE, v);
+                        let _ = k.set_raw_value(VALUE, v);
                     }
                     None => {
                         let _ = k.delete_value(VALUE);
@@ -636,7 +667,10 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
             .open_subkey_with_flags(RUN_KEY, KEY_READ)
             .map(|k| {
                 k.enum_values()
-                    .filter_map(|r| r.ok().map(|(name, _)| name))
+                    .map(|r| {
+                        r.expect("refusing to run: cannot enumerate the shared Run key")
+                            .0
+                    })
                     .filter(|name| name != VALUE)
                     .collect()
             })
@@ -753,6 +787,33 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
                 .and_then(|k| k.get_raw_value(VALUE).ok())
                 .map(|v| (v.vtype as u32, v.bytes))
         };
+        // Seed a REG_EXPAND_SZ prior: restoring it as REG_SZ is exactly the defect found, and a
+        // String-shaped snapshot cannot preserve it.
+        {
+            use winreg::enums::{RegType, HKEY_CURRENT_USER};
+            use winreg::{RegKey, RegValue};
+            let expand = RegValue {
+                vtype: RegType::REG_EXPAND_SZ,
+                bytes: "%LOCALAPPDATA%\\prior.exe\0"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            };
+            RegKey::predef(HKEY_CURRENT_USER)
+                .create_subkey(RUN_KEY)
+                .expect("open Run")
+                .0
+                .set_raw_value(VALUE, &expand)
+                .expect("seed REG_EXPAND_SZ prior");
+        }
+        let read_run_raw = || {
+            RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey_with_flags(RUN_KEY, KEY_READ)
+                .ok()
+                .and_then(|k| k.get_raw_value(VALUE).ok())
+                .map(|v| (v.vtype as u32, v.bytes))
+        };
+        let prior_run_raw = read_run_raw();
         let prior_run = read_raw_run_value();
         let prior_sa = read_sa();
         snapshot_restore_roundtrip_for_tests(&|| {
