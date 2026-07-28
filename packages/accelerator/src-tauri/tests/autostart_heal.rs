@@ -153,6 +153,92 @@ fn linux_full_lifecycle_enable_break_heal_disable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Linux — L4 hermetic (Docker) legs. The lifecycle test above pins its OWN env, so re-running it
+// in a container would prove nothing about env handling; these two read the env AS GIVEN and are
+// therefore meaningful only under scripts/autostart-test.sh, which passes a DIVERGENT
+// XDG_CONFIG_HOME vs HOME (impossible to prove on a dev host, where they coincide) and a second
+// invocation with HOME/XDG unset entirely. Outside the harness they self-skip loudly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "L4 container harness only (AZTEC_AUTOSTART_HERMETIC=1 + divergent XDG); vacuous elsewhere"]
+fn linux_hermetic_xdg_divergence() {
+    if std::env::var("AZTEC_AUTOSTART_HERMETIC").is_err() {
+        eprintln!("SKIPPED (vacuous pass): not under the L4 harness — run bun run --cwd packages/accelerator test:autostart");
+        return;
+    }
+    let xdg =
+        PathBuf::from(std::env::var("XDG_CONFIG_HOME").expect("harness sets XDG_CONFIG_HOME"));
+    let home = PathBuf::from(std::env::var("HOME").expect("harness sets HOME"));
+    assert_ne!(
+        xdg,
+        home.join(".config"),
+        "harness must pass DIVERGENT dirs or this proves nothing"
+    );
+
+    let bin = tempfile::tempdir().expect("bin dir");
+    let v1 = make_exe(bin.path(), "app-v1");
+    let v2 = make_exe(bin.path(), "app-v2");
+
+    // D9: everything must land under XDG_CONFIG_HOME — the removed plugin hardcoded $HOME/.config,
+    // and a reader watching the wrong dir is invisible outside a container.
+    enable_entry_at(&v1).expect("enable");
+    let right = xdg.join("autostart/Aztec Accelerator.desktop");
+    let wrong = home.join(".config/autostart/Aztec Accelerator.desktop");
+    assert!(
+        right.exists(),
+        "artifact must live under XDG_CONFIG_HOME (D9)"
+    );
+    assert!(
+        !wrong.exists(),
+        "nothing may be written under the $HOME/.config decoy"
+    );
+
+    std::fs::remove_file(&v1).unwrap();
+    assert!(matches!(heal_if_broken_at(&v2), HealOutcome::Healed { .. }));
+    assert_healthy_at(&read_stored_target(Some(&v2)), &v2);
+    assert!(
+        !wrong.exists(),
+        "the heal must not touch the decoy dir either"
+    );
+    remove_entry().expect("remove");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "L4 container harness only (invoked with HOME and XDG_CONFIG_HOME unset); vacuous elsewhere"]
+fn linux_hermetic_no_home_is_graceful() {
+    if std::env::var("AZTEC_AUTOSTART_HERMETIC").is_err() {
+        eprintln!("SKIPPED (vacuous pass): not under the L4 harness");
+        return;
+    }
+    if std::env::var_os("HOME").is_some() || std::env::var_os("XDG_CONFIG_HOME").is_some() {
+        eprintln!("SKIPPED (vacuous pass): HOME/XDG set — this leg runs under `env -u HOME -u XDG_CONFIG_HOME`");
+        return;
+    }
+    // C8: the removed plugin's `dirs::home_dir().unwrap()` PANICKED here. Every owned operation
+    // must degrade to an error or a skip — never abort.
+    let bin = tempfile::tempdir().expect("bin dir");
+    let live = make_exe(bin.path(), "app");
+    assert!(
+        enable_entry_at(&live).is_err(),
+        "enable without HOME must Err, not panic"
+    );
+    assert!(
+        intent_enabled_now().is_err(),
+        "intent without HOME must Err, not panic"
+    );
+    assert!(
+        matches!(
+            heal_if_broken_at(&live),
+            HealOutcome::Skipped(_) | HealOutcome::Failed(_)
+        ),
+        "heal without HOME must skip/fail, not panic"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // macOS
 // ─────────────────────────────────────────────────────────────────────────────
 
