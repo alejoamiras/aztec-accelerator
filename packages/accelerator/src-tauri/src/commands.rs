@@ -135,7 +135,6 @@ pub fn respond_auth(
     request_id: String,
     origin: String,
     allowed: bool,
-    remember: bool,
 ) -> Result<(), String> {
     // F-012 (D6) + SEC-06 (strengthened): bind the calling window to THIS request_id. windows.rs labels
     // the popup `auth-{hash(request_id)}`; asserting the caller's label == that means a popup opened for
@@ -144,8 +143,11 @@ pub fn respond_auth(
     let label = format!("{AUTH_LABEL_PREFIX}{}", sanitize_window_label(&request_id));
     require_label(window.label(), &label)?;
 
+    // No `remember` parameter: an untrusted renderer sending `false` would have been asking for LESS
+    // privilege, so removing it is not a hardening — it is removing a value that now has one meaning.
+    // Allow is unconditionally persistent; the popup discloses that instead of offering a toggle.
     let decision = if allowed {
-        AuthDecision::Allow { remember }
+        AuthDecision::Allow
     } else {
         AuthDecision::Deny
     };

@@ -172,7 +172,7 @@ describe("Authorization Flow", () => {
     }
   });
 
-  it("should show auth popup and allow with remember", async () => {
+  it("should show auth popup and persist the origin on Allow", async () => {
     const handlesBefore = await browser.getWindowHandles();
 
     pendingProve = fireProveRequest();
@@ -189,11 +189,9 @@ describe("Authorization Flow", () => {
     expect(await browser.getTitle()).toBe("Authorize Site");
     expect(await browser.$("#origin").getText()).toBe(TEST_ORIGIN);
 
-    // F-014: "Always allow this site" defaults UNCHECKED — opt in explicitly to persist the origin.
-    const remember = await browser.$("#remember");
-    expect(await remember.isSelected()).toBe(false);
-    await clickBy("#remember");
-    expect(await remember.isSelected()).toBe(true);
+    // Allow is unconditionally persistent — no checkbox to opt in with. The popup says so instead;
+    // this is the real-app proof that the disclosure is truthful (the mocked specs pin the copy).
+    expect(await browser.$("#permanence").getText()).toContain("Stays approved");
 
     // Click Allow — use JS click on Linux (WebKitGTK elementClick returns malformed response)
     await clickBy("#allow");
@@ -238,7 +236,10 @@ describe("Authorization Flow", () => {
     await browser.switchToWindow(settingsHandle);
   });
 
-  it("should allow without remembering when Remember is unchecked", async () => {
+  it("should NOT persist the origin when Denied", async () => {
+    // Replaces "allow without remembering": with Allow unconditionally persistent, Deny is the only
+    // path that must leave `approved_origins` untouched. Worth keeping as a real-app assertion —
+    // a bug that persisted on Deny would hand a standing grant to a site the user just refused.
     const handlesBefore = await browser.getWindowHandles();
 
     pendingProve = fireProveRequest();
@@ -250,15 +251,12 @@ describe("Authorization Flow", () => {
 
     // C9 (D8/A): wait for the server origin to render + the click-guard to elapse.
     await waitForActivePopup();
-    // F-014: Remember defaults UNCHECKED — no click needed; a plain Allow is ephemeral ("Allow once").
-    const remember = await browser.$("#remember");
-    expect(await remember.isSelected()).toBe(false);
 
-    await clickBy("#allow");
+    await clickBy("#deny");
 
     const proveResponse = await pendingProve;
     pendingProve = null;
-    expect(proveResponse.status).not.toBe(403);
+    expect(proveResponse.status).toBe(403);
 
     const config = readConfig();
     const origins = (config.approved_origins as string[]) || [];

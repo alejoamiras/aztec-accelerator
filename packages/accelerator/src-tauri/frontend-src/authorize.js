@@ -1,4 +1,4 @@
-import { invoke, isClickGuardActive, showErrorHint, wireButton } from "./bridge.js";
+import { invoke, showErrorHint, wireButton } from "./bridge.js";
 
 const params = new URLSearchParams(window.location.search);
 // SEC-06: the opaque request id the server issued for this popup — the ONLY value we trust from the URL.
@@ -9,7 +9,6 @@ const requestId = params.get("requestId") || "";
 const originEl = document.getElementById("origin");
 const allowBtn = document.getElementById("allow");
 const denyBtn = document.getElementById("deny");
-const rememberEl = document.getElementById("remember");
 
 let serverOrigin = null; // authoritative origin, once get_pending_auth answers
 let badgeShownFor = null; // origin we've already rendered the verified badge for
@@ -20,25 +19,13 @@ let poll = null; // active setTimeout id (self-scheduling; never overlaps)
 // Never render the query-param origin as authoritative: show a placeholder + disabled controls until the
 // server answers.
 originEl.textContent = "…";
-// codex r2 #1: defensively CLEAR the checkbox on init. The HTML ships it `disabled` so a pre-JS click
-// can't check it, but if anything (autofill/restore) left it checked, `disabled` alone wouldn't uncheck
-// it — and Allow reads `.checked`. Reset before enabling any control.
-rememberEl.checked = false;
 setControlsEnabled(false);
-
-// C9 (audit fix): the Remember checkbox is a consequential action too — a click-steal can pre-arm
-// persistent authorization before the user later Allows. It is disabled while inactive (below) AND its
-// toggle is refused within the click-steal guard window, exactly like Allow/Deny.
-rememberEl.addEventListener("click", (e) => {
-  if (isClickGuardActive()) e.preventDefault();
-});
 
 function setControlsEnabled(on) {
   // Don't fight the button state while a decision is in flight or already made.
   if (decided || responding) return;
   allowBtn.disabled = !on;
   denyBtn.disabled = !on;
-  rememberEl.disabled = !on; // C9 (audit fix): gate Remember on active-state too
 }
 
 function renderVerifiedBadge(origin) {
@@ -105,10 +92,11 @@ async function respond(allowed) {
   // must keep running so a resolved/expired request still closes and a promoted one stays truthful, rather
   // than the popup being left falsely actionable with a stale "try again".
   responding = true;
-  const remember = rememberEl.checked;
   try {
     // Send the server-authoritative origin (respond_auth treats it as diagnostics-only, but keep it honest).
-    await invoke("respond_auth", { requestId, origin: serverOrigin ?? "", allowed, remember });
+    // No `remember`: Allow is unconditionally persistent now, so there is no per-decision flag for the
+    // renderer to set. The popup discloses that permanence instead (see #permanence in authorize.html).
+    await invoke("respond_auth", { requestId, origin: serverOrigin ?? "", allowed });
     decided = true; // success — the Rust side is closing this window
     stopPolling();
   } finally {

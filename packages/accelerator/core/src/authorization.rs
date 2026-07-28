@@ -178,7 +178,13 @@ impl<'de> serde::Deserialize<'de> for CanonicalOrigin {
 /// Decision from the user about whether to authorize an origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthDecision {
-    Allow { remember: bool },
+    /// Approve the origin. Approval is unconditionally PERSISTENT — it is written to
+    /// `approved_origins` by `server::auth::authorize_origin`. There is deliberately no ephemeral
+    /// variant: the old `Allow { remember: false }` persisted nothing at all and did not even survive
+    /// the popup closing, so it re-prompted on the very next proof. See
+    /// implementations-plan/pre-release-polish/decision-allow-once.md for the reversal and its
+    /// compensating controls (the popup now discloses the permanence in place of a checkbox).
+    Allow,
     Deny,
 }
 
@@ -407,7 +413,7 @@ impl AuthorizationManager {
     /// Returns true if the origin is approved: in the persisted allowlist, OR — only when
     /// `auto_approve_localhost` is set — an auto-approved localhost origin (SEC-04). With the flag
     /// `false` (the desktop default) a localhost page is NOT silently trusted; it falls through to
-    /// the approval prompt (then, if remembered, joins `approved_origins`). The headless binary
+    /// the approval prompt (then, on Allow, joins `approved_origins`). The headless binary
     /// passes `true` (no popup).
     ///
     /// Both `origin` and `approved_origins` are [`CanonicalOrigin`], so canonicality is guaranteed by
@@ -500,10 +506,10 @@ mod tests {
         assert!(!is_first2);
         assert_eq!(id1, id2, "same origin must share one request_id");
 
-        mgr.resolve(&id1, AuthDecision::Allow { remember: true });
+        mgr.resolve(&id1, AuthDecision::Allow);
 
-        assert_eq!(rx1.await.unwrap(), AuthDecision::Allow { remember: true });
-        assert_eq!(rx2.await.unwrap(), AuthDecision::Allow { remember: true });
+        assert_eq!(rx1.await.unwrap(), AuthDecision::Allow);
+        assert_eq!(rx2.await.unwrap(), AuthDecision::Allow);
     }
 
     #[tokio::test]
@@ -521,7 +527,7 @@ mod tests {
     async fn resolve_ignores_wrong_request_id() {
         let mgr = AuthorizationManager::new();
         let (mut rx, id, _, _) = mgr.request(&co("https://example.com")).unwrap();
-        mgr.resolve("not-the-real-id", AuthDecision::Allow { remember: true });
+        mgr.resolve("not-the-real-id", AuthDecision::Allow);
         assert!(
             rx.try_recv().is_err(),
             "a wrong request_id must not resolve the request"
@@ -622,7 +628,7 @@ mod tests {
         let (mut rx2, id2, _, _) = mgr.request(&co("https://b.com")).unwrap();
         // A USER decision from the QUEUED (non-active) popup is REJECTED server-side (arbiter enforcement).
         assert_eq!(
-            mgr.resolve_active(&id2, AuthDecision::Allow { remember: true }),
+            mgr.resolve_active(&id2, AuthDecision::Allow),
             ResolveOutcome::NotActive
         );
         assert!(
@@ -630,7 +636,7 @@ mod tests {
             "a queued popup's user-decision must not resolve it"
         );
         // The ACTIVE popup's user decision succeeds and promotes b.com.
-        match mgr.resolve_active(&id1, AuthDecision::Allow { remember: false }) {
+        match mgr.resolve_active(&id1, AuthDecision::Allow) {
             ResolveOutcome::Resolved(promoted) => {
                 assert_eq!(promoted.as_deref(), Some(id2.as_str()))
             }

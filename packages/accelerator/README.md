@@ -120,12 +120,18 @@ Windows has no npm `bb`, so `bb.exe` ships as a sidecar fetched from a GitHub re
 
 ## Site Authorization
 
-The accelerator uses a MetaMask-style approval flow. When a new website calls `/prove`, the user sees a popup asking to allow or deny access. **Localhost origins are prompted once too** (then remembered if you choose **Remember**) — the desktop app no longer silently auto-approves localhost, so a malicious local page can't quietly use the accelerator. (The headless CI server *does* auto-approve localhost — it's an operator-controlled environment; see the [Headless Server section](#headless-server-for-ci-test-acceleration).)
+The accelerator uses a MetaMask-style approval flow. When a new website calls `/prove`, the user sees a popup asking to allow or deny access. **Localhost origins are prompted once too** (then remembered, like any other origin) — the desktop app no longer silently auto-approves localhost, so a malicious local page can't quietly use the accelerator. (The headless CI server *does* auto-approve localhost — it's an operator-controlled environment; see the [Headless Server section](#headless-server-for-ci-test-acceleration).)
 
-- **Allow + Remember**: the origin is saved to `~/.aztec-accelerator/config.json` and never prompted again
-- **Allow** (without Remember): approved for this session only
-- **Deny**: the SDK receives a `403` and automatically falls back to WASM proving
+- **Allow**: the origin is saved to `~/.aztec-accelerator/config.json` and never prompted again. The
+  popup says so ("Stays approved until you remove it in Settings") — approving is permanent, and
+  Settings → Approved Sites is where you undo it.
+- **Deny**: the SDK receives a `403` (nothing is saved) and automatically falls back to WASM proving
 - **Timeout** (60s): auto-denied if the user doesn't respond
+
+There is deliberately no "allow once". The option that existed until 1.0.8 persisted *nothing at
+all* — not a session, not a TTL — so it re-prompted on the very next proof; see
+`implementations-plan/pre-release-polish/decision-allow-once.md` for why it was removed and what
+replaced it.
 
 Approved sites can be reviewed and removed from the Settings window.
 
@@ -371,8 +377,8 @@ Tests the Settings, Authorization, and Update Prompt windows with mocked Tauri I
 bun run --cwd packages/accelerator test:e2e:ui
 ```
 
-### WebDriver E2E tests (9)
-Real end-to-end tests that launch the actual Tauri app via `tauri-plugin-webdriver` and drive it with WebdriverIO. Covers smoke (app health), settings (speed persistence), and auth flow (Allow/Deny/Remember).
+### WebDriver E2E tests
+Real end-to-end tests that launch the actual Tauri app via `tauri-plugin-webdriver` and drive it with WebdriverIO. Covers smoke (app health), settings (speed persistence), and auth flow (Allow persists, Deny does not).
 
 ```bash
 # Terminal 1: launch app with WebDriver

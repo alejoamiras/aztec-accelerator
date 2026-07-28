@@ -105,6 +105,12 @@ pub type ShowAuthPopupCallback =
 /// clone-stutter) (Q1).
 #[derive(Clone)]
 pub struct HeadlessState {
+    /// Override for where an approved origin is persisted. `None` (production) means
+    /// [`crate::config::config_path`]. `pub(crate)` so it CANNOT be set outside this crate — the
+    /// only writers are core's own tests, which redirect the now-unconditional approve-and-save
+    /// path away from the developer's real config file (post-impl codex: encode that as visibility,
+    /// not as a comment).
+    pub(crate) config_path: Option<std::path::PathBuf>,
     pub bundled_version: Option<String>,
     /// Injected app/release version for `/health.version`, decoupling it from `env!("CARGO_PKG_VERSION")`
     /// (which resolves to whichever crate compiles this module — wrong once `server.rs` lives in core).
@@ -167,6 +173,7 @@ impl Default for HeadlessState {
     /// compile-time version (binaries inject their own via [`HeadlessState::headless`]). (F-01)
     fn default() -> Self {
         Self {
+            config_path: None,
             bundled_version: None,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             https_bound: Arc::new(AtomicBool::new(false)),
@@ -191,6 +198,7 @@ impl HeadlessState {
         auth_manager: Option<Arc<AuthorizationManager>>,
     ) -> Self {
         Self {
+            config_path: None,
             app_version: app_version.into(),
             bundled_version,
             https_bound: Arc::new(AtomicBool::new(false)),

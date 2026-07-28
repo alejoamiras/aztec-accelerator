@@ -222,9 +222,27 @@ pub fn lock_mutate_save(
     lock: &parking_lot::RwLock<AcceleratorConfig>,
     f: impl FnOnce(&mut AcceleratorConfig) -> bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    lock_mutate_save_to(lock, None, f)
+}
+
+/// As [`lock_mutate_save`], but writes to `path` when given instead of [`config_path`].
+///
+/// Exists so the persistence path can be tested for real. Approving an origin is now unconditional
+/// (there is no ephemeral Allow), so a test that drives `authorize_origin` would otherwise write the
+/// DEVELOPER'S OWN `~/.aztec-accelerator/config.json` — and an assertion against the in-memory config
+/// would still pass even if that write failed, proving nothing about persistence (post-impl codex).
+/// With a destination injected, the test can reload from disk and assert what actually landed.
+pub fn lock_mutate_save_to(
+    lock: &parking_lot::RwLock<AcceleratorConfig>,
+    path: Option<&std::path::Path>,
+    f: impl FnOnce(&mut AcceleratorConfig) -> bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cfg = lock.write();
     if f(&mut cfg) {
-        save(&cfg)
+        match path {
+            Some(p) => save_to(&cfg, p),
+            None => save(&cfg),
+        }
     } else {
         Ok(())
     }

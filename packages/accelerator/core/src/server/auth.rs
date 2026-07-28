@@ -87,23 +87,30 @@ pub(crate) async fn authorize_origin(
         .map_err(|_| ProveError::AuthorizationCancelled)?;
 
     match decision {
-        AuthDecision::Allow { remember } => {
-            tracing::info!(origin = %origin, remember, "Origin authorized");
-            if remember {
-                if let Some(ref cfg_lock) = state.config {
-                    // q7e3-F-13: shared core helper; the closure's bool keeps the conditional save (only
-                    // when the origin is new) — no always-write on the piggyback-Allow path. Warn-and-
-                    // continue on save failure (a config-write error must NOT fail an approved prove).
-                    if let Err(e) = config::lock_mutate_save(cfg_lock, |cfg| {
+        AuthDecision::Allow => {
+            tracing::info!(origin = %origin, "Origin authorized (persistent)");
+            // Unconditional: there is no ephemeral Allow any more. The popup discloses that approving
+            // is permanent, so this write IS the thing the user consented to.
+            if let Some(ref cfg_lock) = state.config {
+                // q7e3-F-13: shared core helper; the closure's bool keeps the conditional save (only
+                // when the origin is new) — no always-write on the piggyback-Allow path. Warn-and-
+                // continue on save failure (a config-write error must NOT fail an approved prove).
+                // NOTE this is why the popup copy says "stays approved until you remove it in
+                // Settings" rather than promising the write succeeded: if it fails the user is asked
+                // again, which is safer than promised, never less safe.
+                if let Err(e) = config::lock_mutate_save_to(
+                    cfg_lock,
+                    state.core.config_path.as_deref(),
+                    |cfg| {
                         if cfg.approved_origins.contains(&origin) {
                             false
                         } else {
                             cfg.approved_origins.push(origin);
                             true
                         }
-                    }) {
-                        tracing::warn!(error = %e, "Failed to persist approved origin");
-                    }
+                    },
+                ) {
+                    tracing::warn!(error = %e, "Failed to persist approved origin");
                 }
             }
             Ok(())

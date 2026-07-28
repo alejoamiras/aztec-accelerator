@@ -35,9 +35,9 @@ if (typeof window !== "undefined") {
   window.addEventListener("focus", rearmInputGuard);
   window.addEventListener("pageshow", rearmInputGuard);
 }
-// Exported so consequential non-button controls (e.g. the authorize "Remember" checkbox) can gate on the
-// same click-steal window — Allow/Deny aren't the only stealable actions.
-export function isClickGuardActive() {
+// Internal-only since the authorize "Remember" checkbox (its one external consumer) was removed:
+// every remaining consequential control is a button wired through `wireButton({guard:true})` below.
+function isClickGuardActive() {
   return now() - inputArmedAt < guardMs();
 }
 
