@@ -4,8 +4,9 @@
 `xhigh`), `plan-fable.md` (top-tier Claude planning subagent), and the main agent's own draft.
 Grounded in `recon.md` (Phase 0.4), whose constraints are cited as **C1**–**C8**.
 
-**Revision 3** — post-contradiction-check, with both owner scope decisions folded (§11). See §12 for
-the change log. Status: **draft — pre-double-audit.** Not approved.
+**Revision 4** — post-double-audit. Codex returned **reject** (6 blocking) and fable
+**conditional-approve** (5 blocking); both are folded. See §12. Status: **draft — pre-final-codex-pass.**
+Not approved.
 
 ---
 
@@ -118,21 +119,48 @@ So **the marker protects autostart itself, not merely crash recovery**, and the 
 deferring it does not survive. Fable's contradiction-check reached the opposite verdict, but it
 worked through the same incomplete case set r1 did; codex's counterexample is strictly more general.
 
-**Design (both reviewers' corrections folded).** Windows-only — macOS/Linux `perform_update` holds
-the lock across `app.restart()`, so they are already covered; the marker exists *only* because
-Windows `install()` calls `std::process::exit(0)` and the lock dies with the process.
+**Design — r4, after both audits rejected the r3 removal rule.** Windows-only: macOS/Linux
+`perform_update` holds the lock across `app.restart()`, so they are already covered; the marker exists
+*only* because Windows `install()` calls `std::process::exit(0)` and the lock dies with the process.
 
-- Written atomically after confirmed disarm, before `install()`, at
-  `~/.aztec-accelerator/update-in-progress.json` (renamed from codex's `update-disarmed.json`, since
-  it now guards two things). Contains the candidate version and the canonical expected install path.
-- While a marker is live, **no process heals and no process rearms**.
-- **Removal requires all three:** matching candidate version **AND** canonical expected install path
-  **AND** a successful rearm. r1 proposed path-only removal; codex correctly rejected it — on Windows
-  the old and new versions normally run from the *same* install path, so a surviving old process could
-  remove the marker mid-NSIS.
-- **Corrupt or stale markers expire** on filesystem age against a conservative TTL. Codex's original
-  "corrupt markers fail closed" is withdrawn by its own author — permanent fail-closed bricks crash
-  recovery forever after a catastrophic NSIS failure.
+Written atomically after confirmed disarm, before `install()`, at
+`~/.aztec-accelerator/update-in-progress.json`, containing the candidate version, the canonical
+expected install path, **the intent snapshot at disarm time**, and **an absolute deadline**. Creation
+is **compare-and-create**, never unconditional replacement (D22).
+
+While a live marker exists: no process heals, no process rearms, **and no process starts a new update**
+(D22).
+
+**Removal requires all four (r3's three-part rule was circular and unsatisfiable):**
+
+1. Matching candidate version — r1's path-only rule was rejected by codex because on Windows old and
+   new run from the *same* install path.
+2. Canonical expected install path.
+3. **Installer-completion evidence** — a token written by a new production `NSIS_HOOK_POSTINSTALL`
+   (D21). *Codex:* once the new exe is copied to `P` it can be launched manually while NSIS is still
+   copying other files; it would match version **and** path **and** rearm successfully while the
+   install is incomplete, reintroducing the half-installed-launch hazard the disarm exists to prevent.
+   **Rearm is not completion evidence.**
+4. **Recovery reconciled to current intent** — armed when intent is ON, *confirmed disarmed* when
+   intent is OFF. This replaces r3's "successful rearm", which **codex withdrew as wrong when adopted
+   literally**: it deadlocked against "no process rearms while a marker is live", and under an OFF
+   intent it could never be satisfied at all. **The removal transaction is explicitly exempt from the
+   no-rearm rule** — that exemption was the missing piece, and both audits found its absence.
+
+**The TTL is a liveness heuristic, never a safety backstop.** Both audits: an installer hung past the
+TTL reopens the exact `P`-absent race. It exists only to recover orphaned/corrupt markers. The deadline
+is stored **inside the validated marker**, not derived from file mtime, because mtime is forgeable by
+the same user who can write the file (D23) — and a backwards clock must not resurrect an expired one.
+
+**Stranded states, each given a defined exit** (enumerated by both audits): returned install failure
+(the writer is N−1 and can never match its own candidate version — so the Err path must remove the
+marker under the lock before `CrashRecoveryGuard` rearms); downgrade or manual reinstall at another
+version; matching version at another path; transient `schtasks` failure at N's first launch (retry, not
+TTL limbo); OFF intent; corrupt or future-dated marker; **and the queued `AztecAccelerator` rename,
+which changes the install dir and exe name, so a renamed N runs from a path ≠ the marker's expected
+path** — fable's catch, and it would strand every first-rename release. The rename must therefore ship
+*after* this, and the marker must treat "expected path absent but a matching-version app is running
+from the current install location" as a valid completion.
 
 **Fork C — Linux config dir. → Honour `XDG_CONFIG_HOME`. (D9)**
 
@@ -165,7 +193,11 @@ Unreadable  I/O or parse failure                    → never heal, never write
 | **D16** | **`prior_enabled` := `intent_enabled`.** | New in r2. `commands.rs:462-464` computes `prior_enabled` from the plugin; under D7 it becomes ours and was undefined. It **must** be intent: if it were the health-aware flag, a `Broken` entry would read `false` and send `enable_transaction` down the full `plugin_enable` path — **recreating the macOS plist and stripping `KeepAlive`, the exact operation C1 forbids.** This makes a dedicated `repair_autostart` *structurally necessary*, not merely nicer UX. |
 | **D17** | **The Settings switch reflects intent; a warning row carries health; OFF always works.** | New in r2, from codex. r1 rendered a `Broken` entry as an *unchecked* switch while D13 treated intent as still on — so the user could not turn it OFF (clicking an unchecked switch sends ON), and `can_repair_now:false` offered no action at all. Status honesty must not cost the user their only control. |
 | **D18** | **The updater marker is in scope.** | See Fork B. Reversed from r1. |
-| **D19** | **Every owned mutation takes the same lock, `set_enabled` included.** | New in r2, from codex. r1 specified the lock only around the heal. Without it, another instance can process an OFF between our locked read and our `rename`/`set_value`, and the heal resurrects the entry — violating success criterion 4. |
+| **D19** | ~~Every owned mutation takes the *updater* lock~~ → **REVISED in r4: a dedicated, short-lived `autostart.lock` serialises owned autostart mutations.** The updater lock is taken *only* by the heal, and only to bow out. | Codex's r2 finding was right that `set_enabled` and the heal must not interleave; its choice of lock was wrong, and **fable caught the cost neither of us weighed**: `perform_update` holds `updater.lock` across the *entire multi-minute download* (`updater.rs:272`), so a non-blocking acquire makes the Settings toggle hard-fail during any background update, and a blocking one hangs the UI. A dedicated lock is held for microseconds around one read-modify-write. §3.4's rejection of a second lock is reversed accordingly — it was rejected on "another stale-lock failure mode" without weighing this. |
+| **D21** | **Add a production `NSIS_HOOK_POSTINSTALL` completion token.** | New in r4, forced by codex's finding 3. `hooks.nsi` today has *only* `NSIS_HOOK_POSTUNINSTALL` (verified, `:44`), so this is new production installer code — the marker cannot be closed without evidence that NSIS actually finished, and no such evidence exists today. |
+| **D22** | **`perform_update` becomes marker-aware: reject a live foreign marker under the updater lock; marker creation is compare-and-create.** | New in r4. **Both audits, independently.** The updater lock dies with the exiting process, so a second copy can acquire it and start a *whole concurrent install* inside the very window the marker protects — a strictly worse operation than the heal that criterion 6 forbids. r3 guarded the heal and left the bigger hole open. |
+| **D23** | **The marker is owner-private, bounded-read, reparse/symlink-refusing, with its deadline stored inside the validated payload.** | New in r4, from both audits' security notes. A same-user-writable marker is a *renewable suppression* lever for healing and crash recovery; mtime-based expiry is forgeable by exactly the actor who can write it. |
+| **D24** | **Redact user paths from the UI and logs.** | New in r4, from codex. `textContent` (F-B2) solves injection, not privacy: `stored_path` and the `from`→`to` `info` log both expose full usernames and home paths, and the §5 UI does not need them. |
 | **D20** | **Read each platform's disable override, not just Windows'.** | New in r2, from codex's "resolves ≠ will launch". Linux `.desktop` has `Hidden=true`; macOS launchd has a `Disabled` key. These are the direct analogues of Windows `StartupApproved`, and reading all three makes `intent_enabled` uniform instead of Windows-special. Known limit retained in §10. |
 
 ### 3.4 Rejected
@@ -177,7 +209,7 @@ Unreadable  I/O or parse failure                    → never heal, never write
 | `launchctl unload`/`load` after patching | `load` with `RunAtLoad` immediately spawns a second instance | fable — but see the §4.7 gap this leaves |
 | Toggle-ON as the repair path | Unledgered fork in r1 (codex proposed it, fable proposed the Fix button). D16 settles it: toggle-ON on a `Broken` entry hits the `prior_enabled` skip. Off→on remains the correct route for `points_elsewhere`, where recreation is desired. | codex |
 | `tauri-plugin-single-instance` | App-wide launch-semantics change, out of scope | fable |
-| A new dedicated `desktop-state.lock` | `updater.lock` already exists and is reviewed; a second lock adds a second stale-lock failure mode | codex |
+| ~~A new dedicated lock~~ | **Un-rejected in r4 (D19).** The r2 reasoning ("`updater.lock` already exists; a second lock adds a second stale-lock failure mode") never weighed that `updater.lock` is held across a multi-minute download, which would break the Settings toggle. A short-lived `autostart.lock` is now the design. | codex, overturned by fable |
 | Path-only marker removal | Old and new versions run from the same install path on Windows | r1's own amendment, rejected by codex |
 | Permanent fail-closed on a corrupt marker | Bricks crash recovery forever after a catastrophic NSIS failure | codex's original, withdrawn by its author |
 | Periodic / filesystem-watcher healing | One-shot per process; the marker (D18) now handles the transient-absence case | fable |
@@ -294,7 +326,8 @@ Linux/macOS writes go through same-dir temp + `fs::rename`, `0600`, refusing a s
 | File | Change |
 |---|---|
 | `src-tauri/src/autostart.rs` | **new** — the whole module above |
-| `src-tauri/src/update_marker.rs` | **new** (D18) — write / read / expire / remove, Windows-only behaviour, pure state machine |
+| `src-tauri/src/update_marker.rs` | **new** (D18) — write / read / expire / remove, Windows-only behaviour, pure state machine. **Its removal call site is `main.rs` startup**, not `updater.rs` (fable: r3's map named no remover at all) |
+| `src-tauri/nsis/hooks.nsi` | **(r4, D21)** add a production `NSIS_HOOK_POSTINSTALL` writing the completion token. Today the file has *only* `NSIS_HOOK_POSTUNINSTALL` (`:44`) — verified |
 | `src-tauri/tests/autostart_heal.rs` | **new** — `#[ignore]`d real-OS integration (shape copied from `tests/trust_linux.rs`) |
 | `e2e-webdriver/autostart.spec.ts` | **new** (L7) |
 | `scripts/autostart-test.sh` | **new** — Docker harness, modelled on `nsis-hook-test.sh` |
@@ -375,8 +408,15 @@ backslashes, `$`, backticks, `%`→`%%`, Unicode, controls, duplicate `Exec`, fi
 `StartupApproved` fixtures. **Decode-before-resolve (F-B3):** a healthy `&`-containing path must
 classify `Healthy`, not `Broken` — otherwise it is rewritten identically every launch while the status
 lies. Full injected-`exists` state table: absent, valid symlink, dangling symlink, directory,
-non-executable, permission error, malformed, `points_elsewhere`. Plus the D18 marker state machine,
-every early return, including expiry.
+non-executable, permission error, malformed, `points_elsewhere`.
+
+**Plus the D18 marker state machine**, exhaustively: every stranded state in §3.2 with its defined
+exit, the removal transaction's no-rearm exemption, compare-and-create rejection of a second writer,
+future-dated and backwards-clock deadlines, and the `install()` **Err** path removing its own marker
+before `CrashRecoveryGuard` rearms (fable: the writer is N−1 and can never satisfy its own
+candidate-version match, so without this the failed transaction strands itself). Three scenarios both
+audits called out as missing: **update while intent is OFF** (candidate clears the marker *without*
+arming recovery), a returned install failure, and a second updater attempt against a live marker.
 
 **L2 — differential oracle.** Structural assertions against `plist`-parsed output (now the production
 parser, so the oracle checks *intent*, not self-consistency).
@@ -387,6 +427,11 @@ relocate (delete the target) → heal → re-read, on each OS. Wired into the **
 free). Windows asserts real registry semantics, `StartupApproved` preservation, quoting. macOS asserts
 `KeepAlive` survives a real patch. Same step adds the bare `cargo test` that finally compiles the three
 dead `patch_plist_*` tests (**D5**).
+
+**Windows caveat (fable):** a throwaway `$HOME` does **not** isolate `HKCU`, so the Windows leg writes
+the real Run hive. These tests must use a uniquely-named value, run serialized (not under `cargo test`'s
+default thread parallelism), and clean up panic-safely via an RAII guard — otherwise a failed test
+leaves a live autostart entry on the runner.
 
 **L4 — Docker, `scripts/autostart-test.sh`.** `rust:bookworm`, inline heredoc Dockerfile,
 `docker run --rm -i` + `bash -s`, covered by `lint:shell`. Runs the Linux leg under hermetic `HOME=/h`
@@ -403,13 +448,27 @@ value with a missing spaced path; assert it becomes the exactly quoted installed
 task, and the smoke then `Stop-Process -Force` at `:594` — a "crash" the task would answer by
 relaunching the app mid-assertion. Delete both the Run value and the schtasks task **before** the kill.
 
+**Then execute it (r4 — fable's highest-value finding).** L1–L8 all assert stored *bytes*; not one
+launches from them, so the entire quoting claim rests on `run_value_candidates` — a model checked
+against itself. After the equality assertion, spawn the **raw Run value** via `Win32_Process Create`
+(the same `CreateProcess` semantics Run-key processing uses) and health-probe it. D11 explicitly
+promises to "prove the written value natively (L6)"; without this step it does not. This is also the
+only end-to-end proof of the §9 security fix.
+
 **L7 — WebDriver, `e2e-webdriver/autostart.spec.ts`** (S1; independently named by fable as the
 highest-value missing test). Under a throwaway `$HOME`: seed a `Broken` entry, launch the real app,
 read status through real IPC, click **Fix**, assert the artifact healed on disk. **This is the only
 layer that exercises the real command through the real capability ACL in the real binary** — L5 mocks
 both sides, so a forgotten `allow-repair-autostart` grant, a missing `build.rs` manifest entry, or
-serde camelCase drift ships green through L1–L6. Covers **macOS + Linux only**: Windows never runs
-`built-debug` WebDriver (recon §E), so L6 carries the Windows end-to-end proof.
+serde camelCase drift ships green through L1–L6.
+
+**Scope corrected in r4 (fable).** r3 said "Windows never runs WebDriver" — that is true only of the
+`built-debug` leg; the dev-mode matrix *does* include `windows-latest` (`accelerator.yml:449-456`).
+L7 covers macOS + Linux by **choice**, because a throwaway `$HOME` cannot isolate `HKCU` (same reason
+as L3), not because Windows is impossible. L6 carries the Windows end-to-end proof. Two further
+interactions the spec must expect: the app's own launch runs the startup rearm, which on macOS
+patches the seeded plist's `KeepAlive` *before* Fix is clicked, and on Linux may shell out to a real
+`systemctl --user`.
 
 **L8 — native Windows updater-window barrier** (owner-approved scope, r3). Codex's highest-value
 missing test, and the direct end-to-end proof of its Fork B counterexample: a real N−1→N update that
@@ -417,11 +476,35 @@ stops at a barrier after the disarm, launches an **alternate executable from a d
 while the installed target is absent, and asserts it **neither heals nor rearms**; then releases the
 barrier and asserts N clears the marker and the Run value still targets the installed exe.
 
-This requires giving `_e2e-updater-windows.yml` a `workflow_dispatch` path. That trigger was
-*deliberately* removed (recon §E; `windows-disarm-proof-2026-06-04/plan.md:80-81`), and the reason is
-structural, not arbitrary: the workflow's `n-artifact` input defaults to `accelerator-windows-x86_64`,
-**an artifact produced by the same run's `build` job**, so standalone it has nothing to install. The
-dispatch path must therefore build N from the checked-out ref in-job.
+**The barrier mechanism — r4. r3 specified this in `updater-smoke-windows.ps1`, and both audits
+independently proved that cannot work:** `perform_update` runs disarm → marker → `install()` within
+milliseconds, and `install_inner` hands off to NSIS and calls `std::process::exit(0)`
+(`tauri-plugin-updater-2.10.1/src/updater.rs:788-867`). There is no process left for PowerShell to
+hold, and a Rust-side pause *before* `install()` leaves `P` present — which does not test the
+counterexample at all.
+
+**Adopted mechanism (codex): a test-only sentinel in the synthetic N−1's `NSIS_HOOK_POSTUNINSTALL`.**
+The dispatch path builds N−1 itself, so it can inject a hook the production installer never carries.
+During an upgrade the new installer invokes the old uninstaller, which removes the old files — so
+POSTUNINSTALL is *exactly* the "`P` absent, new files not yet written" state. The hook signals ready,
+waits on a release file, and the smoke asserts `P` is absent before launching `Q`. This needs **no
+production code**, unlike fable's env-gated-pause-in-`perform_update` alternative, which would put a
+test lever in the shipped updater. `hooks.nsi:44` is the existing precedent for hook-driven behaviour
+tests.
+
+**The subject must also be asserted not to start its own update (fable).** `Q` is a real app copy
+sharing `~/.aztec-accelerator`; the smoke pre-seeds `auto_update:true`
+(`updater-smoke-windows.ps1:196`), the feed still serves N, and the first check fires 5 s after launch.
+Without D22, `Q` would kick off a *second concurrent NSIS run* inside the barrier — so L8 asserts three
+properties, not one: `Q` does not heal, does not rearm, **and does not start an install**. That third
+assertion is the regression test for D22.
+
+**Trigger plumbing.** `workflow_dispatch` was *deliberately* removed (recon §E;
+`windows-disarm-proof-2026-06-04/plan.md:80-81`) for a structural reason: `n-artifact` defaults to
+`accelerator-windows-x86_64`, **an artifact produced by the same run's `build` job**, so standalone the
+workflow has nothing to install. The dispatch path must build N from the checked-out ref in-job — which
+means **two** full Windows Tauri builds (pubkey-patched N−1 + N) against a `timeout-minutes: 40` budget
+sized for one (`_e2e-updater-windows.yml:50`). Raise it, and expect the runtime cost.
 
 **Trigger-split design (r3):**
 
@@ -430,17 +513,33 @@ dispatch path must therefore build N from the checked-out ref in-job.
 | `workflow_call` (release, unchanged) | this run's `build` artifact | **real `accelerator-v1.0.7`** — replacing the synthetic 0.0.1 | prod |
 | `workflow_dispatch` (new — the marker gate) | built in-job from the ref | synthetic | **ephemeral throughout** |
 
-Two things fall out of this. First, the workflow header's claim *"There is no prior Windows STABLE
-release to download as N−1 yet"* has been **false since April** — seven stable releases ship a Windows
-`setup.exe` (`accelerator-v1.0.0`…`v1.0.7`) — and the file's own comment says to switch to the real-N−1
-pattern once one exists. Doing it here also delivers the fixture the queued `AztecAccelerator` rename
-already needs, so it is built once rather than twice.
+The workflow header's claim *"There is no prior Windows STABLE release to download as N−1 yet"* has
+been **false since April** — seven stable releases ship a Windows `setup.exe`
+(`accelerator-v1.0.0`…`v1.0.7`) — and the file's own comment says to switch to the real-N−1 pattern
+once one exists. Doing it here also delivers the fixture the queued `AztecAccelerator` rename needs.
 
-Second, and deliberately: the dispatch path uses an **ephemeral key for both ends**, never the prod
-updater key. Real-N−1 forces prod signing because `v1.0.7` embeds the committed prod pubkey — but the
-marker test does not need real-signature verification, only real updater-window behaviour. Keeping the
-prod key exclusively on the release path means a manually-triggerable workflow can never be induced to
-produce a prod-signed artifact (§9).
+**Real-N−1 preflight (both audits — r3 called this path "unchanged", which is false; the fixture
+changes materially).** Before enabling updates, assert: the installed N−1's `/health` version, with N
+strictly greater (F-004's monotonic floor rejects any N ≤ 1.0.7, and the `accelerator-v1.0.7` *tag
+source* reads `1.0.7-rc.1` because release builds patch the version in-job — **verified**); that
+v1.0.7's embedded pubkey equals the current prod key; that the endpoint host matches what the
+redirected feed impersonates; and that the current `SignedEnvelope` v1 / `config_version:1` pre-seed is
+accepted. Fail early and loudly — an unverified precondition here turns the release gate red *on
+release day*.
+
+**Ephemeral signing, specified properly (codex — r3 under-specified it).** Merely swapping the private
+key fails verification, because the current workflow deliberately keeps the committed **production**
+pubkey inside N−1 (`_e2e-updater-windows.yml:102-104`). The generated ephemeral **public** key must be
+patched into `tauri.conf.json` before building *both* N−1 and N, and the same private key must sign N's
+artifact **and** its manifest.
+
+**Security correction (codex).** r3 claimed the trigger split keeps the prod key off the dispatch path.
+**That claim was wrong**: `workflow_call.secrets` is not an isolation boundary — repository secrets stay
+addressable in a `workflow_dispatch` run of the same YAML, and this file already references the
+production key. The real control is structural: put the dispatch and production paths in **separate
+jobs**, with the secretless one requesting no production secrets; event-guard every production step;
+and protect the production key behind a **release-only environment**. Note also that `contents: read`
+prevents publishing a release but does **not** prevent uploading a production-signed Actions artifact.
 
 ---
 
@@ -450,7 +549,7 @@ produce a prod-signed artifact (§9).
 |---|---|---|
 | 1 | `autostart.rs` pure layer + L1/L2 | `cargo test autostart`; `cargo clippy --all-targets -- -D warnings`; `cargo fmt --check` → **Rust Tests** (`:88`) |
 | 2 | Platform readers/writers, `heal_if_broken`, `set_enabled`, `intent_enabled`; remove the plugin; `build.rs` + trust-boundary command sets | `cargo test` on Linux **and** `windows-build` (`:535`); `bun run --cwd packages/accelerator test:unit` |
-| 3 | `update_marker.rs` + updater integration (D18) | `cargo test marker`; `windows-build` green |
+| 3 | `update_marker.rs` (D18) + **production `NSIS_HOOK_POSTINSTALL` completion token (D21)** + **marker-aware `perform_update` (D22)** + the removal call site in `main.rs` startup (fable: r3's change map had no remover) | `cargo test marker` — the state table must cover every stranded state in §3.2 and show a defined exit; `windows-build` green; `test:nsis` still green with the new hook |
 | 4 | `main.rs` call site + `repair_autostart` + `AutostartStatus` + `settings.js` (D17) | `test:e2e:ui` → **Desktop UI Tests** (`:413`); existing `settings.spec.ts:159` still passes |
 | 5 | L3 + L7 + CI wiring (incl. the macOS bare `cargo test`) | `cargo test --test autostart_heal -- --ignored` on all three `cert-trust` legs; the macOS log shows `patch_plist_*` **running**; `test:e2e:webdriver` green; `bun run lint:actions` |
 | 6 | L4 container harness | `test:autostart` exits 0 locally; `bun run lint:shell` clean |
@@ -483,12 +582,19 @@ autostart artifact content; no macOS CI job runs a bare `cargo test`; the fronte
 
 **Inferences (challenge these):** Finder's drag-to-`/Applications` is a move, so the old path stops
 resolving — the trigger. "Path resolves" means canonicalizable regular executable file. A valid
-alternate copy is functional and must not be auto-repointed. Matching candidate version **and**
-canonical expected path **and** a successful rearm is sufficient evidence NSIS finished. A conservative
-file-age TTL is a safe backstop for a corrupt marker.
+alternate copy is functional and must not be auto-repointed. An installer-written `POSTINSTALL` token
+is trustworthy evidence that NSIS finished. `NSIS_HOOK_POSTUNINSTALL` during an upgrade is a point
+where the old target is genuinely absent (this is what L8's barrier rests on).
 
-*(r1's weakest inference — "the heal is safe inside the Windows NSIS window" — was **disproven** by
-codex and is no longer load-bearing; D18 replaces it.)*
+**Two inferences have now been disproven in review and are no longer load-bearing** — recorded because
+the pattern matters more than either instance:
+
+- r1: *"the heal is safe inside the Windows NSIS window"* — disproven by codex's alternate-copy
+  interleaving. D18 replaces it.
+- r3: *"version + path + successful rearm is sufficient evidence NSIS finished"* — disproven by codex
+  (the new exe can be launched while NSIS is still copying other files) and **withdrawn by its own
+  author**. D21's completion token replaces it. Likewise r3's *"a file-age TTL is a safe backstop"*:
+  it is a liveness heuristic only, and a hung installer past the TTL reopens the very race.
 
 **Asks:** one, **Q1** (§11) — now a scope-size question, not a design question.
 
@@ -524,13 +630,27 @@ treatment the origin rendering received in PR #421.
 **TOCTOU / symlink.** Refuse a symlinked plist or `.desktop`; same-dir temp + `rename`, `0600`. The
 NSIS-window TOCTOU codex identified is closed by D18.
 
-**Auditability.** Every heal logs `from`→`to` at `info`.
+**Auditability, and privacy (D24, r4).** Every heal logs `from`→`to` at `info` — but codex is right
+that `textContent` (F-B2) solves *injection*, not *privacy*. Both `stored_path` in the UI and the
+transition log expose full usernames and home paths that §5's copy does not need. Redact to the
+basename plus an elided ancestor.
 
-**Least privilege on the new dispatch trigger (r3).** Making `_e2e-updater-windows.yml`
-manually-dispatchable widens *who can trigger a workflow that signs updater artifacts*. The dispatch
-path therefore uses an **ephemeral key for both N and N−1** and never requests
-`TAURI_SIGNING_PRIVATE_KEY`; the prod key stays bound to the `workflow_call` release path. A
-manually-triggered run can never emit a prod-signed artifact.
+**The marker is a new attack surface (D23, r4 — both audits).** It is same-user-writable and its whole
+purpose is to *suppress* healing and crash-recovery rearming, so an attacker who can write it gains
+**renewable suppression** of both. This is an **availability** effect, not privilege escalation — the
+same actor could simply delete the Run value — and it is stated that way rather than dressed up.
+Controls: owner-private ACLs, bounded reads, reparse-point/symlink refusal, defined handling for
+future-dated values, and an absolute deadline stored **inside** the validated payload so mtime forging
+cannot extend it.
+
+**Least privilege on the new dispatch trigger — r3's claim was WRONG, corrected in r4 (codex).** r3
+asserted that using an ephemeral key on the dispatch path keeps the production signing key away from a
+manually-triggerable workflow. `workflow_call.secrets` is **not** an isolation boundary: repository
+secrets remain addressable in a `workflow_dispatch` run of the same YAML, and this file already
+references the production key. The real control is structural — separate jobs, the secretless one
+requesting no production secrets, every production step event-guarded, and the production key behind a
+release-only environment. `contents: read` blocks publishing a release but not uploading a
+production-signed Actions artifact.
 
 ---
 
@@ -542,8 +662,13 @@ manually-triggered run can never emit a prod-signed artifact.
 - **macOS session gap** (§4.7): the loaded launchd job is not reloaded. Repaired at next login.
 - **L7 covers macOS + Linux only**; Windows end-to-end rests on L6 + L8.
 - **L8 is dispatch-gated, not PR-gated.** It proves the updater-window property on demand, not on
-  every PR — a full Windows Tauri build per run is too heavy for the PR gate. Running it is a
+  every PR — *two* full Windows Tauri builds per run is far too heavy for the PR gate. Running it is a
   release-checklist item.
+- **The marker is a same-user availability lever** (D23): anyone who can write the user's home can
+  suppress healing and crash-recovery rearming until the deadline. No privilege boundary is claimed —
+  the same actor could delete the Run value outright.
+- **The `AztecAccelerator` rename must ship after this**, not before: it changes the install dir and
+  exe name, which is precisely the marker's "expected path" (fable).
 
 ---
 
@@ -587,5 +712,33 @@ its conclusion happened to hold (fable) — and then wrong (codex).
 **r3 — owner scope decisions.** Q1 → the marker ships in this PR (Phase 3). Q2 → `_e2e-updater-windows.yml`
 gains a `workflow_dispatch` path now (Phase 8, **L8**), which also delivers the real-N−1 fixture the
 queued `AztecAccelerator` rename needs and corrects a workflow header comment that has been false since
-April. Added the least-privilege split that keeps the prod updater signing key off the manually
-triggerable path (§9), and the note that Phase 8 has no local gate.
+April.
+
+**r4 — double audit (codex: reject, 6 blocking; fable: conditional-approve, 5 blocking; run in
+parallel, neither seeing the other).** They converged on the two fatal areas.
+
+*Both, independently:*
+- **L8's barrier was not implementable.** `install()` hands off to NSIS and calls `process::exit(0)`,
+  so nothing was left for `updater-smoke-windows.ps1` to hold. Replaced with codex's test-only sentinel
+  in the synthetic N−1's `NSIS_HOOK_POSTUNINSTALL` — the one point where `P` is genuinely absent, and
+  it needs no production code.
+- **D18's removal rule was circular** ("no process rearms while live" vs "removal requires a successful
+  rearm") and unsatisfiable under an OFF intent. Codex withdrew its own formulation. Now: version +
+  path + **installer-completion token** + **recovery reconciled to intent**, with the removal
+  transaction explicitly exempt from the no-rearm rule.
+- **D22** — `perform_update` was not marker-aware, so a second instance could start a whole concurrent
+  install inside the window the marker protects. r3 guarded the heal and left the larger hole open.
+
+*Codex only:* rearm is not proof NSIS finished (→ **D21**, a new production `NSIS_HOOK_POSTINSTALL`
+token); TTL is a liveness heuristic, not a safety backstop; the r3 signing-isolation claim in §9 was
+**wrong** — `workflow_call.secrets` is not a boundary; ephemeral signing needs the pubkey patched into
+both builds; real-N−1 needs a version preflight and the release path is *not* "unchanged"; **D24**
+redact user paths.
+
+*Fable only:* **D19 as adopted in r2 would have broken the Settings toggle** — `updater.lock` is held
+across a multi-minute download — so a dedicated short-lived `autostart.lock` replaces it, and §3.4's
+rejection of a second lock is reversed; L8's own subject would have started a second update mid-barrier;
+the change map named **no marker removal call site**; the queued rename would strand every first-rename
+marker; L3/L7 on Windows cannot isolate `HKCU` via `$HOME`; L7's Windows exclusion is a choice, not an
+impossibility; **and the highest-value missing test — nothing anywhere actually *executes* a healed
+entry**, so the quoting fix was proved only against our own model.
