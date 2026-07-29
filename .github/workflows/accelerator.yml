@@ -618,49 +618,94 @@ jobs:
             Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Out-String | Write-Host
             exit 1
           }
-          # L6, piece-1 variant (autostart plan §11b): seed a STALE spaced Run value — exactly the
-          # unquoted shape the removed auto-launch plugin wrote — before launching the production
-          # build. Piece 1 gates the automatic Windows heal OFF (the piece-2 update marker must land
-          # first), so the assertion here is UNCHANGED: launching must neither heal nor clobber the
-          # value. Piece 2 flips this to assert the exactly-quoted healed path.
+          # Shared launch/probe helper for the two scenarios below.
           $runKey = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+          $saKey  = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
           $staleValue = "$env:LOCALAPPDATA\Aztec Gone\Aztec Accelerator.exe "
-          Set-ItemProperty -Path $runKey -Name "Aztec Accelerator" -Value $staleValue
-          Write-Host "seeded stale Run value: $staleValue"
-          Write-Host "launching $($exe.FullName)"
+          $aztecDir = Join-Path $env:USERPROFILE ".aztec-accelerator"
+          $markerFile = Join-Path $aztecDir "update-in-progress.json"
           # Kill switch so the launched app doesn't poll the PROD updater feed / pop a prompt.
+          # NOTE: marker reconciliation deliberately runs regardless of this switch.
           $env:AZTEC_ACCEL_NO_UPDATE = "1"
-          $proc = Start-Process -FilePath $exe.FullName -PassThru
-          # Poll /health (the server binds even without a visible tray) — proves the app starts.
-          $ok = $false
-          for ($i = 0; $i -lt 30; $i++) {
-            try {
-              $h = Invoke-RestMethod -Uri "http://127.0.0.1:59833/health" -TimeoutSec 3
-              if ($h.status -eq "ok") { Write-Host "/health: $($h | ConvertTo-Json -Compress)"; $ok = $true; break }
-            } catch { }
-            Start-Sleep -Seconds 2
+          function Start-AndProbe {
+            $p = Start-Process -FilePath $exe.FullName -PassThru
+            $healthy = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              try {
+                $h = Invoke-RestMethod -Uri "http://127.0.0.1:59833/health" -TimeoutSec 3
+                if ($h.status -eq "ok") { Write-Host "/health: $($h | ConvertTo-Json -Compress)"; $healthy = $true; break }
+              } catch { }
+              Start-Sleep -Seconds 2
+            }
+            if (-not $healthy) {
+              Write-Error "app did not serve /health within 60s — the tray/WebView2 app may not run on a windows-latest runner (risk #1)"
+              exit 1
+            }
+            return $p
           }
-          # L6 assertion (piece 1): the seeded value is byte-identical — the Windows automatic heal
-          # is compile-time gated off, and nothing else may touch the entry on launch.
+          function Clear-AutostartState {
+            # F-B1 cleanup — BEFORE any force-kill: an armed crash-recovery task would treat
+            # Stop-Process as a crash and relaunch the app mid-assertion (flake generator).
+            schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null
+            Remove-ItemProperty -Path $runKey -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $saKey  -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
+          }
+
+          # ── Scenario A (T5, piece-2 wiring proof): a LIVE update marker suppresses the heal AND
+          #    the crash-recovery rearm, end to end through main.rs — the library tables cannot
+          #    catch a wiring bug that gates only one of the two. ──
+          New-Item -ItemType Directory -Force -Path $aztecDir | Out-Null
+          $deadline = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 600
+          # Valid marker (schema/canonical-semver/deadline in-clamp) whose token will never match:
+          # classification = Suppress, so it must SURVIVE the launch.
+          Set-Content -Path $markerFile -NoNewline -Value ('{"schema":1,"txn":"ci-live-window","candidate":"9.9.9","expected_install_path":"C:\\nowhere\\app.exe","intent_at_disarm":true,"deadline_unix":' + $deadline + '}')
+          Set-ItemProperty -Path $runKey -Name "Aztec Accelerator" -Value $staleValue
+          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null
+          Write-Host "scenario A: live marker + stale Run value seeded; launching"
+          $proc = Start-AndProbe
           $after = (Get-ItemProperty -Path $runKey -Name "Aztec Accelerator" -ErrorAction SilentlyContinue)."Aztec Accelerator"
           if ($after -cne $staleValue) {
-            Write-Error "piece-1 gate breached: the Run value changed on launch (was '$staleValue', now '$after') — the Windows automatic heal must stay OFF until the piece-2 update marker lands"
+            Write-Error "suppression breached: the Run value changed under a live marker (was '$staleValue', now '$after')"
             exit 1
           }
-          Write-Host "OK: seeded stale Run value untouched by launch (Windows auto-heal gated off)"
-          # F-B1 cleanup — BEFORE the force-kill. The seeded entry reads as intent ON, so the
-          # startup rearm armed the real crash-recovery schtasks task; Stop-Process -Force IS a
-          # "crash", and the armed task would relaunch the app mid-/after-assertions (flake
-          # generator). Delete the task first, then the Run value.
-          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null
-          Remove-ItemProperty -Path $runKey -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
-          Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
+          schtasks /Query /TN "Aztec Accelerator Crash Recovery" 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error "suppression breached: the crash-recovery task was created under a live marker"
+            exit 1
+          }
+          if (-not (Test-Path $markerFile)) {
+            Write-Error "the live marker was removed by a launch that could not satisfy its removal rule"
+            exit 1
+          }
+          Write-Host "OK scenario A: live marker suppressed heal AND rearm; marker survived"
+          Clear-AutostartState
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          if (-not $ok) {
-            Write-Error "app did not serve /health within 60s — the tray/WebView2 app may not run on a windows-latest runner (risk #1)"
+          Remove-Item -Force $markerFile -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+          # ── Scenario B (L6 flip, piece 2): with NO marker, the Windows automatic heal is ON —
+          #    the seeded stale value must come out as the EXACTLY QUOTED installed exe. ──
+          if (Test-Path $markerFile) { Write-Error "precondition: marker still present"; exit 1 }
+          Set-ItemProperty -Path $runKey -Name "Aztec Accelerator" -Value $staleValue
+          Write-Host "scenario B: stale Run value seeded, no marker; launching"
+          $proc = Start-AndProbe
+          $expected = '"' + $exe.FullName + '"'
+          $healed = $null
+          # The heal runs in .setup() before the server binds, but poll briefly to be robust.
+          $deadlineB = (Get-Date).AddSeconds(15)
+          do {
+            $healed = (Get-ItemProperty -Path $runKey -Name "Aztec Accelerator" -ErrorAction SilentlyContinue)."Aztec Accelerator"
+            if ($healed -ceq $expected) { break }
+            Start-Sleep -Milliseconds 500
+          } while ((Get-Date) -lt $deadlineB)
+          if ($healed -cne $expected) {
+            Write-Error "heal breached: expected the exactly quoted installed exe '$expected', got '$healed'"
             exit 1
           }
-          Write-Host "OK: the Windows app installs, launches, and serves /health on the runner"
+          Write-Host "OK scenario B: stale value healed to the exactly quoted installed exe"
+          Clear-AutostartState
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "OK: the Windows app installs, launches, serves /health, suppresses under a live marker, and heals without one"
           # Explicit success: `schtasks /Delete` above is the last NATIVE command, and Actions
           # appends `exit $LASTEXITCODE` to pwsh steps. Cmdlets don't reset $LASTEXITCODE, so a
           # task that was never armed (schtasks exits 1) would fail this step despite every
