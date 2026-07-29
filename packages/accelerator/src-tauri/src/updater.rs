@@ -466,13 +466,20 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
                 guard.defuse();
                 return;
             }
-            Err(crate::update_marker::CreateErr::Io(e)) => {
-                // The write may have PUBLISHED a complete marker before failing (e.g. sync_all
-                // after a full write) — and any survivor here is OURS, since a foreign one
-                // returns Live. Run the checked, intent-sensitive cleanup under the still-held
-                // lock, then defuse: a Drop-rearm into a possibly-live marker of ours is exactly
-                // what rev 3 forbids (post-impl audit #1).
+            Err(crate::update_marker::CreateErr::NotPublished(e)) => {
+                // Nothing of ours exists — plain abort; the guard's Drop rearms from the
+                // snapshot, which is FRESH here (the lock has been held since the intent read),
+                // so an unreadable current intent can never strand recovery on this path
+                // (verification pass, sibling path a).
                 tracing::error!("cannot create the update marker ({e}); aborting install");
+                return;
+            }
+            Err(crate::update_marker::CreateErr::PublishedMaybe(e)) => {
+                // The exclusive create WON, so any survivor is OURS — possibly complete (sync
+                // can fail after a full write). Run the checked, intent-sensitive cleanup under
+                // the still-held lock, then defuse: a Drop-rearm into a possibly-live marker of
+                // ours is exactly what rev 3 forbids (post-impl audit #1).
+                tracing::error!("marker write failed after creation ({e}); aborting install");
                 crate::update_marker::post_create_failure_cleanup(
                     &paths,
                     &crate::autostart::intent_enabled_now,

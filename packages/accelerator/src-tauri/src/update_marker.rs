@@ -179,7 +179,13 @@ pub fn live_marker_exists(paths: &MarkerPaths, now_unix: i64) -> bool {
 pub enum CreateErr {
     /// A live foreign window exists — NEVER deleted, never replaced (D22).
     Live,
-    Io(String),
+    /// Failed with NO marker of ours published (the exclusive create itself failed). The caller
+    /// may rearm from its snapshot — nothing exists to suppress, and the snapshot is fresh
+    /// because the lock has been held since the intent read.
+    NotPublished(String),
+    /// The exclusive create SUCCEEDED and a later step (write/sync) failed — a complete marker of
+    /// ours may exist on disk. The caller must run the checked cleanup and defuse its guard.
+    PublishedMaybe(String),
 }
 
 /// Compare-and-create (D22). Caller MUST hold `autostart.lock` — that hold is what makes the
@@ -191,15 +197,21 @@ pub fn create_new(
     now_unix: i64,
 ) -> Result<(), CreateErr> {
     let bytes = serde_json::to_vec_pretty(payload)
-        .map_err(|e| CreateErr::Io(format!("cannot serialize marker: {e}")))?;
+        .map_err(|e| CreateErr::NotPublished(format!("cannot serialize marker: {e}")))?;
     if let Some(parent) = paths.marker.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| CreateErr::Io(format!("cannot create state dir: {e}")))?;
+            .map_err(|e| CreateErr::NotPublished(format!("cannot create state dir: {e}")))?;
     }
     for attempt in 0..2 {
         match try_create_exclusive(&paths.marker, &bytes) {
             Ok(()) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+            Err(CreateStep::Open(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if attempt == 1 {
+                    // Reappeared between our delete and the retry ⇒ a RACING writer owns it now.
+                    // Classify as Live regardless of payload — a second delete is how a foreign
+                    // live window would get destroyed (verification pass, sibling path b).
+                    return Err(CreateErr::Live);
+                }
                 match load(paths, now_unix) {
                     // Live foreign window: hard stop, never delete (D22 / final pass #2).
                     l if is_live(&l, now_unix) => return Err(CreateErr::Live),
@@ -209,20 +221,36 @@ pub fn create_new(
                     }
                 }
             }
-            Err(e) => return Err(CreateErr::Io(format!("cannot create marker: {e}"))),
+            Err(CreateStep::Open(e)) => {
+                return Err(CreateErr::NotPublished(format!(
+                    "cannot create marker: {e}"
+                )))
+            }
+            Err(CreateStep::AfterCreate(e)) => {
+                // The exclusive create won — whatever is on disk is OURS, possibly complete.
+                return Err(CreateErr::PublishedMaybe(format!(
+                    "marker write failed after creation: {e}"
+                )));
+            }
         }
     }
-    Err(CreateErr::Io(
-        "marker reappeared during creation".to_string(),
-    ))
+    unreachable!("both create attempts return")
+}
+
+/// Which step of exclusive creation failed — the caller's obligations differ: an `Open` failure
+/// published nothing; an `AfterCreate` failure may have left a complete file of OURS (write_all
+/// can finish and sync_all still fail).
+enum CreateStep {
+    Open(std::io::Error),
+    AfterCreate(std::io::Error),
 }
 
 /// Exclusive creation: `CREATE_NEW` semantics on every platform; owner-private + reparse-safe on
 /// Windows via the existing `win_acl` primitive.
-fn try_create_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn try_create_exclusive(path: &Path, bytes: &[u8]) -> Result<(), CreateStep> {
     use std::io::Write as _;
     #[cfg(windows)]
-    let mut f = accelerator_core::win_acl::secure_create_file(path)?;
+    let mut f = accelerator_core::win_acl::secure_create_file(path).map_err(CreateStep::Open)?;
     #[cfg(not(windows))]
     let mut f = {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -230,10 +258,11 @@ fn try_create_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(path)?
+            .open(path)
+            .map_err(CreateStep::Open)?
     };
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    f.write_all(bytes).map_err(CreateStep::AfterCreate)?;
+    f.sync_all().map_err(CreateStep::AfterCreate)?;
     Ok(())
 }
 
@@ -657,6 +686,28 @@ mod tests {
         remove_all(&paths).unwrap();
         std::fs::write(&paths.marker, b"garbage").unwrap();
         assert_eq!(create_new(&paths, &fresh, NOW), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t1_create_failure_classification() {
+        // NotPublished vs PublishedMaybe drive DIFFERENT caller obligations (plain snapshot rearm
+        // vs checked cleanup + defuse) — pin the reachable half: an open failure publishes
+        // nothing.
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = tempfile::tempdir().unwrap();
+        let ro = d.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        let paths = MarkerPaths::in_dir(&ro.join("sub")); // create_dir_all under a read-only parent
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let fresh = MarkerPayload::new(&ver("1.0.9"), Path::new("/x"), true, NOW);
+        let out = create_new(&paths, &fresh, NOW);
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(out, Err(CreateErr::NotPublished(_))),
+            "an open/mkdir failure must classify NotPublished, got {out:?}"
+        );
+        assert!(!paths.marker.exists());
     }
 
     #[test]
