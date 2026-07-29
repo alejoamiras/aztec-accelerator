@@ -68,7 +68,9 @@ jobs:
           {
             echo "TAURI_SIGNING_PRIVATE_KEY=$(cat ./eph.key)"
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD="
-            echo "EPHEMERAL_PUBKEY=$(base64 -w0 ./eph.key.pub)"
+            # The CLI's .pub file is ALREADY the base64 doc tauri.conf.json expects — cat, don't
+            # re-encode (a second base64 layer fails the build at "Missing encoded key").
+            echo "EPHEMERAL_PUBKEY=$(cat ./eph.key.pub)"
           } >> "$GITHUB_ENV"
           rm -f ./eph.key ./eph.key.pub
 

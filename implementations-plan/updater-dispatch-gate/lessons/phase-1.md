@@ -41,3 +41,13 @@ history when a test feeds real old binaries.
 own new workflow. Bootstrap: temporary `push: branches: [worktree-updater-dispatch-gate]`
 trigger; every push validates the dispatch job end-to-end; the trigger is REMOVED in the final
 pre-merge commit, then a post-merge dispatch burn-in re-proves the real trigger path.
+
+## Round 1 (bootstrap run 30469821837): double-base64 pubkey
+
+N−1 build died at updater-artifact signing: "failed to decode pubkey: Missing encoded key in
+public key". `tauri signer generate`'s `.pub` FILE is ALREADY the base64 document that
+tauri.conf.json's `pubkey` holds — my `base64 -w0 ./eph.key.pub` added a second layer.
+Fix: `cat`, not re-encode. Verified locally by generating a key with the repo CLI and
+diffing formats against the committed pubkey — 5-minute local repro vs a 15-minute CI leg.
+(The PRIVATE key file is also single-line base64, which is why `cat` into GITHUB_ENV was
+always safe on the existing path.)
