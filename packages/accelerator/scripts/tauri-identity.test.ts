@@ -86,5 +86,6 @@ describe("CI/scripts reference the renamed binary (lockstep sites)", () => {
       "utf8",
     );
     expect(body).toContain('-N1BinaryName "aztec-accelerator.exe"');
+    expect(body.split("aztec-accelerator.exe").length - 1).toBe(1);
   });
 });

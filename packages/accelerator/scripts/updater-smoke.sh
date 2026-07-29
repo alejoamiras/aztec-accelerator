@@ -35,10 +35,9 @@ REPO_ROOT="$5"
 MODE="${UPDATER_SMOKE_MODE:-positive}"
 
 APP="/Applications/Aztec Accelerator.app"
-# N-1 is the real previous release: OLD binary name (aztec-accelerator) until a renamed release
-# becomes the fixture, then AztecAccelerator. Resolve whichever exists — fail if neither.
-APP_BIN=$(find "$APP/Contents/MacOS" -maxdepth 1 -type f \( -name AztecAccelerator -o -name aztec-accelerator \) | head -1)
-[ -n "$APP_BIN" ] || { echo "FAIL: no main binary in $APP/Contents/MacOS"; exit 1; }
+# APP_BIN is resolved AFTER the N-1 install below — resolving here would probe a not-yet-installed
+# (or stale leftover) .app, and `set -euo pipefail` turns the failed find into an instant death on
+# a clean runner.
 HEALTH="http://127.0.0.1:59833/health"
 HOST="aztec-accelerator.dev"
 CONFIG_DIR="$HOME/.aztec-accelerator"
@@ -152,6 +151,10 @@ hdiutil detach /Volumes/AztecAccelerator-N1 >/dev/null
 # Approximate the post-Gatekeeper state of a Finder-dragged notarized install
 # so N-1 launches headlessly (the update path to N is what we're testing).
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+# N-1 is the real previous release: OLD binary name (aztec-accelerator) until a renamed release
+# becomes the fixture, then AztecAccelerator. Resolve whichever THIS install ships — fail if neither.
+APP_BIN=$(find "$APP/Contents/MacOS" -maxdepth 1 -type f \( -name AztecAccelerator -o -name aztec-accelerator \) | head -1 || true)
+[ -n "$APP_BIN" ] || { echo "FAIL: no main binary in $APP/Contents/MacOS"; exit 1; }
 
 # ── Pre-seed auto-update so N-1 updates without UI ──
 mkdir -p "$CONFIG_DIR"

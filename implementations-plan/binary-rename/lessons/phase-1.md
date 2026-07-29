@@ -24,3 +24,15 @@ pinning test whose comment says what deleting it requires.
 installed base — proven by checking `bun.lock` at EVERY release tag (all cli 2.10.1, whose
 template has installer.nsi:666-674). The claim is about binaries users already have, so the
 evidence had to come from git history, not HEAD.
+
+## Post-impl audit (codex fresh session `019faf54-9c0d-7932-b596-6421c2449e85`): 1 blocking
+
+Blocking: my updater-smoke.sh dual-name APP_BIN resolution sat at the ORIGINAL assignment
+site — BEFORE the N−1 .app is installed — and under `set -euo pipefail` the find on a
+missing .app kills a clean release runner instantly (or resolves a STALE leftover install).
+Moved after ditto + quarantine-strip, with `|| true` on the find so the explicit FAIL line
+reports it. PR CI cannot catch this class (the macOS release-updater gate doesn't run on
+PRs) — exactly why the fresh-eyes diff audit exists.
+Non-blocking adopted: identity test's "ONLY the fixture argument" claim is now a real
+count assert (was toContain). Declined: schtasks XML <Command> assert (codex grades the
+present→absent→present transition proof adequate; no more machinery).
