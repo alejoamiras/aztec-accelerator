@@ -258,14 +258,15 @@ describe("F-012 P3 — per-window capability ACL", () => {
 });
 
 // Tier-4 (audit R1 / C-1): the Windows NSIS uninstall hook must NEVER wipe the CA trust + certs during
-// an UPGRADE — Tauri runs the previous version's uninstaller when installing over an existing install.
+// an UPGRADE — Tauri runs the previous version's uninstaller on the INTERACTIVE plain-upgrade path
+// (silent in-app updates never invoke it in tauri-bundler 2.8.1 — measured, see hooks.nsi header).
 // The Windows leg of the `cert-trust` CI job now runs the real hook under all three command lines
 // (nsis/harness.test.nsi); this static test is the cheap companion that pins the SHAPE, so a refactor
 // that drops a guard fails on every platform in milliseconds rather than only in the Windows leg.
 //
-// TWO guards are load-bearing, not one. `$UpdateMode` is set from the installer's own `/UPDATE` flag
-// and forwarded to the old uninstaller only when the installer received it — so a manually downloaded
-// installer (the only upgrade route once auto-update is off) leaves it 0. The second guard is
+// ONE guard is load-bearing in tauri-bundler 2.8.1 (`$UpdateMode` never reaches the uninstaller —
+// silent updates skip it entirely and the interactive path leaves it 0 — so it is pinned here as
+// defense-in-depth for a future template that forwards `/UPDATE`). The load-bearing guard is
 // `$EXEDIR` vs `$INSTDIR`: `_?=` means "do not copy yourself to temp", so an install-over runs the
 // uninstaller IN PLACE while a real uninstall runs a `~nsu*.tmp` copy. `_?=` itself is NOT detectable
 // — the NSIS stub strips it from `$CMDLINE` (measured; a guard that searched $CMDLINE for it shipped

@@ -84,3 +84,18 @@ First perform the installer-lifecycle proof. If it demonstrates a real gap, land
 ## Genuinely sound
 
 D1’s resolve-not-diff rule, in-place repair, plugin removal, quoted Windows enable, intent/health separation, OFF-capable UI, XDG/AppImage handling, the dedicated short-lived lock, native Run-value execution, real IPC coverage, and adding bare macOS `cargo test` are all well-founded.
+
+---
+
+## ADDENDUM (2026-07-29, piece 3): Blocking finding #1's refutation is REVERSED by measurement
+
+Codex was right. The piece-3 barrier smoke (run 30472678896) baked a sentinel into the installed
+N−1's `NSIS_HOOK_POSTUNINSTALL`, armed it, and ran a real silent in-app update on windows-latest:
+the update completed and the sentinel never fired. tauri-bundler 2.8.1 `installer.nsi:294-297`
+("In update mode, always proceeds without uninstalling") skips `reinst_uninstall` — the
+`/UPDATE`-forwarding line (:333) this file's refutation leaned on (via the hooks.nsi command
+table) is dead code in update mode, and fully silent installs skip page callbacks regardless.
+The old uninstaller runs ONLY on the interactive plain-upgrade path ($UpdateMode=0, wizard),
+which is exactly the CA-wipe scenario the hooks.nsi guard exists for — the guard and its tests
+remain correct and necessary; the `/UPDATE` handling is defense-in-depth. Consequences and the
+redesigned pre-mutation barrier: `updater-dispatch-gate/plan.md` ("Premise reversal").

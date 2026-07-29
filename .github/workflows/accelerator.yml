@@ -171,10 +171,12 @@ jobs:
         run: cargo test
       # Tier-3: run the REAL NSIS uninstall hook on real Windows under each command line it has to tell
       # apart. This guard cannot be fixed after the fact — a release cannot fix its own uninstaller —
-      # and getting it wrong deletes the user's trust anchor on a routine upgrade. `$UpdateMode` alone
-      # does not cover the manual-download upgrade (the only route once auto-update is off): the Tauri
-      # template forwards `/UPDATE` to the old uninstaller only when the INSTALLER got it, while `_?=`
-      # is appended unconditionally on that path. Both must be treated as "not a real uninstall".
+      # and getting it wrong deletes the user's trust anchor on a routine upgrade. The path that
+      # matters is the INTERACTIVE plain upgrade (wizard, uninstall radio): there the old uninstaller
+      # runs with `_?=` and WITHOUT `/UPDATE`. The silent in-app update NEVER runs the old
+      # uninstaller at all in tauri-bundler 2.8.1 (PageLeaveReinstall's update-mode guard skips
+      # reinst_uninstall; measured live in smoke run 30472678896) — the `/UPDATE` case below is
+      # therefore DEFENSE-IN-DEPTH for a future template that forwards it, not a path 2.8.1 takes.
       # The hook's `RMDir` target is the observable: a seeded marker survives iff the guard held.
       - name: NSIS uninstall-hook guard (upgrade must not wipe trust)
         if: matrix.platform == 'windows'
@@ -196,7 +198,7 @@ jobs:
             @{ args = "/S _?=$dir";         survives = $true;
                desc = "manual-download upgrade: installer runs the old uninstaller WITHOUT /UPDATE" },
             @{ args = "/S /UPDATE _?=$dir"; survives = $true;
-               desc = "in-app updater: /UPDATE is forwarded" },
+               desc = "defense-in-depth: /UPDATE forwarding (dead in 2.8.1 silent updates)" },
             @{ args = "/S";                 survives = $false;
                desc = "genuine uninstall: Add/Remove Programs, no _?=" }
           )

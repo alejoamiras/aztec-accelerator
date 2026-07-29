@@ -2,21 +2,30 @@
 ;
 ; POSTUNINSTALL removes the local CA from the CurrentUser Root store on a REAL uninstall.
 ;
-; CRITICAL (audit R1 / C-1): Tauri runs the PREVIOUS version's uninstaller when installing over an
-; existing install — i.e. on every upgrade. Without a guard this hook would delete the trust anchor +
-; certs on every update, silently breaking HTTPS until the user re-enabled it. This must be correct in
-; the FIRST release that ships the hook — a release cannot fix its own uninstaller.
+; CRITICAL (audit R1 / C-1): Tauri runs the PREVIOUS version's uninstaller when a user installs the
+; new version INTERACTIVELY over an existing install (wizard plain upgrade — silent in-app updates
+; skip it entirely; see the measured note below). Without a guard this hook would delete the trust
+; anchor + certs on that upgrade, silently breaking HTTPS until the user re-enabled it. This must be
+; correct in the FIRST release that ships the hook — a release cannot fix its own uninstaller.
 ;
-; TWO guards are needed, because `$UpdateMode` alone does not cover every upgrade. In the Tauri NSIS
+; ONE guard is load-bearing in 2.8.1 — `$EXEDIR != $INSTDIR` — because the only path that runs this
+; hook during an upgrade is the interactive one, where `$UpdateMode` is 0. `$UpdateMode` is kept as
+; defense-in-depth for a future template that forwards `/UPDATE`. In the Tauri NSIS
 ; template, `$UpdateMode` is set from the INSTALLER's own `/UPDATE` flag, and is forwarded to the old
 ; uninstaller only when the installer itself received it:
 ;
 ;     ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|}   ; append /UPDATE
 ;     StrCpy $R1 "$R1 _?=$4"                                         ; append uninstall directory
 ;
-; The in-app updater passes `/UPDATE`. A user who downloads the new installer and double-clicks it —
-; the only route available once auto-update is off — does NOT, so `$UpdateMode` is 0 all the way down
-; and the old uninstaller wiped the trust anchor on a plain upgrade (post-impl codex Medium).
+; The in-app updater passes `/UPDATE` — but in tauri-bundler 2.8.1 that line is DEAD CODE:
+; PageLeaveReinstall's update-mode guard (`${If} $UpdateMode = 1` → reinst_done) skips
+; reinst_uninstall entirely, so the SILENT in-app update never runs the old uninstaller at all
+; (measured live: smoke run 30472678896 — a sentinel baked into the installed N-1's uninstaller,
+; armed, never fired while the update completed). The `/UPDATE` handling below is kept as
+; defense-in-depth for a future template that forwards it. The path that DOES run the old
+; uninstaller is the INTERACTIVE plain upgrade: a user double-clicks the new installer — the only
+; route once auto-update is off — `$UpdateMode` is 0 all the way down, and the old uninstaller
+; wiped the trust anchor on that upgrade (post-impl codex Medium).
 ;
 ; `_?=` IS appended unconditionally on that path — but it CANNOT be detected from `$CMDLINE`. The NSIS
 ; stub consumes it: invoked as `uninstall.exe /S _?=C:\dir`, the script sees `$CMDLINE` =
@@ -27,8 +36,11 @@
 ; So WHERE the uninstaller is executing from is the discriminator, and it holds in all three cases:
 ;
 ;   uninstall.exe /S _?=<dir>            $EXEDIR = <dir>              == $INSTDIR   install-over
-;   uninstall.exe /S /UPDATE _?=<dir>    $EXEDIR = <dir>              == $INSTDIR   install-over
+;   uninstall.exe /S /UPDATE _?=<dir>    $EXEDIR = <dir>              == $INSTDIR   install-over (†)
 ;   uninstall.exe /S   (Add/Remove)      $EXEDIR = ...\~nsu1.tmp      != $INSTDIR   REAL uninstall
+;
+; (†) constructed from installer.nsi:333, which 2.8.1 never reaches in update mode (dead code) —
+;     no silent in-app update invokes the uninstaller. Row kept as defense-in-depth.
 ;
 ; `$UpdateMode` is kept as a second, independent guard: it costs nothing and still covers a future
 ; Tauri that forwards `/UPDATE` without `_?=`.
