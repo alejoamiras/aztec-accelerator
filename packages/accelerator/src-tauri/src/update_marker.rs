@@ -216,15 +216,31 @@ pub fn create_new(
                     // Live foreign window: hard stop, never delete (D22 / final pass #2).
                     l if is_live(&l, now_unix) => return Err(CreateErr::Live),
                     // Expired or corrupt leftover: clear it (and its siblings) and retry once.
+                    // The removal is CHECKED: if the leftover cannot be cleared, the retry would
+                    // hit AlreadyExists and misclassify a non-live leftover as Live — defusing
+                    // recovery for the session with no live window (confirmation round). An
+                    // expired marker demands nothing, so NotPublished (plain snapshot rearm) is
+                    // the correct exit.
                     _ => {
-                        let _ = remove_all(paths);
+                        if remove_all(paths).is_err() {
+                            return Err(CreateErr::NotPublished(
+                                "cannot clear an expired/corrupt leftover marker".to_string(),
+                            ));
+                        }
                     }
                 }
             }
             Err(CreateStep::Open(e)) => {
+                // secure_create_file (Windows) can create the file and then fail ACL/readback.
+                // Any file present here is OURS — a foreign one fails CreateFileW with
+                // AlreadyExists, handled above — so clear the partial rather than leaving the
+                // next launch a spurious one-launch Corrupt suppression (confirmation round).
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    let _ = std::fs::remove_file(&paths.marker);
+                }
                 return Err(CreateErr::NotPublished(format!(
                     "cannot create marker: {e}"
-                )))
+                )));
             }
             Err(CreateStep::AfterCreate(e)) => {
                 // The exclusive create won — whatever is on disk is OURS, possibly complete.
@@ -686,6 +702,30 @@ mod tests {
         remove_all(&paths).unwrap();
         std::fs::write(&paths.marker, b"garbage").unwrap();
         assert_eq!(create_new(&paths, &fresh, NOW), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t1_unremovable_expired_leftover_is_not_published_not_live() {
+        // Confirmation round: if the expired leftover cannot be cleared, the retry's
+        // AlreadyExists must NOT masquerade as Live — that would defuse recovery for the session
+        // with no live window. NotPublished ⇒ plain snapshot rearm, which an expired marker
+        // permits.
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("m");
+        std::fs::create_dir(&dir).unwrap();
+        let paths = MarkerPaths::in_dir(&dir);
+        write_marker(&paths, &payload("old", "1.0.8", "/x", NOW - 5)); // expired
+                                                                       // Read-only dir: the marker can be read but not unlinked.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let fresh = MarkerPayload::new(&ver("1.0.9"), Path::new("/y"), true, NOW);
+        let out = create_new(&paths, &fresh, NOW);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(out, Err(CreateErr::NotPublished(_))),
+            "unremovable expired leftover must be NotPublished, got {out:?}"
+        );
     }
 
     #[cfg(unix)]
