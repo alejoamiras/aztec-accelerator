@@ -566,9 +566,9 @@ jobs:
 
   # Windows/NSIS updater smoke — BLOCKING (in tag.needs + release.needs), proven green on the
   # 1.0.4-rc.3 dry-run (positive + negative). Tests the REAL prod-signed Windows artifact (this run's
-  # `build` output) installing as an auto-update FROM a synthetic N-1 that embeds the prod pubkey —
-  # parity with the mac/linux smokes (they download a real N-1 stable; Windows has no stable yet, so
-  # it bootstraps N-1 in-job). Once a Windows STABLE exists, switch N-1 to the linux download-real-N-1.
+  # `build` output) installing as an auto-update FROM the REAL previous Windows stable
+  # (accelerator-v1.0.7 release asset, 4-point fixture preflight) — full parity with the mac/linux
+  # smokes. The ephemeral/current-ref sibling (incl. the L8 barrier) is smoke-updater-windows.yml.
   # REVERT (if it flakes): drop both jobs from tag.needs/release.needs to demote back to advisory.
   update-smoke-windows:
     name: Updater Smoke (windows-x86_64 / positive)

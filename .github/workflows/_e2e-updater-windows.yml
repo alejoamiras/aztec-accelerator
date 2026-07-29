@@ -107,6 +107,13 @@ jobs:
             exit 1
           fi
           ls -la "$RUNNER_TEMP/n1"
+          # Exactly ONE installer asset — a wildcard matching several (e.g. a future arm64 build)
+          # would make the smoke's Select-Object -First 1 pick silently.
+          count=$(find "$RUNNER_TEMP/n1" -name '*-setup.exe' | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::preflight (a): expected exactly 1 *-setup.exe asset on $TAG, found $count"
+            exit 1
+          fi
           # (b) N is STRICTLY above the F-004 monotonic floor baked into N-1 (its own version) —
           # semver-aware (prerelease tags order below their release), not string/[version] compare.
           if ! bun -e "process.exit(Bun.semver.order(process.env.N_VERSION, process.env.N1_VERSION) === 1 ? 0 : 1)"; then

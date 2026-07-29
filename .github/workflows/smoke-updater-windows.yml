@@ -16,8 +16,8 @@ name: Smoke Updater Windows (manual)
 # Deliberately a SEPARATE file from _e2e-updater-windows.yml: a called workflow sees the CALLER's
 # `github` context and releases are themselves workflow_dispatch, so an event_name split inside
 # the reusable file would misroute releases. Separation by FILE also keeps this path structurally
-# secretless — no `secrets.*` reference exists here (piece-2 ledger A3: job/file separation is the
-# isolation boundary, not workflow_call.secrets).
+# secretless — no `${{ secrets.* }}` expression exists in this file (piece-2 ledger A3: job/file
+# separation is the isolation boundary, not workflow_call.secrets).
 #
 # NOT a PR gate: two Windows Tauri builds. Run it manually before a release, or when updater/
 # marker/NSIS-hook code changes.

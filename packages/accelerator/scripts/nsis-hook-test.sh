@@ -76,7 +76,7 @@ run_case() {
 # place instead of from a ~nsu*.tmp copy, which is what the hook actually keys on.
 #                                                          /UPDATE  _?=  survive
 run_case "upgrade via downloaded installer (no /UPDATE)"        no  yes  yes
-run_case "upgrade via in-app updater (/UPDATE)"                yes  yes  yes
+run_case "defense-in-depth: /UPDATE (dead in 2.8.1 silent)"   yes  yes  yes
 run_case "genuine uninstall (Add/Remove Programs)"              no   no   no
 
 # ── POSTINSTALL completion-token cases (piece-2 plan §6 T2) ──

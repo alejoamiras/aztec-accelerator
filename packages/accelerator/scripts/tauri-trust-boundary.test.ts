@@ -258,7 +258,8 @@ describe("F-012 P3 — per-window capability ACL", () => {
 });
 
 // Tier-4 (audit R1 / C-1): the Windows NSIS uninstall hook must NEVER wipe the CA trust + certs during
-// an UPGRADE — Tauri runs the previous version's uninstaller when installing over an existing install.
+// an UPGRADE — Tauri runs the previous version's uninstaller on the INTERACTIVE plain-upgrade path
+// (silent in-app updates never invoke it in tauri-bundler 2.8.1 — measured, see hooks.nsi header).
 // The Windows leg of the `cert-trust` CI job now runs the real hook under all three command lines
 // (nsis/harness.test.nsi); this static test is the cheap companion that pins the SHAPE, so a refactor
 // that drops a guard fails on every platform in milliseconds rather than only in the Windows leg.

@@ -84,3 +84,19 @@ Meta-lesson, worth the CI hours: a test that guards its own preconditions conver
 premise" from a silent vacuous pass into a loud, diagnosable failure. Round 2's misrouted mode
 would have shipped a barrier that never barriered; round 3's ownership assert turned a false
 design premise into a one-run discovery.
+
+## Post-impl audit (codex fresh session `019faef4-7b38-74b2-b9a5-3b4de1a374ed`): 4 blocking, all folded
+
+1. Prod signing key inherited by every child process (feed server, installers, N−1, Q, N) —
+   cleared from the ps1 process right after the one `tauri signer sign` call.
+2. D22 settle-sleep race — replaced with the decision's own log milestone (updater.rs:286
+   "an update window is still live") counted beyond the barrier-open baseline, THEN the
+   download-count assert.
+3. Five more stale premise sites found (ps1 ×3, release-accelerator.yml job comment,
+   hooks.nsi opening line, nsis-hook-test.sh case label, tauri-trust-boundary.test.ts) — all
+   corrected; /UPDATE cases KEPT as defense-in-depth per codex (deletion would shed cheap
+   protection against future template changes).
+4. Push trigger removal confirmed as the final pre-merge commit (was already planned).
+Non-blocking folded: exactly-one-asset preflight guard; precise "no ${{ secrets }}
+expression" wording. Declined: TCP-level port probe (codex itself notes later asserts
+prevent vacuity — not worth the machinery).

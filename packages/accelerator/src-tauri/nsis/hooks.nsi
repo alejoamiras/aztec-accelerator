@@ -2,10 +2,11 @@
 ;
 ; POSTUNINSTALL removes the local CA from the CurrentUser Root store on a REAL uninstall.
 ;
-; CRITICAL (audit R1 / C-1): Tauri runs the PREVIOUS version's uninstaller when installing over an
-; existing install — i.e. on every upgrade. Without a guard this hook would delete the trust anchor +
-; certs on every update, silently breaking HTTPS until the user re-enabled it. This must be correct in
-; the FIRST release that ships the hook — a release cannot fix its own uninstaller.
+; CRITICAL (audit R1 / C-1): Tauri runs the PREVIOUS version's uninstaller when a user installs the
+; new version INTERACTIVELY over an existing install (wizard plain upgrade — silent in-app updates
+; skip it entirely; see the measured note below). Without a guard this hook would delete the trust
+; anchor + certs on that upgrade, silently breaking HTTPS until the user re-enabled it. This must be
+; correct in the FIRST release that ships the hook — a release cannot fix its own uninstaller.
 ;
 ; TWO guards are needed, because `$UpdateMode` alone does not cover every upgrade. In the Tauri NSIS
 ; template, `$UpdateMode` is set from the INSTALLER's own `/UPDATE` flag, and is forwarded to the old

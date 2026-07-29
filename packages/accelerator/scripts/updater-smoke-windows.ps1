@@ -61,7 +61,7 @@ $ServeDir = Join-Path $Work "serve"
 New-Item -ItemType Directory -Force -Path $ServeDir | Out-Null
 $BarrierPrefix = $env:UPDATER_SMOKE_BARRIER_PREFIX
 if ($Mode -eq "barrier" -and -not $BarrierPrefix) {
-  Write-Error "barrier mode requires UPDATER_SMOKE_BARRIER_PREFIX (baked into the N-1 sentinel)"
+  Write-Error "barrier mode requires UPDATER_SMOKE_BARRIER_PREFIX (baked into N's PREINSTALL sentinel)"
   exit 1
 }
 function BarrierFile($suffix) { Join-Path $ConfigDir "$BarrierPrefix-$suffix" }
@@ -157,9 +157,9 @@ try {
 
   # ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
   # A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry manifest/manifest_sig
-  # signed with the SAME (prod) key N-1 embeds. The synthetic N-1 keeps the committed prod pubkey, so
-  # the manifest key is the prod key — provided to THIS step's env (overriding the ephemeral key that
-  # only built N-1's artifacts). Encoding contract matches accelerator_core::update_manifest:
+  # signed with the SAME key N-1 embeds as its updater pubkey: the PROD key on the call path (real
+  # released N-1), the run-local ephemeral key on the dispatch path (patched into both builds).
+  # Encoding contract matches accelerator_core::update_manifest:
   # manifest = base64(envelope bytes); manifest_sig = the .sig content verbatim (base64(minisign doc)).
   $platform = [ordered]@{ signature = $NSigText; url = "https://$FeedHost/releases/download/$NName"; size = $NSize }
   $platforms = [ordered]@{ $PlatformKey = $platform }
@@ -179,6 +179,10 @@ try {
   Pop-Location
   $ManifestB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($EnvPath))
   $ManifestSig = (Get-Content "$EnvPath.sig" -Raw).Trim()
+  # The signing key's job ends HERE. Clear it from THIS process so no child spawned below — feed
+  # server, installers, N-1, Q, N — inherits it (on the release path this is the PROD key).
+  Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
   $latestObj = [ordered]@{
     version      = $NVersion
     notes        = "updater smoke $NVersion"
@@ -263,7 +267,7 @@ try {
     }
   }
 
-  # ── BARRIER pre-launch: the sentinel (baked into N-1's POSTUNINSTALL) only engages when the
+  # ── BARRIER pre-launch: the sentinel (baked into N's PREINSTALL) only engages when the
   #    request file exists, and Q must be a copy of the PRE-update install (after the update starts,
   #    $InstallRoot is mid-transition).
   if ($Mode -eq "barrier") {
@@ -358,9 +362,11 @@ try {
       Start-Sleep -Milliseconds 500
     }
     if (-not $portFree) { Dump-Logs; Write-Error "BARRIER FAILED — :59833 still serving 15s into the window; N-1 did not exit for the install."; exit 1 }
-    # Baselines for the D22 no-second-download proof.
+    # Baselines for the D22 no-second-download proof. $AppLogGlob covers N-1's and Q's shared log.
+    $AppLogGlob = "$env:LOCALAPPDATA\aztec-accelerator\logs\*.log"
     $K1 = @(Select-String -Path $FeedLog -Pattern "/releases/latest.json" -ErrorAction SilentlyContinue).Count
     $D1 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
+    $R1 = @(Select-String -Path $AppLogGlob -Pattern "an update window is still live" -ErrorAction SilentlyContinue).Count
     # Seed a STALE (non-resolving) Run value: if Q's heal were NOT suppressed it would rewrite this.
     $StaleVal = '"C:\nonexistent\updater-smoke-stale\aztec-accelerator.exe"'
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value $StaleVal
@@ -389,8 +395,17 @@ try {
       Start-Sleep -Seconds 1
     }
     if (-not $checked) { Dump-Logs; Write-Error "BARRIER FAILED — Q never fetched latest.json; the D22 no-second-update proof was not exercised."; exit 1 }
-    # … and D22 must stop it BEFORE any download (count unchanged after a settle).
-    Start-Sleep -Seconds 5
+    # … and D22 must REJECT it: wait for the decision's own log line (updater.rs "an update window
+    # is still live; not starting another update") to appear beyond the barrier-open baseline —
+    # attributable to Q, since N-1 exited and N hasn't launched — THEN assert no download happened.
+    # (An arbitrary sleep instead of this milestone would let a slow regressed download pass.)
+    $rejected = $false
+    for ($i = 0; $i -lt 60; $i++) {
+      $R2 = @(Select-String -Path $AppLogGlob -Pattern "an update window is still live" -ErrorAction SilentlyContinue).Count
+      if ($R2 -gt $R1) { $rejected = $true; break }
+      Start-Sleep -Seconds 1
+    }
+    if (-not $rejected) { Dump-Logs; Write-Error "BARRIER FAILED — Q fetched latest.json but never logged the D22 live-window rejection; the no-second-update decision was not observed."; exit 1 }
     $D2 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
     if ($D2 -ne $D1) { Dump-Logs; Write-Error "BARRIER FAILED — a SECOND artifact download happened inside the window ($D1 -> $D2); D22 did not reject while the marker is live."; exit 1 }
     # Suppressions: marker untouched, Run value byte-identical (no heal), task still absent (no rearm).
