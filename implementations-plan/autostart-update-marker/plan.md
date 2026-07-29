@@ -1,6 +1,6 @@
 # Plan — autostart update marker (piece 2)
 
-`/blueprint mid`, **revision 2** — post dual-audit (fable: conditional-approve, 3 blocking; codex:
+`/blueprint mid`, **revision 3** — post dual-audit + final fresh-context pass (reject, 4 blocking — folded, §10 rounds 1–2) (fable: conditional-approve, 3 blocking; codex:
 reject, 6 blocking; run in parallel, neither seeing the other). All findings folded or explicitly
 adjudicated in §10. The DESIGN remains settled elsewhere
 (`implementations-plan/autostart-self-heal/plan.md` §3.2 Fork B r4/r5, D18/D21/D22/D23, §11b);
@@ -24,13 +24,14 @@ race-free.
 | `src-tauri/src/update_marker.rs` | **new** — pure state machine + IO: schema, classification, `removal_decision`, expiry; reconcile actions taken as **injected closures** (house `enable_transaction` pattern) so tests never touch real schtasks |
 | `src-tauri/src/lib.rs` | +`pub mod update_marker;` |
 | `src-tauri/nsis/hooks.nsi` | **new `NSIS_HOOK_POSTINSTALL`** — token handoff (§3): `Delete` stale dest → `Rename update-txn → update-txn-done`; no handoff file ⇒ no-op |
-| `src-tauri/src/updater.rs` | Windows: post-lock live-marker reject (D22); `autostart.lock` acquired **before disarm**, held through `record_pending` → marker+handoff creation, dropped before `install()`; **every post-create exit** cleans up under the lock and reconciles to CURRENT intent (§4) |
+| `src-tauri/src/updater.rs` | Windows: post-lock live-marker reject (D22); `record_pending` BEFORE the critical section; `autostart.lock` spans intent-read → disarm → marker+handoff create only, dropped before `install()`; every post-create exit reconciles to CURRENT intent with removal-success-before-rearm and a defused guard, intent-sensitive ordering on the Err path (§4) |
 | `src-tauri/src/autostart.rs` | `acquire_autostart_lock` → `pub(crate)`; heal: step-0 fast-path marker check **plus locked re-check** inside the existing critical section; new `startup_rearm()` seam (Windows: lock → marker re-check → intent → rearm; elsewhere: intent → rearm); `set_enabled_at` ON branch (Windows, inside held lock): live marker ⇒ Err |
 | `src-tauri/src/main.rs` | startup: `startup_reconcile()` → gate heal AND `startup_rearm()`; remove `not(target_os = "windows"))` from the heal cfg + rewrite `:606-611` comment; Quit handler takes `autostart.lock` around its disarm (disarm stays unconditional — §10 A4) |
 | `src-tauri/nsis/harness.test.nsi` + `scripts/nsis-hook-test.sh` | POSTINSTALL cases: positive must-fire (nonce round-trip — kills the `!ifmacrodef` typo trap) + no-handoff no-op |
 | `.github/workflows/accelerator.yml` | cert-trust Windows step: run the POSTINSTALL harness cases; L6: marker-absent precondition, flip `:616` to the healed quoted path, **new wiring scenario** (live marker ⇒ task NOT created, marker survives — §6 T5), F-B1 cleanup + `exit 0` kept |
 | `src-tauri/tests/autostart_heal.rs` | Windows: suppression + reconciliation steps via injected closures — **never the real scheduled task** (§6 T3) |
 | `CLAUDE.md`, `implementations-plan/index.md` | counts + index entry |
+| `implementations-plan/autostart-self-heal/plan.md` | append the D23 amendment note (final pass: the upstream ledger must stop contradicting this plan's §5.5) |
 
 Unchanged: `crash_recovery.rs`; `core/updater_state.rs` (marker never touches floor semantics);
 all frontend/e2e-mock surfaces. Core-crate paths: `packages/accelerator/core/src/…`
@@ -91,28 +92,33 @@ by binding, not by construction: the stale token's nonce only matches its own ma
 still requires version + path; the mismatch lands in `Suppress` → deadline expiry. Failure mode of a
 failed `Rename`: handoff stays, no token, suppress-then-expire. Hook logs on failure (DetailPrint).
 
-## 4. Control flow (rev 2 — every exit reconciles)
+## 4. Control flow (rev 3 — every exit reconciles)
 
-**`perform_update` (Windows-cfg), replacing the r1 sequence:**
+**`perform_update` (Windows-cfg), rev-3 ordering (final pass: the snapshot must live INSIDE the
+lock, and `record_pending` OUTSIDE it — `autostart.lock` protects nothing there):**
 1. After `acquire_updater_lock()` (`:275`): `load(marker)` — live ⇒ log + return (D22).
-2. Intent snapshot (`:365-376`, existing).
-3. **Acquire `autostart.lock`** (bounded; timeout ⇒ return — nothing mutated yet). Nesting order
-   updater→autostart matches the heal; the held lock also freezes owned intent mutations across
-   the disarm→create span, which is what keeps the snapshot honest inside it.
-4. Disarm (`:383-393`). Failure ⇒ rearm-if-was-enabled, drop lock, return (no marker exists — clean).
-5. Guard constructed (`:399-401`, existing).
-6. `record_pending` (`:412-428`). Failure ⇒ drop lock, guard rearms, return (**still no marker** —
-   codex #3's ordering fix: the fallible floor write happens BEFORE marker creation).
-7. `create_new(marker)` + write handoff. Any failure ⇒ `remove_all` (best-effort), drop lock, guard
-   rearms, return.
+2. `record_pending` (moved BEFORE the critical section; it needs only `updater.lock` + precede
+   `install()`. Failure ⇒ return — nothing else touched. A disarm failure later leaves pending
+   recorded — the already-documented exact-version-retry semantics).
+3. **Acquire `autostart.lock`** (bounded; timeout ⇒ return). The critical section is now only
+   disarm→create — and owned intent mutations are frozen across it.
+4. **Read current intent INSIDE the lock** (this becomes both `intent_at_disarm` and the guard's
+   rearm input — it cannot go stale against owned mutations while held).
+5. Disarm. Failure ⇒ rearm-if-enabled, drop lock, return (no marker exists).
+6. Guard constructed.
+7. `create_new(marker)` + write handoff. **Cleanup invariants (final pass #2):** the transaction
+   tracks whether IT created the marker; `CreateErr::Live` is NEVER deleted (return, guard rearms —
+   a foreign window stays intact); handoff-write failure after a successful create ⇒ `remove_all`,
+   **checked**: if removal succeeds ⇒ reconcile to current intent under the held lock + defuse the
+   guard; if removal FAILS ⇒ leave recovery disarmed (suppression until expiry is the safe
+   direction) and defuse the guard so Drop cannot rearm into a live window.
 8. Drop `autostart.lock`. `install()`:
-   - Windows success path: process exits inside — marker lives, NSIS runs, next launch reconciles.
-   - **Err ⇒ under re-acquired `autostart.lock`: `remove_all` FIRST; if removal succeeded,
-     reconcile recovery to CURRENT intent (not the stale snapshot — the user may have toggled OFF
-     via the still-allowed OFF path); defuse the guard (`rearm_now`-equivalent marking) so Drop
-     cannot double-fire a stale rearm. If removal FAILED, leave recovery disarmed and the marker
-     live — suppression until expiry is the safe direction (codex #3: removal success is checked
-     before any rearm).**
+   - Windows success: process exits inside; next launch reconciles.
+   - **Err ⇒ under re-acquired `autostart.lock`, INTENT-SENSITIVE ordering (final pass #2): read
+     current intent; if ON ⇒ `remove_all` first, checked, THEN arm (a failed removal leaves
+     disarmed + suppressed — safe); if OFF ⇒ confirm disarm FIRST, then `remove_all` (removing
+     first could leave intent-OFF/task-armed permanently if disarm confirmation fails). Guard
+     defused on every branch.**
 
 **`startup_reconcile()` (Windows; head of the startup block; AppHandle-free core):**
 Everything under ONE `autostart.lock` hold — **load, classify, decide, act** (codex #2: a pre-lock
@@ -138,9 +144,11 @@ intent→rearm. Sequential with the heal's own lock hold — never nested (the l
 Err("an update is finishing; try turning Start on Login on again in a moment"). OFF: untouched.
 
 **Quit handler (`main.rs:393`):** acquires `autostart.lock` (bounded) around its
-`disable_crash_recovery()`; the disarm stays UNCONDITIONAL (§10 A4 — skipping it on a live marker
-would leave the task armed through a user quit: relaunch-after-quit is strictly worse than the
-transient codex described, which self-heals at next launch).
+`disable_crash_recovery()`; the disarm stays UNCONDITIONAL (§10 A4, rationale corrected per the
+final pass). **Timeout semantics defined (final pass #3): on lock timeout, log a warning and
+disarm UNLOCKED anyway, then quit** — not cancel-the-quit (a quit that refuses to quit is worse
+UX than either race), and not skip-disarm (relaunch-after-quit is user-visible). The unlocked
+fallback's worst case is the pre-existing self-healing transient (§10 A5).
 
 **Then:** remove `not(target_os = "windows")` from `main.rs:612`; rewrite `:606-611` and
 `autostart.rs:1325-1326` comments.
@@ -172,20 +180,33 @@ transient codex described, which self-heals at next launch).
   idempotence (second install run: token unchanged, no error).
 - **T3 — reconciliation transaction** (unit, injected closures + counters — codex #6: NEVER the
   real scheduled task): Remove path arms (intent ON) / confirm-disarms (intent OFF) exactly once;
-  **Expire performs ZERO reconciliation calls** (the Remove/Expire discriminator — fable);
-  Suppressed paths make zero calls; lock-timeout ⇒ Suppressed.
-- **T4 — barrier race test** (unit, both audits' highest-value ask): operation observes Missing,
-  marker is published (temp path) before it re-checks under the lock, operation must return exactly
-  `Skipped`/`Suppressed` with **zero** heal-write/rearm callbacks — deterministic via injected
-  closures, temp paths, counters. Covers heal re-check AND `startup_rearm` re-check.
+  **Expire: asserts the expired marker PRE-EXISTED, is removed, outcome is Proceed, AND zero
+  reconciliation calls** (final pass: not merely zero callbacks); Suppressed paths make zero calls;
+  lock-timeout ⇒ Suppressed.
+- **T4 — barrier race test** (unit, both audits' highest-value ask): marker-absent asserted as a
+  PRECONDITION; operation observes Missing; marker is published (temp path) before the re-check
+  under the lock; operation must return exactly `Skipped`/`Suppressed` with **zero**
+  heal-write/rearm callbacks. **Drives the PRODUCTION cores across the real lock boundary** (the
+  `*_at` surfaces with injected paths/closures), not a duplicated helper (final pass). Covers the
+  heal re-check AND `startup_rearm`.
 - **T5 — CI wiring scenario** (fable's E.2 gap; L6 extension): seed a LIVE valid marker + intent-ON
   Run value + no schtasks task → launch installed app → assert task NOT created AND marker
   survives → clean marker → relaunch → assert normal heal path (flipped assertion: Run value ==
   exactly quoted installed exe) → F-B1 cleanup → `exit 0`. Marker-absent asserted as a
   PRECONDITION of the heal scenario.
 - **T6 — Windows integration** (`tests/autostart_heal.rs`, temp marker paths, RAII registry guard):
-  live marker ⇒ heal `Skipped` + `set_enabled_at(true)` Err + OFF still works; full Remove flow
-  with matching token/version/path against injected reconcile counters.
+  live marker ⇒ heal `Skipped` + `set_enabled_at(true)` Err; **the OFF-unaffected property is
+  pinned WITHOUT calling `set_enabled_at(false)`** (final pass: that would disarm the developer's
+  real scheduled task, which the registry RAII cannot restore) — artifact-level OFF via
+  `remove_entry()` plus the T7 closure table proving the marker gate exists only in the ON branch;
+  full Remove flow with matching token/version/path against injected reconcile counters.
+- **T7 — updater cleanup-transaction table** (unit, injected closures — final pass #4, the central
+  transaction none of T1–T6 reached): handoff-write failure AFTER a successful marker create
+  (removal checked; success ⇒ reconcile + defused guard; failure ⇒ disarmed + defused guard, marker
+  left live); `CreateErr::Live` never deletes; install-Err intent-sensitive ordering both
+  directions (ON: remove-checked-then-arm; OFF: confirm-disarm-then-remove, incl. the
+  disarm-confirmation-failure branch leaving the marker in place); guard defused on every branch
+  (Drop fires zero stale rearms).
 
 ## 7. Phases & gates
 
@@ -250,3 +271,37 @@ remains, so the separate candidate copy PREVENTS drift rather than causing it).
 kill-mid-install, stale-handoff-months-later); `perform_update` rearm paths via lock exclusion;
 the enable/disable call-site census (complete); the competing-outline rejection; §5.6
 snapshot-vs-current.
+
+## §10 addendum — round 2 (final fresh-context codex pass: reject, 4 blocking)
+
+**Adopted in full:**
+- **#1** — `record_pending` moved OUT of the critical section (it needs only `updater.lock`); the
+  intent read moved INSIDE `autostart.lock`, becoming both the stored snapshot and the guard input,
+  so it cannot go stale against owned mutations. (This also resolved the consolidator's own §-worry
+  from rev 2 — the lock protected nothing in step 6.)
+- **#2** — post-create cleanup invariants: transaction tracks whether IT created the marker;
+  `CreateErr::Live` never deletes; removal success checked before any rearm; reconcile under the
+  held lock; guard defused on every branch; install-Err ordering is INTENT-SENSITIVE (ON:
+  remove-then-arm; OFF: confirm-disarm-then-remove — removing first could leave intent-OFF/
+  task-armed permanently on a failed confirmation).
+- **#4** — T3/T4/T6 tightened; **T7** added for the cleanup transaction; T6's real
+  `set_enabled_at(false)` dropped (would have disarmed a developer's real scheduled task — the
+  piece-1 unrestorable-shared-state rule, caught at plan time for the second occurrence).
+- **A4 rationale corrected** as directed: with the invariant intact, a live marker normally means
+  recovery is already disarmed, so conditional skipping does not itself leave the task armed; the
+  decisive argument is monotone-safety of unconditional disarm + the lock closing the
+  arm-before-remove race. Conclusion unchanged.
+- **Upstream ledger amendment**: `autostart-self-heal/plan.md` D23 gets an explicit amendment note
+  so "settled upstream" no longer contradicts §5.5 — rides in this PR.
+
+**Adjudicated (A5 — Quit lock-timeout semantics, final pass #3 partially adopted):** the pass
+demanded defined semantics and suggested cancel-the-quit. Defined here as: **log warning + UNLOCKED
+disarm + quit**. Cancel-the-quit is rejected (a quit that refuses to quit is worse UX than either
+race); skip-disarm is rejected (relaunch-after-quit is user-visible). The unlocked fallback's worst
+case is the pre-existing self-healing transient. The 10s-contention observation stands and is why
+the fallback exists at all.
+
+**Round-2 close-out:** the remaining verification burden (does the implementation honour rev 3?)
+transfers to the per-PR review loop mandated by the goal — one post-impl codex audit + one resumed
+verification — rather than a fourth planning pass. Rationale: all round-2 findings were mechanical
+mappings of settled invariants, none reopened design.
