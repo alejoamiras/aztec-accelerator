@@ -27,6 +27,8 @@ path = "src/main.rs"
 accelerator-core = { path = "../core" }
 # F-004: SemVer comparison for the monotonic update version floor (same crate/major the core uses).
 semver = "1"
+# Marker transaction nonce (plan D18/D21). Already in the lock via accelerator-core.
+uuid = { version = "1", features = ["v4"] }
 # F-004 B2: cross-process advisory file lock serialising the updater transaction (check→install→
 # floor-commit) across concurrent app instances. Battle-tested, stable flock primitive.
 fs2 = "0.4"

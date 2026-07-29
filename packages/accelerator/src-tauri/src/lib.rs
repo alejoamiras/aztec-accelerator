@@ -13,5 +13,6 @@ pub mod commands;
 pub mod crash_recovery;
 pub mod server;
 pub mod trust;
+pub mod update_marker;
 pub mod updater;
 pub mod verified_sites;
