@@ -46,11 +46,14 @@ describe("bundle metadata", () => {
     expect(fs.existsSync(path.join(SRC_TAURI, conf.bundle.licenseFile))).toBe(true);
   });
 
-  test("publisher stays ABSENT until it ships with a registry-migration story", () => {
+  test("publisher is pinned — changing it again is a fleet-migration event", () => {
     // publisher feeds NSIS ${MANUFACTURER}, whose registry namespace anchors custom-$INSTDIR
-    // restore — changing it silently strands custom-directory installs (binary-rename plan,
-    // audit fold #1). Deleting this assertion requires that migration, not just the config key.
-    expect(conf.bundle.publisher).toBeUndefined();
+    // restore and the interactive-reinstall uninstaller lookup. It was flipped from the
+    // identifier-fallback "aztec" on 2026-07-29 while the install base was dev/test only
+    // (publisher-flip plan). Changing it against a REAL fleet strands custom-directory installs
+    // and breaks interactive-reinstall trust cleanup — that needs a prior-release migration,
+    // not just an edit here.
+    expect(conf.bundle.publisher).toBe("Aztec Accelerator");
   });
 });
 
