@@ -277,6 +277,17 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         None => return,
     };
 
+    // D22 (piece-2): no new update while an update window is live. The marker outlives the
+    // updater lock by design (the lock dies with the exiting process at install()), so this is a
+    // distinct check, not a duplicate of the lock.
+    #[cfg(target_os = "windows")]
+    if let Some(paths) = crate::update_marker::MarkerPaths::default_paths() {
+        if crate::update_marker::live_marker_exists(&paths, crate::update_marker::now_unix()) {
+            tracing::warn!("an update window is still live; not starting another update");
+            return;
+        }
+    }
+
     // Parse our own version once; a parse failure is fail-closed (can't safely gate → abort). Needed
     // both for the install-time re-check and for recording the pending version after install.
     let current = match Version::parse(env!("CARGO_PKG_VERSION")) {
@@ -357,58 +368,10 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         return;
     }
 
-    // codex r3 #5: capture the autostart state ONCE, BEFORE disarming, and drive every re-arm decision
-    // off this value. Re-reading it later (in the guard) could error independently and then wrongly arm
-    // recovery while autostart is actually OFF. If THIS read errors we can't tell → assume enabled: we
-    // are about to disarm, so erring toward "restore it" is the safe default (missing a re-arm leaves the
-    // app unrecoverable; a spurious one is a harmless idempotent write).
-    #[cfg(target_os = "windows")]
-    let was_recovery_enabled = {
-        // D13: INTENT (entry present AND not StartupApproved-disabled), not bare presence — bare
-        // presence would rearm the schtasks relauncher against an explicit Task-Manager OFF after
-        // every update. Err keeps the assume-enabled re-arm-safety default (codex r3 #5).
-        crate::autostart::intent_enabled(app).unwrap_or_else(|e| {
-            tracing::warn!(
-                "pre-install: autostart state unreadable ({e}); assuming enabled for re-arm safety"
-            );
-            true
-        })
-    };
-
-    // Windows: disarm the always-armed repeating crash-recovery task right before install. A
-    // tick during NSIS file mutation could spawn the exe mid-update (lock the file being
-    // replaced / launch a half-written binary). If we CANNOT verify the task is gone, do NOT
-    // install — the race would be live; skip this attempt (the app keeps running on the current
-    // version, and the next check retries). disable returns true if never armed (autostart off).
-    #[cfg(target_os = "windows")]
-    if !crate::crash_recovery::disable_crash_recovery() {
-        tracing::error!(
-            "Aborting update install: could not disarm crash-recovery task (race risk)"
-        );
-        // The app keeps running on the current version, and disarm may have PARTIALLY succeeded
-        // (/Delete worked but /Query couldn't confirm), so recovery could now be off. Restore it
-        // before bailing out — every path that leaves the app running must end armed.
-        rearm_crash_recovery_if_enabled(was_recovery_enabled);
-        return;
-    }
-
-    // q7e3-F-10: recovery is now disarmed (Windows) — the guard re-arms on EVERY exit path below. Drop
-    // covers the install-failure return; the restart arm calls rearm_now() explicitly FIRST, because
-    // app.restart() never returns (Drop would never fire there). The old per-arm `// must rearm`
-    // comments are now structurally enforced by the guard.
-    #[cfg(target_os = "windows")]
-    let mut recovery_guard =
-        CrashRecoveryGuard::new(move || rearm_crash_recovery_if_enabled(was_recovery_enabled));
-
-    // H1 / codex #5: record the install INTENT under the lock BEFORE install(), and FAIL CLOSED if it
-    // cannot be recorded. This raises the anti-downgrade floor to `version` for any instance that
-    // acquires the lock next, so a racing older instance cannot install a LOWER (still-signed) version
-    // and regress this build. It MUST precede install(): on Windows tauri-plugin-updater's install()
-    // dispatches the external NSIS/MSI installer and `std::process::exit(0)`s — it never returns — so
-    // the old Ok-branch placement recorded NOTHING on Windows, leaving the downgrade window wide open
-    // there. Because `candidate_allowed` permits re-attempting the EXACT recorded version, recording
-    // before install does not poison the version on a failed install. On Windows the recovery_guard
-    // already exists here, so an abort below re-arms crash recovery via its Drop.
+    // Piece-2 rev-3 ordering: record the install INTENT first (it needs only the updater lock and
+    // must precede install(); a later disarm failure leaving `pending` recorded is the documented
+    // exact-version-retry semantics) — so the fallible floor write can never strand a live marker.
+    // H1 / codex #5 rationale unchanged: fail closed if the intent cannot be recorded.
     match updater_state_path() {
         Some(path) => {
             if let Err(e) = updater_state::record_pending(&path, &current, &version) {
@@ -427,6 +390,124 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         }
     }
 
+    // ── Windows: the update-window critical section (piece-2 plan §4) ──
+    // autostart.lock spans intent-read → disarm → marker+handoff create, and NOTHING else: the
+    // held lock freezes owned intent mutations, which is what keeps the snapshot honest inside it
+    // (final pass #1 — a pre-lock snapshot could go stale against a mid-download toggle).
+    // Lock nesting matches the heal: updater.lock (outer, held) → autostart.lock (inner).
+    #[cfg(target_os = "windows")]
+    let (marker_paths, mut recovery_guard) = {
+        let Some(paths) = crate::update_marker::MarkerPaths::default_paths() else {
+            tracing::error!("cannot resolve the update-marker path; aborting install");
+            return;
+        };
+        let section_lock = match crate::autostart::acquire_autostart_lock() {
+            Ok(l) => l,
+            Err(e) => {
+                // Nothing mutated yet — plain abort; the poller retries.
+                tracing::warn!("cannot enter the update critical section ({e}); aborting install");
+                return;
+            }
+        };
+
+        // Current intent, read INSIDE the lock — both the marker's stored snapshot and the
+        // guard's rearm input. Err ⇒ assume enabled (codex r3 #5: about to disarm, err toward
+        // restoring; a spurious rearm is an idempotent write).
+        let was_recovery_enabled = crate::autostart::intent_enabled(app).unwrap_or_else(|e| {
+            tracing::warn!(
+                "pre-install: autostart state unreadable ({e}); assuming enabled for re-arm safety"
+            );
+            true
+        });
+
+        // Disarm the always-armed repeating crash-recovery task right before install. A tick
+        // during NSIS file mutation could spawn a half-written binary. Cannot confirm ⇒ do NOT
+        // install.
+        if !crate::crash_recovery::disable_crash_recovery() {
+            tracing::error!(
+                "Aborting update install: could not disarm crash-recovery task (race risk)"
+            );
+            rearm_crash_recovery_if_enabled(was_recovery_enabled);
+            drop(section_lock);
+            return;
+        }
+
+        // q7e3-F-10: the guard re-arms on every exit path below unless explicitly defused after
+        // the marker cleanup has reconciled recovery itself (defusing prevents a stale-snapshot
+        // Drop-rearm into a live window).
+        let mut guard =
+            CrashRecoveryGuard::new(move || rearm_crash_recovery_if_enabled(was_recovery_enabled));
+
+        // The marker (D18): compare-and-create under the held lock; a live foreign window is
+        // never deleted. The expected install path is where THIS exe lives — the update replaces
+        // it in place.
+        let exe = std::env::current_exe().ok();
+        let expected = exe
+            .as_deref()
+            .and_then(|e| e.canonicalize().ok())
+            .or(exe)
+            .unwrap_or_default();
+        let payload = crate::update_marker::MarkerPayload::new(
+            &version,
+            &expected,
+            was_recovery_enabled,
+            crate::update_marker::now_unix(),
+        );
+        match crate::update_marker::create_new(&paths, &payload, crate::update_marker::now_unix()) {
+            Ok(()) => {}
+            Err(crate::update_marker::CreateErr::Live) => {
+                // Raced by a FOREIGN window between the top-of-fn check and here. Never delete
+                // it — and never REARM into it either: "no process rearms while a marker is
+                // live" applies to us too. Recovery stays disarmed; the foreign window's own
+                // reconcile (next launch) reconciles to intent (post-impl audit #1).
+                tracing::warn!(
+                    "another update window appeared; aborting install, recovery stays disarmed"
+                );
+                guard.defuse();
+                return;
+            }
+            Err(crate::update_marker::CreateErr::NotPublished(e)) => {
+                // Nothing of ours exists — plain abort; the guard's Drop rearms from the
+                // snapshot, which is FRESH here (the lock has been held since the intent read),
+                // so an unreadable current intent can never strand recovery on this path
+                // (verification pass, sibling path a).
+                tracing::error!("cannot create the update marker ({e}); aborting install");
+                return;
+            }
+            Err(crate::update_marker::CreateErr::PublishedMaybe(e)) => {
+                // The exclusive create WON, so any survivor is OURS — possibly complete (sync
+                // can fail after a full write). Run the checked, intent-sensitive cleanup under
+                // the still-held lock, then defuse: a Drop-rearm into a possibly-live marker of
+                // ours is exactly what rev 3 forbids (post-impl audit #1).
+                tracing::error!("marker write failed after creation ({e}); aborting install");
+                crate::update_marker::post_create_failure_cleanup(
+                    &paths,
+                    &crate::autostart::intent_enabled_now,
+                    &crate::crash_recovery::enable_crash_recovery,
+                    &crate::crash_recovery::disable_crash_recovery,
+                );
+                guard.defuse();
+                return;
+            }
+        }
+        if let Err(e) = crate::update_marker::write_handoff(&paths, &payload.txn) {
+            // Post-create failure (final pass #2): intent-sensitive cleanup under the still-held
+            // lock, then defuse — the cleanup reconciled recovery itself.
+            tracing::error!("cannot write the update handoff ({e}); aborting install");
+            crate::update_marker::post_create_failure_cleanup(
+                &paths,
+                &crate::autostart::intent_enabled_now,
+                &crate::crash_recovery::enable_crash_recovery,
+                &crate::crash_recovery::disable_crash_recovery,
+            );
+            guard.defuse();
+            drop(section_lock);
+            return;
+        }
+        drop(section_lock); // dropped BEFORE install(): NSIS runs outside any lock we hold.
+        (paths, guard)
+    };
+
     match update.install(bytes) {
         Ok(()) => {
             // Windows never reaches here — install() dispatched the installer and exited the process.
@@ -440,9 +521,33 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         }
         Err(e) => {
             // Intent stays recorded — a returned Err is not proof that nothing was mutated (codex #5),
-            // and candidate_allowed lets this exact version be retried, so keeping it can't poison the
-            // version. recovery_guard's Drop re-arms crash recovery on return (Windows, if it was armed).
+            // and candidate_allowed lets this exact version be retried.
             tracing::error!("Update install failed: {e}");
+            // Piece-2: the writer (this process) can never satisfy its own marker's removal rule,
+            // so clean up NOW, under a re-acquired lock, with intent-sensitive ordering (plan §4:
+            // ON = remove-checked-then-arm; OFF = confirm-disarm-then-remove), then defuse the
+            // guard — its snapshot is stale and cleanup reconciled recovery itself. If the lock
+            // cannot be re-acquired, leave everything: the marker suppresses until the next
+            // launch's reconcile (or expiry), and the DEFUSED guard cannot rearm into that window.
+            #[cfg(target_os = "windows")]
+            {
+                match crate::autostart::acquire_autostart_lock() {
+                    Ok(_lock) => {
+                        crate::update_marker::post_create_failure_cleanup(
+                            &marker_paths,
+                            &crate::autostart::intent_enabled_now,
+                            &crate::crash_recovery::enable_crash_recovery,
+                            &crate::crash_recovery::disable_crash_recovery,
+                        );
+                    }
+                    Err(le) => {
+                        tracing::warn!(
+                            "cannot re-enter the update critical section after a failed install ({le}); leaving the window suppressed"
+                        );
+                    }
+                }
+                recovery_guard.defuse();
+            }
         }
     }
 }
@@ -494,6 +599,14 @@ impl<F: FnMut()> CrashRecoveryGuard<F> {
             (self.rearm)();
             self.rearmed = true;
         }
+    }
+
+    /// DEFUSE: mark handled WITHOUT rearming. Used after the marker cleanup transaction has
+    /// already reconciled recovery to CURRENT intent (piece-2 plan §4) — a Drop-rearm after that
+    /// would act on the STALE pre-disarm snapshot, and a rearm into a still-live window is exactly
+    /// what the marker forbids.
+    fn defuse(&mut self) {
+        self.rearmed = true;
     }
 }
 
@@ -555,6 +668,19 @@ mod tests {
             1,
             "Drop must NOT re-arm again after rearm_now (no double-rearm)"
         );
+    }
+
+    #[test]
+    fn crash_recovery_guard_defuse_prevents_drop_rearm() {
+        // Piece 2: after the marker cleanup transaction has reconciled recovery to CURRENT
+        // intent, the guard's snapshot is stale — defuse() must make Drop a no-op, or a stale
+        // rearm could fire into a live update window.
+        let count = std::cell::Cell::new(0);
+        {
+            let mut guard = CrashRecoveryGuard::new(|| count.set(count.get() + 1));
+            guard.defuse();
+        }
+        assert_eq!(count.get(), 0, "a defused guard must never rearm");
     }
 
     #[test]

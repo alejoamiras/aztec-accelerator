@@ -696,7 +696,7 @@ fn classify_program(program: String, desired: Option<&Path>) -> StoredTarget {
 /// entire multi-minute download, and taking it here would hard-fail the Settings toggle during any
 /// background update (fable, r4). Blocking acquire is safe: holders keep it for one
 /// read-modify-write; fs2 releases on process death.
-fn acquire_autostart_lock() -> Result<std::fs::File, String> {
+pub(crate) fn acquire_autostart_lock() -> Result<std::fs::File, String> {
     use fs2::FileExt as _;
     let dir = dirs::home_dir()
         .ok_or_else(|| "cannot resolve home directory for autostart lock".to_string())?
@@ -1323,16 +1323,36 @@ pub fn heal_if_broken_at(desired: &Path) -> HealOutcome {
         _ => return HealOutcome::NotNeeded,
     }
     // 4. Bow out while an update transaction is live (non-blocking — the poller/next launch
-    //    retries). Piece 2 adds the Windows post-install marker on top of this.
+    //    retries). The lock is necessary but NOT sufficient on Windows: it dies with the exiting
+    //    process at install(), which is exactly when the update-window marker takes over.
     let _updater_guard = match crate::updater::acquire_updater_lock() {
         Some(f) => f,
         None => return HealOutcome::Skipped("updater active"),
     };
+    // 4b (piece 2, Windows): fast-path marker check. Cheap and UNLOCKED — the authoritative
+    // re-check happens under autostart.lock below, where it is race-free because marker creation
+    // holds that same lock.
+    #[cfg(windows)]
+    if let Some(mp) = crate::update_marker::MarkerPaths::default_paths() {
+        if crate::update_marker::live_marker_exists(&mp, crate::update_marker::now_unix()) {
+            return HealOutcome::Skipped("update in progress");
+        }
+    }
     // 5. D19: serialise against set_enabled and other healers, re-read under the lock.
     let _lock = match acquire_autostart_lock() {
         Ok(f) => f,
         Err(e) => return HealOutcome::Failed(e),
     };
+    // Piece 2 (Windows): the AUTHORITATIVE marker check — under the lock, immediately before the
+    // write. Both audits independently showed the unlocked fast path alone resurrects the Fork B
+    // counterexample: updater.lock dies at install()'s exit, so a repair click can slip between
+    // the fast path and the lock. Creation holds THIS lock, so this re-check cannot race it.
+    #[cfg(windows)]
+    if let Some(mp) = crate::update_marker::MarkerPaths::default_paths() {
+        if crate::update_marker::live_marker_exists(&mp, crate::update_marker::now_unix()) {
+            return HealOutcome::Skipped("update in progress");
+        }
+    }
     let old_program = match read_stored_target(Some(desired)) {
         StoredTarget::Broken { program } => program,
         StoredTarget::Unreadable { .. } => return HealOutcome::Skipped("artifact unreadable"),
@@ -1356,6 +1376,133 @@ pub fn heal_if_broken_at(desired: &Path) -> HealOutcome {
 pub fn enable_entry_at(desired: &Path) -> Result<(), String> {
     let _lock = acquire_autostart_lock()?;
     backend::enable_write(desired)
+}
+
+/// Piece-2 Quit-path disarm (plan §4 / ledger A5), Windows only. Serialized behind
+/// `autostart.lock` so it cannot interleave with the reconcile's arm→remove span. On lock
+/// timeout: log and disarm UNLOCKED anyway — cancel-the-quit is worse UX than either race, and
+/// skip-disarm risks a user-visible relaunch-after-quit; the unlocked fallback's worst case is
+/// the pre-existing self-healing transient. Lives here (not main.rs) because the lock is
+/// deliberately not part of the library's public surface.
+#[cfg(windows)]
+pub fn quit_disarm() {
+    let _lock = acquire_autostart_lock()
+        .map_err(|e| tracing::warn!("quit: disarming without the lock ({e})"))
+        .ok();
+    if !crate::crash_recovery::disable_crash_recovery() {
+        tracing::warn!(
+            "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
+        );
+    }
+}
+
+/// Piece-2 startup marker reconciliation (plan §4). Windows: the removal transaction — ONE
+/// `autostart.lock` hold across load → classify → decide → act (reconcile recovery to CURRENT
+/// intent, then remove). This is the only rearm path allowed while a marker exists (the r5
+/// exemption). Non-Windows: trivially Proceed (no marker exists there by design).
+///
+/// Returns whether the caller may proceed with the normal heal + rearm. Runs regardless of
+/// `AZTEC_ACCEL_NO_UPDATE` — a marker left by a previous run still needs resolving.
+pub fn startup_reconcile() -> bool {
+    #[cfg(not(windows))]
+    {
+        true
+    }
+    #[cfg(windows)]
+    {
+        let Some(paths) = crate::update_marker::MarkerPaths::default_paths() else {
+            // No home dir ⇒ no marker could exist either; nothing to reconcile.
+            return true;
+        };
+        let running = match semver::Version::parse(env!("CARGO_PKG_VERSION")) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("own version unparseable ({e}); suppressing heal/rearm this launch");
+                return false;
+            }
+        };
+        let exe = std::env::current_exe().ok();
+        let exe_canon = exe
+            .as_deref()
+            .and_then(|e| e.canonicalize().ok())
+            .or(exe)
+            .unwrap_or_default();
+        let _lock = match acquire_autostart_lock() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("marker reconcile could not lock ({e}); suppressing this launch");
+                return false;
+            }
+        };
+        match crate::update_marker::reconcile_under_lock(
+            &paths,
+            crate::update_marker::now_unix(),
+            &running,
+            &exe_canon,
+            &intent_enabled_now,
+            &crate::crash_recovery::enable_crash_recovery,
+            &crate::crash_recovery::disable_crash_recovery,
+        ) {
+            crate::update_marker::ReconcileOutcome::Proceed => true,
+            crate::update_marker::ReconcileOutcome::Suppressed(reason) => {
+                tracing::warn!("update window live or unresolved ({reason}); heal and rearm skipped this launch");
+                false
+            }
+        }
+    }
+}
+
+/// Piece-2 startup rearm seam (plan §4): the intent-keyed crash-recovery rearm, with the Windows
+/// half performed under `autostart.lock` behind a marker re-check — the rearm is a gated mutation
+/// like any other, and the unlocked-gate version was the audits' second TOCTOU. Sequential with
+/// the heal's own lock hold, never nested (the lock is not reentrant).
+pub fn startup_rearm(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        let lock = match acquire_autostart_lock() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("startup rearm could not lock ({e}); skipped this launch");
+                return;
+            }
+        };
+        if let Some(mp) = crate::update_marker::MarkerPaths::default_paths() {
+            if crate::update_marker::live_marker_exists(&mp, crate::update_marker::now_unix()) {
+                tracing::warn!("update window live; startup rearm skipped");
+                return;
+            }
+        }
+        match intent_enabled_now() {
+            Ok(true) => {
+                if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
+                    tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "could not read autostart state at startup; crash recovery not re-armed: {e}"
+            ),
+        }
+        drop(lock);
+    }
+    #[cfg(not(windows))]
+    {
+        // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch, and it
+        // must NOT be silently swallowed. codex #7: a READ ERROR is not a confirmed "off". D13:
+        // keyed on INTENT, never health — a Broken entry still means "the user wants autostart".
+        match intent_enabled(app) {
+            Ok(true) => {
+                if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
+                    tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "could not read autostart state at startup; crash recovery not re-armed: {e}"
+            ),
+        }
+    }
 }
 
 /// L3 test surface: capture the exact prior state `set_enabled`'s rollback would restore, apply it
@@ -1414,6 +1561,18 @@ pub fn set_enabled_at(desired: Option<&Path>, enabled: bool) -> Result<(), Strin
                 "Executable path is unsafe for autostart (control/newline/non-UTF-8); refusing to enable."
                     .to_string(),
             );
+        }
+        // Piece 2 (Windows): explicit ON is rejected while an update window is live (r5). The
+        // check sits INSIDE the held lock — checking before acquisition would be the same TOCTOU
+        // the audits rejected at the heal. OFF stays untouched below: it is always available.
+        #[cfg(windows)]
+        if let Some(mp) = crate::update_marker::MarkerPaths::default_paths() {
+            if crate::update_marker::live_marker_exists(&mp, crate::update_marker::now_unix()) {
+                return Err(
+                    "an update is finishing; try turning Start on Login on again in a moment"
+                        .to_string(),
+                );
+            }
         }
         // `prior_enabled` answers a NARROWER question than `intent_enabled`: "is there already a
         // sound entry I must not recreate?" (C1 — recreating a good macOS plist strips KeepAlive).

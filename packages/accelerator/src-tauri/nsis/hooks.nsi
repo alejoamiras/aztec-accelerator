@@ -41,6 +41,38 @@
 ; Deletes by CN (not serial): at uninstall the app exe (and x509-parser) is gone, and rotation has
 ; already removed prior anchors, so only our single "Aztec Accelerator Local CA" remains (plan D4).
 
+; ── POSTINSTALL: the update-window completion token (piece-2 plan §3, D21) ──
+;
+; The in-app updater cannot know when NSIS has finished: on Windows `install()` hands off and the
+; process exits, so it writes an `update-in-progress.json` marker (plus a one-line nonce handoff at
+; `update-txn`) and the NEXT launch refuses to touch autostart until the install demonstrably
+; completed. This hook is that proof: the Tauri template invokes NSIS_HOOK_POSTINSTALL as the LAST
+; act of `Section Install` — after every file copy, the uninstaller write, registry and shortcuts —
+; so renaming the handoff into `update-txn-done` hands the nonce back exactly when "NSIS finished
+; copying files" is true.
+;
+; Rename, not read+write: it preserves the nonce bytes with no FileRead loop, and it CONSUMES the
+; handoff, which makes a double fire (reinstall-over) naturally idempotent. NSIS `Rename` fails if
+; the destination exists, hence the Delete first. No handoff file ⇒ no-op — fresh installs never
+; have one. (A failed prior update can leave a handoff that a later MANUAL install consumes; that
+; is safe by BINDING, not construction: the token's nonce only matches its own marker, and removal
+; still requires version + path. See plan §3.)
+;
+; The template guard is `!ifmacrodef` — a misspelled macro name is SILENTLY skipped. The harness's
+; positive must-fire case (nsis-hook-test.sh) exists precisely to catch that.
+!macro NSIS_HOOK_POSTINSTALL
+  IfFileExists "$PROFILE\.aztec-accelerator\update-txn" 0 aztec_postinstall_done
+    Delete "$PROFILE\.aztec-accelerator\update-txn-done"
+    ClearErrors
+    Rename "$PROFILE\.aztec-accelerator\update-txn" "$PROFILE\.aztec-accelerator\update-txn-done"
+    ${If} ${Errors}
+      ; Leave the handoff in place: no token appears, the marker suppresses until its deadline —
+      ; the documented stranded exit. Never abort the install over bookkeeping.
+      DetailPrint "aztec: update completion token could not be written"
+    ${EndIf}
+  aztec_postinstall_done:
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
   Push $0
   Push $1

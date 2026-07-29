@@ -661,6 +661,13 @@ expose full usernames and home paths that §5's copy does not need. **Redact in 
 crosses IPC** — not in the webview. The frontend never needs the untruncated path, so it should never
 receive it.
 
+**AMENDMENT (piece 2, 2026-07-29):** D23's "the NSIS hook's token destination needs its own
+reparse-point/junction check" is formally amended — NOT implemented — by the piece-2 plan
+(`implementations-plan/autostart-update-marker/plan.md` §5.5, ledger A3): NSIS has no
+junction-refusal primitive, building one from `System::Call` is disproportionate for a same-user
+availability lever, and a junction-redirected token cannot forge acceptance (nonce/version/path
+binding). Recorded here so the upstream ledger does not contradict the piece-2 plan.
+
 **The marker is a new attack surface (D23; r5 correction).** It is same-user-writable and its whole
 purpose is to *suppress* healing and crash-recovery rearming — and, with D22, **to suppress updates**.
 r4 called this "no worse than deleting the Run value". **That was wrong**, and the final codex pass
