@@ -30,6 +30,9 @@ SilentInstall silent
 Section "Install"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; Mirrors the Tauri template: POSTINSTALL fires as the LAST act of Section Install
+  ; (installer.nsi:709-711 in tauri-bundler 2.8.1, !ifmacrodef-guarded).
+  !insertmacro NSIS_HOOK_POSTINSTALL
 SectionEnd
 
 Function un.onInit

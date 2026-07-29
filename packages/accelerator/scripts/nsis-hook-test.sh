@@ -77,6 +77,48 @@ run_case "upgrade via downloaded installer (no /UPDATE)"        no  yes  yes
 run_case "upgrade via in-app updater (/UPDATE)"                yes  yes  yes
 run_case "genuine uninstall (Add/Remove Programs)"              no   no   no
 
+# ── POSTINSTALL completion-token cases (piece-2 plan §6 T2) ──
+# The template invokes NSIS_HOOK_POSTINSTALL via !ifmacrodef, so a MISSPELLED macro is silently
+# skipped and nothing errors — the positive case below is the only thing that catches that: the
+# token MUST appear, carrying the exact nonce.
+aztec_dir="$PROFILE/.aztec-accelerator"
+
+# Positive must-fire: seeded handoff becomes the token, byte-for-byte, and the handoff is consumed.
+mkdir -p "$aztec_dir"
+printf 'nonce-abc123' > "$aztec_dir/update-txn"
+wine hooks-harness-setup.exe /S >/dev/null 2>&1
+wineserver -w
+if [ -f "$aztec_dir/update-txn-done" ] && [ "$(cat "$aztec_dir/update-txn-done")" = "nonce-abc123" ] \
+   && [ ! -f "$aztec_dir/update-txn" ]; then
+  echo "ok   POSTINSTALL renames handoff -> token (nonce preserved)"
+else
+  echo "FAIL POSTINSTALL must-fire: token missing/wrong or handoff not consumed"
+  fails=$((fails + 1))
+fi
+
+# Double fire (reinstall-over): the handoff was consumed, so a second run must be a no-op — token
+# unchanged, no error, and no handoff resurrected.
+wine hooks-harness-setup.exe /S >/dev/null 2>&1
+wineserver -w
+if [ "$(cat "$aztec_dir/update-txn-done" 2>/dev/null)" = "nonce-abc123" ] && [ ! -f "$aztec_dir/update-txn" ]; then
+  echo "ok   POSTINSTALL double fire is idempotent"
+else
+  echo "FAIL POSTINSTALL double fire disturbed the token"
+  fails=$((fails + 1))
+fi
+rm -rf "$aztec_dir" "$PROFILE/Temp/aztec-hooks-harness"
+
+# No-handoff no-op: a fresh install (no update-txn) must create NO token.
+wine hooks-harness-setup.exe /S >/dev/null 2>&1
+wineserver -w
+if [ ! -f "$aztec_dir/update-txn-done" ]; then
+  echo "ok   POSTINSTALL no-op without a handoff (fresh install)"
+else
+  echo "FAIL POSTINSTALL created a token with no handoff present"
+  fails=$((fails + 1))
+fi
+rm -rf "$aztec_dir" "$PROFILE/Temp/aztec-hooks-harness"
+
 [ "$fails" -eq 0 ] || { echo "$fails case(s) misclassified"; exit 1; }
 echo "all cases classified correctly"
 RUNNER

@@ -225,6 +225,36 @@ jobs:
             Remove-Item -Recurse -Force $certs, $dir -ErrorAction SilentlyContinue
           }
 
+          # ── POSTINSTALL completion-token cases (piece-2 plan §6 T2), on REAL Windows ──
+          # The template invokes NSIS_HOOK_POSTINSTALL via !ifmacrodef: a misspelled macro is
+          # SILENTLY skipped. The positive must-fire case is the only guard against that.
+          $aztecDir = Join-Path $env:USERPROFILE ".aztec-accelerator"
+          $handoff  = Join-Path $aztecDir "update-txn"
+          $token    = Join-Path $aztecDir "update-txn-done"
+
+          New-Item -ItemType Directory -Force -Path $aztecDir | Out-Null
+          Set-Content -Path $handoff -Value "nonce-abc123" -NoNewline
+          & $setup /S | Out-Null
+          if (-not (Test-Path $token)) { throw "FAIL POSTINSTALL must-fire: no token written" }
+          $nonce = (Get-Content -Raw $token).Trim()
+          if ($nonce -cne "nonce-abc123") { throw "FAIL POSTINSTALL: nonce mangled ($nonce)" }
+          if (Test-Path $handoff) { throw "FAIL POSTINSTALL: handoff not consumed" }
+          Write-Host "ok [POSTINSTALL must-fire: handoff -> token, nonce preserved]"
+
+          # Double fire (reinstall-over): handoff consumed, so a no-op — token untouched.
+          & $setup /S | Out-Null
+          if ((Get-Content -Raw $token).Trim() -cne "nonce-abc123" -or (Test-Path $handoff)) {
+            throw "FAIL POSTINSTALL double fire disturbed the token"
+          }
+          Write-Host "ok [POSTINSTALL double fire is idempotent]"
+          Remove-Item -Recurse -Force $aztecDir, $dir -ErrorAction SilentlyContinue
+
+          # Fresh install (no handoff) must create NO token.
+          & $setup /S | Out-Null
+          if (Test-Path $token) { throw "FAIL POSTINSTALL created a token with no handoff" }
+          Write-Host "ok [POSTINSTALL no-op on fresh install]"
+          Remove-Item -Recurse -Force $aztecDir, $dir -ErrorAction SilentlyContinue
+
   # F-004: full updater-feed sign/verify round-trip with a THROWAWAY key (no prod secret). Guards the
   # version-binding property end-to-end against tauri-CLI drift and any change to the update-manifest
   # tool: happy path (envelope -> tauri signer sign -> splice -> verify) must pass, and the F-004 splice
