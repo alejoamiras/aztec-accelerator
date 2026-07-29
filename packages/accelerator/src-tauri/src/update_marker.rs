@@ -354,6 +354,15 @@ pub fn reconcile_under_lock(
         LoadedMarker::Valid(m) => m,
     };
 
+    // Expiry DOMINATES every verification failure below: an expected path that stays
+    // unverifiable (e.g. permanently broken permissions) must not suppress past the deadline —
+    // that would be exactly the TTL-limbo r5 forbids. Zero reconciliation on expiry, as ever.
+    if now_unix >= m.deadline_unix {
+        tracing::warn!("update marker expired without completion; clearing");
+        let _ = remove_all(paths);
+        return ReconcileOutcome::Proceed;
+    }
+
     // Rename-tolerance demands PROVEN absence: conflating a permission or transient I/O error
     // with "the path is gone" would widen the settled clause and could remove a marker while
     // running from the wrong path (post-impl audit #3). Unverifiable ⇒ Suppress and retry.
@@ -384,8 +393,8 @@ pub fn reconcile_under_lock(
     ) {
         Decision::Suppress(reason) => ReconcileOutcome::Suppressed(reason),
         Decision::Expire(_) => {
-            // ZERO reconciliation on expiry (the discriminator T3 pins): the window is simply
-            // over. Removal failure leaves an expired marker that expires again next launch.
+            // Defense in depth: expiry is normally handled by the dominant check above, before
+            // path verification. Same semantics if reached: zero reconciliation, clear, proceed.
             tracing::warn!("update marker expired without completion; clearing");
             let _ = remove_all(paths);
             ReconcileOutcome::Proceed
@@ -918,6 +927,34 @@ mod tests {
             matches!(load(&paths, NOW), LoadedMarker::Valid(_)),
             "unreadable intent must leave the window suppressed, not resolved"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t3_expired_marker_with_unverifiable_path_still_expires() {
+        // The dominance rule: expiry beats path verification, or a permanently unreadable path
+        // suppresses forever — the TTL-limbo r5 forbids.
+        let (d, paths) = temp_paths();
+        let locked_dir = d.path().join("locked2");
+        std::fs::create_dir(&locked_dir).unwrap();
+        let target = locked_dir.join("app.exe");
+        std::fs::write(&target, b"x").unwrap();
+        write_marker(
+            &paths,
+            &payload("n", "1.0.9", &target.to_string_lossy(), NOW - 5),
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let c = Counters::new(true);
+        let out = c.run(&paths, "1.0.9", "/x");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            out,
+            ReconcileOutcome::Proceed,
+            "expiry must dominate unverifiability"
+        );
+        assert_eq!((c.arms.get(), c.disarms.get()), (0, 0));
+        assert_eq!(load(&paths, NOW), LoadedMarker::Missing);
     }
 
     #[cfg(unix)]

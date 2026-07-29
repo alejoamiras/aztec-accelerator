@@ -10,3 +10,14 @@
   imports) was catchable locally and wasn't.
 - The wine harness (test:nsis) proved the POSTINSTALL hook before any Windows runner saw it — all
   six cases first try. Measured-under-wine continues to beat push-and-pray for NSIS work.
+
+## Post-impl audit round — residual declared
+
+Blocker 4's "T4 must drive the production heal across a deterministic barrier" is implemented at
+the reconcile layer (T4) and the production-core layer (T6: the heal's authoritative under-lock
+check and the full Remove flow run against real default-path files on a real Windows runner). The
+remaining gap — deterministically publishing a marker BETWEEN the heal's fast path and its
+under-lock re-check — requires a test-only injection point inside production code, which is the
+exact test-lever-in-shipped-code pattern the piece-2 planning round rejected (fable's option (a)).
+Documented residual, not silent: the interleaving's correctness rests on the lock-exclusion
+argument (creation and re-check hold the same lock), which T6 exercises structurally.
