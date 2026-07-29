@@ -51,3 +51,16 @@ Fix: `cat`, not re-encode. Verified locally by generating a key with the repo CL
 diffing formats against the committed pubkey — 5-minute local repro vs a 15-minute CI leg.
 (The PRIVATE key file is also single-line base64, which is why `cat` into GITHUB_ENV was
 always safe on the existing path.)
+
+## Round 2 (run 30471013752): green, but the WRONG green
+
+The job title said barrier, the summary said barrier — the ps1 ran POSITIVE. The dispatch
+workflow set a job-local `SMOKE_MODE` (summary text only); the ps1 reads `UPDATER_SMOKE_MODE`,
+which the reusable's smoke step exports but my new file never did → default positive. All
+asserts passed because the positive path is real — the run just wasn't the scenario it
+claimed. Caught ONLY by grepping the log for BARRIER milestones before trusting the ✓
+(the goal's two-outcome rule applied to the harness itself: a green run must prove WHICH
+path ran). Fixes: job env renamed to `UPDATER_SMOKE_MODE` (single source), and the ps1 now
+logs `mode: $Mode` at startup so this class is visible in any future log at a glance.
+Consolation finding: run 2 inadvertently proved the sentinel's no-request no-op — the
+baked sentinel sat in N−1's uninstaller and did nothing without the request file.

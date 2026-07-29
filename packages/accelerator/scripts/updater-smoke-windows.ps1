@@ -73,6 +73,7 @@ $PollJob = $null
 $TaskName = "Aztec Accelerator Crash Recovery"
 
 function Log($m) { Write-Host "── $m ──" }
+Log "mode: $Mode"
 
 function Cleanup {
   if ($QProc) { Stop-Process -Id $QProc.Id -Force -ErrorAction SilentlyContinue }

@@ -47,7 +47,9 @@ jobs:
     env:
       N_VERSION: ${{ inputs.n-version || '9.9.9' }}
       N1_VERSION: "0.0.1"
-      SMOKE_MODE: ${{ inputs.mode || 'barrier' }}
+      # The ps1 reads THIS variable — a job-local alias here once silently ran the positive path
+      # under a "barrier" job title (run 30471013752).
+      UPDATER_SMOKE_MODE: ${{ inputs.mode || 'barrier' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-accelerator
@@ -185,4 +187,4 @@ jobs:
 
       - name: Result summary
         if: success()
-        run: echo "✅ Ephemeral Windows updater smoke PASSED ($env:SMOKE_MODE) — current-ref N-1 → current-ref N, full marker lifecycle." >> $env:GITHUB_STEP_SUMMARY
+        run: echo "✅ Ephemeral Windows updater smoke PASSED ($env:UPDATER_SMOKE_MODE) — current-ref N-1 → current-ref N, full marker lifecycle." >> $env:GITHUB_STEP_SUMMARY
