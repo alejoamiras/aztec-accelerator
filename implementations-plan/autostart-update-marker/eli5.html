@@ -1,0 +1,108 @@
+<title>Update marker (piece 2) — plan in plain terms</title>
+
+<style>
+  :root {
+    --paper:#f4f7fb; --card:#fff; --ink:#101b28; --ink-soft:#4a5a6e; --rule:#cbd8e6;
+    --accent:#1a5c99; --accent-soft:#e3edf7; --warn:#9c5117; --warn-soft:#f8ece1;
+    --ok:#2a6650; --ok-soft:#e2f0ea;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --serif:ui-serif,Georgia,"Iowan Old Style",serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper:#0b131d; --card:#121e2b; --ink:#e4ecf5; --ink-soft:#9aacc0; --rule:#26384c;
+      --accent:#74aede; --accent-soft:#16283a; --warn:#e0a06a; --warn-soft:#2c2115;
+      --ok:#7fc4a6; --ok-soft:#14261f; }
+  }
+  :root[data-theme="dark"] { --paper:#0b131d; --card:#121e2b; --ink:#e4ecf5; --ink-soft:#9aacc0;
+    --rule:#26384c; --accent:#74aede; --accent-soft:#16283a; --warn:#e0a06a; --warn-soft:#2c2115;
+    --ok:#7fc4a6; --ok-soft:#14261f; }
+  :root[data-theme="light"] { --paper:#f4f7fb; --card:#fff; --ink:#101b28; --ink-soft:#4a5a6e;
+    --rule:#cbd8e6; --accent:#1a5c99; --accent-soft:#e3edf7; --warn:#9c5117; --warn-soft:#f8ece1;
+    --ok:#2a6650; --ok-soft:#e2f0ea; }
+
+  body { background:var(--paper); color:var(--ink); font-family:var(--sans); line-height:1.65;
+    margin:0; padding:0 1.25rem 5rem; }
+  main { max-width:44rem; margin:0 auto; }
+  header { padding:3.5rem 0 2rem; border-bottom:2px solid var(--ink); margin-bottom:2.5rem; }
+  .eyebrow { font-family:var(--mono); font-size:.74rem; letter-spacing:.13em; text-transform:uppercase;
+    color:var(--accent); margin:0 0 .9rem; }
+  h1 { font-family:var(--serif); font-weight:600; font-size:clamp(1.8rem,4.5vw,2.5rem);
+    line-height:1.14; margin:0 0 .8rem; text-wrap:balance; letter-spacing:-.015em; }
+  .standfirst { font-size:1.08rem; color:var(--ink-soft); margin:0; max-width:32rem; }
+  h2 { font-family:var(--serif); font-weight:600; font-size:1.45rem; margin:2.8rem 0 .9rem;
+    text-wrap:balance; }
+  p { margin:0 0 1.05rem; }
+  code { font-family:var(--mono); font-size:.88em; background:var(--accent-soft);
+    padding:.12em .38em; border-radius:3px; }
+  .flow { background:var(--card); border:1px solid var(--rule); border-radius:10px;
+    margin:1.5rem 0; overflow:hidden; }
+  .flow .step { display:flex; gap:.9rem; padding:.85rem 1.15rem; align-items:baseline; }
+  .flow .step + .step { border-top:1px solid var(--rule); }
+  .flow .n { font-family:var(--mono); font-size:.72rem; color:var(--accent); flex:0 0 1.5rem;
+    font-variant-numeric:tabular-nums; }
+  .callout { border-left:3px solid var(--accent); background:var(--card); padding:1rem 1.2rem;
+    margin:1.5rem 0; border-radius:0 8px 8px 0; }
+  .callout.warn { border-left-color:var(--warn); }
+  .callout .label { font-family:var(--mono); font-size:.7rem; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--accent); display:block; margin-bottom:.45rem; }
+  .callout.warn .label { color:var(--warn); }
+  .callout p:last-child { margin-bottom:0; }
+  ul { padding-left:1.1rem; margin:0 0 1.05rem; }
+  li { margin-bottom:.45rem; }
+  footer { margin-top:3.5rem; padding-top:1.3rem; border-top:1px solid var(--rule);
+    font-size:.88rem; color:var(--ink-soft); }
+  a { color:var(--accent); text-underline-offset:3px; }
+</style>
+
+<main>
+<header>
+  <p class="eyebrow">Autostart arc · piece 2 of 3 · blueprint mid, rev 3</p>
+  <h1>A do-not-disturb sign for the seconds an update is installing</h1>
+  <p class="standfirst">Piece 1 taught the app to repair its own "Start on Login" entry — everywhere except Windows, where the repair stayed switched off. This piece is the reason it can now be switched on.</p>
+</header>
+
+<h2>The problem, in one scene</h2>
+
+<p>On Windows, applying an update means the app hands control to an installer and <em>exits</em>. For a few seconds, the installer has deleted the old program and not yet finished writing the new one. If any copy of the app wakes up in exactly that window and runs its repair, it "fixes" the login entry to point at whatever transient copy it happens to be — and after the installer finishes and that copy is deleted, autostart is broken again. The very bug this whole arc exists to fix, reintroduced by its own cure.</p>
+
+<p>The old safety net can't help: the file-lock the updater holds <em>dies with the exiting process</em>, which is precisely when the danger starts.</p>
+
+<h2>The fix: a marker file with a receipt</h2>
+
+<div class="flow">
+  <div class="step"><span class="n">1</span><span>Before handing off to the installer, the updater writes a small marker file: a one-time ticket number, which version is being installed, where it will land, and a hard expiry (~15 minutes).</span></div>
+  <div class="step"><span class="n">2</span><span>While that marker exists: <strong>no repair, no crash-recovery re-arming, no new update, no turning autostart ON.</strong> Turning it OFF always still works.</span></div>
+  <div class="step"><span class="n">3</span><span>The installer itself, as its <em>last</em> act after every file is in place, stamps the receipt — it hands the ticket number back. New installer code; a release can't fix its own installer, so it ships right the first time.</span></div>
+  <div class="step"><span class="n">4</span><span>The freshly installed app, at next launch, removes the marker only when everything matches: right ticket, right version, right location, and crash recovery put back the way the user's settings say. Then normal life — including the Windows repair, enabled at last — resumes.</span></div>
+  <div class="step"><span class="n">5</span><span>If anything went wrong and no one can ever match the ticket, the marker simply expires and the app carries on. The sign can never get stuck on the door.</span></div>
+</div>
+
+<h2>What review added this round</h2>
+
+<p>Three audit passes (two in parallel, one fresh-context) rejected early revisions and were folded:</p>
+
+<ul>
+  <li><strong>Every check now happens while holding the lock, right before acting.</strong> Both auditors independently showed that a check made <em>before</em> taking the lock recreates the original bug through a side door — twice, at two different sites.</li>
+  <li><strong>Failure paths are direction-aware.</strong> If an install fails and the user wants autostart ON, remove the marker first, then re-arm; if OFF, confirm the disarm first, then remove. The wrong order can leave the app silently re-launching against the user's wishes — permanently.</li>
+  <li><strong>A planned test would have deleted a real setting on a developer's machine.</strong> Caught at plan time — the same class of mistake piece 1 caught only after CI ran. The test now uses injected counters instead of the real scheduler.</li>
+</ul>
+
+<div class="callout warn">
+  <span class="label">One design point reopened, openly</span>
+  <p>The original ledger asked the installer to defend its receipt-file against a filesystem trick (junction redirection). The installer language has no primitive for that, building one would be heavy machinery against an attacker who — running as the same user — could simply write the receipt directly. The requirement is <em>amended with a written rationale</em>, in both ledgers, rather than quietly skipped. The receipt can't be forged into acceptance either way: the ticket number, version and path still have to match.</p>
+</div>
+
+<h2>What lands in this PR</h2>
+
+<ul>
+  <li>The marker module with an exhaustive state-table test (every stranded state has a defined exit).</li>
+  <li>The installer receipt hook + a wine-based harness case that <em>fails if the hook never fires</em> — a misspelled hook name is silently ignored by the installer templates, so the test must prove the positive.</li>
+  <li>The updater and the repair/rearm/toggle paths made marker-aware — four call sites, each checked under the lock.</li>
+  <li>The Windows repair switched on, and the CI smoke flipped to prove it: a deliberately broken login entry must come out healed to the exactly-quoted installed path — plus a new scenario proving a live marker suppresses everything it should.</li>
+</ul>
+
+<footer>
+  <p>Full mapping + decision ledger: <a href="plan.md">plan.md</a> · audits: <a href="audit-codex.md">codex</a>, <a href="audit-fable.md">fable</a>, <a href="audit-codex-final.md">final pass</a> · settled design: piece-1 ledger D18/D21/D22/D23</p>
+</footer>
+</main>
