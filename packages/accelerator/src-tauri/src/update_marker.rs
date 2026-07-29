@@ -284,7 +284,8 @@ pub enum Decision {
 }
 
 /// The pure removal rule (plan §2). `expected_canon` is the canonicalized
-/// `expected_install_path` — `None` when that path does not currently exist, which triggers the
+/// `expected_install_path` — `None` means the path is PROVEN absent (`try_exists() == Ok(false)`,
+/// never a canonicalize/permission failure — the caller suppresses those), which triggers the
 /// settled rename-tolerance clause (a renamed build runs from a path ≠ expected; if the version
 /// and token match, the install demonstrably completed).
 pub fn removal_decision(
@@ -353,8 +354,24 @@ pub fn reconcile_under_lock(
         LoadedMarker::Valid(m) => m,
     };
 
+    // Rename-tolerance demands PROVEN absence: conflating a permission or transient I/O error
+    // with "the path is gone" would widen the settled clause and could remove a marker while
+    // running from the wrong path (post-impl audit #3). Unverifiable ⇒ Suppress and retry.
     let expected = PathBuf::from(&m.expected_install_path);
-    let expected_canon = expected.canonicalize().ok();
+    let expected_canon = match expected.try_exists() {
+        Ok(false) => None, // proven absent — the rename-tolerance arm may apply
+        Ok(true) => match expected.canonicalize() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("expected install path exists but cannot be canonicalized ({e})");
+                return ReconcileOutcome::Suppressed("expected path unverifiable");
+            }
+        },
+        Err(e) => {
+            tracing::warn!("cannot stat the expected install path ({e})");
+            return ReconcileOutcome::Suppressed("expected path unverifiable");
+        }
+    };
     let token = read_token_nonce(paths);
 
     match removal_decision(
@@ -415,9 +432,18 @@ pub fn post_create_failure_cleanup(
     arm: &dyn Fn() -> Result<(), String>,
     disarm_confirmed: &dyn Fn() -> bool,
 ) -> bool {
-    // Err ⇒ assume ON: about to decide about rearming, and the pre-disarm capture used the same
-    // assume-enabled default (codex r3 #5 in updater.rs) — missing a rearm strands recovery.
-    let intent = intent_read().unwrap_or(true);
+    // Unreadable intent is NOT assumed ON here (unlike the pre-disarm capture): on this path the
+    // marker may already be published and intent may have changed while the lock was released —
+    // assuming ON could remove the marker and arm recovery permanently against an OFF intent.
+    // The sanctioned exit is suppression: keep the marker, stay disarmed, defuse; the next
+    // launch's reconcile retries with a readable intent (post-impl audit #2).
+    let intent = match intent_read() {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!("intent unreadable during cleanup ({e}); leaving the window suppressed");
+            return true;
+        }
+    };
     if intent {
         match remove_all(paths) {
             Ok(()) => {
@@ -862,6 +888,67 @@ mod tests {
             c.arms.get(),
             0,
             "no rearm into a window that could not be cleared"
+        );
+    }
+
+    #[test]
+    fn t7_unreadable_intent_keeps_marker_disarmed_and_defuses() {
+        // Post-impl audit #2: on the cleanup path, intent may have changed while the lock was
+        // released, so an unreadable read must NOT assume ON — it keeps the marker (suppression),
+        // performs zero reconciliation, and still defuses the guard.
+        let (_d, paths) = temp_paths();
+        write_marker(&paths, &payload("n", "1.0.9", "/x", NOW + 600));
+        let mut c = Counters::new(true);
+        c.intent = Err("io".into());
+        let defuse = post_create_failure_cleanup(
+            &paths,
+            &|| c.intent.clone(),
+            &|| {
+                c.arms.set(c.arms.get() + 1);
+                Ok(())
+            },
+            &|| {
+                c.disarms.set(c.disarms.get() + 1);
+                true
+            },
+        );
+        assert!(defuse);
+        assert_eq!((c.arms.get(), c.disarms.get()), (0, 0));
+        assert!(
+            matches!(load(&paths, NOW), LoadedMarker::Valid(_)),
+            "unreadable intent must leave the window suppressed, not resolved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t3_unverifiable_expected_path_suppresses_not_removes() {
+        // Post-impl audit #3: a permission failure on the expected path must NOT read as
+        // "absent" — that would widen the rename-tolerance clause into wrong removals.
+        let (d, paths) = temp_paths();
+        let locked_dir = d.path().join("locked");
+        std::fs::create_dir(&locked_dir).unwrap();
+        let target = locked_dir.join("app.exe");
+        std::fs::write(&target, b"x").unwrap();
+        let m = payload("nonce-1", "1.0.9", &target.to_string_lossy(), NOW + 600);
+        write_marker(&paths, &m);
+        std::fs::write(&paths.token, b"nonce-1").unwrap();
+        // Make the parent unsearchable: try_exists on the target now errors.
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let c = Counters::new(true);
+        let out = c.run(&paths, "1.0.9", "/somewhere/else");
+        // Restore perms BEFORE asserting so a failure cannot leak an undeletable tempdir.
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            out,
+            ReconcileOutcome::Suppressed("expected path unverifiable")
+        );
+        assert_eq!((c.arms.get(), c.disarms.get()), (0, 0));
+        assert!(
+            matches!(load(&paths, NOW), LoadedMarker::Valid(_)),
+            "marker kept for retry"
         );
     }
 

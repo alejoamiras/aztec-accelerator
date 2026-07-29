@@ -753,7 +753,13 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
         }
         impl MarkerRestore {
             fn capture(paths: &MarkerPaths) -> Self {
-                let snap = |p: &std::path::Path| (p.to_path_buf(), std::fs::read(p).ok());
+                // Absence must be PROVEN: mapping a read error to None would make Drop DELETE a
+                // real profile file this test merely failed to read (post-impl audit NB).
+                let snap = |p: &std::path::Path| match std::fs::read(p) {
+                    Ok(b) => (p.to_path_buf(), Some(b)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (p.to_path_buf(), None),
+                    Err(e) => panic!("refusing to run: cannot capture {} ({e})", p.display()),
+                };
                 Self {
                     paths: paths.clone(),
                     prior: vec![
@@ -822,9 +828,50 @@ fn windows_full_lifecycle_quoting_heal_and_createprocess_proof() {
         );
         remove_entry().expect("artifact-level OFF must stay available during the window");
 
+        // The Remove flow (rev-3 T6 spec): a marker whose token/version/path ALL match must
+        // reconcile (counters, never the real task) and remove the trio — through the production
+        // transaction against the real default-path files.
+        {
+            use aztec_accelerator::update_marker::{reconcile_under_lock, ReconcileOutcome};
+            let running = semver::Version::parse("9.9.9").unwrap();
+            let m2 = MarkerPayload {
+                schema: 1,
+                txn: "t6-remove".into(),
+                candidate: "9.9.9".into(),
+                expected_install_path: probe_src.to_string_lossy().into_owned(),
+                intent_at_disarm: true,
+                deadline_unix: aztec_accelerator::update_marker::now_unix() + 600,
+            };
+            std::fs::write(&mpaths.marker, serde_json::to_vec(&m2).unwrap()).unwrap();
+            std::fs::write(&mpaths.token, b"t6-remove").unwrap();
+            let arms = std::cell::Cell::new(0u32);
+            let out = reconcile_under_lock(
+                &mpaths,
+                aztec_accelerator::update_marker::now_unix(),
+                &running,
+                &probe_src.canonicalize().unwrap(),
+                &|| Ok(true),
+                &|| {
+                    arms.set(arms.get() + 1);
+                    Ok(())
+                },
+                &|| true,
+            );
+            assert_eq!(out, ReconcileOutcome::Proceed, "all-four-match must Remove");
+            assert_eq!(
+                arms.get(),
+                1,
+                "Remove with intent ON reconciles exactly once"
+            );
+            assert!(
+                !mpaths.marker.exists() && !mpaths.token.exists(),
+                "the trio must be gone after Remove"
+            );
+        }
+
         // End the window FIRST — the heal below must run marker-free, and asserting that also
         // pins "suppression ends when the marker goes".
-        std::fs::remove_file(&mpaths.marker).unwrap();
+        let _ = std::fs::remove_file(&mpaths.marker); // already removed by the Remove flow above
         write_raw_run_value(&unquoted);
         std::fs::copy(&probe_src, &v2).expect("restore v2");
         std::fs::remove_file(&v2b).unwrap();

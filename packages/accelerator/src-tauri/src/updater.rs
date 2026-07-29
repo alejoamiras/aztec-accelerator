@@ -456,15 +456,30 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         match crate::update_marker::create_new(&paths, &payload, crate::update_marker::now_unix()) {
             Ok(()) => {}
             Err(crate::update_marker::CreateErr::Live) => {
-                // Raced by another window between the top-of-fn check and here. Never delete it;
-                // the guard rearms via Drop (no marker of OURS exists, so that rearm is safe).
-                tracing::warn!("another update window appeared; aborting install");
-                drop(section_lock);
+                // Raced by a FOREIGN window between the top-of-fn check and here. Never delete
+                // it — and never REARM into it either: "no process rearms while a marker is
+                // live" applies to us too. Recovery stays disarmed; the foreign window's own
+                // reconcile (next launch) reconciles to intent (post-impl audit #1).
+                tracing::warn!(
+                    "another update window appeared; aborting install, recovery stays disarmed"
+                );
+                guard.defuse();
                 return;
             }
             Err(crate::update_marker::CreateErr::Io(e)) => {
+                // The write may have PUBLISHED a complete marker before failing (e.g. sync_all
+                // after a full write) — and any survivor here is OURS, since a foreign one
+                // returns Live. Run the checked, intent-sensitive cleanup under the still-held
+                // lock, then defuse: a Drop-rearm into a possibly-live marker of ours is exactly
+                // what rev 3 forbids (post-impl audit #1).
                 tracing::error!("cannot create the update marker ({e}); aborting install");
-                drop(section_lock);
+                crate::update_marker::post_create_failure_cleanup(
+                    &paths,
+                    &crate::autostart::intent_enabled_now,
+                    &crate::crash_recovery::enable_crash_recovery,
+                    &crate::crash_recovery::disable_crash_recovery,
+                );
+                guard.defuse();
                 return;
             }
         }
