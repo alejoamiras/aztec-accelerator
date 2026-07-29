@@ -389,22 +389,10 @@ fn build_tray(
             // no-op there and the recovery entry must persist across quit.
             // codex #7: surface (log) a non-confirmed disarm — an unconfirmed disable here means the
             // Task Scheduler recovery entry may survive and relaunch the app within ~1 min of this quit.
+            // Piece 2 (A5): the disarm is serialized behind autostart.lock inside the seam —
+            // it cannot interleave with the marker reconcile's arm→remove span.
             #[cfg(target_os = "windows")]
-            {
-                // Piece 2 (A5): serialize the quit-disarm behind autostart.lock so it cannot
-                // interleave with the marker reconcile's arm→remove span. On lock timeout: log
-                // and disarm UNLOCKED anyway — cancel-the-quit is worse UX than either race, and
-                // skip-disarm risks a user-visible relaunch-after-quit; the unlocked fallback's
-                // worst case is the pre-existing self-healing transient (plan §10 A5).
-                let _quit_lock = aztec_accelerator::autostart::acquire_autostart_lock()
-                    .map_err(|e| tracing::warn!("quit: disarming without the lock ({e})"))
-                    .ok();
-                if !aztec_accelerator::crash_recovery::disable_crash_recovery() {
-                    tracing::warn!(
-                        "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
-                    );
-                }
-            }
+            aztec_accelerator::autostart::quit_disarm();
             app.exit(0);
         }
         "show_logs" => open_in_browser(&log_dir()),

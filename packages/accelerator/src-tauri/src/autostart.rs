@@ -1378,6 +1378,24 @@ pub fn enable_entry_at(desired: &Path) -> Result<(), String> {
     backend::enable_write(desired)
 }
 
+/// Piece-2 Quit-path disarm (plan §4 / ledger A5), Windows only. Serialized behind
+/// `autostart.lock` so it cannot interleave with the reconcile's arm→remove span. On lock
+/// timeout: log and disarm UNLOCKED anyway — cancel-the-quit is worse UX than either race, and
+/// skip-disarm risks a user-visible relaunch-after-quit; the unlocked fallback's worst case is
+/// the pre-existing self-healing transient. Lives here (not main.rs) because the lock is
+/// deliberately not part of the library's public surface.
+#[cfg(windows)]
+pub fn quit_disarm() {
+    let _lock = acquire_autostart_lock()
+        .map_err(|e| tracing::warn!("quit: disarming without the lock ({e})"))
+        .ok();
+    if !crate::crash_recovery::disable_crash_recovery() {
+        tracing::warn!(
+            "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
+        );
+    }
+}
+
 /// Piece-2 startup marker reconciliation (plan §4). Windows: the removal transaction — ONE
 /// `autostart.lock` hold across load → classify → decide → act (reconcile recovery to CURRENT
 /// intent, then remove). This is the only rearm path allowed while a marker exists (the r5

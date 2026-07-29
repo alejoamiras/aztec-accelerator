@@ -9,6 +9,7 @@ use aztec_accelerator::autostart::{
     enable_entry_at, heal_if_broken_at, intent_enabled_now, read_stored_target, remove_entry,
     set_enabled_at, snapshot_restore_roundtrip_for_tests, HealOutcome, StoredTarget,
 };
+#[cfg(windows)]
 use aztec_accelerator::update_marker::{MarkerPaths, MarkerPayload};
 use std::path::{Path, PathBuf};
 
