@@ -4,7 +4,7 @@ version = "1.0.8-rc.1"
 description = "Native proving accelerator for Aztec transactions"
 edition = "2021"
 rust-version = "1.77.2"
-default-run = "aztec-accelerator"
+default-run = "AztecAccelerator"
 # Disable Cargo's `src/bin/*` auto-discovery. `tauri build` bundles every
 # `[[bin]]` defined in this crate into the desktop `.app`'s `MacOS/` folder.
 # A stray file under `src/bin/` would silently change the bundle signature
@@ -20,7 +20,11 @@ default = []
 webdriver = ["dep:tauri-plugin-webdriver"]
 
 [[bin]]
-name = "aztec-accelerator"
+# The DESKTOP executable name (Task Manager, Contents/MacOS/, NSIS ${MAINBINARYNAME}). Renamed at
+# the CARGO layer — not via tauri.conf mainBinaryName — so plain `cargo build` (which the
+# webdriver E2E legs use deliberately, F-012) produces the SAME name as tauri-driven builds.
+# Crate name (and so Cargo.lock + the release version-sed) stays aztec-accelerator.
+name = "AztecAccelerator"
 path = "src/main.rs"
 
 [dependencies]

@@ -44,8 +44,14 @@ param(
   # When set, /health must report THIS version after N-1 launches, BEFORE any update is expected —
   # proves the installed N-1 actually runs (a wrong fixture or a crashed N-1 otherwise passes the
   # negative leg and fails the positive one confusingly late).
-  [string]$N1Version = ""
+  [string]$N1Version = "",
+  # N-1's main-binary FILE NAME. Defaults to the renamed binary (current ref); the CALL path
+  # passes "aztec-accelerator.exe" while the fixture is the pre-rename v1.0.7. N itself is always
+  # the current build, so its name is a constant below, and when the two differ the tail asserts
+  # the boundary: new exe present, old exe DELETED (installer.nsi OldMainBinaryName logic).
+  [string]$N1BinaryName = "AztecAccelerator.exe"
 )
+$NBinaryName = "AztecAccelerator.exe"
 
 $ErrorActionPreference = "Stop"
 $Mode = if ($env:UPDATER_SMOKE_MODE) { $env:UPDATER_SMOKE_MODE } else { "positive" }
@@ -79,7 +85,7 @@ Log "mode: $Mode"
 function Cleanup {
   if ($QProc) { Stop-Process -Id $QProc.Id -Force -ErrorAction SilentlyContinue }
   if ($AppProc) { Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue }
-  Get-Process -Name "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-Process -Name "AztecAccelerator", "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   if ($FeedProc) { Stop-Process -Id $FeedProc.Id -Force -ErrorAction SilentlyContinue }
   # Drop the scoped Defender exclusions we added (self-hosted-runner hygiene; no-op on
   # ephemeral GH-hosted runners, which are torn down — but never leave an AV hole behind).
@@ -217,8 +223,8 @@ try {
     exit 1
   }
   Write-Host "N-1 installed (exit $($inst.ExitCode))"
-  $Exe = Get-ChildItem -Path $InstallRoot -Recurse -Filter "aztec-accelerator.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $Exe) { Write-Error "installed exe not found under $InstallRoot"; exit 1 }
+  $Exe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $N1BinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $Exe) { Write-Error "installed N-1 exe ($N1BinaryName) not found under $InstallRoot"; exit 1 }
 
   # ── Pre-seed auto-update so N-1 updates without UI ──
   New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
@@ -342,7 +348,7 @@ try {
     if ($pStatus -ne "present") {
       Dump-Logs; Write-Error "BARRIER FAILED — sentinel measured P as '$pStatus' (expected 'present' at PREINSTALL, before any File copy); the park point is not where we think it is."; exit 1
     }
-    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter "aztec-accelerator.exe" | Select-Object -First 1
+    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter $N1BinaryName | Select-Object -First 1
     if (-not $QExe) { Write-Error "BARRIER — staged Q exe not found under $QDir"; exit 1 }
     if ((Get-FileHash $Exe.FullName -Algorithm SHA256).Hash -ne (Get-FileHash $QExe.FullName -Algorithm SHA256).Hash) {
       Dump-Logs; Write-Error "BARRIER FAILED — installed exe already differs from the pre-update copy inside the window; mutation began before the barrier (park point too late)."; exit 1
@@ -368,7 +374,7 @@ try {
     $D1 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
     $R1 = @(Select-String -Path $AppLogGlob -Pattern "an update window is still live" -ErrorAction SilentlyContinue).Count
     # Seed a STALE (non-resolving) Run value: if Q's heal were NOT suppressed it would rewrite this.
-    $StaleVal = '"C:\nonexistent\updater-smoke-stale\aztec-accelerator.exe"'
+    $StaleVal = '"C:\nonexistent\updater-smoke-stale\AztecAccelerator.exe"'
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value $StaleVal
     # Precondition: no crash-recovery task exists (barrier mode never armed one).
     & schtasks /Query /TN $TaskName *> $null
@@ -475,6 +481,26 @@ try {
   # /health == N means the server is up, which happens AFTER startup reconciliation).
   foreach ($f in @("update-in-progress.json", "update-txn", "update-txn-done")) {
     if (Test-Path (Join-Path $ConfigDir $f)) { Dump-Logs; Write-Error "end-state FAILED — $f present after the update; the startup reconcile did not clear the transaction."; exit 1 }
+  }
+
+  # End-state: the NEW-name exe is what's installed. Across the rename boundary (call path,
+  # N-1 = pre-rename fixture) also require the OLD exe GONE — the installer's OldMainBinaryName
+  # delete is what keeps stale-exe autostart loops impossible for existing users; observe it.
+  $NewExe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $NBinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $NewExe) { Dump-Logs; Write-Error "end-state FAILED — $NBinaryName not found under $InstallRoot after the update."; exit 1 }
+  if ($N1BinaryName -ne $NBinaryName) {
+    $OldExe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $N1BinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($OldExe) { Dump-Logs; Write-Error "end-state FAILED — old-name exe ($($OldExe.FullName)) SURVIVED the renamed update; the installer's OldMainBinaryName delete did not fire (stale-exe autostart loop risk)."; exit 1 }
+  }
+  # End-state: the autostart Run value points at the NEW exe, quoted. Same-name path: the value
+  # set at arming is already the (overwritten-in-place) exe. Rename boundary: the old target was
+  # deleted, so N's startup heal must have rewritten it. One assert covers both.
+  if ($Mode -eq "positive") {
+    $endVal = (Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue)."Aztec Accelerator"
+    $expected = '"' + $NewExe.FullName + '"'
+    if (-not $endVal -or -not $endVal.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Dump-Logs; Write-Error "end-state FAILED — Run value is '$endVal', expected the quoted installed exe $expected (rename-boundary heal or arming regressed)."; exit 1
+    }
   }
 
   # ── Read what the poller observed: Receive-Job returns every emitted "<sawPresent> <maxStreak>" line;

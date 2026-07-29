@@ -289,7 +289,7 @@ disk, so the trusted anchor can mint nothing) and Name-Constrained to `127.0.0.1
 
 **To remove:** Settings → **Remove certificate trust** (all OSes). On Windows the uninstaller also
 removes it; on macOS you can alternatively delete it from Keychain Access; on Linux you can run
-`aztec-accelerator --remove-ca-trust`.
+`AztecAccelerator --remove-ca-trust`.
 
 **Certificate details:**
 - CA: ECDSA P-256, 10-year validity, keyless, Name Constraints (localhost only)

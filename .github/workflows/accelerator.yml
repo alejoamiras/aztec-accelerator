@@ -38,6 +38,12 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - '.github/workflows/accelerator.yml'
+              # The binary-name identity guard (tauri-identity.test.ts) greps these workflows —
+              # edits to them must re-run the suite so a half-rename can't land silently.
+              - '.github/workflows/_e2e-webdriver.yml'
+              - '.github/workflows/_e2e-updater-windows.yml'
+              - '.github/workflows/smoke-updater-windows.yml'
+              - '.github/workflows/release-accelerator.yml'
               - '.github/workflows/_e2e.yml'
               - '.github/workflows/_e2e-webdriver.yml'
               - '.github/actions/**'
@@ -614,9 +620,9 @@ jobs:
           # Silent per-user NSIS install (/S, installMode currentUser -> %LOCALAPPDATA%, no UAC).
           Write-Host "installing $($nsis.FullName) /S"
           Start-Process -FilePath $nsis.FullName -ArgumentList "/S" -Wait
-          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "aztec-accelerator.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $exe) {
-            Write-Error "installed aztec-accelerator.exe not found under %LOCALAPPDATA%"
+            Write-Error "installed AztecAccelerator.exe not found under %LOCALAPPDATA%"
             Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Out-String | Write-Host
             exit 1
           }

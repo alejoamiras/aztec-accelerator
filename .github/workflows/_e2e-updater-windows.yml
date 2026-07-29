@@ -154,7 +154,10 @@ jobs:
             -NArtifactsDir "$env:RUNNER_TEMP\n" `
             -N1Installer $n1.FullName `
             -RepoRoot $env:GITHUB_WORKSPACE `
-            -N1Version $env:N1_VERSION
+            -N1Version $env:N1_VERSION `
+            -N1BinaryName "aztec-accelerator.exe"
+          # ^ the v1.0.7 fixture predates the AztecAccelerator rename. When n1-version moves to a
+          #   renamed release, drop this argument (the ps1 default is the new name).
 
       - name: Result summary
         if: success()

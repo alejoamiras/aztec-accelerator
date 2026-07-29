@@ -247,7 +247,7 @@ jobs:
             ls -la "$MACOS_DIR" 2>/dev/null || true
             exit 1
           fi
-          EXPECTED="$(printf 'aztec-accelerator\nbb\n' | sort)"
+          EXPECTED="$(printf 'AztecAccelerator\nbb\n' | sort)"
           ACTUAL="$(cd "$APP/Contents/MacOS" && find . -mindepth 1 -maxdepth 1 -exec basename {} \; | sort)"
           echo "Expected MacOS/ contents:"; echo "$EXPECTED"
           echo "Actual MacOS/ contents:"; echo "$ACTUAL"
@@ -401,7 +401,7 @@ jobs:
           hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator
 
           # Find and launch the app binary
-          APP_BIN=$(find /Volumes/AztecAccelerator -name "aztec-accelerator" -path "*/MacOS/*" | head -1)
+          APP_BIN=$(find /Volumes/AztecAccelerator -name "AztecAccelerator" -path "*/MacOS/*" | head -1)
           if [ -z "$APP_BIN" ]; then
             echo "::error::Binary not found in DMG"
             find /Volumes/AztecAccelerator -type f
@@ -449,7 +449,7 @@ jobs:
         if: always()
         run: |
           kill "$SMOKE_PID" 2>/dev/null || true
-          pkill -f "aztec-accelerator" 2>/dev/null || true
+          pkill -f "AztecAccelerator" 2>/dev/null || true # DMG smoke runs N only (new name)
           hdiutil detach /Volumes/AztecAccelerator 2>/dev/null || true
 
       - name: Upload logs

@@ -12,7 +12,7 @@ stable `X.Y.Z`** — auto-update from an older stable is exactly what broke in
 
 - **Bundle structure invariant** (`release-accelerator.yml`, macOS `build` job):
   asserts the `.app/Contents/MacOS/` directory contains exactly
-  `{aztec-accelerator, bb}`. This deterministically catches the *specific*
+  `{AztecAccelerator, bb}`. This deterministically catches the *specific*
   1.0.1 regression (a stray `accelerator-server` binary changing the signed
   bundle's shape and breaking amfid revalidation on update).
 - **WebDriver E2E** confirms a freshly-built app launches and is drivable.
