@@ -390,10 +390,20 @@ fn build_tray(
             // codex #7: surface (log) a non-confirmed disarm — an unconfirmed disable here means the
             // Task Scheduler recovery entry may survive and relaunch the app within ~1 min of this quit.
             #[cfg(target_os = "windows")]
-            if !aztec_accelerator::crash_recovery::disable_crash_recovery() {
-                tracing::warn!(
-                    "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
-                );
+            {
+                // Piece 2 (A5): serialize the quit-disarm behind autostart.lock so it cannot
+                // interleave with the marker reconcile's arm→remove span. On lock timeout: log
+                // and disarm UNLOCKED anyway — cancel-the-quit is worse UX than either race, and
+                // skip-disarm risks a user-visible relaunch-after-quit; the unlocked fallback's
+                // worst case is the pre-existing self-healing transient (plan §10 A5).
+                let _quit_lock = aztec_accelerator::autostart::acquire_autostart_lock()
+                    .map_err(|e| tracing::warn!("quit: disarming without the lock ({e})"))
+                    .ok();
+                if !aztec_accelerator::crash_recovery::disable_crash_recovery() {
+                    tracing::warn!(
+                        "quit: crash recovery could not be confirmed disarmed — the app may relaunch shortly"
+                    );
+                }
             }
             app.exit(0);
         }
@@ -600,43 +610,29 @@ fn main() {
                 .enabled(false)
                 .build(app)?;
 
-            // Startup autostart reconciliation (plan §4.4): heal FIRST, so the crash-recovery
-            // rearm below arms against the healed artifact.
+            // Startup autostart reconciliation (piece-2 plan §4): marker reconcile FIRST (the
+            // removal transaction — the only rearm path allowed while a window exists), then the
+            // heal, then the intent-keyed rearm. Suppressed ⇒ BOTH heal and rearm are skipped
+            // this launch: "no process heals, no process rearms while a marker is live".
             {
-                // Piece 1 (plan §11b): the AUTOMATIC heal runs on macOS/Linux only — Windows waits
-                // for the piece-2 update marker (a heal inside the NSIS window can point autostart
-                // at a transient copy; repair_autostart stays live everywhere). Webdriver builds
-                // skip the unattended heal (S1 — the app must not mutate a CI runner's real login
-                // items on every E2E launch; recon §G: today's block was ungated, a defect not to
-                // inherit) but keep the command path live so L7 exercises real IPC.
-                #[cfg(all(not(feature = "webdriver"), not(target_os = "windows")))]
-                match aztec_accelerator::autostart::heal_if_broken(app.handle()) {
-                    aztec_accelerator::autostart::HealOutcome::Healed { from, to } => {
-                        tracing::info!(%from, %to, "startup autostart heal applied");
-                    }
-                    aztec_accelerator::autostart::HealOutcome::Failed(e) => {
-                        tracing::warn!("startup autostart heal failed: {e}");
-                    }
-                    aztec_accelerator::autostart::HealOutcome::Skipped(reason) => {
-                        tracing::debug!("startup autostart heal skipped: {reason}");
-                    }
-                    aztec_accelerator::autostart::HealOutcome::NotNeeded => {}
-                }
-                // C8 (D12): log-and-continue — a rearm hiccup at startup must NEVER abort launch,
-                // and it must NOT be silently swallowed. codex #7: distinguish a READ ERROR from a
-                // confirmed "off". D13: keyed on INTENT (entry present AND not platform-disabled),
-                // never on health — a Broken entry still means "the user wants autostart", and
-                // keying on health would stop protecting exactly the users whose entry broke.
-                match aztec_accelerator::autostart::intent_enabled(app.handle()) {
-                    Ok(true) => {
-                        if let Err(e) = aztec_accelerator::crash_recovery::enable_crash_recovery() {
-                            tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                if aztec_accelerator::autostart::startup_reconcile() {
+                    // The heal now runs on Windows too — the marker above is what piece 1 gated
+                    // it on. Webdriver builds still skip the unattended heal (S1: E2E must not
+                    // mutate a runner's real login items; the command path stays live for L7).
+                    #[cfg(not(feature = "webdriver"))]
+                    match aztec_accelerator::autostart::heal_if_broken(app.handle()) {
+                        aztec_accelerator::autostart::HealOutcome::Healed { from, to } => {
+                            tracing::info!(%from, %to, "startup autostart heal applied");
                         }
+                        aztec_accelerator::autostart::HealOutcome::Failed(e) => {
+                            tracing::warn!("startup autostart heal failed: {e}");
+                        }
+                        aztec_accelerator::autostart::HealOutcome::Skipped(reason) => {
+                            tracing::debug!("startup autostart heal skipped: {reason}");
+                        }
+                        aztec_accelerator::autostart::HealOutcome::NotNeeded => {}
                     }
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!(
-                        "could not read autostart state at startup; crash recovery not re-armed: {e}"
-                    ),
+                    aztec_accelerator::autostart::startup_rearm(app.handle());
                 }
             }
 

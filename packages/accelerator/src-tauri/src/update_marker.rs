@@ -895,6 +895,45 @@ mod tests {
         assert_eq!(load(&paths, NOW), LoadedMarker::Missing);
     }
 
+    // ── T4: barrier race (both audits' highest-value ask) ──
+    //
+    // The shape both audits demanded: an operation observes Missing, the window is PUBLISHED
+    // before the operation's authoritative check, and the operation must come back Suppressed
+    // with zero mutation callbacks. This drives the PRODUCTION reconcile core across the real
+    // decision boundary (the lock itself is the caller's; what the lock protects is exactly the
+    // load-before-act sequence pinned here).
+
+    #[test]
+    fn t4_barrier_marker_published_after_first_observation() {
+        let (_d, paths) = temp_paths();
+        // Precondition, asserted (piece-1 rule): no marker exists at first observation.
+        assert_eq!(load(&paths, NOW), LoadedMarker::Missing);
+        assert!(!live_marker_exists(&paths, NOW));
+
+        // The updater publishes a live window between that observation and the gated mutation's
+        // authoritative re-check (in production: between heal step 4b and the under-lock re-check).
+        write_marker(&paths, &payload("raced", "1.0.9", "/x", NOW + 600));
+
+        // The authoritative check must now see it…
+        assert!(
+            live_marker_exists(&paths, NOW),
+            "re-check must observe the published window"
+        );
+
+        // …and the reconcile transaction must suppress with ZERO reconciliation callbacks — the
+        // token belongs to no completed install, so nothing may arm, disarm, or remove.
+        let c = Counters::new(true);
+        assert_eq!(
+            c.run(&paths, "1.0.8", "/elsewhere"),
+            ReconcileOutcome::Suppressed("no completion token")
+        );
+        assert_eq!((c.arms.get(), c.disarms.get()), (0, 0));
+        assert!(
+            matches!(load(&paths, NOW), LoadedMarker::Valid(_)),
+            "the raced window must survive untouched"
+        );
+    }
+
     // ── handoff/token plumbing ──
 
     #[test]
