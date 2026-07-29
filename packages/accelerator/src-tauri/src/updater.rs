@@ -439,14 +439,20 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
             CrashRecoveryGuard::new(move || rearm_crash_recovery_if_enabled(was_recovery_enabled));
 
         // The marker (D18): compare-and-create under the held lock; a live foreign window is
-        // never deleted. The expected install path is where THIS exe lives — the update replaces
-        // it in place.
-        let exe = std::env::current_exe().ok();
-        let expected = exe
-            .as_deref()
-            .and_then(|e| e.canonicalize().ok())
-            .or(exe)
-            .unwrap_or_default();
+        // never deleted. The expected install path is where the INSTALLER will put the new exe —
+        // NOT current_exe (arc-hunt r2 F2: a stray copy driving an update would record its own
+        // path, and the relaunched N would suppress reconciliation until the deadline). For the
+        // installed instance the two coincide.
+        let expected = match nsis_install_destination() {
+            Ok(dest) => canonicalize_expected(dest),
+            Err(e) => {
+                // Publishing a guessed path would arm a marker N can never satisfy — abort;
+                // the guard's Drop rearms from the snapshot (ownership-gated) and the next
+                // check retries.
+                tracing::warn!("cannot determine install destination ({e}); update aborted");
+                return;
+            }
+        };
         let payload = crate::update_marker::MarkerPayload::new(
             &version,
             &expected,
@@ -560,11 +566,59 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
 #[cfg(target_os = "windows")]
 fn rearm_crash_recovery_if_enabled(was_enabled: bool) {
     if was_enabled {
+        // Arc-hunt r2 F1: the guard rearm is an IMPLICIT path — a stray copy whose update
+        // aborted must not re-point the recovery task at itself on the way out.
+        if !crate::autostart::implicit_arm_gate() {
+            return;
+        }
         // C8 (D12): log-and-continue — a post-update rearm hiccup must not abort, but is never swallowed.
         if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
             tracing::warn!("post-update crash-recovery rearm failed: {e}");
         }
     }
+}
+
+/// Arc-hunt r2 F2: the destination the NSIS installer will actually use — MANUPRODUCTKEY's
+/// default value (`Software\<publisher>\<productName>`, written by every prior install and read
+/// back by RestorePreviousInstallLocation) or the `%LOCALAPPDATA%` default. `Err` means the
+/// registry answered something other than "not found": abort the update rather than publish a
+/// marker with a guessed path. Pre-#427 installs wrote the OLD manufacturer namespace
+/// ("Software\aztec\…"); those are dev-only default-dir installs, and NotFound → default
+/// resolves to exactly where they live.
+#[cfg(target_os = "windows")]
+fn nsis_install_destination() -> Result<std::path::PathBuf, String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let reg_dir = match hkcu
+        .open_subkey_with_flags(r"Software\Aztec Accelerator\Aztec Accelerator", KEY_READ)
+    {
+        Ok(k) => match k.get_value::<String, _>("") {
+            Ok(v) => Some(v),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("install-location value read failed: {e}")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("install-location key open failed: {e}")),
+    };
+    let lad = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    crate::update_marker::expected_install_path_from(reg_dir, lad)
+        .ok_or_else(|| "cannot determine install destination (no LOCALAPPDATA)".to_string())
+}
+
+/// Best-effort canonicalization that survives a not-yet-existing file: canonicalize the whole
+/// path, else the parent dir + file name, else keep it raw (the marker reader's proven-absence
+/// rule handles the rest).
+#[cfg(target_os = "windows")]
+fn canonicalize_expected(p: std::path::PathBuf) -> std::path::PathBuf {
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    if let (Some(dir), Some(name)) = (p.parent(), p.file_name()) {
+        if let Ok(cd) = dir.canonicalize() {
+            return cd.join(name);
+        }
+    }
+    p
 }
 
 /// q7e3-F-10: structural guard for the Windows crash-recovery disarm→rearm invariant — *every* path

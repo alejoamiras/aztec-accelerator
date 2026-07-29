@@ -57,6 +57,36 @@ describe("bundle metadata", () => {
   });
 });
 
+describe("NSIS install-destination mirror (arc-hunt r2 F2)", () => {
+  // update_marker.rs computes the marker's expected_install_path by MIRRORING what NSIS will do:
+  // MANUPRODUCTKEY (Software\<publisher>\<productName>) default value, else
+  // %LOCALAPPDATA%\<productName>, plus the binary name. Every input to that mirror is pinned
+  // here — if one drifts, the marker starts pointing somewhere the installer never writes and
+  // reconciliation silently suppresses heal/rearm until the deadline.
+  const marker = fs.readFileSync(path.join(SRC_TAURI, "src", "update_marker.rs"), "utf8");
+
+  test("Rust consts match the conf values the installer derives $INSTDIR from", () => {
+    expect(marker).toContain(`MAIN_BINARY_EXE: &str = "${BIN}.exe"`);
+    expect(marker).toContain(`PRODUCT_DIR_NAME: &str = "${conf.productName}"`);
+    // The registry namespace is Software\\<publisher>\\<productName>; publisher is pinned above.
+    const updater = fs.readFileSync(path.join(SRC_TAURI, "src", "updater.rs"), "utf8");
+    const regPath = `r"Software\\${conf.bundle.publisher}\\${conf.productName}"`;
+    expect(regPath).toBe(String.raw`r"Software\Aztec Accelerator\Aztec Accelerator"`); // guards the builder itself
+    expect(updater).toContain(regPath);
+  });
+
+  test("per-user install mode (the default-dir half of the mirror)", () => {
+    expect(conf.bundle.windows.nsis.installMode).toBe("currentUser");
+  });
+
+  test("no installer argument may override $INSTDIR", () => {
+    // A /D flag (or nsis.installerArgs carrying one) would make NSIS install somewhere the
+    // mirror cannot predict. The updater passes /UPDATE only.
+    expect(conf.bundle.windows.nsis.installerArgs).toBeUndefined();
+    expect(JSON.stringify(conf.plugins.updater)).not.toContain("/D");
+  });
+});
+
 describe("CI/scripts reference the renamed binary (lockstep sites)", () => {
   const expectContains = (rel: string, needle: string) => {
     const body = fs.readFileSync(path.join(REPO, rel), "utf8");

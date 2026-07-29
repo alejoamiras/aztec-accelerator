@@ -1440,7 +1440,7 @@ pub fn startup_reconcile() -> bool {
             &running,
             &exe_canon,
             &intent_enabled_now,
-            &crate::crash_recovery::enable_crash_recovery,
+            &gated_enable_crash_recovery,
             &crate::crash_recovery::disable_crash_recovery,
         ) {
             crate::update_marker::ReconcileOutcome::Proceed => true,
@@ -1449,6 +1449,73 @@ pub fn startup_reconcile() -> bool {
                 false
             }
         }
+    }
+}
+
+/// Arc-hunt r2 F1 (pure decision): may an IMPLICIT path — startup rearm, the marker reconcile's
+/// arm, the post-update guard rearm — (re)write crash recovery? The Windows task XML and the
+/// Linux systemd unit both serialize `current_exe()`, so an implicit arm from a stray COPY
+/// re-points recovery at the copy: the exact entry-stealing that resolve-based healing forbids
+/// for the Run value (`StoredTarget::Healthy.points_elsewhere` documents "a healthy entry is
+/// never silently stolen by whichever copy launched last" — this extends that discipline to the
+/// task). Only `Healthy { points_elsewhere: false }` may arm. Broken/Unreadable => false: the
+/// user's INTENT still means "autostart wanted" (the doctrine at `intent_enabled_now`), but the
+/// EXECUTOR must be the entry's owner — in the shipped startup flow the heal runs before the
+/// rearm, so the installed exe becomes owner first, while a stray copy never does. Explicit
+/// user actions (`set_enabled(true)`, repair) intentionally arm the CURRENT exe and stay
+/// ungated. macOS is exempt: its crash recovery patches KeepAlive into the stored entry itself
+/// and cannot steal.
+pub(crate) fn implicit_arm_allowed(stored: &StoredTarget) -> bool {
+    matches!(
+        stored,
+        StoredTarget::Healthy {
+            points_elsewhere: false,
+            ..
+        }
+    )
+}
+
+/// Effectful wrapper over [`implicit_arm_allowed`] for the platforms whose serializers embed
+/// `current_exe()`. Conservative on unknowns (no exe, unreadable entry): NOT arming is a
+/// one-session protection gap that self-heals at the next launch; wrongly arming hands the
+/// recovery task to a copy that may be deleted tomorrow.
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn implicit_arm_gate() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::warn!("implicit crash-recovery arm skipped: own path unresolvable");
+        return false;
+    };
+    let allowed = implicit_arm_allowed(&read_stored_target(Some(&exe)));
+    if !allowed {
+        tracing::warn!(
+            "implicit crash-recovery arm skipped: this process does not own the autostart entry"
+        );
+    }
+    allowed
+}
+
+/// Platform split for the startup rearm: gate where the serializer embeds current_exe.
+fn startup_arm_permitted() -> bool {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        implicit_arm_gate()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+}
+
+/// Reconcile's arm callback (arc-hunt r2 F1): the marker-removal transaction reconciles recovery
+/// to CURRENT intent, but must not arm from a non-owner. Skipping here is safe even for the
+/// owner: on the rename boundary the stored value is Broken until the heal (which runs right
+/// after a Proceed), and `startup_rearm` completes the arm in the same launch.
+#[cfg(windows)]
+fn gated_enable_crash_recovery() -> Result<(), String> {
+    if implicit_arm_gate() {
+        crate::crash_recovery::enable_crash_recovery()
+    } else {
+        Ok(())
     }
 }
 
@@ -1475,8 +1542,10 @@ pub fn startup_rearm(app: &tauri::AppHandle) {
         }
         match intent_enabled_now() {
             Ok(true) => {
-                if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
-                    tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                if startup_arm_permitted() {
+                    if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
+                        tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                    }
                 }
             }
             Ok(false) => {}
@@ -1493,8 +1562,10 @@ pub fn startup_rearm(app: &tauri::AppHandle) {
         // keyed on INTENT, never health — a Broken entry still means "the user wants autostart".
         match intent_enabled(app) {
             Ok(true) => {
-                if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
-                    tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                if startup_arm_permitted() {
+                    if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
+                        tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
+                    }
                 }
             }
             Ok(false) => {}
@@ -1637,6 +1708,29 @@ pub fn set_enabled_at(desired: Option<&Path>, enabled: bool) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
+    // Arc-hunt r2 F1: the implicit-arm decision table. Only a healthy entry pointing AT US may
+    // be implicitly armed; every other state either has no owner to protect or an owner that
+    // is not us.
+    #[test]
+    fn implicit_arm_only_for_owned_healthy_entry() {
+        use super::{implicit_arm_allowed, StoredTarget};
+        assert!(implicit_arm_allowed(&StoredTarget::Healthy {
+            program: std::path::PathBuf::from("/x"),
+            points_elsewhere: false,
+        }));
+        assert!(!implicit_arm_allowed(&StoredTarget::Healthy {
+            program: std::path::PathBuf::from("/x"),
+            points_elsewhere: true,
+        }));
+        assert!(!implicit_arm_allowed(&StoredTarget::Broken {
+            program: "gone".into(),
+        }));
+        assert!(!implicit_arm_allowed(&StoredTarget::Unreadable {
+            reason: "io".into(),
+        }));
+        assert!(!implicit_arm_allowed(&StoredTarget::Absent));
+    }
+
     use super::*;
 
     // ── APP_NAME drift guard (D7: one derivation) ──
