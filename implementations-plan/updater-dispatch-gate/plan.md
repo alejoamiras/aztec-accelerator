@@ -96,3 +96,26 @@ piece-1 plan §10); any change to `hooks.nsi` as committed; the rename (next pie
 
 ## Asks
 None. (Light floor: 8 verified Facts above; no silent asks.)
+
+## Audit fold (codex: reject, 4 blocking — session `019fae8f-585b-7cf3-8840-ce2d46bb269a`)
+
+1. **Event split → SEPARATE WORKFLOW.** Confirmed: a called workflow's github context is the
+   CALLER's, and releases are workflow_dispatch — the in-file split would have run the ephemeral
+   job on every release. `_e2e-updater-windows.yml` stays call-only; the manual path becomes
+   `smoke-updater-windows.yml` (workflow_dispatch, zero secrets referenced, standalone jobs).
+2. **Pre-merge dispatch is unavailable** (dispatchable workflows must exist on the default
+   branch). Bootstrap: a TEMPORARY `push: branches: [worktree-updater-dispatch-gate]` trigger
+   during development — every push validates — removed in the final pre-merge commit; plus a
+   documented post-merge dispatch burn-in.
+3. **Q anti-vacuous set:** :59833 unreachable before Q; Q binds it and `/health.version ==`
+   N1Version (proves Q alive AND reconciliation ran — the server spawns after it);
+   latest.json hits INCREASE after Q (the check ran) while download hits DON'T (D22 blocked
+   perform_update); Q still alive at assert time.
+4. **Barrier ownership:** smoke FAILS if `ready` never appears (bounded) — proves the sentinel
+   ran at all; sentinel emits `timed-out` on loop expiry and the smoke asserts it ABSENT before
+   writing release; negative leg additionally requires `/health == N1Version` at the end (alive
+   and rejecting, not crashed). Barrier filenames are BAKED run-unique at N−1 build time
+   ($GITHUB_RUN_ID in the injected sentinel), cleaned in finally.
+
+Non-blocking folded: exact-endpoint compare; GH_TOKEN export; semver compare via bun (not
+pwsh [version]). Confirmed sound: the ephemeral chain needs no prod key at any step.
