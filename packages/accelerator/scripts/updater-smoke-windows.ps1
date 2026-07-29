@@ -28,11 +28,12 @@
     -N1Installer   : path to N-1's *-setup.exe
   UPDATER_SMOKE_MODE = positive (default) | negative (tamper the served zip, expect rejection)
                      | barrier  (piece-3 L8: hold the update open mid-NSIS via the sentinel baked
-                       into the synthetic N-1's POSTUNINSTALL; assert P absent, the real
-                       update-in-progress.json live, and a second instance Q fully suppressed —
-                       no heal, no rearm, no second download — then release and finish positive.
-                       Requires UPDATER_SMOKE_BARRIER_PREFIX (run-unique file prefix, baked into
-                       the sentinel at N-1 build time).
+                       into N's NSIS_HOOK_PREINSTALL — a PRE-MUTATION barrier at the top of
+                       Section Install (2.8.1 silent updates never run the old uninstaller);
+                       assert the txn mid-flight (marker+handoff live, no token), the old exe
+                       intact, and a second instance Q fully suppressed — no heal, no rearm, no
+                       second download — then release and finish positive. Requires
+                       UPDATER_SMOKE_BARRIER_PREFIX (run-unique prefix, baked at N build time).
 #>
 param(
   [Parameter(Mandatory)][string]$NVersion,
@@ -311,34 +312,52 @@ try {
   }
 
   if ($Mode -eq "barrier") {
-    # ── The window OPENS when the OLD uninstaller (run by N's installer, PageLeaveReinstall —
-    #    before Section Install) reaches the injected sentinel and parks on the release file. ──
-    Log "BARRIER: waiting for the sentinel to signal ready (240s)"
+    # ── The window OPENS when N's installer reaches the injected NSIS_HOOK_PREINSTALL at the top
+    #    of Section Install and parks on the release file. This is a PRE-MUTATION barrier: marker
+    #    live, completion token not yet written, the OLD exe still on disk. (2.8.1 silent updates
+    #    never run the old uninstaller — PageLeaveReinstall's update-mode guard, measured in run
+    #    30472678896 — so N's own installer is the only mid-update actor to park.) ──
+    Log "BARRIER: waiting for the sentinel (N's PREINSTALL) to signal ready (240s)"
     $ready = $false
     for ($i = 0; $i -lt 240; $i++) {
       if (Test-Path (BarrierFile "ready")) { $ready = $true; break }
       Start-Sleep -Seconds 1
     }
     if (-not $ready) {
-      Dump-Logs; Write-Error "BARRIER FAILED — the sentinel never signalled ready: the injected POSTUNINSTALL did not run (injection regressed, or the silent update no longer runs the old uninstaller — the L8 premise itself)."; exit 1
+      Dump-Logs; Write-Error "BARRIER FAILED — the sentinel never signalled ready: N's injected NSIS_HOOK_PREINSTALL did not run (injection regressed, the update never started, or the template moved the hook)."; exit 1
     }
     Log "BARRIER OPEN — measuring the mid-update world"
     $Marker = Join-Path $ConfigDir "update-in-progress.json"
     $FeedLog = Join-Path $Work "feed.log"
 
-    # 1. P is non-resolving — measured from INSIDE the uninstaller by the sentinel, not assumed.
+    # 1. Phase proof — this really is the pre-mutation point: the sentinel (inside N's installer,
+    #    before any File copy) measured the OLD exe still present, and it is byte-identical to the
+    #    pre-update copy we staged for Q (nothing has been rewritten yet).
     $pStatus = ""
     try { $pStatus = (Get-Content (BarrierFile "p-status") -Raw).Trim() } catch { }
-    if ($pStatus -ne "absent") {
-      Dump-Logs; Write-Error "BARRIER FAILED — sentinel measured P as '$pStatus' (expected 'absent'): the old-uninstaller window does NOT leave the exe non-resolving, so the marker's premise is wrong. Re-open the design, don't patch the test."; exit 1
+    if ($pStatus -ne "present") {
+      Dump-Logs; Write-Error "BARRIER FAILED — sentinel measured P as '$pStatus' (expected 'present' at PREINSTALL, before any File copy); the park point is not where we think it is."; exit 1
     }
-    # 2. The real production marker is live inside the window.
+    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter "aztec-accelerator.exe" | Select-Object -First 1
+    if (-not $QExe) { Write-Error "BARRIER — staged Q exe not found under $QDir"; exit 1 }
+    if ((Get-FileHash $Exe.FullName -Algorithm SHA256).Hash -ne (Get-FileHash $QExe.FullName -Algorithm SHA256).Hash) {
+      Dump-Logs; Write-Error "BARRIER FAILED — installed exe already differs from the pre-update copy inside the window; mutation began before the barrier (park point too late)."; exit 1
+    }
+    # 2. The real production transaction is mid-flight: marker live, handoff written, token NOT yet
+    #    (POSTINSTALL runs after the copies — a token here would mean the barrier isn't holding).
     if (-not (Test-Path $Marker)) { Dump-Logs; Write-Error "BARRIER FAILED — update-in-progress.json absent inside the window; N-1 (current ref) did not write the marker before install()."; exit 1 }
-    # 3. Nothing is serving :59833 (N-1 exited for the install) — precondition that makes Q's
-    #    /health binding below attributable to Q and only Q.
+    if (-not (Test-Path (Join-Path $ConfigDir "update-txn"))) { Dump-Logs; Write-Error "BARRIER FAILED — the update-txn handoff is absent inside the window."; exit 1 }
+    if (Test-Path (Join-Path $ConfigDir "update-txn-done")) { Dump-Logs; Write-Error "BARRIER FAILED — the completion token already exists INSIDE the window; POSTINSTALL ran, so the barrier is not holding the install open."; exit 1 }
+    # 3. :59833 must go dark (N-1 exits for the install) — precondition that makes Q's /health
+    #    binding below attributable to Q and only Q. POLLED, not one-shot: install() spawns the
+    #    installer BEFORE N-1's process::exit, so the sentinel can signal ready while N-1 is
+    #    still dying.
     $portFree = $false
-    try { Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2 | Out-Null } catch { $portFree = $true }
-    if (-not $portFree) { Dump-Logs; Write-Error "BARRIER FAILED — :59833 still serving inside the window; N-1 did not exit for the install."; exit 1 }
+    for ($i = 0; $i -lt 30; $i++) {
+      try { Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2 | Out-Null } catch { $portFree = $true; break }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not $portFree) { Dump-Logs; Write-Error "BARRIER FAILED — :59833 still serving 15s into the window; N-1 did not exit for the install."; exit 1 }
     # Baselines for the D22 no-second-download proof.
     $K1 = @(Select-String -Path $FeedLog -Pattern "/releases/latest.json" -ErrorAction SilentlyContinue).Count
     $D1 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
@@ -352,8 +371,6 @@ try {
     # ── Q: a second instance launched INSIDE the window (from a pre-update copy). Every suppression
     #    must hold: no heal, no rearm, no marker removal, no second download — and Q must be ALIVE
     #    (a Q that crashes at startup would pass all "nothing happened" asserts vacuously). ──
-    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter "aztec-accelerator.exe" | Select-Object -First 1
-    if (-not $QExe) { Write-Error "BARRIER — staged Q exe not found under $QDir"; exit 1 }
     Log "BARRIER: launching Q ($($QExe.FullName))"
     $QProc = Start-Process -FilePath $QExe.FullName -PassThru
     $qUp = $false
@@ -417,7 +434,7 @@ try {
       Start-Sleep -Seconds 2
     }
     if (-not $rearmed) { Dump-Logs; Write-Error "BARRIER tail FAILED — '$TaskName' absent after the window closed; startup rearm did not run."; exit 1 }
-    Log "SUCCESS (barrier) — L8 proven: P absent mid-window, Q fully suppressed, D22 held, and the window-end reconcile removed the txn, healed the Run value, and re-armed."
+    Log "SUCCESS (barrier) — L8 proven at the pre-mutation barrier: txn mid-flight (marker+handoff, no token), old exe intact, Q fully suppressed, D22 held, and the window-end reconcile removed the txn, healed the Run value, and re-armed."
     exit 0
   }
 

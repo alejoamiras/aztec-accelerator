@@ -1,9 +1,11 @@
 //! The Windows update-window marker (plan D18/D21/D22; piece-2 plan §2-§4).
 //!
 //! Windows `install()` hands off to NSIS and calls `std::process::exit(0)`, so the updater's file
-//! lock dies exactly when the danger starts: for a few seconds the installed exe is deleted and
-//! not yet rewritten, and any instance that runs the autostart heal in that window "repairs" the
-//! entry to a transient copy. The marker is the cross-process do-not-disturb sign for that window:
+//! lock dies exactly when the danger starts: for a few seconds the installed exe is being
+//! truncated and rewritten in place by the installer's `File` copy (silent updates never run the
+//! old uninstaller in tauri-bundler 2.8.1 — measured; on INTERACTIVE plain upgrades it genuinely
+//! is deleted by the old uninstaller first), and any instance that runs the autostart heal in
+//! that window can act on a half-written or transient target. The marker is the cross-process do-not-disturb sign for that window:
 //! while one is live, no process heals, no process rearms crash recovery, no process starts a new
 //! update, and explicit autostart-ON is rejected (OFF always works).
 //!

@@ -5,8 +5,13 @@ name: Smoke Updater Windows (manual)
 # the feed manifest with a run-local throwaway key, and runs updater-smoke-windows.ps1. Because
 # both ends are current-ref, this is the only place the FULL piece-2 marker lifecycle is
 # exercised end-to-end (a real released N-1 predates the marker), including the L8 `barrier`
-# scenario: an injected sentinel in the synthetic N-1's uninstaller holds the mid-update window
-# open while the smoke measures it (P absent, marker live, a second instance Q fully suppressed).
+# scenario: a sentinel injected into N's NSIS_HOOK_PREINSTALL parks N's installer at the top of
+# Section Install — a PRE-MUTATION barrier: marker live, completion token not yet written, the
+# old exe still on disk — while the smoke measures suppression (a second instance Q must not
+# heal, rearm, remove the marker, or start a second download). Why PREINSTALL: tauri-bundler
+# 2.8.1 silent updates NEVER run the old uninstaller (PageLeaveReinstall's update-mode guard;
+# measured in run 30472678896), so the piece-1 POSTUNINSTALL premise was falsified — the actor
+# that runs mid-update on the silent path is N's OWN installer.
 #
 # Deliberately a SEPARATE file from _e2e-updater-windows.yml: a called workflow sees the CALLER's
 # `github` context and releases are themselves workflow_dispatch, so an event_name split inside
@@ -76,19 +81,35 @@ jobs:
           } >> "$GITHUB_ENV"
           rm -f ./eph.key ./eph.key.pub
 
-      - name: Inject the L8 barrier sentinel into hooks.nsi (synthetic N-1 only)
+      - name: Build synthetic N-1 (0.0.1, ephemeral pubkey, clean hooks)
+        shell: bash
+        working-directory: packages/accelerator/src-tauri
+        run: |
+          set -euo pipefail
+          sed -i "s/^version = \".*\"/version = \"$N1_VERSION\"/" Cargo.toml
+          bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N1_VERSION;c.plugins.updater.pubkey=process.env.EPHEMERAL_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"
+          ( cd .. && bunx tauri build --bundles nsis )
+          mkdir -p "$RUNNER_TEMP/n1"
+          cp target/release/bundle/nsis/*-setup.exe "$RUNNER_TEMP/n1/"
+
+      - name: Inject the L8 barrier sentinel into hooks.nsi (N's installer only)
         shell: bash
         run: |
           set -euo pipefail
           PREFIX="smoke-barrier-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "UPDATER_SMOKE_BARRIER_PREFIX=$PREFIX" >> "$GITHUB_ENV"
-          # The sentinel parks the OLD uninstaller (run mid-update by N's installer) at the END of
-          # POSTUNINSTALL — after every uninstall action, before Section Install — so the smoke can
-          # measure the held-open window. Engages only when the run-unique request file exists;
-          # emits p-status (is the exe present?) + ready, then waits for release with a bounded
-          # fail-open that RECORDS itself (timed-out) so the smoke can reject a lost window.
-          cat > "$RUNNER_TEMP/sentinel.nsi" <<'NSI'
-            ; TEST-ONLY smoke barrier — injected in CI for the synthetic N-1 build; never committed.
+          # PRE-MUTATION barrier: tauri-bundler 2.8.1 silent updates never run the OLD uninstaller
+          # (PageLeaveReinstall's update-mode guard — measured, run 30472678896), so the actor that
+          # runs mid-update is N's OWN installer. NSIS_HOOK_PREINSTALL fires at the TOP of Section
+          # Install (installer.nsi:617), before CheckIfAppIsRunning and the File copies: marker
+          # live, completion token not yet written, old exe still on disk. The sentinel engages
+          # only when the run-unique request file exists; emits p-status + ready, then waits for
+          # release with a bounded fail-open that RECORDS itself (timed-out) so the smoke can
+          # reject a lost window. hooks.nsi defines no PREINSTALL macro, so this APPENDS one.
+          cat >> packages/accelerator/src-tauri/nsis/hooks.nsi <<'NSI'
+
+          ; TEST-ONLY smoke barrier (CI-injected for the in-job N build; never committed).
+          !macro NSIS_HOOK_PREINSTALL
             ${If} ${FileExists} "$PROFILE\.aztec-accelerator\__PFX__-request"
               Push $R8
               Push $R9
@@ -129,41 +150,22 @@ jobs:
               Pop $R9
               Pop $R8
             ${EndIf}
+          !macroend
           NSI
-          sed -i "s/__PFX__/$PREFIX/g" "$RUNNER_TEMP/sentinel.nsi"
-          python3 - <<'PY'
-          import os, pathlib
-          h = pathlib.Path("packages/accelerator/src-tauri/nsis/hooks.nsi")
-          s = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sentinel.nsi"
-          t = h.read_text()
-          anchor = "  Pop $1\n  Pop $0\n!macroend"
-          assert t.count(anchor) == 1, "POSTUNINSTALL tail anchor not found exactly once"
-          h.write_text(t.replace(anchor, s.read_text() + anchor))
-          PY
-          # Must-fire discipline: a silently-failed injection would make barrier mode fail late and
-          # confusingly (no ready file) — prove the sentinel is in the source NOW.
+          sed -i "s/__PFX__/$PREFIX/g" packages/accelerator/src-tauri/nsis/hooks.nsi
+          # Must-fire discipline: prove the macro is in the source NOW (a silently-failed injection
+          # would surface only as a confusing no-ready timeout an hour later).
+          grep -q "NSIS_HOOK_PREINSTALL" packages/accelerator/src-tauri/nsis/hooks.nsi
           grep -q -- "$PREFIX-ready" packages/accelerator/src-tauri/nsis/hooks.nsi
-          echo "sentinel injected (prefix $PREFIX)"
+          echo "sentinel injected into NSIS_HOOK_PREINSTALL (prefix $PREFIX)"
 
-      - name: Build synthetic N-1 (0.0.1, ephemeral pubkey, sentinel)
+      - name: Build N (${{ inputs.n-version || '9.9.9' }}, ephemeral pubkey, PREINSTALL sentinel)
         shell: bash
         working-directory: packages/accelerator/src-tauri
         run: |
           set -euo pipefail
-          sed -i "s/^version = \".*\"/version = \"$N1_VERSION\"/" Cargo.toml
-          bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N1_VERSION;c.plugins.updater.pubkey=process.env.EPHEMERAL_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"
-          ( cd .. && bunx tauri build --bundles nsis )
-          mkdir -p "$RUNNER_TEMP/n1"
-          cp target/release/bundle/nsis/*-setup.exe "$RUNNER_TEMP/n1/"
-
-      - name: Build N (${{ inputs.n-version || '9.9.9' }}, ephemeral pubkey, clean hooks)
-        shell: bash
-        working-directory: packages/accelerator/src-tauri
-        run: |
-          set -euo pipefail
-          # N stays prod-shaped: the sentinel belongs ONLY to N-1's uninstaller (the one that runs
-          # mid-update). Drop N-1's bundle output so N's staging can't pick up 0.0.1 files.
-          git checkout -- nsis/hooks.nsi
+          # N carries the sentinel (its installer is the mid-update actor). Drop N-1's bundle
+          # output so N's staging can't pick up 0.0.1 files.
           rm -rf target/release/bundle/nsis
           sed -i "s/^version = \".*\"/version = \"$N_VERSION\"/" Cargo.toml
           bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N_VERSION;c.plugins.updater.pubkey=process.env.EPHEMERAL_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"

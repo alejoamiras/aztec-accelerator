@@ -64,3 +64,23 @@ path ran). Fixes: job env renamed to `UPDATER_SMOKE_MODE` (single source), and t
 logs `mode: $Mode` at startup so this class is visible in any future log at a glance.
 Consolation finding: run 2 inadvertently proved the sentinel's no-request no-op — the
 baked sentinel sat in N−1's uninstaller and did nothing without the request file.
+
+## Round 3 (run 30472678896): the L8 premise itself was false — and the harness caught it
+
+Barrier mode genuinely ran (mode echo proved it) and the bounded missing-`ready` assert — added
+because the AUDIT demanded barrier ownership be provable — fired: the sentinel in N−1's
+uninstaller never executed while the production update completed underneath it. Template
+autopsy: 2.8.1 `PageLeaveReinstall` skips `reinst_uninstall` entirely in update mode (:294-297),
+so the `/UPDATE` cmdline at :333 (the line our piece-1 "refutation" table row was derived from)
+is dead code; silent installs skip page callbacks anyway. **Codex's piece-1 claim was right; we
+refuted it with dead code.** The goal's "do not re-adopt" instruction was built on our own bad
+refutation — direct measurement overrides it, and the reversal is documented, not silently
+adopted (appended to `autostart-self-heal/audit-codex-final.md`; codex consulted via resumed
+session before rebuilding; verdict: PREINSTALL correct, call it a pre-mutation barrier, keep
+p-status as a lifecycle invariant, fix the false comments in this PR, N−1 injection has no
+remaining value).
+
+Meta-lesson, worth the CI hours: a test that guards its own preconditions converts "wrong
+premise" from a silent vacuous pass into a loud, diagnosable failure. Round 2's misrouted mode
+would have shipped a barrier that never barriered; round 3's ownership assert turned a false
+design premise into a one-run discovery.

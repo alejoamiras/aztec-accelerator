@@ -69,7 +69,9 @@ run_case() {
   rm -rf "$PROFILE/.aztec-accelerator" "$dir"
 }
 
-# `_?=` is what the Tauri installer appends when it runs the PREVIOUS version's uninstaller. It is
+# `_?=` is what the Tauri installer appends when it runs the PREVIOUS version's uninstaller —
+# which in tauri-bundler 2.8.1 happens ONLY on the interactive plain-upgrade path (silent
+# in-app updates skip the uninstall entirely: PageLeaveReinstall's update-mode guard). It is
 # invisible to the script ($CMDLINE is stripped of it) — its effect is that the uninstaller runs in
 # place instead of from a ~nsu*.tmp copy, which is what the hook actually keys on.
 #                                                          /UPDATE  _?=  survive

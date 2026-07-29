@@ -119,3 +119,32 @@ None. (Light floor: 8 verified Facts above; no silent asks.)
 
 Non-blocking folded: exact-endpoint compare; GH_TOKEN export; semver compare via bun (not
 pwsh [version]). Confirmed sound: the ephemeral chain needs no prod key at any step.
+
+## Premise reversal (round 3, measured) — the barrier moved to N's PREINSTALL
+
+Round-3 bootstrap (run 30472678896, real windows-latest, production update flow) armed the
+POSTUNINSTALL sentinel in the installed N−1's uninstaller and the update completed WITHOUT it
+ever firing. Template root cause (tauri-bundler 2.8.1 `installer.nsi`): `PageLeaveReinstall`
+:294-297 — "In update mode, always proceeds without uninstalling" — jumps over
+`reinst_uninstall`, making the `/UPDATE` command construction at :333 dead code; and fully
+silent installs skip page callbacks regardless. **The silent in-app update never runs the old
+uninstaller.** Codex's original piece-1 objection was CORRECT; our refutation quoted the
+hooks.nsi table row that was derived from that dead code. Reversal recorded in
+`autostart-self-heal/audit-codex-final.md` (appended, not rewritten).
+
+Redesign (codex-consulted, resumed session, response-1.md — "PREINSTALL is the correct
+deterministic park point"): the sentinel is a full `NSIS_HOOK_PREINSTALL` macro injected into
+**N's build** (the installer that actually runs mid-update); N−1 now builds clean. It is a
+**pre-mutation barrier** (top of Section Install, before CheckIfAppIsRunning and File copies),
+not a park inside a P-absent interval. Adjusted asserts: p-status == "present" + SHA-256 of the
+installed exe equals the pre-update copy (mutation not begun); marker AND handoff live, token
+ABSENT (POSTINSTALL not yet run — the barrier is really holding); :59833 polled-until-dark
+(install() spawns the installer before N−1's process::exit). Q-suppression, D22, timed-out
+ownership, and the window-end truths are unchanged. Piece-2's marker remains sound — the
+protected window is real; only the "P non-resolving via old uninstaller" mechanism was wrong on
+the silent path (it survives on the interactive plain upgrade, which the CA guard already
+handles and CI drives directly via the wine/real-NSIS harnesses).
+
+In-PR comment corrections (comment-only, no behavior change): hooks.nsi header + table row (†),
+update_marker.rs mechanism sentence, nsis-hook-test.sh `_?=` scoping, accelerator.yml guard-case
+labels (`/UPDATE` relabelled defense-in-depth).
