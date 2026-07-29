@@ -1,0 +1,186 @@
+name: Smoke Updater Windows (manual)
+
+# Manually-dispatched Windows updater smoke — the EPHEMERAL sibling of _e2e-updater-windows.yml.
+# Builds BOTH ends from the current ref (synthetic N-1 at 0.0.1, N at `n-version`), signs both and
+# the feed manifest with a run-local throwaway key, and runs updater-smoke-windows.ps1. Because
+# both ends are current-ref, this is the only place the FULL piece-2 marker lifecycle is
+# exercised end-to-end (a real released N-1 predates the marker), including the L8 `barrier`
+# scenario: an injected sentinel in the synthetic N-1's uninstaller holds the mid-update window
+# open while the smoke measures it (P absent, marker live, a second instance Q fully suppressed).
+#
+# Deliberately a SEPARATE file from _e2e-updater-windows.yml: a called workflow sees the CALLER's
+# `github` context and releases are themselves workflow_dispatch, so an event_name split inside
+# the reusable file would misroute releases. Separation by FILE also keeps this path structurally
+# secretless — no `secrets.*` reference exists here (piece-2 ledger A3: job/file separation is the
+# isolation boundary, not workflow_call.secrets).
+#
+# NOT a PR gate: two Windows Tauri builds. Run it manually before a release, or when updater/
+# marker/NSIS-hook code changes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Smoke scenario
+        required: false
+        default: barrier
+        type: choice
+        options: [barrier, positive, negative]
+      n-version:
+        description: Version to stamp on the in-job N build
+        required: false
+        default: "9.9.9"
+        type: string
+  # TEMPORARY bootstrap — REMOVE before merge. workflow_dispatch only works once the file exists
+  # on the default branch, so pre-merge validation runs ride the feature-branch pushes instead.
+  push:
+    branches: [worktree-updater-dispatch-gate]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-ephemeral:
+    name: Ephemeral both-ends smoke (${{ inputs.mode || 'barrier' }})
+    runs-on: windows-latest
+    timeout-minutes: 70 # TWO in-job Tauri builds (N-1 and N; the second is mostly incremental) + the smoke
+    env:
+      N_VERSION: ${{ inputs.n-version || '9.9.9' }}
+      N1_VERSION: "0.0.1"
+      SMOKE_MODE: ${{ inputs.mode || 'barrier' }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
+          rust-workspaces: packages/accelerator/src-tauri -> target
+          rust-components: ""
+
+      # One ephemeral key signs EVERYTHING: N-1's artifacts, N's artifacts, and (in the smoke step,
+      # via the same env) the feed manifest. Its pubkey is patched into tauri.conf.json for BOTH
+      # builds — swapping only the private key would fail verification (piece-2 audit correction).
+      - name: Generate ephemeral signing key + patch pubkey into tauri.conf.json
+        shell: bash
+        working-directory: packages/accelerator
+        run: |
+          set -euo pipefail
+          bunx tauri signer generate --ci -p "" -w ./eph.key
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY=$(cat ./eph.key)"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD="
+            echo "EPHEMERAL_PUBKEY=$(base64 -w0 ./eph.key.pub)"
+          } >> "$GITHUB_ENV"
+          rm -f ./eph.key ./eph.key.pub
+
+      - name: Inject the L8 barrier sentinel into hooks.nsi (synthetic N-1 only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="smoke-barrier-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "UPDATER_SMOKE_BARRIER_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          # The sentinel parks the OLD uninstaller (run mid-update by N's installer) at the END of
+          # POSTUNINSTALL — after every uninstall action, before Section Install — so the smoke can
+          # measure the held-open window. Engages only when the run-unique request file exists;
+          # emits p-status (is the exe present?) + ready, then waits for release with a bounded
+          # fail-open that RECORDS itself (timed-out) so the smoke can reject a lost window.
+          cat > "$RUNNER_TEMP/sentinel.nsi" <<'NSI'
+            ; TEST-ONLY smoke barrier — injected in CI for the synthetic N-1 build; never committed.
+            ${If} ${FileExists} "$PROFILE\.aztec-accelerator\__PFX__-request"
+              Push $R8
+              Push $R9
+              ${If} ${FileExists} "$INSTDIR\aztec-accelerator.exe"
+                StrCpy $R8 "present"
+              ${Else}
+                StrCpy $R8 "absent"
+              ${EndIf}
+              ClearErrors
+              FileOpen $R9 "$PROFILE\.aztec-accelerator\__PFX__-p-status" w
+              ${IfNot} ${Errors}
+                FileWrite $R9 $R8
+                FileClose $R9
+              ${EndIf}
+              ClearErrors
+              FileOpen $R9 "$PROFILE\.aztec-accelerator\__PFX__-ready" w
+              ${IfNot} ${Errors}
+                FileWrite $R9 "ready"
+                FileClose $R9
+              ${EndIf}
+              StrCpy $R8 0
+              ${Do}
+                ${If} ${FileExists} "$PROFILE\.aztec-accelerator\__PFX__-release"
+                  ${Break}
+                ${EndIf}
+                IntOp $R8 $R8 + 1
+                ${If} $R8 > 240
+                  ClearErrors
+                  FileOpen $R9 "$PROFILE\.aztec-accelerator\__PFX__-timed-out" w
+                  ${IfNot} ${Errors}
+                    FileWrite $R9 "timed-out"
+                    FileClose $R9
+                  ${EndIf}
+                  ${Break}
+                ${EndIf}
+                Sleep 500
+              ${Loop}
+              Pop $R9
+              Pop $R8
+            ${EndIf}
+          NSI
+          sed -i "s/__PFX__/$PREFIX/g" "$RUNNER_TEMP/sentinel.nsi"
+          python3 - <<'PY'
+          import os, pathlib
+          h = pathlib.Path("packages/accelerator/src-tauri/nsis/hooks.nsi")
+          s = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sentinel.nsi"
+          t = h.read_text()
+          anchor = "  Pop $1\n  Pop $0\n!macroend"
+          assert t.count(anchor) == 1, "POSTUNINSTALL tail anchor not found exactly once"
+          h.write_text(t.replace(anchor, s.read_text() + anchor))
+          PY
+          # Must-fire discipline: a silently-failed injection would make barrier mode fail late and
+          # confusingly (no ready file) — prove the sentinel is in the source NOW.
+          grep -q -- "$PREFIX-ready" packages/accelerator/src-tauri/nsis/hooks.nsi
+          echo "sentinel injected (prefix $PREFIX)"
+
+      - name: Build synthetic N-1 (0.0.1, ephemeral pubkey, sentinel)
+        shell: bash
+        working-directory: packages/accelerator/src-tauri
+        run: |
+          set -euo pipefail
+          sed -i "s/^version = \".*\"/version = \"$N1_VERSION\"/" Cargo.toml
+          bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N1_VERSION;c.plugins.updater.pubkey=process.env.EPHEMERAL_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"
+          ( cd .. && bunx tauri build --bundles nsis )
+          mkdir -p "$RUNNER_TEMP/n1"
+          cp target/release/bundle/nsis/*-setup.exe "$RUNNER_TEMP/n1/"
+
+      - name: Build N (${{ inputs.n-version || '9.9.9' }}, ephemeral pubkey, clean hooks)
+        shell: bash
+        working-directory: packages/accelerator/src-tauri
+        run: |
+          set -euo pipefail
+          # N stays prod-shaped: the sentinel belongs ONLY to N-1's uninstaller (the one that runs
+          # mid-update). Drop N-1's bundle output so N's staging can't pick up 0.0.1 files.
+          git checkout -- nsis/hooks.nsi
+          rm -rf target/release/bundle/nsis
+          sed -i "s/^version = \".*\"/version = \"$N_VERSION\"/" Cargo.toml
+          bun -e "const f='tauri.conf.json';const c=JSON.parse(await Bun.file(f).text());c.version=process.env.N_VERSION;c.plugins.updater.pubkey=process.env.EPHEMERAL_PUBKEY;await Bun.write(f,JSON.stringify(c,null,2)+'\n')"
+          ( cd .. && bunx tauri build --bundles nsis )
+          mkdir -p "$RUNNER_TEMP/n"
+          cp target/release/bundle/nsis/*-setup.nsis.zip target/release/bundle/nsis/*-setup.nsis.zip.sig "$RUNNER_TEMP/n/"
+          ls -la "$RUNNER_TEMP/n"
+
+      - name: Updater smoke (${{ inputs.mode || 'barrier' }}, ephemeral chain)
+        shell: pwsh
+        run: |
+          $n1 = Get-ChildItem -Path "$env:RUNNER_TEMP\n1" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $n1) { Write-Error "N-1 installer not found"; exit 1 }
+          if ($env:N1_VERSION -eq $env:N_VERSION) { Write-Error "N-1 == N ($env:N_VERSION) — a no-op update would pass trivially"; exit 1 }
+          & packages/accelerator/scripts/updater-smoke-windows.ps1 `
+            -NVersion $env:N_VERSION `
+            -NArtifactsDir "$env:RUNNER_TEMP\n" `
+            -N1Installer $n1.FullName `
+            -RepoRoot $env:GITHUB_WORKSPACE `
+            -N1Version $env:N1_VERSION
+
+      - name: Result summary
+        if: success()
+        run: echo "✅ Ephemeral Windows updater smoke PASSED ($env:SMOKE_MODE) — current-ref N-1 → current-ref N, full marker lifecycle." >> $env:GITHUB_STEP_SUMMARY

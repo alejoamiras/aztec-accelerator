@@ -27,13 +27,23 @@
     -NArtifactsDir : dir with N's *-setup.nsis.zip + *-setup.nsis.zip.sig
     -N1Installer   : path to N-1's *-setup.exe
   UPDATER_SMOKE_MODE = positive (default) | negative (tamper the served zip, expect rejection)
+                     | barrier  (piece-3 L8: hold the update open mid-NSIS via the sentinel baked
+                       into the synthetic N-1's POSTUNINSTALL; assert P absent, the real
+                       update-in-progress.json live, and a second instance Q fully suppressed —
+                       no heal, no rearm, no second download — then release and finish positive.
+                       Requires UPDATER_SMOKE_BARRIER_PREFIX (run-unique file prefix, baked into
+                       the sentinel at N-1 build time).
 #>
 param(
   [Parameter(Mandatory)][string]$NVersion,
   [string]$PlatformKey = "windows-x86_64",
   [Parameter(Mandatory)][string]$NArtifactsDir,
   [Parameter(Mandatory)][string]$N1Installer,
-  [Parameter(Mandatory)][string]$RepoRoot
+  [Parameter(Mandatory)][string]$RepoRoot,
+  # When set, /health must report THIS version after N-1 launches, BEFORE any update is expected —
+  # proves the installed N-1 actually runs (a wrong fixture or a crashed N-1 otherwise passes the
+  # negative leg and fails the positive one confusingly late).
+  [string]$N1Version = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,6 +58,14 @@ $CaCn = "updater-smoke-CA-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
 $Work = Join-Path $env:RUNNER_TEMP ("updater-smoke-" + [guid]::NewGuid().ToString('N'))
 $ServeDir = Join-Path $Work "serve"
 New-Item -ItemType Directory -Force -Path $ServeDir | Out-Null
+$BarrierPrefix = $env:UPDATER_SMOKE_BARRIER_PREFIX
+if ($Mode -eq "barrier" -and -not $BarrierPrefix) {
+  Write-Error "barrier mode requires UPDATER_SMOKE_BARRIER_PREFIX (baked into the N-1 sentinel)"
+  exit 1
+}
+function BarrierFile($suffix) { Join-Path $ConfigDir "$BarrierPrefix-$suffix" }
+$QDir = Join-Path $Work "q"
+$QProc = $null
 $AppProc = $null
 $FeedProc = $null
 $CaThumb = $null
@@ -57,6 +75,7 @@ $TaskName = "Aztec Accelerator Crash Recovery"
 function Log($m) { Write-Host "── $m ──" }
 
 function Cleanup {
+  if ($QProc) { Stop-Process -Id $QProc.Id -Force -ErrorAction SilentlyContinue }
   if ($AppProc) { Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue }
   Get-Process -Name "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   if ($FeedProc) { Stop-Process -Id $FeedProc.Id -Force -ErrorAction SilentlyContinue }
@@ -75,6 +94,10 @@ function Cleanup {
   & schtasks /Delete /F /TN $TaskName *> $null
   # (#97) Stop the background task-state poller if it's still running (don't leak a job).
   if ($PollJob) { Stop-Job $PollJob -ErrorAction SilentlyContinue; Remove-Job $PollJob -Force -ErrorAction SilentlyContinue }
+  # Barrier files are run-unique but live under the app's real config dir — never leave them.
+  if ($BarrierPrefix) {
+    Get-ChildItem -Path $ConfigDir -Filter "$BarrierPrefix-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Dump-Logs {
@@ -193,7 +216,7 @@ try {
 
   # ── Pre-seed auto-update so N-1 updates without UI ──
   New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
-  '{"config_version":1,"safari_support":false,"approved_origins":[],"speed":"full","auto_update":true}' | Set-Content (Join-Path $ConfigDir "config.json")
+  '{"config_version":1,"https_enabled":false,"approved_origins":[],"speed":"full","auto_update":true}' | Set-Content (Join-Path $ConfigDir "config.json")
 
   # ── (#96) Arm crash-recovery the way the app does, so the update runs THROUGH the
   #    disarm-before-install guard (updater.rs). The app registers the Task Scheduler task on
@@ -238,9 +261,33 @@ try {
     }
   }
 
+  # ── BARRIER pre-launch: the sentinel (baked into N-1's POSTUNINSTALL) only engages when the
+  #    request file exists, and Q must be a copy of the PRE-update install (after the update starts,
+  #    $InstallRoot is mid-transition).
+  if ($Mode -eq "barrier") {
+    Set-Content -Path (BarrierFile "request") -Value "armed"
+    Copy-Item -Recurse $InstallRoot $QDir
+    Log "BARRIER: request seeded (prefix $BarrierPrefix); Q staged from the pre-update install"
+  }
+
   # ── Launch N-1; it should auto-update to N and relaunch ──
   Log "launching N-1 (expecting auto-update → $NVersion)"
   $AppProc = Start-Process -FilePath $Exe.FullName -PassThru
+
+  # ── N-1 launch proof: the installed fixture must actually RUN and report ITS version before any
+  #    update. Seeing N here without ever seeing N-1 means the fixture is wrong (or already N) and
+  #    the "update happened" tail would pass vacuously.
+  if ($N1Version) {
+    $sawN1 = $false
+    for ($i = 0; $i -lt 60; $i++) {
+      try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2).version } catch { $got = $null }
+      if ($got -eq $N1Version) { $sawN1 = $true; break }
+      if ($got -eq $NVersion) { Dump-Logs; Write-Error "N-1 launch proof FAILED — /health reported N ($NVersion) before ever reporting N-1 ($N1Version); wrong fixture or no real update is being exercised."; exit 1 }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not $sawN1) { Dump-Logs; Write-Error "N-1 launch proof FAILED — /health never reported $N1Version within 30s; the installed N-1 did not run (crash on startup? wrong artifact?)"; exit 1 }
+    Log "N-1 alive at $N1Version"
+  }
 
   if ($Mode -eq "negative") {
     Log "NEGATIVE: asserting /health never reports $NVersion (tampered artifact rejected), 120s"
@@ -252,8 +299,125 @@ try {
     if (-not (Select-String -Path (Join-Path $Work "feed.log") -Pattern "/releases/download/" -Quiet)) {
       Dump-Logs; Write-Error "NEGATIVE inconclusive — the updater never downloaded the artifact, so signature rejection wasn't exercised."; exit 1
     }
+    # Rejecting is only proven by a LIVE N-1 still reporting its own version — a crash after the
+    # download would also "never report N" and pass vacuously.
+    if ($N1Version) {
+      try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3).version } catch { $got = $null }
+      if ($got -ne $N1Version) { Dump-Logs; Write-Error "NEGATIVE inconclusive — N-1 is not alive at $N1Version after the rejection window (got '$got'); it may have crashed rather than refused."; exit 1 }
+    }
     Log "SUCCESS (negative) — updater downloaded the tampered artifact and refused to update"
     Dump-Logs; exit 0
+  }
+
+  if ($Mode -eq "barrier") {
+    # ── The window OPENS when the OLD uninstaller (run by N's installer, PageLeaveReinstall —
+    #    before Section Install) reaches the injected sentinel and parks on the release file. ──
+    Log "BARRIER: waiting for the sentinel to signal ready (240s)"
+    $ready = $false
+    for ($i = 0; $i -lt 240; $i++) {
+      if (Test-Path (BarrierFile "ready")) { $ready = $true; break }
+      Start-Sleep -Seconds 1
+    }
+    if (-not $ready) {
+      Dump-Logs; Write-Error "BARRIER FAILED — the sentinel never signalled ready: the injected POSTUNINSTALL did not run (injection regressed, or the silent update no longer runs the old uninstaller — the L8 premise itself)."; exit 1
+    }
+    Log "BARRIER OPEN — measuring the mid-update world"
+    $Marker = Join-Path $ConfigDir "update-in-progress.json"
+    $FeedLog = Join-Path $Work "feed.log"
+
+    # 1. P is non-resolving — measured from INSIDE the uninstaller by the sentinel, not assumed.
+    $pStatus = ""
+    try { $pStatus = (Get-Content (BarrierFile "p-status") -Raw).Trim() } catch { }
+    if ($pStatus -ne "absent") {
+      Dump-Logs; Write-Error "BARRIER FAILED — sentinel measured P as '$pStatus' (expected 'absent'): the old-uninstaller window does NOT leave the exe non-resolving, so the marker's premise is wrong. Re-open the design, don't patch the test."; exit 1
+    }
+    # 2. The real production marker is live inside the window.
+    if (-not (Test-Path $Marker)) { Dump-Logs; Write-Error "BARRIER FAILED — update-in-progress.json absent inside the window; N-1 (current ref) did not write the marker before install()."; exit 1 }
+    # 3. Nothing is serving :59833 (N-1 exited for the install) — precondition that makes Q's
+    #    /health binding below attributable to Q and only Q.
+    $portFree = $false
+    try { Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2 | Out-Null } catch { $portFree = $true }
+    if (-not $portFree) { Dump-Logs; Write-Error "BARRIER FAILED — :59833 still serving inside the window; N-1 did not exit for the install."; exit 1 }
+    # Baselines for the D22 no-second-download proof.
+    $K1 = @(Select-String -Path $FeedLog -Pattern "/releases/latest.json" -ErrorAction SilentlyContinue).Count
+    $D1 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
+    # Seed a STALE (non-resolving) Run value: if Q's heal were NOT suppressed it would rewrite this.
+    $StaleVal = '"C:\nonexistent\updater-smoke-stale\aztec-accelerator.exe"'
+    Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value $StaleVal
+    # Precondition: no crash-recovery task exists (barrier mode never armed one).
+    & schtasks /Query /TN $TaskName *> $null
+    if ($LASTEXITCODE -eq 0) { Dump-Logs; Write-Error "BARRIER precondition FAILED — '$TaskName' already exists before Q; the no-rearm assertion would be meaningless."; exit 1 }
+
+    # ── Q: a second instance launched INSIDE the window (from a pre-update copy). Every suppression
+    #    must hold: no heal, no rearm, no marker removal, no second download — and Q must be ALIVE
+    #    (a Q that crashes at startup would pass all "nothing happened" asserts vacuously). ──
+    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter "aztec-accelerator.exe" | Select-Object -First 1
+    if (-not $QExe) { Write-Error "BARRIER — staged Q exe not found under $QDir"; exit 1 }
+    Log "BARRIER: launching Q ($($QExe.FullName))"
+    $QProc = Start-Process -FilePath $QExe.FullName -PassThru
+    $qUp = $false
+    for ($i = 0; $i -lt 120; $i++) {
+      try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2).version } catch { $got = $null }
+      if ($got -eq $N1Version) { $qUp = $true; break }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not $qUp) { Dump-Logs; Write-Error "BARRIER FAILED — Q never served /health == $N1Version (Q crashed, or startup reconcile misbehaved; the server spawns AFTER reconciliation, so this also proves reconcile completed)."; exit 1 }
+    if ($QProc.HasExited) { Dump-Logs; Write-Error "BARRIER FAILED — Q exited after binding /health."; exit 1 }
+    # Q's scheduled update check (5s post-launch) must HIT the feed (latest.json count rises) …
+    $checked = $false
+    for ($i = 0; $i -lt 60; $i++) {
+      $K2 = @(Select-String -Path $FeedLog -Pattern "/releases/latest.json" -ErrorAction SilentlyContinue).Count
+      if ($K2 -gt $K1) { $checked = $true; break }
+      Start-Sleep -Seconds 1
+    }
+    if (-not $checked) { Dump-Logs; Write-Error "BARRIER FAILED — Q never fetched latest.json; the D22 no-second-update proof was not exercised."; exit 1 }
+    # … and D22 must stop it BEFORE any download (count unchanged after a settle).
+    Start-Sleep -Seconds 5
+    $D2 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
+    if ($D2 -ne $D1) { Dump-Logs; Write-Error "BARRIER FAILED — a SECOND artifact download happened inside the window ($D1 -> $D2); D22 did not reject while the marker is live."; exit 1 }
+    # Suppressions: marker untouched, Run value byte-identical (no heal), task still absent (no rearm).
+    if (-not (Test-Path $Marker)) { Dump-Logs; Write-Error "BARRIER FAILED — Q REMOVED the live update marker (foreign-window removal; the four-part rule regressed)."; exit 1 }
+    $runVal = (Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator")."Aztec Accelerator"
+    if ($runVal -cne $StaleVal) { Dump-Logs; Write-Error "BARRIER FAILED — Q healed the Run value inside the window ('$runVal'); marker suppression of heal regressed."; exit 1 }
+    & schtasks /Query /TN $TaskName *> $null
+    if ($LASTEXITCODE -eq 0) { Dump-Logs; Write-Error "BARRIER FAILED — Q re-armed '$TaskName' inside the window; marker suppression of rearm regressed."; exit 1 }
+    if ($QProc.HasExited) { Dump-Logs; Write-Error "BARRIER FAILED — Q exited during the suppression window (asserts above may be vacuous)."; exit 1 }
+    Log "BARRIER: Q fully suppressed (alive, checked feed, no download, no heal, no rearm, marker intact)"
+    # Free :59833 BEFORE releasing — the resumed installer relaunches N, which must bind it.
+    Stop-Process -Id $QProc.Id -Force; $QProc.WaitForExit(); $QProc = $null
+
+    # ── Release the window. The sentinel must still OWN it: a timed-out sentinel already fell
+    #    through, meaning everything above was measured OUTSIDE the window — reject loudly. ──
+    if (Test-Path (BarrierFile "timed-out")) { Dump-Logs; Write-Error "BARRIER FAILED — the sentinel timed out before release; the measured window was not held."; exit 1 }
+    Set-Content -Path (BarrierFile "release") -Value "go"
+    Log "BARRIER RELEASED — expecting the install to complete and N to reconcile the marker away"
+
+    $updated = $false
+    for ($i = 0; $i -lt 150; $i++) {
+      try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3).version } catch { $got = $null }
+      if ($got -eq $NVersion) { $updated = $true; break }
+      Start-Sleep -Seconds 2
+    }
+    if (-not $updated) { Dump-Logs; Write-Error "BARRIER tail FAILED — /health never reported $NVersion after release."; exit 1 }
+    # Window-end truths: marker/handoff/token all reconciled away; the stale Run value HEALED to the
+    # installed exe (window closed ⇒ heal unsuppressed); crash-recovery re-armed (Run key enabled).
+    foreach ($f in @("update-in-progress.json", "update-txn", "update-txn-done")) {
+      if (Test-Path (Join-Path $ConfigDir $f)) { Dump-Logs; Write-Error "BARRIER tail FAILED — $f still present after N started; startup reconciliation did not remove the transaction."; exit 1 }
+    }
+    $runVal = (Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator")."Aztec Accelerator"
+    $expectedHeal = '"' + $Exe.FullName + '"'
+    if (-not $runVal.Equals($expectedHeal, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Dump-Logs; Write-Error "BARRIER tail FAILED — Run value is '$runVal', expected the healed quoted exe $expectedHeal; window-end re-heal regressed."; exit 1
+    }
+    $rearmed = $false
+    for ($r = 0; $r -lt 15; $r++) {
+      & schtasks /Query /TN $TaskName *> $null
+      if ($LASTEXITCODE -eq 0) { $rearmed = $true; break }
+      Start-Sleep -Seconds 2
+    }
+    if (-not $rearmed) { Dump-Logs; Write-Error "BARRIER tail FAILED — '$TaskName' absent after the window closed; startup rearm did not run."; exit 1 }
+    Log "SUCCESS (barrier) — L8 proven: P absent mid-window, Q fully suppressed, D22 held, and the window-end reconcile removed the txn, healed the Run value, and re-armed."
+    exit 0
   }
 
   # ── Positive: the task-state poller is already running (started BEFORE launch, above). Wait for the
@@ -272,6 +436,13 @@ try {
     Dump-Logs; Write-Error "/health reports $NVersion but the feed log has no download hit — the update didn't flow through our feed."; exit 1
   }
   Log "SUCCESS — updated to $NVersion via the local feed (artifact downloaded + relaunched)"
+
+  # End-state: no update-transaction file survives N's startup (the real v1.0.7 N-1 predates the
+  # marker and writes none; a current-ref N-1's marker must have been reconciled away by now —
+  # /health == N means the server is up, which happens AFTER startup reconciliation).
+  foreach ($f in @("update-in-progress.json", "update-txn", "update-txn-done")) {
+    if (Test-Path (Join-Path $ConfigDir $f)) { Dump-Logs; Write-Error "end-state FAILED — $f present after the update; the startup reconcile did not clear the transaction."; exit 1 }
+  }
 
   # ── Read what the poller observed: Receive-Job returns every emitted "<sawPresent> <maxStreak>" line;
   #    the LAST is the final state (no file/torn-read race). Default closed to "0 0" → ARMING fails. ──
