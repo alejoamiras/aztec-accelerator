@@ -100,3 +100,10 @@ design premise into a one-run discovery.
 Non-blocking folded: exactly-one-asset preflight guard; precise "no ${{ secrets }}
 expression" wording. Declined: TCP-level port probe (codex itself notes later asserts
 prevent vacuity — not worth the machinery).
+
+## Resumed verification (same session): 1-2 fully closed, 3 half-applied, 4 by-design; no new must-fix
+
+Half-applied residue: two "TWO guards" phrasings (hooks.nsi:11, tauri-trust-boundary.test.ts:267)
+still claimed both guards load-bearing — in 2.8.1 only `$EXEDIR != $INSTDIR` is;
+`$UpdateMode` is defense-in-depth. Reworded both + harness.test.nsi polish. Push trigger
+removed in this same final commit (dispatch-only from here; post-merge burn-in next).

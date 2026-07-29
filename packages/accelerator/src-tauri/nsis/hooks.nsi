@@ -8,7 +8,9 @@
 ; anchor + certs on that upgrade, silently breaking HTTPS until the user re-enabled it. This must be
 ; correct in the FIRST release that ships the hook — a release cannot fix its own uninstaller.
 ;
-; TWO guards are needed, because `$UpdateMode` alone does not cover every upgrade. In the Tauri NSIS
+; ONE guard is load-bearing in 2.8.1 — `$EXEDIR != $INSTDIR` — because the only path that runs this
+; hook during an upgrade is the interactive one, where `$UpdateMode` is 0. `$UpdateMode` is kept as
+; defense-in-depth for a future template that forwards `/UPDATE`. In the Tauri NSIS
 ; template, `$UpdateMode` is set from the INSTALLER's own `/UPDATE` flag, and is forwarded to the old
 ; uninstaller only when the installer itself received it:
 ;

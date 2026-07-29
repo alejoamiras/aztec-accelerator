@@ -5,7 +5,8 @@
 ; release that ships it, because a release cannot fix its own uninstaller. Getting it wrong wipes the
 ; user's trust anchor on a routine upgrade. So the guard is exercised for real here — a genuine NSIS
 ; uninstaller, built around the ACTUAL hook macro (included verbatim, never re-implemented), run on
-; Windows under each of the three command lines it must tell apart.
+; Windows under each of the three command lines it must tell apart (one of them — /UPDATE — is
+; dead code in 2.8.1 silent updates and pinned as defense-in-depth; see hooks.nsi header).
 ;
 ; Observing the decision without touching a real trust store: the harness watches the hook's OTHER
 ; side effect, `RMDir /r "$PROFILE\.aztec-accelerator\certs"`. CI seeds a marker file in that directory
