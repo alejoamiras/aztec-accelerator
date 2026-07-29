@@ -345,6 +345,11 @@ try {
     Copy-Item -Recurse -Force $InstallRoot $QDir
     $CopyExe = Get-ChildItem -Path $QDir -Recurse -Filter $N1BinaryName | Select-Object -First 1
     if (-not $CopyExe) { Write-Error "copy-initiator — copied exe ($N1BinaryName) not found under $QDir"; exit 1 }
+    # Hash the copy BEFORE the update: on the dispatch path the copy has the SAME file name as N,
+    # so "is there an AztecAccelerator.exe beside the copy" is trivially true and cannot detect an
+    # install into the copy's dir. The copy's BYTES staying N-1's is what proves it (the first
+    # version of this assert was name-based and failed on the copy's own existence).
+    $CopyHashBefore = (Get-FileHash $CopyExe.FullName -Algorithm SHA256).Hash
     Log "copy-initiator: launching the COPY ($($CopyExe.FullName)); installed dir left closed"
     $QProc = Start-Process -FilePath $CopyExe.FullName -PassThru
 
@@ -376,7 +381,9 @@ try {
     # N must be installed (and running) at the INSTALL dir, not beside the copy.
     $NewExe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $NBinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $NewExe) { Dump-Logs; Write-Error "copy-initiator FAILED — $NBinaryName absent from $InstallRoot; the installer did not target the install dir."; exit 1 }
-    if (Test-Path (Join-Path $QDir $NBinaryName)) { Dump-Logs; Write-Error "copy-initiator FAILED — N was installed BESIDE the copy ($QDir)."; exit 1 }
+    if ((Get-FileHash $CopyExe.FullName -Algorithm SHA256).Hash -ne $CopyHashBefore) {
+      Dump-Logs; Write-Error "copy-initiator FAILED — the copy's bytes changed: the installer wrote N into the copy's directory ($QDir) instead of the install dir."; exit 1
+    }
     # F1 ownership gate: autostart is OFF and no process owns an entry, so nothing may have armed
     # crash recovery — least of all the copy.
     & schtasks /Query /TN $TaskName *> $null

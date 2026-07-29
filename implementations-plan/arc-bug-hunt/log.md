@@ -80,3 +80,16 @@ Windows-only code could not be compiled locally (cross-compiling the C deps — 
 needs a Windows C toolchain we don't have). Mitigation: the winreg API was verified against the
 vendored 0.55 sources (`io::Result` on both calls, empty-name default-value read) and the exact
 idiom already proven on Windows in `autostart.rs`; CI's Windows legs compile it.
+
+### Validation run 1 (30499816033): the regression test's OWN assert was malformed
+
+`copy-initiator` failed — on my assert, not the product. Order matters: every earlier assert
+passed, including the two that carry the proof (transaction files GONE ⇒ N reconciled the
+copy-initiated marker, i.e. the F2 fix works end-to-end; and N present in the install dir). The
+failure was `Test-Path $QDir\AztecAccelerator.exe` → "N was installed BESIDE the copy", which is
+trivially TRUE because on the dispatch path the copy has the SAME file name as N. A name-existence
+check cannot distinguish "the installer wrote N here" from "the copy I made is still here".
+Replaced with a SHA-256 before/after comparison of the copy's own bytes — the property actually
+being claimed. Lesson: when two things share a name, identity asserts must key on content, not
+existence; the dual name-regime introduced by the rename makes this a recurring trap in this
+script.
