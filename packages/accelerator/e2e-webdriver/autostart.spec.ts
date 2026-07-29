@@ -145,7 +145,7 @@ describe("Autostart self-heal (real IPC)", () => {
 
     const program = readStoredProgram();
     expect(fs.existsSync(program)).toBe(true);
-    expect(path.basename(program).startsWith("aztec-accelerator")).toBe(true);
+    expect(path.basename(program).startsWith("AztecAccelerator")).toBe(true);
 
     if (PLATFORM === "darwin") {
       // C1 end-to-end: the seed included KeepAlive/ThrottleInterval (crash recovery armed when

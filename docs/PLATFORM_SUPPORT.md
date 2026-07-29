@@ -26,7 +26,7 @@ within 30 days of expiry.
 |----|-------------|---------|-------------------|-----------|
 | **macOS** | login Keychain (`security`) | password dialog on install | renewal consent window → password | Settings "Remove certificate trust"; or Keychain Access |
 | **Windows** | CurrentUser `Root` (`certutil.exe`) | the wizard's *Start* click (no separate dialog is guaranteed) | renewal consent window | NSIS uninstaller removes it; or Settings "Remove certificate trust" |
-| **Linux** | user NSS DBs — `~/.pki/nssdb` (Chrome/Chromium/Brave/Edge) + each Firefox profile — via `certutil` | the wizard's *Start* click (no OS dialog exists) | silent (user DBs need no auth) | Settings "Remove certificate trust"; or `aztec-accelerator --remove-ca-trust` |
+| **Linux** | user NSS DBs — `~/.pki/nssdb` (Chrome/Chromium/Brave/Edge) + each Firefox profile — via `certutil` | the wizard's *Start* click (no OS dialog exists) | silent (user DBs need no auth) | Settings "Remove certificate trust"; or `AztecAccelerator --remove-ca-trust` |
 
 **Linux notes.** Requires `certutil` (the `.deb` depends on `libnss3-tools`; the AppImage detects it and
 degrades with an install hint if absent). Per-store trust status is shown honestly in the wizard/Settings.

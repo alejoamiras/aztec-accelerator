@@ -88,9 +88,9 @@ jobs:
           EXE=""
           [ "$RUNNER_OS" = "Windows" ] && EXE=".exe"
           case "${{ inputs.mode }}" in
-            release)     APP_CMD="./src-tauri/target/release/aztec-accelerator$EXE" ;;
-            built-debug) APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;;
-            *)           APP_CMD="./src-tauri/target/debug/aztec-accelerator$EXE" ;; # dev: built above
+            release)     APP_CMD="./src-tauri/target/release/AztecAccelerator$EXE" ;;
+            built-debug) APP_CMD="./src-tauri/target/debug/AztecAccelerator$EXE" ;;
+            *)           APP_CMD="./src-tauri/target/debug/AztecAccelerator$EXE" ;; # dev: built above
 
           esac
           $APP_CMD > /tmp/tauri.log 2>&1 &
@@ -155,12 +155,12 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             # Git Bash has no pkill; use taskkill on the native processes (// escapes
             # the flags so MSYS doesn't path-mangle them).
-            taskkill //F //IM aztec-accelerator.exe 2>/dev/null || true
+            taskkill //F //IM AztecAccelerator.exe 2>/dev/null || true
             taskkill //F //IM msedgewebview2.exe 2>/dev/null || true
           else
             kill "$TAURI_PID" 2>/dev/null || true
             pkill -P "$TAURI_PID" 2>/dev/null || true
-            pkill -f "aztec-accelerator" 2>/dev/null || true
+            pkill -f "AztecAccelerator" 2>/dev/null || true
             pkill -f stalonetray 2>/dev/null || true
             pkill -f Xvfb 2>/dev/null || true
             kill "$DBUS_SESSION_BUS_PID" 2>/dev/null || true
