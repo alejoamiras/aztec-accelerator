@@ -412,6 +412,10 @@ try {
       Start-Sleep -Seconds 1
     }
     if (-not $rejected) { Dump-Logs; Write-Error "BARRIER FAILED — Q fetched latest.json but never logged the D22 live-window rejection; the no-second-update decision was not observed."; exit 1 }
+    # The milestone proves the DECISION was logged; a regression that logs it but still schedules
+    # the download asynchronously would pass an immediate sample. Give such a download a bounded
+    # window to reach the feed before sampling (arc-hunt round 1).
+    Start-Sleep -Seconds 5
     $D2 = @(Select-String -Path $FeedLog -Pattern "/releases/download/" -ErrorAction SilentlyContinue).Count
     if ($D2 -ne $D1) { Dump-Logs; Write-Error "BARRIER FAILED — a SECOND artifact download happened inside the window ($D1 -> $D2); D22 did not reject while the marker is live."; exit 1 }
     # Suppressions: marker untouched, Run value byte-identical (no heal), task still absent (no rearm).

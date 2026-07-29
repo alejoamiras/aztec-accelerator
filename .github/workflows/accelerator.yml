@@ -60,6 +60,14 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - '.github/workflows/accelerator.yml'
+              # test:scripts (this job) runs the binary-identity guard that greps these
+              # workflows — a workflow-only PR must not skip the very test that pins it
+              # (arc-hunt round 1: desktop had them, integration didn't, and the guard
+              # runs in the integration-gated job).
+              - '.github/workflows/_e2e-webdriver.yml'
+              - '.github/workflows/_e2e-updater-windows.yml'
+              - '.github/workflows/smoke-updater-windows.yml'
+              - '.github/workflows/release-accelerator.yml'
               - '.github/workflows/_e2e.yml'
               - '.github/workflows/_e2e-webdriver.yml'
               - '.github/actions/**'
