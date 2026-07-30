@@ -208,3 +208,36 @@ external writer; the installer_arg pin catches singular and plural builder metho
 unknown-owner policy across the three arming contexts, then STOP — after that, residual risk should
 be dominated by real-release/real-fleet behaviour rather than more static rereading. Round 5 is
 scoped exactly to that.
+
+## Round 5 (resumed, scoped to the target codex itself named): 3 findings, 2 release-blocking
+
+**r5 #1 — CONFIRMED (High, fixed): the marker cleanup paths bypassed the gate.**
+Three `post_create_failure_cleanup` call sites (`updater.rs`) passed the RAW
+`enable_crash_recovery`. So a copy-initiated update whose marker publication / handoff write /
+install FAILED would still re-arm recovery at the COPY on the way out — the F1 theft, reached
+through the failure path instead of the happy path. The copy smoke only exercises a SUCCESSFUL
+install, and the existing cleanup unit tests inject ordering counters, not ownership. Fixed: all
+three cleanups now take `gated_enable_crash_recovery` (made `pub(crate)`).
+
+**r5 #2 — CONFIRMED (High, fixed) — and PRE-EXISTING, not introduced by this work.**
+My r3 AppImage fix corrected only the gate's COMPARISON path; `crash_recovery::enable_impl`
+(Linux) still serialized `current_exe()` into `ExecStart`, which inside an AppImage is the
+ephemeral `/tmp/.mount_*` squashfs. The recovery unit therefore pointed at a path that vanishes
+exactly when recovery is needed — for every AppImage user, since before this arc. Fixed with a pure
+`recovery_target(appimage, exe)` helper (prefers `$APPIMAGE`, ignores an empty value) + unit table.
+This is the arc's clearest evidence for hunting the same code repeatedly: four rounds of ownership
+work were needed before anyone looked at what the writer actually writes.
+
+**r5 #3 — CONFIRMED (Medium, fixed): macOS lost its exemption.**
+Parameterising the gate made the whole non-Windows branch gate, including macOS — but macOS
+crash recovery patches KeepAlive into the app's own fixed plist and writes NO executable path, so
+it cannot steal; gating it only widened the `Unreadable` residual (a managed plist using `Program`
+instead of the owned `ProgramArguments` shape classifies Unreadable). macOS arms unconditionally
+again; Linux keeps the AppImage-aware gate.
+
+Checked clean (r5): in all three Windows arming contexts a declined reconcile arm still removes the
+marker without double-arming; parse-unreadable users recover via OFF→ON. Honest limit it noted:
+a TRULY ACL-unreadable entry cannot be repaired from inside the app (Repair skips Unreadable) —
+management must restore access. Destination hoisting and the run-baselined marker proof hold.
+
+Loop judgement: CONTINUE narrowly — audit only these two fix paths, then STOP.

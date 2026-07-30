@@ -502,7 +502,9 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
                 crate::update_marker::post_create_failure_cleanup(
                     &paths,
                     &crate::autostart::intent_enabled_now,
-                    &crate::crash_recovery::enable_crash_recovery,
+                    // r5 #1: the GATED arm — cleanup re-arms recovery, and a copy-initiated
+                    // update whose marker write failed must not capture the task on the way out.
+                    &crate::autostart::gated_enable_crash_recovery,
                     &crate::crash_recovery::disable_crash_recovery,
                 );
                 guard.defuse();
@@ -516,7 +518,8 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
             crate::update_marker::post_create_failure_cleanup(
                 &paths,
                 &crate::autostart::intent_enabled_now,
-                &crate::crash_recovery::enable_crash_recovery,
+                // r5 #1: gated — see the sibling cleanup above.
+                &crate::autostart::gated_enable_crash_recovery,
                 &crate::crash_recovery::disable_crash_recovery,
             );
             guard.defuse();
@@ -555,7 +558,8 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
                         crate::update_marker::post_create_failure_cleanup(
                             &marker_paths,
                             &crate::autostart::intent_enabled_now,
-                            &crate::crash_recovery::enable_crash_recovery,
+                            // r5 #1: gated — see the sibling cleanups above.
+                            &crate::autostart::gated_enable_crash_recovery,
                             &crate::crash_recovery::disable_crash_recovery,
                         );
                     }

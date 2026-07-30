@@ -1521,7 +1521,7 @@ pub(crate) fn implicit_arm_gate(reference: &Path) -> bool {
 /// recovery to CURRENT intent, but must not arm on behalf of a foreign owner. Windows has no
 /// AppImage indirection, so `current_exe()` is the ownership reference.
 #[cfg(windows)]
-fn gated_enable_crash_recovery() -> Result<(), String> {
+pub(crate) fn gated_enable_crash_recovery() -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot determine own path for the recovery arm: {e}"))?;
     if implicit_arm_gate(&exe) {
@@ -1581,7 +1581,12 @@ pub fn startup_rearm(app: &tauri::AppHandle) {
         // keyed on INTENT, never health — a Broken entry still means "the user wants autostart".
         match intent_enabled(app) {
             Ok(true) => {
-                // AppImage-aware ownership reference (r3 #3): desired_path resolves $APPIMAGE.
+                // Linux gates (systemd ExecStart embeds a path, so a copy could capture it) with an
+                // AppImage-aware reference — desired_path resolves $APPIMAGE (r3 #3). macOS does
+                // NOT gate (r5 #3): its crash recovery patches KeepAlive into the app's own fixed
+                // plist and writes no executable path, so it cannot steal another binary's entry —
+                // gating there would only widen the Unreadable residual for no safety gain.
+                #[cfg(target_os = "linux")]
                 let permitted = match desired_path(app) {
                     Ok(reference) => implicit_arm_gate(&reference),
                     Err(e) => {
@@ -1589,6 +1594,8 @@ pub fn startup_rearm(app: &tauri::AppHandle) {
                         false
                     }
                 };
+                #[cfg(target_os = "macos")]
+                let permitted = true;
                 if permitted {
                     if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
                         tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
