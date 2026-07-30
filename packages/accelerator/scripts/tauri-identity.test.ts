@@ -79,6 +79,17 @@ describe("NSIS install-destination mirror (arc-hunt r2 F2)", () => {
     expect(conf.bundle.windows.nsis.installMode).toBe("currentUser");
   });
 
+  test("no RUNTIME installer arg is passed to the updater builder", () => {
+    // A `.installer_arg("/D=...")` on the updater builder would make NSIS install where the
+    // marker's mirror cannot predict, and the conf-level pins below would stay green (r3 #5).
+    const rustSrc = fs
+      .readdirSync(path.join(SRC_TAURI, "src"), { recursive: true })
+      .filter((f): f is string => typeof f === "string" && f.endsWith(".rs"))
+      .map((f) => fs.readFileSync(path.join(SRC_TAURI, "src", f), "utf8"))
+      .join("\n");
+    expect(rustSrc).not.toContain("installer_arg");
+  });
+
   test("no installer argument may override $INSTDIR", () => {
     // A /D flag (or nsis.installerArgs carrying one) would make NSIS install somewhere the
     // mirror cannot predict. The updater passes /UPDATE only.

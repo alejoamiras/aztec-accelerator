@@ -93,3 +93,61 @@ Replaced with a SHA-256 before/after comparison of the copy's own bytes — the 
 being claimed. Lesson: when two things share a name, identity asserts must key on content, not
 existence; the dual name-regime introduced by the rename makes this a recurring trap in this
 script.
+
+### Validation run 2 (30500599861): copy-initiator GREEN on real Windows
+
+"copy-driven update installed at the install dir, transaction fully reconciled with the copy still
+present, and no crash-recovery task armed" — the end-to-end regression proof for F1 (OFF-intent
+implicit arm) and F2 (destination mirror). Note this run predates the round-3 fixes below; re-run
+after them.
+
+## Round 3 (resumed): 5 findings, 3 release-blocking — ALL introduced by my round-2 fixes
+
+The loop's most valuable round: the fixes themselves were the bug source.
+
+**r3 #1 — CONFIRMED (High, fixed): the gate could strand recovery permanently.**
+`gated_enable_crash_recovery` returned `Ok(())` when it DECLINED, so reconciliation treated a
+decline as a successful arm and deleted the marker. On the rename boundary with a read-only/ACL'd
+autostart entry (readable, not writable): entry is `Broken` (old exe deleted) → gate declined →
+marker removed → heal failed to write → every later rearm kept declining the still-`Broken`
+entry. Crash recovery gone permanently, nothing left to converge it. Same for a parse-unreadable
+artifact.
+**Fix — the rule is now narrowed to exactly the theft it must stop**: decline ONLY
+`Healthy { points_elsewhere: true }` (another live binary provably owns a working entry). `Broken`
+arms (nobody owns a working entry; whoever launched becomes owner — precisely what the heal writes
+next, so this matches piece 1's audited resolve-based semantics). `Unreadable`/`Absent` arm (no
+proof of theft; declining would silently drop recovery for endpoint-managed users). This mirrors
+piece 2's proven-absence epistemics: act only on what can be PROVEN, and never let an unprovable
+state become permanent.
+
+**r3 #2 — CONFIRMED (High, fixed): the new abort path ran after the global disarm.**
+`nsis_install_destination()` was called inside the critical section — after `record_pending` and
+after `disable_crash_recovery()`. An unreadable registry therefore aborted with an installed
+instance's recovery task already deleted and no marker to reconcile it back (and the guard's
+ownership-gated rearm correctly refuses when a copy is the initiator). **Fix**: hoist the
+destination resolution above the critical section — it is a read-only registry+env lookup, so an
+error now aborts before ANY state changes.
+
+**r3 #3 — CONFIRMED (High, fixed): AppImage owners could never pass the gate.**
+Linux autostart deliberately stores the real `.AppImage` path while `current_exe()` is the
+ephemeral `/tmp/.mount_*` squashfs (`desired_path`, D12) — so my gate computed
+`points_elsewhere: true` on EVERY AppImage launch. After a logout destroyed the mount recorded in
+the systemd unit, no launch would ever rewrite it. **Fix**: the gate takes the ownership
+`reference` as a parameter; the Linux/macOS caller passes `desired_path(app)` (which resolves
+`$APPIMAGE`), Windows callers pass `current_exe()` (no AppImage indirection there). The pure
+decision table never modelled this identity split — the lesson is that a "pure core" only tests
+the logic, not whether callers feed it the right identity.
+
+**r3 #4 — CONFIRMED (Medium, fixed): copy mode could pass without a marker ever existing.**
+It only asserted the transaction files were ABSENT afterwards, which also holds if marker creation
+was skipped entirely. `updater.rs` now logs `update window marker armed` on successful create
+(D24-safe: version only) and the smoke requires that line before trusting the absence assert.
+
+**r3 #5 — CONFIRMED (Medium, fixed): the `/D` pin missed runtime builder args.**
+A `.installer_arg("/D=…")` on the updater builder would redirect NSIS while both conf-level
+assertions stayed green. The identity test now greps all Rust sources for `installer_arg` —
+mutation-tested (inject the string ⇒ 1 fail; remove ⇒ 12 pass).
+
+Checked clean (r3): the currentUser destination mirror vs the 2.8.1 template; the old publisher
+key ignored by both sides; 8.3 names, casing, junctions, trailing separators converge through
+canonicalization; fresh explicit ON; macOS and Linux non-AppImage; the SHA-based copy assert.

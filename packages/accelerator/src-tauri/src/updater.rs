@@ -390,6 +390,21 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         }
     }
 
+    // Arc-hunt r3 #2: resolve the installer's destination BEFORE anything is mutated. It is a
+    // read-only registry+env lookup, and computing it inside the critical section meant an
+    // unreadable registry aborted AFTER crash recovery had been disarmed — leaving a legitimate
+    // installed instance's task deleted with no marker to reconcile it back.
+    #[cfg(target_os = "windows")]
+    let expected_install = match nsis_install_destination() {
+        Ok(dest) => canonicalize_expected(dest),
+        Err(e) => {
+            tracing::error!(
+                "cannot determine the install destination ({e}); aborting before any state change"
+            );
+            return;
+        }
+    };
+
     // ── Windows: the update-window critical section (piece-2 plan §4) ──
     // autostart.lock spans intent-read → disarm → marker+handoff create, and NOTHING else: the
     // held lock freezes owned intent mutations, which is what keeps the snapshot honest inside it
@@ -443,16 +458,7 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         // NOT current_exe (arc-hunt r2 F2: a stray copy driving an update would record its own
         // path, and the relaunched N would suppress reconciliation until the deadline). For the
         // installed instance the two coincide.
-        let expected = match nsis_install_destination() {
-            Ok(dest) => canonicalize_expected(dest),
-            Err(e) => {
-                // Publishing a guessed path would arm a marker N can never satisfy — abort;
-                // the guard's Drop rearms from the snapshot (ownership-gated) and the next
-                // check retries.
-                tracing::warn!("cannot determine install destination ({e}); update aborted");
-                return;
-            }
-        };
+        let expected = expected_install.clone();
         let payload = crate::update_marker::MarkerPayload::new(
             &version,
             &expected,
@@ -460,7 +466,12 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
             crate::update_marker::now_unix(),
         );
         match crate::update_marker::create_new(&paths, &payload, crate::update_marker::now_unix()) {
-            Ok(()) => {}
+            Ok(()) => {
+                // Observable proof the transaction was armed (D24: version/nonce only, no paths).
+                // The Windows smoke asserts this line so "no transaction files afterwards" cannot
+                // pass by never having created one (arc-hunt r3 #4).
+                tracing::info!(candidate = %version, "update window marker armed");
+            }
             Err(crate::update_marker::CreateErr::Live) => {
                 // Raced by a FOREIGN window between the top-of-fn check and here. Never delete
                 // it — and never REARM into it either: "no process rearms while a marker is
@@ -567,9 +578,15 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
 fn rearm_crash_recovery_if_enabled(was_enabled: bool) {
     if was_enabled {
         // Arc-hunt r2 F1: the guard rearm is an IMPLICIT path — a stray copy whose update
-        // aborted must not re-point the recovery task at itself on the way out.
-        if !crate::autostart::implicit_arm_gate() {
-            return;
+        // aborted must not re-point the recovery task at itself on the way out. (Windows: no
+        // AppImage indirection, so current_exe is the ownership reference.)
+        match std::env::current_exe() {
+            Ok(exe) if crate::autostart::implicit_arm_gate(&exe) => {}
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!("own path unresolvable ({e}); post-update rearm skipped");
+                return;
+            }
         }
         // C8 (D12): log-and-continue — a post-update rearm hiccup must not abort, but is never swallowed.
         if let Err(e) = crate::crash_recovery::enable_crash_recovery() {

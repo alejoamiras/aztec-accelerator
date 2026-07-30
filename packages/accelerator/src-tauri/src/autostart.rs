@@ -1454,65 +1454,57 @@ pub fn startup_reconcile() -> bool {
 
 /// Arc-hunt r2 F1 (pure decision): may an IMPLICIT path — startup rearm, the marker reconcile's
 /// arm, the post-update guard rearm — (re)write crash recovery? The Windows task XML and the
-/// Linux systemd unit both serialize `current_exe()`, so an implicit arm from a stray COPY
-/// re-points recovery at the copy: the exact entry-stealing that resolve-based healing forbids
-/// for the Run value (`StoredTarget::Healthy.points_elsewhere` documents "a healthy entry is
-/// never silently stolen by whichever copy launched last" — this extends that discipline to the
-/// task). Only `Healthy { points_elsewhere: false }` may arm. Broken/Unreadable => false: the
-/// user's INTENT still means "autostart wanted" (the doctrine at `intent_enabled_now`), but the
-/// EXECUTOR must be the entry's owner — in the shipped startup flow the heal runs before the
-/// rearm, so the installed exe becomes owner first, while a stray copy never does. Explicit
-/// user actions (`set_enabled(true)`, repair) intentionally arm the CURRENT exe and stay
-/// ungated. macOS is exempt: its crash recovery patches KeepAlive into the stored entry itself
-/// and cannot steal.
+/// Linux systemd unit both serialize the launching binary's path, so an implicit arm from a stray
+/// COPY re-points recovery at the copy: the entry-stealing that resolve-based healing already
+/// forbids for the autostart value itself (`StoredTarget::Healthy.points_elsewhere` — "a healthy
+/// entry is never silently stolen by whichever copy launched last").
+///
+/// The rule is deliberately narrow — **decline only when someone else PROVABLY owns a working
+/// entry** (r3 #1/#3, mirroring piece 2's proven-absence epistemics):
+/// - `Healthy { points_elsewhere: true }` → DECLINE. Another live binary owns it; that is the bug.
+/// - `Healthy { points_elsewhere: false }` → allow. We are the owner.
+/// - `Broken` → allow. Nobody owns a working entry; whoever launched becomes the owner, which is
+///   exactly what the heal (running right after) writes anyway. Declining here would STRAND users
+///   whose heal cannot write (read-only/ACL'd entry): the marker reconcile removes the marker,
+///   the heal fails, and every later rearm would keep declining a still-`Broken` entry — crash
+///   recovery gone permanently, with nothing to converge it.
+/// - `Unreadable` → allow. We cannot prove theft, and pre-gate behaviour armed here; declining
+///   would silently drop crash recovery for exactly the endpoint-managed users who can least
+///   diagnose it.
+/// - `Absent` → allow (unreachable in practice: intent is false, so no caller arms).
 pub(crate) fn implicit_arm_allowed(stored: &StoredTarget) -> bool {
-    matches!(
+    !matches!(
         stored,
         StoredTarget::Healthy {
-            points_elsewhere: false,
+            points_elsewhere: true,
             ..
         }
     )
 }
 
-/// Effectful wrapper over [`implicit_arm_allowed`] for the platforms whose serializers embed
-/// `current_exe()`. Conservative on unknowns (no exe, unreadable entry): NOT arming is a
-/// one-session protection gap that self-heals at the next launch; wrongly arming hands the
-/// recovery task to a copy that may be deleted tomorrow.
-#[cfg(any(windows, target_os = "linux"))]
-pub(crate) fn implicit_arm_gate() -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        tracing::warn!("implicit crash-recovery arm skipped: own path unresolvable");
-        return false;
-    };
-    let allowed = implicit_arm_allowed(&read_stored_target(Some(&exe)));
+/// Effectful wrapper over [`implicit_arm_allowed`]. `reference` is the path that IDENTIFIES us for
+/// ownership purposes — callers pass [`desired_path`] where an `AppHandle` exists, because on Linux
+/// an AppImage's identity is the `.AppImage` file, NOT `current_exe()` (which points into the
+/// ephemeral `/tmp/.mount_*` squashfs): comparing the mount path would make every AppImage launch
+/// look like a foreign copy and permanently strand those users' crash recovery (r3 #3).
+pub(crate) fn implicit_arm_gate(reference: &Path) -> bool {
+    let allowed = implicit_arm_allowed(&read_stored_target(Some(reference)));
     if !allowed {
         tracing::warn!(
-            "implicit crash-recovery arm skipped: this process does not own the autostart entry"
+            "implicit crash-recovery arm skipped: another installed copy owns the autostart entry"
         );
     }
     allowed
 }
 
-/// Platform split for the startup rearm: gate where the serializer embeds current_exe.
-fn startup_arm_permitted() -> bool {
-    #[cfg(any(windows, target_os = "linux"))]
-    {
-        implicit_arm_gate()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        true
-    }
-}
-
-/// Reconcile's arm callback (arc-hunt r2 F1): the marker-removal transaction reconciles recovery
-/// to CURRENT intent, but must not arm from a non-owner. Skipping here is safe even for the
-/// owner: on the rename boundary the stored value is Broken until the heal (which runs right
-/// after a Proceed), and `startup_rearm` completes the arm in the same launch.
+/// Reconcile's arm callback (arc-hunt r2 F1), Windows: the marker-removal transaction reconciles
+/// recovery to CURRENT intent, but must not arm on behalf of a foreign owner. Windows has no
+/// AppImage indirection, so `current_exe()` is the ownership reference.
 #[cfg(windows)]
 fn gated_enable_crash_recovery() -> Result<(), String> {
-    if implicit_arm_gate() {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot determine own path for the recovery arm: {e}"))?;
+    if implicit_arm_gate(&exe) {
         crate::crash_recovery::enable_crash_recovery()
     } else {
         Ok(())
@@ -1542,7 +1534,14 @@ pub fn startup_rearm(app: &tauri::AppHandle) {
         }
         match intent_enabled_now() {
             Ok(true) => {
-                if startup_arm_permitted() {
+                let permitted = match std::env::current_exe() {
+                    Ok(exe) => implicit_arm_gate(&exe),
+                    Err(e) => {
+                        tracing::warn!("own path unresolvable ({e}); crash recovery not re-armed");
+                        false
+                    }
+                };
+                if permitted {
                     if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
                         tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
                     }
@@ -1562,7 +1561,15 @@ pub fn startup_rearm(app: &tauri::AppHandle) {
         // keyed on INTENT, never health — a Broken entry still means "the user wants autostart".
         match intent_enabled(app) {
             Ok(true) => {
-                if startup_arm_permitted() {
+                // AppImage-aware ownership reference (r3 #3): desired_path resolves $APPIMAGE.
+                let permitted = match desired_path(app) {
+                    Ok(reference) => implicit_arm_gate(&reference),
+                    Err(e) => {
+                        tracing::warn!("own path unresolvable ({e}); crash recovery not re-armed");
+                        false
+                    }
+                };
+                if permitted {
                     if let Err(e) = crate::crash_recovery::enable_crash_recovery() {
                         tracing::warn!("startup crash-recovery rearm failed (autostart on): {e}");
                     }
@@ -1712,23 +1719,25 @@ mod tests {
     // be implicitly armed; every other state either has no owner to protect or an owner that
     // is not us.
     #[test]
-    fn implicit_arm_only_for_owned_healthy_entry() {
+    fn implicit_arm_declines_only_proven_foreign_owner() {
         use super::{implicit_arm_allowed, StoredTarget};
-        assert!(implicit_arm_allowed(&StoredTarget::Healthy {
-            program: std::path::PathBuf::from("/x"),
-            points_elsewhere: false,
-        }));
+        // The ONLY decline: a working entry provably owned by another binary (the F1 theft).
         assert!(!implicit_arm_allowed(&StoredTarget::Healthy {
             program: std::path::PathBuf::from("/x"),
             points_elsewhere: true,
         }));
-        assert!(!implicit_arm_allowed(&StoredTarget::Broken {
+        // Everything else arms — declining would strand users with no path back (r3 #1/#3).
+        assert!(implicit_arm_allowed(&StoredTarget::Healthy {
+            program: std::path::PathBuf::from("/x"),
+            points_elsewhere: false,
+        }));
+        assert!(implicit_arm_allowed(&StoredTarget::Broken {
             program: "gone".into(),
         }));
-        assert!(!implicit_arm_allowed(&StoredTarget::Unreadable {
+        assert!(implicit_arm_allowed(&StoredTarget::Unreadable {
             reason: "io".into(),
         }));
-        assert!(!implicit_arm_allowed(&StoredTarget::Absent));
+        assert!(implicit_arm_allowed(&StoredTarget::Absent));
     }
 
     use super::*;

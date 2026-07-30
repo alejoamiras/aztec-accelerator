@@ -369,6 +369,12 @@ try {
     }
     if (-not $updated) { Dump-Logs; Write-Error "copy-initiator FAILED — /health never reported $NVersion; the copy-driven update did not complete."; exit 1 }
 
+    # The transaction must have EXISTED: "files absent afterwards" alone also passes if marker
+    # creation was skipped entirely and the install proceeded (r3 #4). updater.rs logs
+    # "update window marker armed" on successful create — require it.
+    if (-not (Select-String -Path "$env:LOCALAPPDATA\aztec-accelerator\logs\*.log" -Pattern "update window marker armed" -ErrorAction SilentlyContinue)) {
+      Dump-Logs; Write-Error "copy-initiator INCONCLUSIVE — no 'update window marker armed' log line: the copy never created a marker, so the reconciliation assert below would pass vacuously."; exit 1
+    }
     # THE regression assert: N (relaunched from the INSTALL dir) reconciled the transaction away.
     # Pre-fix the marker held the copy's path, N's exe_canon differed, the copy still existed
     # (so absence was not provable) and reconciliation was suppressed — leaving these behind.
