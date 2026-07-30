@@ -241,3 +241,34 @@ a TRULY ACL-unreadable entry cannot be repaired from inside the app (Repair skip
 management must restore access. Destination hoisting and the run-baselined marker proof hold.
 
 Loop judgement: CONTINUE narrowly — audit only these two fix paths, then STOP.
+
+### CI caught what every local gate structurally could not: a misplaced `cfg` boundary
+
+PR #429's macOS legs failed to COMPILE (`enable_impl` defined multiple times; `SYSTEMD_NAME`,
+`systemd_exec_start`, `recovery_target` not found). Cause: my r5 #2 edit inserted `recovery_target`
++ the reopened `fn enable_impl` header BETWEEN the linux `#[cfg(target_os = "linux")]` attribute and
+the function it guarded. The cfg then applied to `recovery_target`, and `enable_impl` — one of THREE
+platform variants — lost its gate entirely, so it was compiled on every target and collided with
+the macOS/Windows definitions. On Linux everything still compiled, which is exactly why the local
+gate passed. Second occurrence of this class in the arc (piece 2's `pub(crate)` E0603 was the
+first): **anchor-based edits near cfg attributes can silently move an item out of its gate, and a
+single-platform build cannot see it.**
+
+Fix: restore attribute adjacency (each of the three `enable_impl`s verified gated by an awk pass
+over the file).
+
+**New local capability — a REAL second-platform compile gate.** Earlier in this session I claimed
+Windows-only code "cannot be compiled locally" (the msvc target dies cross-compiling ring/aws-lc-sys
+C deps). That claim was wrong for `x86_64-pc-windows-gnu`: mingw is present, and the only blocker
+was tauri-build wanting a sidecar for the triple. With an empty, gitignored
+`binaries/bb-x86_64-pc-windows-gnu.exe` placeholder:
+
+    cargo check  --target x86_64-pc-windows-gnu --lib
+    cargo clippy --target x86_64-pc-windows-gnu --all-targets   # warnings here are test-only noise;
+                                                                # CI's clippy gate is ubuntu-only
+
+**Mutation-proved live**: a deliberate type error inside the Windows-only
+`nsis_install_destination()` makes the check fail; reverting restores green. So this gate really
+does compile the `cfg(windows)` paths — it would have caught BOTH platform breaks in this arc.
+Cost: ~5s incremental after the first build. This belongs in the local gate for any change touching
+platform-gated code.

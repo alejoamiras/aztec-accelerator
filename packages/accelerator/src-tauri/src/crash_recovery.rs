@@ -238,9 +238,6 @@ fn systemd_exec_start(exe: &std::path::Path) -> Option<String> {
     Some(format!("\":{}\"", s.replace('%', "%%")))
 }
 
-/// Create and enable a systemd user service with `Restart=on-failure`.
-/// Call this after `manager.enable()`.
-#[cfg(target_os = "linux")]
 /// The path a Linux recovery unit must relaunch: the AppImage file when running from one (its
 /// mount is ephemeral), else the executable itself. Pure so the choice is unit-tested without
 /// touching process env in a parallel test run.
@@ -255,6 +252,9 @@ fn recovery_target(
     }
 }
 
+/// Create and enable a systemd user service with `Restart=on-failure`.
+/// Call this after `manager.enable()`.
+#[cfg(target_os = "linux")]
 fn enable_impl() -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot determine executable path for systemd service: {e}"))?;
