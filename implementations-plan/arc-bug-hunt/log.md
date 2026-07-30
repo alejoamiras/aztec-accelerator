@@ -151,3 +151,60 @@ mutation-tested (inject the string ⇒ 1 fail; remove ⇒ 12 pass).
 Checked clean (r3): the currentUser destination mirror vs the 2.8.1 template; the old publisher
 key ignored by both sides; 8.3 names, casing, junctions, trailing separators converge through
 canonicalization; fresh explicit ON; macOS and Linux non-AppImage; the SHA-based copy assert.
+
+### Validation runs 3+4 (30501446852 copy-initiator, 30501460093 barrier): both GREEN on the r3 code
+
+barrier passing matters as much as the new mode: it proves the ownership gate did not break the
+marker-removal transaction's own rearm path.
+
+## Round 4 (resumed): 4 findings, 1 release-blocking — the High is a correction to r3's correction
+
+**r4 #1 — CONFIRMED (High, fixed): allowing `Unreadable` to arm reopened the original theft.**
+Concrete Windows path, verified in the source: endpoint management writes a WORKING Run value with
+arguments (`"C:\Installed\AztecAccelerator.exe" --managed`); `run_value_candidates` rejects
+trailing arguments as "not the owned format" (`autostart.rs:556`) ⇒ `Unreadable`, while
+`artifact_present` reads presence WITHOUT parsing ⇒ intent still ON. So my r3 "allow Unreadable"
+let a stray copy arm recovery at itself — the exact F1 bug, reachable via startup rearm and via the
+updater guard.
+**Fix**: `Unreadable` DECLINES again; `Broken` still arms (that is what fixed r3 #1's stranding,
+and it is the rename-boundary case that affects every user). The final rule: arm iff proven-ours,
+Broken, or Absent; decline iff proven-foreign or unknowable.
+**Disagreement with codex, deliberate**: it proposed a per-caller policy matrix (allow unknown at
+reconcile, decline at startup/guard). Rejected as machinery for a rare configuration — a single
+rule kills the theft in all three contexts and keeps the boundary convergence. The cost is stated
+as an ACCEPTED RESIDUAL in the code: unparseable/managed entries get no implicit rearm, so after an
+update their recovery task stays disarmed until an explicit toggle or Repair. Safety over
+availability, matching the module's standing "never act on what we don't understand" doctrine (the
+heal refuses `Unreadable` too). Noted for later: arming recovery at the INSTALL DESTINATION rather
+than `current_exe` would give both properties, but it changes audited crash-recovery serialization
+on all three platforms — not worth it now.
+
+**r4 #2 — CONFIRMED (Medium, fixed): the "before any state change" abort still wrote `pending`.**
+`record_pending` ran before the destination lookup, so a bad install-location value aborted with
+`pending = candidate` recorded. F-004's `candidate_allowed` then requires `candidate >= pending`
+(`core/src/updater_state.rs:113-130`) — a WITHDRAWN release would block the fixed, lower-but-newer
+one forever. Fix: the lookup now precedes `record_pending` too, so the abort truly mutates nothing.
+
+**r4 #3 — ACCEPTED residual (Medium): cached destination vs a concurrent registry writer.**
+Between our read and NSIS's own `.onInit` re-read, another installer/management agent could
+rewrite the install-location key; the marker would then predict A while NSIS installs at B, and
+with A still present, proven-absence cannot rescue it. Unfixable without cooperation from the
+installer (the window exists regardless of where we read), rare (requires a concurrent writer),
+and BOUNDED: the marker expires on its in-payload deadline and the next launch removes it via the
+Expire path. Documented, not coded.
+
+**r4 #4 — CONFIRMED (Medium, fixed): the marker-armed proof was neither fresh nor run-scoped.**
+It asserted PRESENCE across a persistent daily log — and copy mode launches the installed N−1
+first (for the launch proof), whose own 5-second update poll can arm a marker before it is killed.
+So P's line could satisfy a check meant to prove Q armed one. Fix: baseline the count before the
+copy launches; require an increase. (Same class as round 1's D22 milestone fix — presence asserts
+in append-only logs need baselines.)
+
+Checked clean (r4): AppImage compares against `$APPIMAGE`; Windows callers use `current_exe`;
+macOS canonicalization agrees with plist classification; the destination mirror is correct absent an
+external writer; the installer_arg pin catches singular and plural builder methods.
+
+**Loop judgement (codex, asked explicitly): CONTINUE for one focused round**, targeting the
+unknown-owner policy across the three arming contexts, then STOP — after that, residual risk should
+be dominated by real-release/real-fleet behaviour rather than more static rereading. Round 5 is
+scoped exactly to that.

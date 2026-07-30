@@ -1468,18 +1468,38 @@ pub fn startup_reconcile() -> bool {
 ///   whose heal cannot write (read-only/ACL'd entry): the marker reconcile removes the marker,
 ///   the heal fails, and every later rearm would keep declining a still-`Broken` entry — crash
 ///   recovery gone permanently, with nothing to converge it.
-/// - `Unreadable` → allow. We cannot prove theft, and pre-gate behaviour armed here; declining
-///   would silently drop crash recovery for exactly the endpoint-managed users who can least
-///   diagnose it.
+/// - `Unreadable` → DECLINE (r4 #1). Tempting to allow — pre-gate behaviour did — but an entry
+///   is `Unreadable` precisely when we cannot tell WHOSE it is, and there is a concrete theft:
+///   endpoint management writes a working value with arguments
+///   (`"C:\Installed\AztecAccelerator.exe" --managed`), which `run_value_candidates` rejects as
+///   "not the owned format" while `artifact_present` still reports intent ON — so a stray copy
+///   would arm recovery at itself. This follows the module's standing doctrine (never write, or
+///   act on, what we do not understand) and the heal's own behaviour (it refuses `Unreadable`
+///   too).
+///   ACCEPTED RESIDUAL: a user whose entry we cannot parse gets no IMPLICIT rearm, so after an
+///   update their crash-recovery task stays disarmed until an explicit toggle or Repair re-arms
+///   it. Chosen over the alternative, where a copy silently captures the task and recovery
+///   launches a binary the user may delete tomorrow.
 /// - `Absent` → allow (unreachable in practice: intent is false, so no caller arms).
 pub(crate) fn implicit_arm_allowed(stored: &StoredTarget) -> bool {
-    !matches!(
-        stored,
+    match stored {
+        // Proven ours.
+        StoredTarget::Healthy {
+            points_elsewhere: false,
+            ..
+        } => true,
+        // Proven someone else's working entry — the F1 theft.
         StoredTarget::Healthy {
             points_elsewhere: true,
             ..
-        }
-    )
+        } => false,
+        // Nobody owns a WORKING entry: whoever launched becomes the owner, which is exactly what
+        // the heal writes moments later. Declining here strands the rename boundary (r3 #1).
+        StoredTarget::Broken { .. } => true,
+        // Ownership unknowable ⇒ never act (r4 #1).
+        StoredTarget::Unreadable { .. } => false,
+        StoredTarget::Absent => true,
+    }
 }
 
 /// Effectful wrapper over [`implicit_arm_allowed`]. `reference` is the path that IDENTIFIES us for
@@ -1719,7 +1739,7 @@ mod tests {
     // be implicitly armed; every other state either has no owner to protect or an owner that
     // is not us.
     #[test]
-    fn implicit_arm_declines_only_proven_foreign_owner() {
+    fn implicit_arm_declines_foreign_owner_and_unknown_ownership() {
         use super::{implicit_arm_allowed, StoredTarget};
         // The ONLY decline: a working entry provably owned by another binary (the F1 theft).
         assert!(!implicit_arm_allowed(&StoredTarget::Healthy {
@@ -1734,7 +1754,9 @@ mod tests {
         assert!(implicit_arm_allowed(&StoredTarget::Broken {
             program: "gone".into(),
         }));
-        assert!(implicit_arm_allowed(&StoredTarget::Unreadable {
+        // Unreadable = ownership unknowable (e.g. a managed value with arguments): never act,
+        // or a copy captures the task (r4 #1). Residual documented on implicit_arm_allowed.
+        assert!(!implicit_arm_allowed(&StoredTarget::Unreadable {
             reason: "io".into(),
         }));
         assert!(implicit_arm_allowed(&StoredTarget::Absent));

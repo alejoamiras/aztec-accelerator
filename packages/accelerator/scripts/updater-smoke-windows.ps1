@@ -345,6 +345,12 @@ try {
     Copy-Item -Recurse -Force $InstallRoot $QDir
     $CopyExe = Get-ChildItem -Path $QDir -Recurse -Filter $N1BinaryName | Select-Object -First 1
     if (-not $CopyExe) { Write-Error "copy-initiator — copied exe ($N1BinaryName) not found under $QDir"; exit 1 }
+    # Baseline the marker-armed log count BEFORE the copy runs: the installed N-1 was launched
+    # earlier for the launch proof and its own 5s update poll may already have armed a marker, and
+    # daily log files persist — so mere PRESENCE of the line could come from P, not the copy
+    # (r4 #4). Only an INCREASE attributable to the copy counts.
+    $AppLogGlob = "$env:LOCALAPPDATA\aztec-accelerator\logs\*.log"
+    $MarkerLogBefore = @(Select-String -Path $AppLogGlob -Pattern "update window marker armed" -ErrorAction SilentlyContinue).Count
     # Hash the copy BEFORE the update: on the dispatch path the copy has the SAME file name as N,
     # so "is there an AztecAccelerator.exe beside the copy" is trivially true and cannot detect an
     # install into the copy's dir. The copy's BYTES staying N-1's is what proves it (the first
@@ -372,8 +378,9 @@ try {
     # The transaction must have EXISTED: "files absent afterwards" alone also passes if marker
     # creation was skipped entirely and the install proceeded (r3 #4). updater.rs logs
     # "update window marker armed" on successful create — require it.
-    if (-not (Select-String -Path "$env:LOCALAPPDATA\aztec-accelerator\logs\*.log" -Pattern "update window marker armed" -ErrorAction SilentlyContinue)) {
-      Dump-Logs; Write-Error "copy-initiator INCONCLUSIVE — no 'update window marker armed' log line: the copy never created a marker, so the reconciliation assert below would pass vacuously."; exit 1
+    $MarkerLogAfter = @(Select-String -Path $AppLogGlob -Pattern "update window marker armed" -ErrorAction SilentlyContinue).Count
+    if ($MarkerLogAfter -le $MarkerLogBefore) {
+      Dump-Logs; Write-Error "copy-initiator INCONCLUSIVE — no NEW 'update window marker armed' line ($MarkerLogBefore -> $MarkerLogAfter): the copy never created a marker, so the reconciliation assert below would pass vacuously."; exit 1
     }
     # THE regression assert: N (relaunched from the INSTALL dir) reconciled the transaction away.
     # Pre-fix the marker held the copy's path, N's exe_canon differed, the copy still existed

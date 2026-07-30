@@ -368,6 +368,23 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         return;
     }
 
+    // Arc-hunt r3 #2 + r4 #2: resolve the installer's destination BEFORE anything is mutated —
+    // above `record_pending` as well as above the disarm. It is a read-only registry+env lookup,
+    // so an unreadable/wrong-typed install-location value must not (a) leave crash recovery
+    // disarmed with no marker to restore it, nor (b) leave `pending` recorded: F-004's floor then
+    // rejects every version below that candidate, so a WITHDRAWN release would block the fixed
+    // (lower but still newer) one forever.
+    #[cfg(target_os = "windows")]
+    let expected_install = match nsis_install_destination() {
+        Ok(dest) => canonicalize_expected(dest),
+        Err(e) => {
+            tracing::error!(
+                "cannot determine the install destination ({e}); aborting before any state change"
+            );
+            return;
+        }
+    };
+
     // Piece-2 rev-3 ordering: record the install INTENT first (it needs only the updater lock and
     // must precede install(); a later disarm failure leaving `pending` recorded is the documented
     // exact-version-retry semantics) — so the fallible floor write can never strand a live marker.
@@ -389,21 +406,6 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
             return;
         }
     }
-
-    // Arc-hunt r3 #2: resolve the installer's destination BEFORE anything is mutated. It is a
-    // read-only registry+env lookup, and computing it inside the critical section meant an
-    // unreadable registry aborted AFTER crash recovery had been disarmed — leaving a legitimate
-    // installed instance's task deleted with no marker to reconcile it back.
-    #[cfg(target_os = "windows")]
-    let expected_install = match nsis_install_destination() {
-        Ok(dest) => canonicalize_expected(dest),
-        Err(e) => {
-            tracing::error!(
-                "cannot determine the install destination ({e}); aborting before any state change"
-            );
-            return;
-        }
-    };
 
     // ── Windows: the update-window critical section (piece-2 plan §4) ──
     // autostart.lock spans intent-read → disarm → marker+handoff create, and NOTHING else: the
