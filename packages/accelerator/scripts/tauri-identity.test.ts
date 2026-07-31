@@ -44,14 +44,25 @@ describe("bundle metadata", () => {
     expect(conf.bundle.license).toBe("AGPL-3.0-only");
   });
 
+  test("the AGPL text ships as a bundled resource (AGPL 4/6: recipients must receive it)", () => {
+    // Dropping licenseFile removes the licence TEXT from the packages — `license` is only an
+    // SPDX identifier. AGPL sections 4 and 6 require recipients to receive the licence, so it
+    // ships as a plain resource: present in the bundle, no assent gate. Lands in
+    // Contents/Resources/LICENSE (macOS) / $INSTDIR (NSIS), NOT Contents/MacOS/, so the
+    // release bundle-shape invariant is unaffected.
+    expect(conf.bundle.resources).toEqual({ "../../../LICENSE": "LICENSE" });
+    expect(fs.existsSync(path.join(SRC_TAURI, "../../../LICENSE"))).toBe(true);
+  });
+
   test("licenseFile stays ABSENT — it embeds a click-through SLA in the macOS DMG", () => {
     // `licenseFile` is GLOBAL in Tauri v2 (no nsis/dmg/macOS-scoped variant exists in
     // config.schema.json), so setting it to get an NSIS license page also embeds a Software
     // License Agreement in the DMG: `hdiutil attach` then requires interactive agreement, which
     // blocked the release pipeline's Post-build Smoke (run 30640841649) and would have forced
     // every macOS user to accept a licence prompt before they could mount the download. The AGPL
-    // governs distribution and needs no click-through assent; the licence still ships in the
-    // repo, in the bundle, and via the SPDX `license` field above.
+    // governs distribution and needs no click-through assent — but the TEXT must still reach
+    // recipients, which is what the `resources` mapping above does (audit correction: `license`
+    // alone is an identifier, not the licence).
     expect(conf.bundle.licenseFile).toBeUndefined();
   });
 

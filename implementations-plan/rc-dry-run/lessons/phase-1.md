@@ -52,9 +52,25 @@ Fix decision: `bundle.licenseFile` is GLOBAL in Tauri v2 — verified against th
 `config.schema.json`, there is no `nsis`/`dmg`/`macOS` per-bundle license key — so it cannot be
 scoped to Windows. Cost/benefit is one-sided: it bought an NSIS license page on INTERACTIVE Windows
 installs only (silent/updater installs skip it), and it costs a mandatory SLA gate for every macOS
-download. Remove `licenseFile`; KEEP the `license: "AGPL-3.0-only"` SPDX string (metadata only, no
-SLA). The AGPL governs distribution and needs no click-through assent, and the license still ships
-in the repo, in the app bundle, and in the SPDX field.
+download. Remove `licenseFile`; KEEP the `license: "AGPL-3.0-only"` SPDX string (metadata only, no SLA).
+The AGPL governs distribution and needs no click-through assent.
+
+**Audit correction (codex, blocking — I was wrong).** I wrote that "the license still ships in the
+bundle". FALSE: there was no `bundle.resources` entry, and `bundle.license` is an SPDX IDENTIFIER,
+not the text — so removing `licenseFile` would have shipped packages containing no copy of the
+AGPL at all, which sections 4 and 6 require recipients to receive. Fixed by adding
+`"resources": { "../../../LICENSE": "LICENSE" }` (map form: the list form preserves the source's
+directory structure, wrong for an out-of-tree path). That ships the text with NO assent gate.
+Verified it cannot break the release bundle-shape invariant: that check inspects
+`Contents/MacOS/` (`release-accelerator.yml:250-255`) while resources land in
+`Contents/Resources/`.
+
+Codex also confirmed the causal chain conclusively: `settings.license_file()` adds `--eula` in the
+2.8.1 DMG bundler, which base64-encodes it and calls `hdiutil udifrez` — a UDIF EULA resource, so
+the diagnosis was right even though my justification was not. Rejected alternative it agreed with:
+`-acceptlicense`/`yes |` in CI would merely hide a shipped-UX regression. Noted for later if the
+Windows licence page is ever product-desired: `tauri.windows.conf.json` can merge `licenseFile`
+into the WINDOWS config only — not legally necessary, so not done now.
 
 Bookkeeping: `Create Git Tag` was SKIPPED (smoke is in `tag.needs`), so **no tag was created** and
 1.0.8-rc.1 stays re-dispatchable. (A first `git ls-remote | grep -c "1.0.8"` printed 1 and looked
