@@ -297,3 +297,39 @@ Also recorded this round: an anchor-based edit half-applied (the `crash_recovery
 uniqueness assert after rustfmt reflowed the signature, while the `autostart` half had already been
 written). The asserts did their job — nothing silent — but the lesson stands: re-read the on-disk
 shape after any formatter run before the next anchored edit.
+
+## Round 7 (close-out): 0 findings — STOP
+
+The provenance fix is sound per the AppImage spec: `APPDIR` IS the mounted AppDir and the payload
+executable is contained by it, so containment is the correct ownership proof. Canonicalization
+covers symlinked mounts; `Path::starts_with` is component-aware (trailing separators and prefix
+collisions are safe); `TMPDIR` only changes the value, nothing is hardcoded; extract-and-run
+extracts to an AppDir and still passes; a manually-run extracted `AppRun` lacks the runtime pair and
+falls back safely to the stable extracted executable. A false ACCEPT needs a spoofed `APPDIR=/`
+(which already implies control of our launch environment) or genuine containment. No widening
+warranted.
+
+**Loop verdict: converged.** Seven rounds: 3 findings (r1) → 2 High (r2) → 5 (r3, all created by
+r2's fixes) → 4 (r4) → 3 (r5, incl. a pre-existing AppImage bug) → 1 Medium (r6) → 0 (r7).
+
+## RESIDUAL LIST (what only the real world can surface), ranked likelihood × impact
+
+1. **Release-only v1.0.7 → renamed-N boundary — medium × high.** Only a real release run executes
+   the split-name call path. DETECT: the mandatory Windows release smoke already built for this
+   (old/new binary names via `-N1BinaryName`, N−1 health proof, transaction reconciliation, the
+   old-exe-deleted assert). An `X.Y.Z-rc.N` dry-run executes it without publishing.
+2. **Managed/unparseable autostart entry — low × high.** An update can leave crash recovery
+   disarmed until an explicit OFF→ON; a truly ACL-unreadable entry needs management intervention
+   (Repair skips Unreadable). DETECT: search logs/support for
+   `implicit crash-recovery arm skipped`, then inspect the Run value + scheduled task.
+3. **AppImage / service-manager diversity — low × medium-high.** No-FUSE users on
+   `--appimage-extract-and-run`, unusual systemd user environments, older runtimes: unexercised.
+   DETECT: a forced-crash smoke in a no-FUSE VM plus `systemctl --user status`.
+4. **Concurrent Windows install-location writer — very low × medium.** A registry change between
+   our read and NSIS's re-read suppresses reconciliation until marker expiry (self-heals).
+   DETECT: path-mismatch/suppression log lines; ask whether another installer or management agent
+   ran concurrently.
+5. **Fixture provenance — very low × high.** Tag metadata does not prove the downloaded asset came
+   from that commit. DETECT: release attestation or a recorded asset digest tied to the tag.
+6. **Publisher-flip interactive trust loss — dev-only × low production impact.** DETECT: one
+   interactive upgrade/reinstall canary; support reports of an unexpected trust prompt.
