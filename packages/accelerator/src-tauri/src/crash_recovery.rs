@@ -243,13 +243,12 @@ fn systemd_exec_start(exe: &std::path::Path) -> Option<String> {
 /// touching process env in a parallel test run.
 #[cfg(target_os = "linux")]
 fn recovery_target(
-    appimage: Option<std::ffi::OsString>,
+    appimage_self: Option<std::path::PathBuf>,
     exe: std::path::PathBuf,
 ) -> std::path::PathBuf {
-    match appimage {
-        Some(a) if !a.is_empty() => std::path::PathBuf::from(a),
-        _ => exe,
-    }
+    // Provenance is decided ONCE, in autostart::appimage_self — an inherited $APPIMAGE from a
+    // parent AppImage must never become a relaunch target (r6 #1).
+    appimage_self.unwrap_or(exe)
 }
 
 /// Create and enable a systemd user service with `Restart=on-failure`.
@@ -262,7 +261,7 @@ fn enable_impl() -> Result<(), String> {
     // is the ephemeral `/tmp/.mount_XXXX` squashfs that vanishes when the process exits — the very
     // reason autostart stores `$APPIMAGE` instead (autostart::desired_path, D12). A recovery unit
     // pointing at the dead mount can never relaunch anything, which is exactly when it is needed.
-    let exe = recovery_target(std::env::var_os("APPIMAGE"), exe);
+    let exe = recovery_target(crate::autostart::appimage_self_from_env(&exe), exe);
 
     let service_dir = dirs::config_dir()
         .ok_or_else(|| "cannot determine config dir for systemd service".to_string())?
@@ -546,15 +545,14 @@ mod tests {
         let mount = PathBuf::from("/tmp/.mount_AbC123/AztecAccelerator");
         assert_eq!(
             recovery_target(
-                Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
+                Some(PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage")),
                 mount.clone()
             ),
             PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage")
         );
-        // Not an AppImage run: the executable itself is correct.
+        // Not an AppImage run, or an UNPROVEN/foreign $APPIMAGE (autostart::appimage_self
+        // returned None): the executable itself is the correct relaunch target.
         assert_eq!(recovery_target(None, mount.clone()), mount);
-        // Defensive: an empty APPIMAGE must not produce an empty ExecStart target.
-        assert_eq!(recovery_target(Some("".into()), mount.clone()), mount);
     }
 
     // C8 (D13/D20): the enable transaction's rollback ordering + completeness + failure-observability,

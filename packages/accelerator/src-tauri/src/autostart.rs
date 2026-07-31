@@ -1173,23 +1173,60 @@ mod backend {
 // Public surface (plan §4.2)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Is `$APPIMAGE` OURS? The AppImage runtime exports `APPIMAGE` (the .AppImage file) and `APPDIR`
+/// (its mount) to the app it launches — but both are plain environment variables and are INHERITED
+/// by any child process. Launch a natively-installed (deb/pacman) Accelerator from a terminal that
+/// is itself running inside some other AppImage and we would see that PARENT's `APPIMAGE`; writing
+/// it into the autostart entry or the systemd recovery unit would make the OS relaunch a completely
+/// different application (r6 #1). `current_exe()` living under `APPDIR` is the proof of ownership:
+/// for a genuine AppImage run our binary IS inside the mount, and for an inherited value it is not
+/// (`/usr/bin/AztecAccelerator`). Pure so the provenance rule is table-tested; both consumers —
+/// [`desired_path`] and `crash_recovery`'s recovery target — go through it so they cannot diverge.
+#[cfg(target_os = "linux")]
+pub(crate) fn appimage_self(
+    appimage: Option<std::ffi::OsString>,
+    appdir: Option<std::ffi::OsString>,
+    exe: &Path,
+) -> Option<PathBuf> {
+    let appimage = appimage.filter(|a| !a.is_empty())?;
+    let appdir = PathBuf::from(appdir.filter(|d| !d.is_empty())?);
+    // Compare canonicalized where possible: the mount path is symlink-free in practice, but a
+    // relative or unnormalized APPDIR must not accidentally "contain" us.
+    let exe_c = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    let dir_c = appdir.canonicalize().unwrap_or(appdir);
+    exe_c.starts_with(&dir_c).then(|| PathBuf::from(appimage))
+}
+
+/// Process-env form of [`appimage_self`] — the production reader.
+#[cfg(target_os = "linux")]
+pub(crate) fn appimage_self_from_env(exe: &Path) -> Option<PathBuf> {
+    appimage_self(
+        std::env::var_os("APPIMAGE"),
+        std::env::var_os("APPDIR"),
+        exe,
+    )
+}
+
 /// The path an autostart entry SHOULD launch (plan D11/D12):
 /// - macOS: `current_exe().canonicalize()` (C7 — the plugin stored canonicalized; comparing raw
 ///   would false-positive on symlinks);
-/// - Linux: `app.env().appimage` when present — inside an AppImage, `current_exe()` points into
-///   the ephemeral `/tmp/.mount_XXXX` squashfs that vanishes at exit (D12) — else `current_exe()`;
+/// - Linux: our OWN `$APPIMAGE` when [`appimage_self`] can prove it (inside an AppImage,
+///   `current_exe()` points into the ephemeral `/tmp/.mount_XXXX` squashfs that vanishes at exit,
+///   D12) — else `current_exe()`;
 /// - Windows: `current_exe()` VERBATIM — `canonicalize()` can yield an extended-length `\\?\`
 ///   path whose Run-value compatibility is unproven (D11); canonicalize only for comparison.
 pub fn desired_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
-        use tauri::Manager as _;
-        if let Some(appimage) = app.env().appimage {
-            let p = PathBuf::from(appimage);
-            return Ok(p.canonicalize().unwrap_or(p));
-        }
+        let _ = app;
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
+        // r6 #1: only an $APPIMAGE we can PROVE is ours (our exe lives under $APPDIR) may be the
+        // stored target — an inherited value from a parent AppImage would point the OS at a
+        // different application entirely.
+        if let Some(appimage) = appimage_self_from_env(&exe) {
+            return Ok(appimage.canonicalize().unwrap_or(appimage));
+        }
         Ok(exe.canonicalize().unwrap_or(exe))
     }
     #[cfg(target_os = "macos")]
@@ -1745,6 +1782,43 @@ mod tests {
     // Arc-hunt r2 F1: the implicit-arm decision table. Only a healthy entry pointing AT US may
     // be implicitly armed; every other state either has no owner to protect or an owner that
     // is not us.
+    // r6 #1: $APPIMAGE/$APPDIR are inherited by children, so a natively-installed app launched
+    // from inside another AppImage sees a FOREIGN pair. Ownership = our exe lives under APPDIR.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_trusted_only_when_our_exe_lives_under_appdir() {
+        use super::appimage_self;
+        use std::path::{Path, PathBuf};
+        let ours = Path::new("/tmp/.mount_AbC/usr/bin/AztecAccelerator");
+        assert_eq!(
+            appimage_self(
+                Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
+                Some("/tmp/.mount_AbC".into()),
+                ours,
+            ),
+            Some(PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage"))
+        );
+        // Inherited from a parent AppImage: our exe is NOT under that mount ⇒ reject.
+        assert_eq!(
+            appimage_self(
+                Some("/home/u/Apps/SomeEditor.AppImage".into()),
+                Some("/tmp/.mount_Parent".into()),
+                Path::new("/usr/bin/AztecAccelerator"),
+            ),
+            None
+        );
+        // Missing or empty halves are never trusted.
+        assert_eq!(appimage_self(Some("/a.AppImage".into()), None, ours), None);
+        assert_eq!(
+            appimage_self(Some("/a.AppImage".into()), Some("".into()), ours),
+            None
+        );
+        assert_eq!(
+            appimage_self(None, Some("/tmp/.mount_AbC".into()), ours),
+            None
+        );
+    }
+
     #[test]
     fn implicit_arm_declines_foreign_owner_and_unknown_ownership() {
         use super::{implicit_arm_allowed, StoredTarget};

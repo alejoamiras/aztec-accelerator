@@ -272,3 +272,28 @@ was tauri-build wanting a sidecar for the triple. With an empty, gitignored
 does compile the `cfg(windows)` paths — it would have caught BOTH platform breaks in this arc.
 Cost: ~5s incremental after the first build. This belongs in the local gate for any change touching
 platform-gated code.
+
+## Round 6 (narrow close-out): the two r5 High fixes are CLEAN; 1 Medium
+
+Verified clean by codex: the gated cleanup (a decline still removes the marker, no double-arm, no
+strand; `current_exe` IS the right cleanup reference because it is exactly what the Windows writer
+would serialize), the AppImage `ExecStart` flowing correctly through F-010 (spaces/`%` serialize
+safely; unsafe or relative paths still fail CLOSED and remove the unit; no sibling Linux writer
+still uses the mount path), and macOS matching its former unconditional behaviour.
+
+**r6 #1 — CONFIRMED (Medium, fixed): `$APPIMAGE` was trusted without provenance.**
+`APPIMAGE`/`APPDIR` are ordinary environment variables and are INHERITED by children. Launch a
+natively-installed (deb) Accelerator from a terminal that is itself running inside some other
+AppImage and we would read that PARENT's `APPIMAGE` — valid, absolute, F-010-safe — and write it as
+the systemd recovery target, so recovery would relaunch a different application. `desired_path`
+(piece 1, pre-existing) trusted the same variable, so explicit autostart-ON could write the foreign
+path into the launcher entry too.
+**Fix**: one pure `appimage_self(appimage, appdir, exe)` — trust `$APPIMAGE` only when our
+`current_exe()` lives under `$APPDIR` (for a genuine AppImage run our binary IS inside the mount;
+for an inherited value it is `/usr/bin/…` and fails) — shared by BOTH consumers so they cannot
+diverge, plus a provenance table test. Note this also fixes a pre-existing piece-1 autostart bug.
+
+Also recorded this round: an anchor-based edit half-applied (the `crash_recovery` half failed its
+uniqueness assert after rustfmt reflowed the signature, while the `autostart` half had already been
+written). The asserts did their job — nothing silent — but the lesson stands: re-read the on-disk
+shape after any formatter run before the next anchored edit.
