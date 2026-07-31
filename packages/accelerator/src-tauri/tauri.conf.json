@@ -38,7 +38,6 @@
     "copyright": "© 2026 Aztec Accelerator contributors",
     "homepage": "https://aztec-accelerator.dev",
     "license": "AGPL-3.0-only",
-    "licenseFile": "../../../LICENSE",
     "publisher": "Aztec Accelerator",
     "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [

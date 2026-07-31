@@ -42,8 +42,17 @@ describe("bundle metadata", () => {
     expect(conf.bundle.copyright).toBe("© 2026 Aztec Accelerator contributors");
     expect(conf.bundle.homepage).toBe("https://aztec-accelerator.dev");
     expect(conf.bundle.license).toBe("AGPL-3.0-only");
-    expect(conf.bundle.licenseFile).toBe("../../../LICENSE");
-    expect(fs.existsSync(path.join(SRC_TAURI, conf.bundle.licenseFile))).toBe(true);
+  });
+
+  test("licenseFile stays ABSENT — it embeds a click-through SLA in the macOS DMG", () => {
+    // `licenseFile` is GLOBAL in Tauri v2 (no nsis/dmg/macOS-scoped variant exists in
+    // config.schema.json), so setting it to get an NSIS license page also embeds a Software
+    // License Agreement in the DMG: `hdiutil attach` then requires interactive agreement, which
+    // blocked the release pipeline's Post-build Smoke (run 30640841649) and would have forced
+    // every macOS user to accept a licence prompt before they could mount the download. The AGPL
+    // governs distribution and needs no click-through assent; the licence still ships in the
+    // repo, in the bundle, and via the SPDX `license` field above.
+    expect(conf.bundle.licenseFile).toBeUndefined();
   });
 
   test("publisher is pinned — changing it again is a fleet-migration event", () => {
