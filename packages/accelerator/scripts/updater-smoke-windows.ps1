@@ -34,6 +34,13 @@
                        intact, and a second instance Q fully suppressed — no heal, no rearm, no
                        second download — then release and finish positive. Requires
                        UPDATER_SMOKE_BARRIER_PREFIX (run-unique prefix, baked at N build time).
+                     | copy-initiator (arc-hunt r2 F2 regression: a COPY of the install drives the
+                       update while the installed instance is closed and the copy REMAINS on disk.
+                       The marker must record the INSTALLER's destination, not the copy's path —
+                       pre-fix, N saw a path mismatch it could not prove absent and suppressed
+                       reconciliation, stranding marker+handoff+token and skipping heal/rearm.
+                       Also proves the F1 ownership gate: autostart is OFF here, so NO
+                       crash-recovery task may exist afterwards.)
 #>
 param(
   [Parameter(Mandatory)][string]$NVersion,
@@ -319,6 +326,83 @@ try {
     }
     Log "SUCCESS (negative) — updater downloaded the tampered artifact and refused to update"
     Dump-Logs; exit 0
+  }
+
+  if ($Mode -eq "copy-initiator") {
+    # ── Arc-hunt r2 F2 regression. N-1 is installed but NEVER launched from $InstallRoot; a COPY
+    #    drives the update instead, and the copy stays on disk throughout (so the marker's
+    #    proven-absent rename-tolerance can't mask a wrong expected path). ──
+    if ($AppProc -and -not $AppProc.HasExited) { Stop-Process -Id $AppProc.Id -Force; $AppProc.WaitForExit() }
+    $AppProc = $null
+    Get-Process -Name "AztecAccelerator", "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Autostart must be OFF for this leg (no Run value armed) — that is exactly the case an
+    # ownership gate on the Run value alone would leave open, and it must still not leave a task.
+    Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
+    & schtasks /Delete /F /TN $TaskName *> $null
+    & schtasks /Query /TN $TaskName *> $null
+    if ($LASTEXITCODE -eq 0) { Dump-Logs; Write-Error "copy-initiator precondition FAILED — '$TaskName' survived pre-run delete; a later 'no task' assert would be meaningless."; exit 1 }
+
+    Copy-Item -Recurse -Force $InstallRoot $QDir
+    $CopyExe = Get-ChildItem -Path $QDir -Recurse -Filter $N1BinaryName | Select-Object -First 1
+    if (-not $CopyExe) { Write-Error "copy-initiator — copied exe ($N1BinaryName) not found under $QDir"; exit 1 }
+    # Baseline the marker-armed log count BEFORE the copy runs: the installed N-1 was launched
+    # earlier for the launch proof and its own 5s update poll may already have armed a marker, and
+    # daily log files persist — so mere PRESENCE of the line could come from P, not the copy
+    # (r4 #4). Only an INCREASE attributable to the copy counts.
+    $AppLogGlob = "$env:LOCALAPPDATA\aztec-accelerator\logs\*.log"
+    $MarkerLogBefore = @(Select-String -Path $AppLogGlob -Pattern "update window marker armed" -ErrorAction SilentlyContinue).Count
+    # Hash the copy BEFORE the update: on the dispatch path the copy has the SAME file name as N,
+    # so "is there an AztecAccelerator.exe beside the copy" is trivially true and cannot detect an
+    # install into the copy's dir. The copy's BYTES staying N-1's is what proves it (the first
+    # version of this assert was name-based and failed on the copy's own existence).
+    $CopyHashBefore = (Get-FileHash $CopyExe.FullName -Algorithm SHA256).Hash
+    Log "copy-initiator: launching the COPY ($($CopyExe.FullName)); installed dir left closed"
+    $QProc = Start-Process -FilePath $CopyExe.FullName -PassThru
+
+    # The copy must run (it owns :59833 now) and then drive the update to completion.
+    $sawCopy = $false
+    for ($i = 0; $i -lt 60; $i++) {
+      try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2).version } catch { $got = $null }
+      if ($got -eq $N1Version) { $sawCopy = $true; break }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not $sawCopy) { Dump-Logs; Write-Error "copy-initiator FAILED — the copied instance never served /health == $N1Version."; exit 1 }
+    $updated = $false
+    for ($i = 0; $i -lt 150; $i++) {
+      try { $got = (Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 3).version } catch { $got = $null }
+      if ($got -eq $NVersion) { $updated = $true; break }
+      Start-Sleep -Seconds 2
+    }
+    if (-not $updated) { Dump-Logs; Write-Error "copy-initiator FAILED — /health never reported $NVersion; the copy-driven update did not complete."; exit 1 }
+
+    # The transaction must have EXISTED: "files absent afterwards" alone also passes if marker
+    # creation was skipped entirely and the install proceeded (r3 #4). updater.rs logs
+    # "update window marker armed" on successful create — require it.
+    $MarkerLogAfter = @(Select-String -Path $AppLogGlob -Pattern "update window marker armed" -ErrorAction SilentlyContinue).Count
+    if ($MarkerLogAfter -le $MarkerLogBefore) {
+      Dump-Logs; Write-Error "copy-initiator INCONCLUSIVE — no NEW 'update window marker armed' line ($MarkerLogBefore -> $MarkerLogAfter): the copy never created a marker, so the reconciliation assert below would pass vacuously."; exit 1
+    }
+    # THE regression assert: N (relaunched from the INSTALL dir) reconciled the transaction away.
+    # Pre-fix the marker held the copy's path, N's exe_canon differed, the copy still existed
+    # (so absence was not provable) and reconciliation was suppressed — leaving these behind.
+    foreach ($f in @("update-in-progress.json", "update-txn", "update-txn-done")) {
+      if (Test-Path (Join-Path $ConfigDir $f)) { Dump-Logs; Write-Error "copy-initiator FAILED — $f survived; the marker's expected_install_path did not match the installer's destination (arc-hunt r2 F2 regressed)."; exit 1 }
+    }
+    # The copy must STILL exist (otherwise proven-absence could have rescued a wrong path and the
+    # assert above would pass for the wrong reason).
+    if (-not (Test-Path $CopyExe.FullName)) { Dump-Logs; Write-Error "copy-initiator INCONCLUSIVE — the copied exe vanished; proven-absence could have masked a wrong expected path."; exit 1 }
+    # N must be installed (and running) at the INSTALL dir, not beside the copy.
+    $NewExe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $NBinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $NewExe) { Dump-Logs; Write-Error "copy-initiator FAILED — $NBinaryName absent from $InstallRoot; the installer did not target the install dir."; exit 1 }
+    if ((Get-FileHash $CopyExe.FullName -Algorithm SHA256).Hash -ne $CopyHashBefore) {
+      Dump-Logs; Write-Error "copy-initiator FAILED — the copy's bytes changed: the installer wrote N into the copy's directory ($QDir) instead of the install dir."; exit 1
+    }
+    # F1 ownership gate: autostart is OFF and no process owns an entry, so nothing may have armed
+    # crash recovery — least of all the copy.
+    & schtasks /Query /TN $TaskName *> $null
+    if ($LASTEXITCODE -eq 0) { Dump-Logs; Write-Error "copy-initiator FAILED — '$TaskName' exists although autostart was OFF; an implicit arm fired (arc-hunt r2 F1 regressed)."; exit 1 }
+    Log "SUCCESS (copy-initiator) — copy-driven update installed at the install dir, transaction fully reconciled with the copy still present, and no crash-recovery task armed."
+    exit 0
   }
 
   if ($Mode -eq "barrier") {

@@ -238,12 +238,30 @@ fn systemd_exec_start(exe: &std::path::Path) -> Option<String> {
     Some(format!("\":{}\"", s.replace('%', "%%")))
 }
 
+/// The path a Linux recovery unit must relaunch: the AppImage file when running from one (its
+/// mount is ephemeral), else the executable itself. Pure so the choice is unit-tested without
+/// touching process env in a parallel test run.
+#[cfg(target_os = "linux")]
+fn recovery_target(
+    appimage_self: Option<std::path::PathBuf>,
+    exe: std::path::PathBuf,
+) -> std::path::PathBuf {
+    // Provenance is decided ONCE, in autostart::appimage_self — an inherited $APPIMAGE from a
+    // parent AppImage must never become a relaunch target (r6 #1).
+    appimage_self.unwrap_or(exe)
+}
+
 /// Create and enable a systemd user service with `Restart=on-failure`.
 /// Call this after `manager.enable()`.
 #[cfg(target_os = "linux")]
 fn enable_impl() -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot determine executable path for systemd service: {e}"))?;
+    // r5 #2 (pre-existing bug, surfaced by the ownership work): inside an AppImage `current_exe()`
+    // is the ephemeral `/tmp/.mount_XXXX` squashfs that vanishes when the process exits — the very
+    // reason autostart stores `$APPIMAGE` instead (autostart::desired_path, D12). A recovery unit
+    // pointing at the dead mount can never relaunch anything, which is exactly when it is needed.
+    let exe = recovery_target(crate::autostart::appimage_self_from_env(&exe), exe);
 
     let service_dir = dirs::config_dir()
         .ok_or_else(|| "cannot determine config dir for systemd service".to_string())?
@@ -516,6 +534,26 @@ mod tests {
 
     use super::enable_transaction;
     use std::cell::Cell;
+
+    // r5 #2: a Linux recovery unit must relaunch the AppImage FILE, never the ephemeral
+    // /tmp/.mount_* executable (which is gone exactly when recovery would fire).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_target_prefers_the_appimage_file() {
+        use super::recovery_target;
+        use std::path::PathBuf;
+        let mount = PathBuf::from("/tmp/.mount_AbC123/AztecAccelerator");
+        assert_eq!(
+            recovery_target(
+                Some(PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage")),
+                mount.clone()
+            ),
+            PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage")
+        );
+        // Not an AppImage run, or an UNPROVEN/foreign $APPIMAGE (autostart::appimage_self
+        // returned None): the executable itself is the correct relaunch target.
+        assert_eq!(recovery_target(None, mount.clone()), mount);
+    }
 
     // C8 (D13/D20): the enable transaction's rollback ordering + completeness + failure-observability,
     // exercised with injected closures — no real AppHandle / OS calls, so it runs on every platform's CI.

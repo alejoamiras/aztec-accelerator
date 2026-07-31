@@ -30,7 +30,7 @@ on:
         required: false
         default: barrier
         type: choice
-        options: [barrier, positive, negative]
+        options: [barrier, copy-initiator, positive, negative]
       n-version:
         description: Version to stamp on the in-job N build
         required: false

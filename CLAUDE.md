@@ -47,6 +47,12 @@ Before writing any code:
 ### Validation
 
 - **Code changes**: `bun run lint` and `bun run test`
+- **Platform-gated Rust** (`#[cfg(windows)]` / `target_os` branches): also
+  `cargo check --target x86_64-pc-windows-gnu --lib` from `src-tauri` — Linux-only checks cannot see
+  a Windows compile break (twice bitten: a `pub(crate)` visibility error, and a `cfg` attribute
+  detached from its function). Needs a one-off empty, gitignored
+  `binaries/bb-x86_64-pc-windows-gnu.exe` placeholder for tauri-build's sidecar check; ~5s
+  incremental. Clippy warnings on that target are test-only noise (CI's clippy gate is ubuntu-only).
 - **Workflow changes**: `bun run lint:actions`
 - **New tests**: Run the specific test file first
 - **Before pushing**: Run full `bun run test` + `bun run lint:actions`

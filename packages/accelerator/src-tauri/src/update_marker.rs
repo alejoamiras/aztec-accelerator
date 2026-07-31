@@ -531,8 +531,67 @@ pub fn post_create_failure_cleanup(
 // All pure/tempdir + counters; nothing here touches locks, registries, or schedulers.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The shipped executable file name. Single Rust source of truth (Cargo `[[bin]]` +
+/// `default-run` define the build side; `tauri-identity.test.ts` pins all three together).
+pub const MAIN_BINARY_EXE: &str = "AztecAccelerator.exe";
+
+/// The NSIS install-dir default component (`%LOCALAPPDATA%\<productName>`). Pinned by the
+/// identity test against tauri.conf.json's productName.
+pub const PRODUCT_DIR_NAME: &str = "Aztec Accelerator";
+
+/// Arc-hunt r2 F2 (codex option C): the marker's `expected_install_path` must be the path the
+/// INSTALLER will use, not where the initiating process happens to live — a stray copy driving
+/// an update otherwise records its own path, and the relaunched N (path mismatch, copy still
+/// present ⇒ not proven absent) suppresses reconciliation until the deadline. NSIS resolves
+/// `$INSTDIR` deterministically for this currentUser bundle (installer.nsi:873-877,
+/// `RestorePreviousInstallLocation`): the `MANUPRODUCTKEY` default value when non-empty, else
+/// `%LOCALAPPDATA%\<productName>`. This is the pure mirror of that rule; `None` means the
+/// destination cannot be determined and the caller must ABORT the update rather than publish a
+/// guessed marker.
+pub fn expected_install_path_from(
+    registry_dir: Option<String>,
+    local_app_data: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let dir = match registry_dir {
+        Some(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
+        _ => local_app_data?.join(PRODUCT_DIR_NAME),
+    };
+    Some(dir.join(MAIN_BINARY_EXE))
+}
+
 #[cfg(test)]
 mod tests {
+    // Arc-hunt r2 F2: the NSIS-destination mirror. Registry wins when non-empty; default is
+    // %LOCALAPPDATA%\<product>; no LOCALAPPDATA and no registry ⇒ undeterminable (caller aborts).
+    #[test]
+    fn expected_install_path_resolution_table() {
+        use super::{expected_install_path_from, MAIN_BINARY_EXE, PRODUCT_DIR_NAME};
+        use std::path::PathBuf;
+        let lad = Some(PathBuf::from(r"C:\Users\u\AppData\Local"));
+        assert_eq!(
+            expected_install_path_from(Some(r"D:\Custom Dir".into()), lad.clone()),
+            Some(PathBuf::from(r"D:\Custom Dir").join(MAIN_BINARY_EXE))
+        );
+        assert_eq!(
+            expected_install_path_from(Some("   ".into()), lad.clone()),
+            Some(
+                PathBuf::from(r"C:\Users\u\AppData\Local")
+                    .join(PRODUCT_DIR_NAME)
+                    .join(MAIN_BINARY_EXE)
+            )
+        );
+        assert_eq!(
+            expected_install_path_from(None, lad.clone()),
+            Some(
+                PathBuf::from(r"C:\Users\u\AppData\Local")
+                    .join(PRODUCT_DIR_NAME)
+                    .join(MAIN_BINARY_EXE)
+            )
+        );
+        assert_eq!(expected_install_path_from(None, None), None);
+        assert_eq!(expected_install_path_from(Some(String::new()), None), None);
+    }
+
     use super::*;
     use std::cell::Cell;
 
