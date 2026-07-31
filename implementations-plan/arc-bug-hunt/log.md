@@ -314,10 +314,15 @@ r2's fixes) → 4 (r4) → 3 (r5, incl. a pre-existing AppImage bug) → 1 Mediu
 
 ## RESIDUAL LIST (what only the real world can surface), ranked likelihood × impact
 
-1. **Release-only v1.0.7 → renamed-N boundary — medium × high.** Only a real release run executes
-   the split-name call path. DETECT: the mandatory Windows release smoke already built for this
-   (old/new binary names via `-N1BinaryName`, N−1 health proof, transaction reconciliation, the
-   old-exe-deleted assert). An `X.Y.Z-rc.N` dry-run executes it without publishing.
+1. ~~**Release-only v1.0.7 → renamed-N boundary — medium × high.**~~ **CLOSED 2026-07-31 by the
+   1.0.8-rc.1 dry-run, run 30644544360** (green end-to-end; tag `accelerator-v1.0.8-rc.1`,
+   prerelease, 16 assets). Both Windows legs passed against the real pre-rename fixture: preflight
+   `1.0.8-rc.1 > 1.0.7, pubkey + endpoint unchanged`, `N-1 alive at 1.0.7`, then the full positive
+   tail (new exe present, old exe deleted, Run value healed quoted, no transaction file, recovery
+   re-armed); negative leg still rejected a tampered artifact across the boundary. The rehearsal
+   also FOUND a shipped-UX regression no other gate could reach — `bundle.licenseFile` embedding a
+   click-through SLA in the macOS DMG (fixed in #430 `b294df1`, which also had to add the licence
+   text back as a bundled resource). Trail: `implementations-plan/rc-dry-run/lessons/phase-1.md`.
 2. **Managed/unparseable autostart entry — low × high.** An update can leave crash recovery
    disarmed until an explicit OFF→ON; a truly ACL-unreadable entry needs management intervention
    (Repair skips Unreadable). DETECT: search logs/support for

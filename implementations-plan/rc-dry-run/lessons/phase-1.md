@@ -77,3 +77,34 @@ Bookkeeping: `Create Git Tag` was SKIPPED (smoke is in `tag.needs`), so **no tag
 like a tag existed — false positive: unescaped dots matched a commit SHA. Escaped, it is empty.
 Same vacuous-assert class this whole arc has been hunting; verify the shape of a check before
 trusting its answer.)
+
+
+## Attempt 3 — full prerelease pipeline (run 30644544360): **GREEN end-to-end**
+
+Dispatched on `b294df1` (the licence fix), same version `1.0.8-rc.1` — legitimate because attempt 2
+never reached `Create Git Tag` (it is gated behind the smoke), so no tag had to be deleted or moved.
+
+23/23 jobs succeeded, 0 failed. Skipped, all by design for a prerelease: `Sign update feed`,
+`Verify live updater feed`, `Bump source version` (no S3 `latest.json` publish, source stays at
+1.0.8-rc.1), and `Cancel run if the pre-release gate failed` (the gate passed).
+
+Evidence for residual #1, from the run log:
+- `preflight OK: accelerator-v1.0.7 asset present, 1.0.8-rc.1 > 1.0.7, pubkey + endpoint unchanged`
+  (both legs) — the 4-point fixture preflight
+- `N-1 alive at 1.0.7` (both legs) — the launch proof, i.e. the PRE-RENAME binary
+  (`aztec-accelerator.exe`) really ran before any update
+- `SUCCESS — updated to 1.0.8-rc.1 via the local feed (artifact downloaded + relaunched)` — the
+  positive leg's full tail, which only passes after: new-name exe present, OLD-name exe deleted by
+  the installer's `OldMainBinaryName` logic, Run value healed to the quoted new path, no
+  update-transaction file surviving, and crash recovery re-armed
+- `Updater Smoke (windows-x86_64 / negative)` green — a tampered artifact is still rejected across
+  the rename boundary
+- `Post-build Smoke` + `Post-build Smoke (Intel notarization)` green — the DMG mounts without an
+  assent gate again, and the licence ships as a resource
+- Outputs: tag `accelerator-v1.0.8-rc.1` → `b294df1`; GitHub release created with
+  `prerelease=true` and 16 assets
+
+**Residual #1 is closed by measurement, not by argument.** Two attempts, one real product bug found
+(the DMG SLA) plus one packaging defect caught in its fix (shipping AGPL software with no licence
+text). Neither was reachable by any local gate, PR CI, or the seven static hunt rounds — PR CI never
+builds DMGs, and no non-release job installs the real pre-rename fixture.
