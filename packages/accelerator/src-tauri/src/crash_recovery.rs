@@ -535,6 +535,45 @@ mod tests {
     use super::enable_transaction;
     use std::cell::Cell;
 
+    // Residual #3 (arc-bug-hunt): the COMPOSITION nothing else covers. `recovery_target` and
+    // `systemd_exec_start` were each unit-tested, but no test asserted the ExecStart value the
+    // unit actually receives — and that value is the whole point of the AppImage fix: relaunching
+    // the ephemeral /tmp/.mount_* path can never work, because the mount is gone exactly when
+    // recovery fires. Asserts the composed string, not the two halves separately.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_execstart_targets_the_image_not_the_mount() {
+        use super::{recovery_target, systemd_exec_start};
+        use std::path::PathBuf;
+        let mount = PathBuf::from("/tmp/.mount_AbC123/usr/bin/AztecAccelerator");
+        let image = PathBuf::from("/home/u/Apps/Aztec Accelerator.AppImage");
+
+        // AppImage run: the unit must relaunch the IMAGE (quoted, `:`-prefixed per F-010).
+        let target = recovery_target(Some(image.clone()), mount.clone());
+        assert_eq!(target, image);
+        assert_eq!(
+            systemd_exec_start(&target).as_deref(),
+            Some("\":/home/u/Apps/Aztec Accelerator.AppImage\""),
+            "spaces are legal in an ExecStart value and must survive; the mount path must not appear"
+        );
+
+        // Non-AppImage (or unproven $APPIMAGE): the executable itself, still F-010-serialized.
+        let target = recovery_target(None, mount.clone());
+        assert_eq!(target, mount);
+        assert_eq!(
+            systemd_exec_start(&target).as_deref(),
+            Some("\":/tmp/.mount_AbC123/usr/bin/AztecAccelerator\"")
+        );
+
+        // An image path systemd cannot represent must FAIL CLOSED rather than write a unit that
+        // silently relaunches something else (enable_impl turns None into an Err + stale-unit
+        // removal).
+        assert_eq!(
+            systemd_exec_start(&PathBuf::from("/home/u/App\"s.AppImage")),
+            None
+        );
+    }
+
     // r5 #2: a Linux recovery unit must relaunch the AppImage FILE, never the ephemeral
     // /tmp/.mount_* executable (which is gone exactly when recovery would fire).
     #[cfg(target_os = "linux")]
