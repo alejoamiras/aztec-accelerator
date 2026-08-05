@@ -56,6 +56,21 @@ export function assertPort(port: number, field: string): number {
   return port;
 }
 
+export function assertFlag(value: boolean, field: string): boolean {
+  // The SAME runtime-erasure argument that justifies `assertPort` — and I applied it to the numbers
+  // and not to the booleans, which is worse, because these two ARE the transport's security policy
+  // (codex round 4). `configure({allowInsecureDowngrade: "false"})` assigned the string `"false"`,
+  // which is truthy, so the documented opt-out switched ON via a value that reads as OFF. Coercion
+  // would repeat the mistake in a quieter form; a non-boolean here means the caller's config is not
+  // what they think it is, and they should hear about it.
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `Invalid accelerator ${field} ${JSON.stringify(value)}: expected true or false.`,
+    );
+  }
+  return value;
+}
+
 export function assertLoopbackHost(host: string): string {
   const reject = (why: string): never => {
     throw new Error(
@@ -263,8 +278,8 @@ export class AcceleratorTransport {
     this.#host = assertLoopbackHost(host);
     this.#port = assertPort(port, "port");
     this.#httpsPort = assertPort(httpsPort, "httpsPort");
-    this.#httpsOnly = httpsOnly;
-    this.#allowInsecureDowngrade = allowInsecureDowngrade;
+    this.#httpsOnly = assertFlag(httpsOnly, "httpsOnly");
+    this.#allowInsecureDowngrade = assertFlag(allowInsecureDowngrade, "allowInsecureDowngrade");
   }
 
   /**
@@ -278,19 +293,38 @@ export class AcceleratorTransport {
     httpsOnly?: boolean;
     allowInsecureDowngrade?: boolean;
   }) {
-    // Validate EVERYTHING into locals before touching a single field. The previous version assigned
+    // Read every property ONCE, up front. `config` is caller-supplied, so a property can be a getter
+    // with side effects or one that throws — reading the policy flags only after the addresses were
+    // already committed left `{port: X, get httpsOnly() { throw } }` with a moved port and none of
+    // the resets below (codex round 4). Reading first also means each property is observed exactly
+    // once, so a getter cannot return one value to the validator and another to the assignment.
+    const raw = {
+      port: config.port,
+      httpsPort: config.httpsPort,
+      host: config.host,
+      httpsOnly: config.httpsOnly,
+      allowInsecureDowngrade: config.allowInsecureDowngrade,
+    };
+
+    // Then validate EVERYTHING into locals before touching a single field. The first version assigned
     // as it went, so `configure({port: attackerPort, host: "evil.com"})` left the port pointing
     // somewhere new while the host check threw — and because the throw skipped the resets below, the
     // stale "healthy" status cache stayed valid for an endpoint that had moved (codex round 2). A
     // rejected call must change nothing at all.
-    const port = config.port === undefined ? this.#port : assertPort(config.port, "port");
+    const port = raw.port === undefined ? this.#port : assertPort(raw.port, "port");
     const httpsPort =
-      config.httpsPort === undefined ? this.#httpsPort : assertPort(config.httpsPort, "httpsPort");
+      raw.httpsPort === undefined ? this.#httpsPort : assertPort(raw.httpsPort, "httpsPort");
     // NORMALISED before comparing: `#host` holds the canonical spelling, so comparing the raw input
-    // against it made `configure({host: "127.1"})` — or "LOCALHOST", or a bare "::1" against the
-    // stored "[::1]" — read as a move and wipe the HTTPS history for an endpoint that never moved
-    // (codex round 2). Losing that history is what re-opens the plaintext downgrade.
-    const host = config.host === undefined ? this.#host : assertLoopbackHost(config.host);
+    // against it made `configure({host: "127.1"})` — or a bare "::1" against the stored "[::1]" —
+    // read as a move and wipe the HTTPS history for an endpoint that never moved (codex round 2).
+    // Losing that history is what re-opens the plaintext downgrade.
+    const host = raw.host === undefined ? this.#host : assertLoopbackHost(raw.host);
+    const httpsOnly =
+      raw.httpsOnly === undefined ? this.#httpsOnly : assertFlag(raw.httpsOnly, "httpsOnly");
+    const allowInsecureDowngrade =
+      raw.allowInsecureDowngrade === undefined
+        ? this.#allowInsecureDowngrade
+        : assertFlag(raw.allowInsecureDowngrade, "allowInsecureDowngrade");
 
     const movedEndpoint =
       port !== this.#port || httpsPort !== this.#httpsPort || host !== this.#host;
@@ -298,9 +332,8 @@ export class AcceleratorTransport {
     this.#port = port;
     this.#httpsPort = httpsPort;
     this.#host = host;
-    if (config.httpsOnly !== undefined) this.#httpsOnly = config.httpsOnly;
-    if (config.allowInsecureDowngrade !== undefined)
-      this.#allowInsecureDowngrade = config.allowInsecureDowngrade;
+    this.#httpsOnly = httpsOnly;
+    this.#allowInsecureDowngrade = allowInsecureDowngrade;
     this.#protocol = null;
     this.#statusCache = null;
     // A different ENDPOINT has its own HTTPS history — carrying the old one over would either block a

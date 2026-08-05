@@ -575,20 +575,24 @@ pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>
 /// `certs_dir()` — can replace it in between. Linux's per-store loop opens it once PER STORE, which
 /// widens the window further. A random, freshly-created name removes the predictable target.
 ///
-/// **Residual, stated plainly** (codex round 2, and it is right): this does NOT close the race
-/// against a determined same-UID attacker. No pathname-based scheme can — `0600` excludes other
-/// users, not another process running as *this* user, which can watch the temp directory and
-/// overwrite the file between our write and the tool's open. Holding the descriptor does not freeze
-/// the pathname's contents, and none of the three OS tools accept a file descriptor.
+/// **This is an explicit RISK ACCEPTANCE, not a closure** (codex rounds 2 and 4, both correct). It
+/// does not stop a determined same-UID attacker, and no pathname-based scheme can: `0600` excludes
+/// other users, not another process running as *this* user; holding the descriptor does not freeze
+/// the pathname's contents; and none of the three OS tools accept a file descriptor.
 ///
-/// What it costs the attacker is real: an unpredictable name and a window measured in the time
-/// between two adjacent syscalls, instead of a fixed path they can camp on indefinitely. What
-/// remains is bounded by the ceremony around it — on macOS and Windows the trust dialog displays the
-/// certificate being installed, and on Linux (no dialog) a same-UID attacker can already drive
-/// `certutil` against their own NSS databases without involving this app at all.
+/// Two things I initially claimed and should not have. The window is NOT "two adjacent syscalls" —
+/// it spans each backend's spawn and every reopen inside it, which on Linux is once per NSS store.
+/// And the trust dialog is NOT a reliable backstop: a substituted certificate can carry the same CN,
+/// so the dialog shows the user what they expect to see.
 ///
-/// The real closure, if the threat model ever needs it, is verifying identity AFTER the install:
-/// re-read the anchor the trust store actually ended up with and compare it to the bytes validated
+/// What the random name does buy is the removal of a fixed, predictable path an attacker can
+/// pre-plant and camp on. What bounds the rest is the alternative available to that attacker
+/// anyway: on Linux there is no dialog and a same-UID process can drive `certutil` against its own
+/// NSS databases without involving this app; on macOS/Windows it must win a live race against a
+/// user-initiated action to gain anything this app's consent ceremony would not otherwise refuse.
+///
+/// The closure, when the threat model demands one, is verifying identity AFTER the install: read
+/// back the anchor the trust store actually ended up with and compare it to the bytes validated
 /// here, removing it on mismatch. That is per-backend work (SHA-1 on macOS, serial on Windows,
 /// nickname on Linux) and is deliberately not in this change.
 ///

@@ -110,6 +110,42 @@ describe("AcceleratorTransport", () => {
     });
   });
 
+  // ── F-01 round 4: the policy flags are erased at runtime too ────────────────────────────────
+  describe("policy flag validation", () => {
+    test("a non-boolean flag is rejected rather than coerced", () => {
+      // codex round 4: I applied the runtime-erasure argument to the NUMBERS and not to the two
+      // booleans that ARE the transport's security policy. `"false"` is truthy, so the documented
+      // opt-out switched ON via a value that reads as OFF.
+      for (const bad of ["false", "true", 0, 1, null]) {
+        expect(
+          () =>
+            new AcceleratorTransport("127.0.0.1", 59833, 59834, false, bad as unknown as boolean),
+        ).toThrow(/Invalid accelerator allowInsecureDowngrade/);
+        expect(
+          () => new AcceleratorTransport("127.0.0.1", 59833, 59834, bad as unknown as boolean),
+        ).toThrow(/Invalid accelerator httpsOnly/);
+      }
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(() => t.configure({ allowInsecureDowngrade: "false" as unknown as boolean })).toThrow(
+        /Invalid accelerator allowInsecureDowngrade/,
+      );
+      // The real thing still works.
+      t.configure({ allowInsecureDowngrade: true, httpsOnly: false });
+      t.commitStatus({ available: true, needsDownload: false }, { pin: "set", protocol: "https" });
+      expect(t.allowsHttpDowngrade).toBe(true);
+    });
+
+    test("a rejected flag does not enable the downgrade", () => {
+      // The end-to-end consequence: pre-fix, this call switched the opt-out ON.
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus({ available: true, needsDownload: false }, { pin: "set", protocol: "https" });
+      expect(() =>
+        t.configure({ allowInsecureDowngrade: "false" as unknown as boolean }),
+      ).toThrow();
+      expect(t.allowsHttpDowngrade).toBe(false);
+    });
+  });
+
   // ── F-01: do not DOWNGRADE from a working HTTPS endpoint ────────────────────────────────────
   describe("allowsHttpDowngrade", () => {
     const healthy = { pin: "set", protocol: "https" } as const;
@@ -176,6 +212,14 @@ describe("AcceleratorTransport", () => {
       six.configure({ host: "[::1]" });
       expect(six.allowsHttpDowngrade).toBe(false);
 
+      // The hostname form re-spelled is the SAME authority — DNS names are case-insensitive, and
+      // `URL` lower-cases them. Untested until codex round 4 pointed out the omission.
+      const named = new AcceleratorTransport("localhost", 59833, 59834);
+      named.commitStatus({ available: true, needsDownload: false }, healthy);
+      named.configure({ host: "LOCALHOST" });
+      expect(named.allowsHttpDowngrade).toBe(false);
+      expect(named.baseUrl).toBe("https://localhost:59834");
+
       // A different loopback AUTHORITY — including the hostname form — still counts as a move.
       for (const other of ["127.0.0.2", "localhost", "[::1]"]) {
         const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
@@ -208,6 +252,35 @@ describe("AcceleratorTransport", () => {
         plain.configure({ host: "127.0.0.2", httpsPort: "443@evil.com" as unknown as number }),
       ).toThrow(/Invalid accelerator httpsPort/);
       expect(plain.baseUrl).toBe("http://127.0.0.1:59833");
+
+      // `httpsPort` needs its own observable — the HTTP baseUrl above reads `#port`, so a mutant
+      // that committed a VALID new httpsPort before rejecting the host would have passed (codex
+      // round 4). Pin the protocol to read the HTTPS side.
+      const https = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      https.setProtocol("https");
+      expect(() => https.configure({ httpsPort: 44444, host: "evil.com" })).toThrow(
+        /Invalid accelerator host/,
+      );
+      expect(https.baseUrl).toBe("https://127.0.0.1:59834");
+
+      // A policy flag rejected AFTER valid addresses must not move them either.
+      const flags = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(() =>
+        flags.configure({ port: 51337, httpsOnly: "yes" as unknown as boolean }),
+      ).toThrow(/Invalid accelerator httpsOnly/);
+      expect(flags.baseUrl).toBe("http://127.0.0.1:59833");
+
+      // Same when the property THROWS on read rather than failing validation.
+      const getter = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(() =>
+        getter.configure({
+          port: 51337,
+          get httpsOnly(): boolean {
+            throw new Error("boom");
+          },
+        }),
+      ).toThrow(/boom/);
+      expect(getter.baseUrl).toBe("http://127.0.0.1:59833");
 
       // The rest of the state must be untouched too: a throw used to skip the resets below the
       // assignments, leaving a stale "healthy" cache valid for an endpoint that had already moved.

@@ -130,20 +130,32 @@ fn keychain_anchor() -> Anchor {
     }
 }
 
-/// Can we reach the login keychain at all?
+/// Can `security` actually QUERY the login keychain? Both signals must agree.
 ///
-/// This asks about the KEYCHAIN FILE, not its contents. The first version ran an unfiltered
-/// `find-certificate` and treated any nonzero exit as unreadable — but that command also exits
-/// nonzero on a keychain holding no certificates, so deleting our anchor when it was the LAST one
-/// made a genuinely successful removal report as unverifiable (codex round 2). A control question
-/// whose answer depends on how many certificates happen to be installed is not a control question.
+/// Neither alone is sufficient, and I shipped each alone in turn:
+/// - An unfiltered `find-certificate` also exits nonzero on a keychain holding NO certificates, so
+///   deleting our anchor when it was the last one reported a successful removal as unverifiable.
+/// - `File::open` succeeds on a keychain that is filesystem-readable but LOCKED, corrupt, or denied
+///   by the keychain service — precisely the states where `security` runs, exits nonzero, and the
+///   removal would again be reported as complete without proof (codex rounds 2 and 4).
 ///
-/// Opening the file covers what this needs to catch: a `HOME` that resolves elsewhere under `sudo`,
-/// a keychain that was moved or never created, a permission-denied path. A LOCKED keychain still
-/// opens, so it remains a residual — `security` prompts or fails on use, and a spawn failure is
-/// already `Unknown`.
+/// Requiring both means the ambiguity that remains is one-directional: a genuinely EMPTY keychain
+/// reports "could not verify" for a removal that had nothing to remove. That is the fail-closed
+/// direction and it costs a user a manual re-check; the alternative costs them a root CA they were
+/// told was gone. It cannot be narrowed further from code we can test — `security`'s exit codes do
+/// not separate "no such item" from "cannot read this store", its stderr strings are localisable,
+/// and installing/locking a keychain in CI needs interactive auth (`tests/trust_macos.rs` covers
+/// only the query path).
 fn keychain_is_readable() -> bool {
-    std::fs::File::open(login_keychain()).is_ok()
+    if std::fs::File::open(login_keychain()).is_err() {
+        return false;
+    }
+    Command::new(SECURITY_BIN)
+        .arg("find-certificate")
+        .arg(login_keychain())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Convenience for the callers that only need "the current anchor, if we can name it".
