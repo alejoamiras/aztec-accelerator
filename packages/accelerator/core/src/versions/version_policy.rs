@@ -393,7 +393,7 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
     // out the window once and finish the job; the caller already runs us detached.
     if deferred_by_active_window {
         tokio::time::sleep(super::downloader::CACHE_ENTRY_ACTIVE_WINDOW).await;
-        Box::pin(cleanup_after_active_window(bundled, in_use)).await;
+        cleanup_after_active_window(bundled, in_use).await;
     }
 }
 
@@ -406,9 +406,11 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
 /// startup is what makes the cap eventually-true regardless of what happened in the previous run.
 ///
 /// `in_use` is `None`: nothing is proving yet. Detached by the caller — this must never delay the
-/// listener coming up.
-pub async fn sweep_cache_on_start(bundled: Option<&str>) {
-    let Some(bundled) = bundled.and_then(AztecVersion::parse) else {
+/// listener coming up. Takes `&str` rather than `Option<&str>`: every caller has a version to pass
+/// (the `DEFAULT_BB_VERSION` sentinel when none is configured), so the `None` arm was a state that
+/// could not occur — codex round 5.
+pub async fn sweep_cache_on_start(bundled: &str) {
+    let Some(bundled) = AztecVersion::parse(bundled) else {
         // An unparseable bundled version means we cannot say what must be KEPT, and evicting without
         // that is how you delete the fallback binary. Callers pass the same `"unknown"` sentinel the
         // post-download path uses when none is configured, so this is the genuinely-broken case only.
@@ -417,9 +419,10 @@ pub async fn sweep_cache_on_start(bundled: Option<&str>) {
     cleanup_old_versions(&bundled, None).await;
 }
 
-/// The retry half of the above, split out so the recursion is explicit and can only happen once:
-/// this pass does NOT re-arm the timer, so a cache that is still over the cap waits for the next
-/// download rather than looping.
+/// The retry half of the above. It does NOT call back into `cleanup_old_versions`, so there is no
+/// recursion and no re-armed timer: a cache still over the cap after this pass waits for the next
+/// download or the next startup sweep rather than looping. (The `Box::pin` this used to carry was
+/// guarding against a recursion that does not exist — codex round 5.)
 async fn cleanup_after_active_window(bundled: &AztecVersion, in_use: Option<&AztecVersion>) {
     let cached: Vec<AztecVersion> = list_cached_versions()
         .iter()

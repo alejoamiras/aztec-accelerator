@@ -253,7 +253,7 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
         .clone()
         .unwrap_or_else(|| DEFAULT_BB_VERSION.to_string());
     tokio::spawn(async move {
-        crate::versions::sweep_cache_on_start(Some(&bundled)).await;
+        crate::versions::sweep_cache_on_start(&bundled).await;
     });
 
     let app = router(state);

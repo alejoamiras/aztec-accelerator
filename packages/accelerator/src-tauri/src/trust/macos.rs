@@ -146,6 +146,15 @@ fn keychain_anchor() -> Anchor {
 /// not separate "no such item" from "cannot read this store", its stderr strings are localisable,
 /// and installing/locking a keychain in CI needs interactive auth (`tests/trust_macos.rs` covers
 /// only the query path).
+///
+/// Lead worth following on a real Mac, not taken here: `security show-keychain-info <keychain>`
+/// reads keychain SETTINGS (`SecKeychainCopySettings`) independently of item count, and is reported
+/// to fail when keychain authentication is broken. If it can be shown, across supported macOS
+/// versions, to succeed on an empty UNLOCKED keychain and fail WITHOUT prompting on
+/// locked/corrupt/service-denied ones, it would replace both checks here and remove the empty-
+/// keychain false positive. It needs that matrix first — settings readability does not obviously
+/// imply certificate-search readability, and a check that prompts would be worse than the ambiguity
+/// it replaces. (codex round 5.)
 fn keychain_is_readable() -> bool {
     if std::fs::File::open(login_keychain()).is_err() {
         return false;
