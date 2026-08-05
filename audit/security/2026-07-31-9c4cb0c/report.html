@@ -124,13 +124,26 @@
 </header>
 
 <div class="callout warn">
-  <h3>Status: verification pass still running</h3>
+  <h3>Verification changed some of this — read this first</h3>
   <p>
-    Bands below come from the reduce stage. An independent verifier is currently re-reading the two
-    High findings and three Mediums from source <em>before</em> seeing the claims, and may move
-    severities in either direction. This page updates in place when it finishes. Nothing here has
-    been fixed — no code changes have been made from this audit.
+    Five findings were independently re-read from source <em>before</em> the verifier saw the claims.
+    Nothing was refuted outright, but three were trimmed and two rationales were wrong:
   </p>
+  <ul>
+    <li><strong>F-03's version-floor claim is refuted.</strong> The launch floor commits the binary's own
+      compiled-in version, not the value a spoofed responder reports, so a forged probe is a no-op there.
+      The self-eviction half stands. Band drops 6.8 → ~5.0.</li>
+    <li><strong>F-01's "not covered by any accepted residual" was wrong.</strong> The plaintext-by-default
+      posture <em>is</em> a documented accepted decision. The finding still holds as High, but on the
+      narrower ground that the authentication half of prior F-001's fix never shipped. Its
+      <code>host</code> facet drops to Low — there is no environment-variable path to set it.</li>
+    <li><strong>F-08's disclosure is asserted, not demonstrated.</strong> The certain harm is that the
+      prover's diagnostics are lost entirely; the leak magnitude is unproven, and "accumulates over
+      months" is unsupported.</li>
+    <li><strong>F-02 and F-04 confirmed as written</strong>, including the claim the verifier tried
+      hardest to break.</li>
+  </ul>
+  <p>Nothing here has been fixed — no code changes have been made from this audit.</p>
 </div>
 
 <div class="callout">
@@ -139,9 +152,13 @@
   <ol>
     <li><strong>F-05 — trust removal fails open.</strong> The correct tri-state already exists in
       <code>trust/linux.rs:328-350</code>; port it to macOS and Windows. Also bounds F-02's damage.</li>
-    <li><strong>F-04 (items 1–2) — permanent update lockout.</strong> On corrupt state, fall back to
-      <code>floor = current_running_version</code>. Costs nothing: <code>candidate_allowed</code>
-      already enforces <code>candidate &gt; current</code> on its own.</li>
+    <li><strong>F-04 (items 1–2) — permanent update lockout. Do this one first.</strong> Verification
+      established this is not primarily an attack: <em>a user who downgrades to an older build — the
+      normal response to a bad release — is permanently and silently cut off from every future update,
+      including the fix.</em> Fall back to <code>floor = current_running_version</code> on corrupt or
+      impossible state, and surface it in Settings. Costs nothing:
+      <code>candidate_allowed</code> already enforces <code>candidate &gt; current</code> before it
+      ever consults the file (verified).</li>
     <li><strong>F-08 (facet B) — dead stderr containment.</strong> One line restores a control that
       was written, tested, and has never actually run.</li>
   </ol>
@@ -153,6 +170,7 @@
 <div class="finding">
   <div class="fh">
     <span class="chip c-high">High 8.1</span><span class="fid">F-01</span>
+    <span class="chip c-info">verified: partial</span>
     <span class="chip c-info">both models</span><span class="chip c-info">confidence: high</span>
     <span class="chip c-info">escalation of prior F-001</span>
     <span class="ftitle">The SDK hands the private witness to an endpoint it never authenticates, in cleartext, by default</span>
@@ -187,7 +205,11 @@
     the wrong one. The generation guard is sound but prevents an <em>unprobed</em> endpoint, not a
     <em>probed-but-unauthenticated</em> one. The disclosed residual in the README describes the
     <code>httpsOnly</code> case, where the bar is forging browser trust; in the default mode the bar is
-    binding a port.</p>
+    binding a port. <strong>Corrected by verification:</strong> the plaintext-by-default posture IS a
+    documented accepted decision (<code>https-by-default-onboarding-2026-07-09/plan.md:18,131</code>) —
+    the earlier claim that it was covered by no residual was wrong. The finding stands on the narrower
+    ground that prior F-001 asked for endpoint authentication and only the body-shape half shipped. The
+    <code>host</code> facet drops to Low: there is no environment-variable ingress for it.</p>
     <p><strong>Prior audit.</strong> F-001's fix had two halves — authenticate the server, and stop
     trusting unrecognized bodies. Only the second shipped. This adds two sinks F-001 did not cover: the
     HTTPS→HTTP demotion re-probe, and the unvalidated <code>host</code> option.</p>
@@ -199,6 +221,7 @@
 <div class="finding">
   <div class="fh">
     <span class="chip c-high">High 7.8</span><span class="fid">F-02</span>
+    <span class="chip c-info">verified: confirmed</span>
     <span class="chip c-info">both models</span><span class="chip c-info">confidence: high</span>
     <span class="chip c-info">new</span>
     <span class="ftitle">The app installs whatever certificate is on disk into the OS root store, unvalidated and unscoped</span>
@@ -250,7 +273,8 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 6.8</span><span class="fid">F-03</span>
+    <span class="chip c-med">Med ~5.0</span><span class="fid">F-03</span>
+    <span class="chip c-info">verified: partial — band ↓</span>
     <span class="chip c-info">both models</span><span class="chip c-info">escalation of prior F-002</span>
     <span class="ftitle">A forgeable <code>/health</code> shape is treated as proof of process identity</span>
   </div>
@@ -261,9 +285,10 @@
     <em>is</em> a legitimate copy of itself.</p>
     <p><strong>What an attacker would do.</strong> Squat the port; on Windows the genuine app then exits
     with a success code deliberately chosen so its supervisor will not restart it — no tray icon, no
-    error. The impostor keeps the port and keeps receiving witnesses. Separately, the anti-rollback
-    version floor is advanced based on a version number the impostor simply states, which can
-    permanently block rolling back to a known-good build.</p>
+    error. The impostor keeps the port and keeps receiving witnesses.
+    <em>Correction from verification:</em> an earlier draft of this finding also claimed the impostor
+    could poison the anti-rollback version floor. That is wrong — the floor commits the running
+    binary's own compiled-in version, not the probed value, so a forged probe is a no-op there.</p>
     <p><strong>The fix.</strong> Use an OS single-instance primitive (named mutex, abstract socket, lock
     file) for the “am I redundant?” decision instead of an HTTP probe, and never advance the version
     floor from a self-declared value.</p>
@@ -287,6 +312,7 @@
 <div class="finding">
   <div class="fh">
     <span class="chip c-med">Med 6.5</span><span class="fid">F-04</span>
+    <span class="chip c-info">verified: confirmed</span>
     <span class="chip c-info">both models</span><span class="chip c-info">new</span>
     <span class="ftitle">A one-shot local write permanently disables the update channel — and survives reinstall</span>
   </div>
@@ -403,6 +429,7 @@
 <div class="finding">
   <div class="fh">
     <span class="chip c-med">Med 6.0</span><span class="fid">F-08</span>
+    <span class="chip c-info">verified: partial</span>
     <span class="chip c-info">claude</span><span class="chip c-info">fix: hours · CHEAPEST</span>
     <span class="ftitle">Witness data escapes the controls designed to contain it</span>
   </div>
@@ -414,9 +441,10 @@
     later. And the prover's error output was supposed to be truncated and kept server-side, but the
     child process inherits the app's output streams, so the captured buffer is always empty and that
     code has never executed.</p>
-    <p><strong>What an attacker would do.</strong> Nothing active — this accumulates on its own. Months
-    of private witnesses sit in a predictable directory, ready for whoever later gets same-user access,
-    the stolen laptop, or the backup.</p>
+    <p><strong>What an attacker would do.</strong> Nothing active — residue accumulates on its own, and
+    whoever later gets same-user access, the laptop, or the backup can read it. <em>Verification note:</em>
+    the volume ("months of witnesses") is unsupported, and for the stderr half the demonstrated harm is
+    that the prover's diagnostics are lost entirely rather than a proven leak.</p>
     <p><strong>The fix.</strong> Sweep the workspace directory at startup (the version cache already has
     exactly this), and either pipe the child's stderr so the existing truncation runs, or discard it
     explicitly.</p>
