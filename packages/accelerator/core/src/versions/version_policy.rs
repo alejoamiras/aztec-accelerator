@@ -365,6 +365,13 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         // exempts a DIFFERENT in_use version). Age-gating stops two concurrent detached cleanups from
         // evicting each other's fresh-in-use binary. A truly-old in-use version is still a narrow,
         // recoverable (re-download) TOCTOU — a full cross-request lease is deferred (see FINDINGS.md B2).
+        //
+        // F-06 note: this exemption applies to the SIZE-cap evictions too, so a burst of downloads can
+        // transiently overshoot `CACHE_MAX_TOTAL_BYTES` by whatever lands inside one active window —
+        // everything in it is "recently active" and therefore unevictable. Correctness wins here:
+        // overriding the guard would let one request delete the binary another is about to execute. The
+        // overshoot is bounded by the burst rate and reclaimed by the next cleanup, which is a different
+        // thing from the unbounded growth this cap exists to stop.
         if super::downloader::recently_active(&dir) {
             tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
             continue;

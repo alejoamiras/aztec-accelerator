@@ -153,14 +153,16 @@ fn layer_b_gate(candidate: &Version, current: &Version) -> Result<(), String> {
     if updater_state::running_below_floor(current, &state) {
         // F-04: a DIAGNOSTIC, not a veto. Refusing every update here was the permanent, silent
         // lockout: reachable by a forged floor *or* by a user deliberately downgrading to an older
-        // build, and unrecoverable because nothing in the tree repaired the file. `candidate_allowed`
-        // now clamps the floor and `commit_successful_launch` resets it; the candidate must still beat
-        // the running build, which is the anti-rollback rule that does not depend on this file.
+        // build, and unrecoverable because nothing in the tree repaired the file. The floor is still
+        // enforced literally by `candidate_allowed` — blocking a candidate below it is the feature —
+        // but `commit_successful_launch` now RESETS it to the running build, so the state repairs
+        // itself within one launch. The candidate must still beat the running build regardless, which
+        // is the anti-rollback rule that does not depend on this file at all.
         tracing::error!(
             running = %current,
             "SECURITY: the persisted version floor is ABOVE the running build (out-of-band downgrade, \
-             user downgrade, or a forged state file); clamping it so updates are not permanently \
-             disabled"
+             user downgrade, or a forged state file); it will be reset to the running version by the \
+             next successful-launch commit rather than disabling updates permanently"
         );
     }
     if !updater_state::candidate_allowed(candidate, current, &state) {
