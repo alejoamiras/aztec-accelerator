@@ -31,9 +31,84 @@ describe("AcceleratorTransport", () => {
     test("configure() updates the endpoint AND resets the negotiated protocol", () => {
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
       t.setProtocol("https");
-      t.configure({ port: 12345, host: "0.0.0.0" });
+      // 127.0.0.2 rather than the 0.0.0.0 this used to pass: still a DIFFERENT host (which is all
+      // the test needs) but a real loopback one, since `assertLoopbackHost` now rejects the rest.
+      t.configure({ port: 12345, host: "127.0.0.2" });
       // protocol reset → back to http, now pointing at the new host+port
-      expect(t.baseUrl).toBe("http://0.0.0.0:12345");
+      expect(t.baseUrl).toBe("http://127.0.0.2:12345");
+    });
+  });
+
+  // ── F-01 regression (audit 2026-07-31) ──────────────────────────────────────────────────────
+  // `host` was interpolated raw into six URL templates, one of which POSTs the private witness.
+  describe("host validation", () => {
+    test("a host that re-points the URL template is rejected", () => {
+      // Each of these silently redirects `https://${host}:${port}/prove` off the machine.
+      for (const evil of [
+        "evil.com",
+        "evil.com/#",
+        "evil.com:1/",
+        "127.0.0.1.evil.com",
+        "127.0.0.1/../../evil",
+        "user:pass@evil.com",
+        "127.0.0.1:1234",
+        "127.0.0.1?x=1",
+        "",
+        " ",
+      ]) {
+        expect(() => new AcceleratorTransport(evil, 59833, 59834)).toThrow(
+          /Invalid accelerator host/,
+        );
+      }
+    });
+
+    test("loopback spellings are accepted and normalised for the URL template", () => {
+      expect(new AcceleratorTransport("127.0.0.1", 1, 2).baseUrl).toBe("http://127.0.0.1:1");
+      expect(new AcceleratorTransport("localhost", 1, 2).baseUrl).toBe("http://localhost:1");
+      expect(new AcceleratorTransport("127.0.0.2", 1, 2).baseUrl).toBe("http://127.0.0.2:1");
+      // A bare IPv6 literal MUST come back bracketed, or the template builds `http://::1:1`.
+      expect(new AcceleratorTransport("::1", 1, 2).baseUrl).toBe("http://[::1]:1");
+      expect(new AcceleratorTransport("[::1]", 1, 2).baseUrl).toBe("http://[::1]:1");
+    });
+
+    test("configure() validates too — the endpoint can be changed after construction", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(() => t.configure({ host: "evil.com" })).toThrow(/Invalid accelerator host/);
+      expect(t.baseUrl).toBe("http://127.0.0.1:59833");
+    });
+  });
+
+  // ── F-01: do not DOWNGRADE from a working HTTPS endpoint ────────────────────────────────────
+  describe("allowsHttpDowngrade", () => {
+    const healthy = { pin: "set", protocol: "https" } as const;
+
+    test("permitted until a healthy HTTPS endpoint has answered", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(t.allowsHttpDowngrade).toBe(true);
+      // An accelerator with HTTPS off (the wizard choice, and the headless server) is untouched:
+      // nothing ever pins https, so HTTP keeps working exactly as before.
+      t.commitStatus({ available: false, reason: "offline" }, { pin: "clear" });
+      expect(t.allowsHttpDowngrade).toBe(true);
+    });
+
+    test("refused once HTTPS has proven healthy at this endpoint", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus({ available: true, needsDownload: false }, healthy);
+      expect(t.allowsHttpDowngrade).toBe(false);
+    });
+
+    test("the documented opt-out restores it", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, false, true);
+      t.commitStatus({ available: true, needsDownload: false }, healthy);
+      expect(t.allowsHttpDowngrade).toBe(true);
+    });
+
+    test("reconfiguring forgets the old endpoint's HTTPS history", () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus({ available: true, needsDownload: false }, healthy);
+      expect(t.allowsHttpDowngrade).toBe(false);
+      t.configure({ port: 12345 });
+      expect(t.allowsHttpDowngrade).toBe(true);
     });
   });
 

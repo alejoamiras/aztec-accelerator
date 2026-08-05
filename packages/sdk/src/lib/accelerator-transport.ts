@@ -28,6 +28,60 @@ const HEALTH_BODY_MAX_BYTES = 64 * 1024;
 const PROVE_TIMEOUT_MS = ms("10 min");
 
 /**
+ * Validate a configured `host` and return it, or throw (F-01, audit 2026-07-31).
+ *
+ * `host` was interpolated raw into six URL templates (`https://${host}:${port}/prove` and friends).
+ * A value like `evil.com/#` or `evil.com:1/` re-points every one of them: the private witness is
+ * POSTed to `/prove`, so a mis-set — or attacker-influenced — host sends it straight off the machine.
+ * Parsing through `URL` is what makes that unrepresentable: the value must survive round-tripping as
+ * a pure hostname, so anything carrying a path, port, query, fragment, credentials, or scheme is
+ * rejected rather than silently reinterpreted.
+ *
+ * Loopback-only is a real constraint, not paranoia: the accelerator is a local service, and its HTTPS
+ * identity is a CA name-constrained to loopback, so a remote host could not present a certificate the
+ * SDK's own trust model accepts. A non-loopback host is therefore always a misconfiguration.
+ */
+export function assertLoopbackHost(host: string): string {
+  const reject = (why: string): never => {
+    throw new Error(
+      `Invalid accelerator host ${JSON.stringify(host)}: ${why}. ` +
+        `Expected a loopback host such as "127.0.0.1", "::1", or "localhost".`,
+    );
+  };
+  if (typeof host !== "string" || host.length === 0) reject("it must be a non-empty string");
+
+  let parsed: URL;
+  try {
+    // Bracket a bare IPv6 literal so `::1` parses as a host rather than a scheme.
+    const literal = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    parsed = new URL(`http://${literal}`);
+  } catch {
+    return reject("it is not a bare hostname");
+  }
+  // `new URL` would happily absorb a path, port, credentials or query into the surrounding template.
+  if (parsed.port !== "" || parsed.username !== "" || parsed.password !== "") {
+    reject("it must not carry a port or credentials");
+  }
+  if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+    reject("it must not carry a path, query, or fragment");
+  }
+
+  // `URL` normalises IPv6 to a bracketed lowercase form and IPv4 to dotted-quad, so compare on that.
+  const h = parsed.hostname.toLowerCase();
+  const isLoopback =
+    h === "localhost" ||
+    h === "[::1]" ||
+    // The whole 127.0.0.0/8 block, which is what the OS actually routes to the loopback interface.
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+  if (!isLoopback) reject("it is not a loopback address");
+
+  // Return the NORMALISED spelling, which is also the only one the URL templates can use: `URL`
+  // brackets IPv6 (`::1` → `[::1]`, required before `:port`) and canonicalises short IPv4 forms
+  // (`127.1` → `127.0.0.1`). Interpolating the raw `::1` would have built `https://::1:59834`.
+  return h;
+}
+
+/**
  * A settled `/health` probe: the {@link Response}, which protocol reached it, and the response body
  * parsed ONCE under {@link HEALTH_BODY_TIMEOUT_MS}/{@link HEALTH_BODY_MAX_BYTES} (`undefined` =
  * unparseable, over-cap, or stalled). The body stream is consumed here — callers use `body`, never
@@ -171,24 +225,55 @@ export class AcceleratorTransport {
    */
   #generation = 0;
 
-  constructor(host: string, port: number, httpsPort: number, httpsOnly = false) {
-    this.#host = host;
+  /**
+   * Has a healthy HTTPS accelerator ever answered at the CURRENT endpoint? Set by
+   * {@link commitStatus} when a probe pins `https`, cleared by {@link configure}.
+   *
+   * F-01 (audit 2026-07-31): this is what turns "prefer HTTPS" into "do not DOWNGRADE from HTTPS".
+   * Preference alone was defeated by a single network-layer `/prove` failure, after which the SDK
+   * retried the same private witness over plaintext HTTP.
+   */
+  #httpsWasHealthy = false;
+
+  /** Escape hatch for the above. See {@link AcceleratorConfig.allowInsecureDowngrade}. */
+  #allowInsecureDowngrade: boolean;
+
+  constructor(
+    host: string,
+    port: number,
+    httpsPort: number,
+    httpsOnly = false,
+    allowInsecureDowngrade = false,
+  ) {
+    this.#host = assertLoopbackHost(host);
     this.#port = port;
     this.#httpsPort = httpsPort;
     this.#httpsOnly = httpsOnly;
+    this.#allowInsecureDowngrade = allowInsecureDowngrade;
   }
 
   /**
    * Update connection settings. Resets the negotiated protocol and the status cache — each is keyed
    * to the old endpoint — and bumps the generation so any in-flight probe's commit is discarded.
    */
-  configure(config: { port?: number; httpsPort?: number; host?: string; httpsOnly?: boolean }) {
+  configure(config: {
+    port?: number;
+    httpsPort?: number;
+    host?: string;
+    httpsOnly?: boolean;
+    allowInsecureDowngrade?: boolean;
+  }) {
     if (config.port !== undefined) this.#port = config.port;
     if (config.httpsPort !== undefined) this.#httpsPort = config.httpsPort;
-    if (config.host !== undefined) this.#host = config.host;
+    if (config.host !== undefined) this.#host = assertLoopbackHost(config.host);
     if (config.httpsOnly !== undefined) this.#httpsOnly = config.httpsOnly;
+    if (config.allowInsecureDowngrade !== undefined)
+      this.#allowInsecureDowngrade = config.allowInsecureDowngrade;
     this.#protocol = null;
     this.#statusCache = null;
+    // A different endpoint has its own HTTPS history — carrying the old one over would either block a
+    // legitimate HTTP-only endpoint or, worse, vouch for a new one we have never reached over TLS.
+    this.#httpsWasHealthy = false;
     this.#generation++;
   }
 
@@ -200,6 +285,19 @@ export class AcceleratorTransport {
   /** Whether strict HTTPS-only mode is on (no HTTP URL is ever constructed). */
   get httpsOnly(): boolean {
     return this.#httpsOnly;
+  }
+
+  /**
+   * May a failed HTTPS `/prove` be retried over plaintext HTTP right now? (F-01.)
+   *
+   * False once a healthy HTTPS accelerator has answered at this endpoint, unless the integrator opted
+   * in. The pre-fix code validated the HTTP endpoint before downgrading, but that check is the
+   * `/health` SHAPE contract — its own comment calls it collision resistance, not authentication — so
+   * any local account that binds 127.0.0.1:59833 answers it and receives the witness.
+   */
+  get allowsHttpDowngrade(): boolean {
+    if (this.#httpsOnly) return false;
+    return !this.#httpsWasHealthy || this.#allowInsecureDowngrade;
   }
 
   /** Pin (or clear, with `null`) the protocol that `/prove` should use. */
@@ -239,8 +337,12 @@ export class AcceleratorTransport {
     generation?: number,
   ): AcceleratorStatus {
     if (generation !== undefined && generation !== this.#generation) return status;
-    if (transition.pin === "set") this.#protocol = transition.protocol;
-    else if (transition.pin === "clear") this.#protocol = null;
+    if (transition.pin === "set") {
+      this.#protocol = transition.protocol;
+      // F-01: remember that TLS worked here. Only a "set" counts — it is the transition that follows
+      // a 2xx `/health` matching the accelerator's body contract.
+      if (transition.protocol === "https") this.#httpsWasHealthy = true;
+    } else if (transition.pin === "clear") this.#protocol = null;
     // "keep" → #protocol unchanged.
     return this.cacheStatus(status);
   }

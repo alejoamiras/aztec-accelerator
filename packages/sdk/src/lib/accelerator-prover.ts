@@ -100,12 +100,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     let httpsPort: number | undefined;
     let host: string | undefined;
     let httpsOnly: boolean | undefined;
+    let allowInsecureDowngrade: boolean | undefined;
 
     if (opts.accelerator) {
       if (opts.accelerator.port !== undefined) port = opts.accelerator.port;
       if (opts.accelerator.httpsPort !== undefined) httpsPort = opts.accelerator.httpsPort;
       if (opts.accelerator.host !== undefined) host = opts.accelerator.host;
       if (opts.accelerator.httpsOnly !== undefined) httpsOnly = opts.accelerator.httpsOnly;
+      if (opts.accelerator.allowInsecureDowngrade !== undefined)
+        allowInsecureDowngrade = opts.accelerator.allowInsecureDowngrade;
     }
 
     const envPort =
@@ -114,6 +117,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       typeof process !== "undefined" ? process.env?.AZTEC_ACCELERATOR_HTTPS_PORT : undefined;
     const envHttpsOnly =
       typeof process !== "undefined" ? process.env?.AZTEC_ACCELERATOR_HTTPS_ONLY : undefined;
+    const envAllowDowngrade =
+      typeof process !== "undefined"
+        ? process.env?.AZTEC_ACCELERATOR_ALLOW_INSECURE_DOWNGRADE
+        : undefined;
 
     const parsedPort = envPort ? Number.parseInt(envPort, 10) : NaN;
     const parsedHttpsPort = envHttpsPort ? Number.parseInt(envHttpsPort, 10) : NaN;
@@ -125,11 +132,16 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     // Explicit option wins; else the env flag (`1`/`true`) enables strict HTTPS-only; else false.
     const resolvedHttpsOnly =
       httpsOnly ?? (envHttpsOnly === "1" || envHttpsOnly?.toLowerCase() === "true");
+    // F-01: off unless explicitly asked for, by option or env, exactly like `httpsOnly`.
+    const resolvedAllowDowngrade =
+      allowInsecureDowngrade ??
+      (envAllowDowngrade === "1" || envAllowDowngrade?.toLowerCase() === "true");
     this.#transport = new AcceleratorTransport(
       resolvedHost,
       resolvedPort,
       resolvedHttpsPort,
       resolvedHttpsOnly,
+      resolvedAllowDowngrade,
     );
   }
 
@@ -415,6 +427,22 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         // `httpRetryUrl` is non-null exactly when this attempt went over HTTPS in non-strict mode —
         // guarding on it (rather than re-deriving the condition) also narrows the type.
         if (httpRetryUrl) {
+          // F-01: a healthy HTTPS accelerator answered at this endpoint, so a network-layer failure
+          // is not a reason to hand the same private witness to whatever is on the plaintext port.
+          // The `isProtocolHealthy` check below is the `/health` SHAPE contract, not authentication —
+          // any local account can bind 127.0.0.1:59833 and satisfy it. WASM is the safe outcome.
+          if (!this.#transport.allowsHttpDowngrade) {
+            logger.warn(
+              "HTTPS /prove failed, but this accelerator was reachable over HTTPS — refusing to " +
+                "retry over plaintext HTTP; falling back to WASM. Set " +
+                "`accelerator.allowInsecureDowngrade` (or AZTEC_ACCELERATOR_ALLOW_INSECURE_DOWNGRADE=1) " +
+                "to allow it.",
+            );
+            return this.#fallbackToWasm(
+              executionSteps,
+              "Local proof completed after transport failure",
+            );
+          }
           this.#transport.demoteHttpsPin();
           // VALIDATE the HTTP endpoint before sending it the witness. A healthy HTTPS probe says
           // nothing about who is listening on the HTTP port; without this check a foreign responder

@@ -803,21 +803,51 @@ describe("AcceleratorProver", () => {
       expect(healthCalls).toBeLessThanOrEqual(2);
     });
 
-    test("pinned-HTTPS /prove network failure retries over HTTP once that endpoint VALIDATES", async () => {
-      const serSpy = mockSerializer();
-      const { fetchedUrls } = mockFetch({
-        // Both endpoints are ours and healthy; HTTPS wins the probe by preference.
+    // ── F-01 regression (audit 2026-07-31) ────────────────────────────────────────────────────
+    // These two used to be ONE test asserting the downgrade always happened. The `isProtocolHealthy`
+    // guard it relied on is the `/health` SHAPE contract — its own comment calls it collision
+    // resistance, not authentication — and ANY local account can bind 127.0.0.1:59833 to satisfy it.
+    // So a cross-user attacker who could make the HTTPS `/prove` fail received the private witness in
+    // cleartext. "Prefer HTTPS" is now "never downgrade FROM a working HTTPS", with an opt-out.
+    const downgradeScenario = () =>
+      mockFetch({
+        // Both endpoints answer the contract; HTTPS wins the probe by preference.
         "http://127.0.0.1:59833/health": () => healthyBody(),
         "https://127.0.0.1:59834/health": () => healthyBody(),
         // HTTPS /prove dies at the network layer (trust/listener changed since /health)...
         "https://127.0.0.1:59834/prove": () => {
           throw new TypeError("TLS handshake failed");
         },
-        // ...and the HTTP endpoint, re-validated first, still proves fine.
+        // ...and the HTTP endpoint would happily take the witness.
         "http://127.0.0.1:59833/prove": () => Response.json({ proof: "" }),
       });
 
+    test("a failed HTTPS /prove is NOT retried over plaintext HTTP by default", async () => {
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const { fetchedUrls } = downgradeScenario();
+
       const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test", // WASM fallback was reached instead
+      );
+
+      expect(fetchedUrls).toContain("https://127.0.0.1:59834/prove");
+      // The assertion: the witness never reaches the plaintext port. Pre-F-01 it did.
+      expect(fetchedUrls).not.toContain("http://127.0.0.1:59833/prove");
+      expect(wasmSpy).toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
+    test("allowInsecureDowngrade opts back into the HTTP retry", async () => {
+      const serSpy = mockSerializer();
+      const { fetchedUrls } = downgradeScenario();
+
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { allowInsecureDowngrade: true },
+      });
       try {
         await prover.createChonkProof([fakeStep]);
       } catch {

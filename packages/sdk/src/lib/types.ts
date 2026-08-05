@@ -35,6 +35,22 @@ export interface AcceleratorConfig {
    * HTTP otherwise). Also settable via `AZTEC_ACCELERATOR_HTTPS_ONLY=1`. Default: false.
    */
   httpsOnly?: boolean;
+  /**
+   * Allow the SDK to fall back to the plaintext `http://` endpoint **after it has already reached a
+   * healthy `https://` accelerator at this address**. Off by default (F-01, audit 2026-07-31).
+   *
+   * This is not the same knob as {@link AcceleratorConfig.httpsOnly}. An accelerator with HTTPS
+   * disabled — the user's own choice in the onboarding wizard, and the permanent state of the
+   * TLS-free headless server — is unaffected: the SDK never saw a healthy HTTPS endpoint, so there is
+   * nothing to downgrade FROM and it uses HTTP exactly as before. What this governs is the narrower
+   * case where HTTPS *was* working and then a `/prove` fails at the network layer: without it the SDK
+   * used to retry the same private witness over plaintext HTTP, and any local account can bind
+   * 127.0.0.1:59833 to receive it. Turn it on only if you would rather have the proof than the
+   * confidentiality. Also settable via `AZTEC_ACCELERATOR_ALLOW_INSECURE_DOWNGRADE=1`.
+   *
+   * Default: false.
+   */
+  allowInsecureDowngrade?: boolean;
 }
 
 export interface AcceleratorProverOptions {
