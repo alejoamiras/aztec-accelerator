@@ -244,9 +244,16 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
     // F-06 (round 3): the ONE place both binaries pass through on the way up, so the cache-size cap
     // gets a chance to bind even when the previous run left it over the limit — post-download
     // eviction cannot help a cache nothing is downloading into. Detached: never delay the listener.
-    let bundled = state.bundled_version.clone();
+    // Same fallback the post-download cleanup uses (`prove.rs`): the headless binary only sets
+    // `bundled_version` when `AZTEC_BB_VERSION` is in its environment, so keying on `Some` would have
+    // made the sweep a no-op on a default headless deployment. The `"unknown"` sentinel parses as a
+    // version and is never in the cache, so it protects nothing that should be evicted.
+    let bundled = state
+        .bundled_version
+        .clone()
+        .unwrap_or_else(|| DEFAULT_BB_VERSION.to_string());
     tokio::spawn(async move {
-        crate::versions::sweep_cache_on_start(bundled.as_deref()).await;
+        crate::versions::sweep_cache_on_start(Some(&bundled)).await;
     });
 
     let app = router(state);

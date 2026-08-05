@@ -409,9 +409,9 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
 /// listener coming up.
 pub async fn sweep_cache_on_start(bundled: Option<&str>) {
     let Some(bundled) = bundled.and_then(AztecVersion::parse) else {
-        // An unparseable/absent bundled version means we cannot say what must be KEPT, and evicting
-        // without that is how you delete the fallback binary. Same defensive skip as the post-download
-        // path takes.
+        // An unparseable bundled version means we cannot say what must be KEPT, and evicting without
+        // that is how you delete the fallback binary. Callers pass the same `"unknown"` sentinel the
+        // post-download path uses when none is configured, so this is the genuinely-broken case only.
         return;
     };
     cleanup_old_versions(&bundled, None).await;
