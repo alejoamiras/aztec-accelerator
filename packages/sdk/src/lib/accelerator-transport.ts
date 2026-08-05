@@ -41,6 +41,21 @@ const PROVE_TIMEOUT_MS = ms("10 min");
  * identity is a CA name-constrained to loopback, so a remote host could not present a certificate the
  * SDK's own trust model accepts. A non-loopback host is therefore always a misconfiguration.
  */
+export function assertPort(port: number, field: string): number {
+  // Validating `host` alone left the authority half-open. `port` is TYPED `number`, but TypeScript
+  // types are erased at runtime, so a JS caller — or a config that came from JSON, a URL parameter,
+  // or an env var — can pass a string. `{host: "127.0.0.1", port: "80@evil.com"}` builds
+  // `http://127.0.0.1:80@evil.com/prove`, whose real authority is `evil.com`: `127.0.0.1` becomes
+  // the username and `80` the password. The witness goes to a remote host that never had to defeat
+  // the host check at all. (Found by the codex pass over the F-01 fix; verified by construction.)
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(
+      `Invalid accelerator ${field} ${JSON.stringify(port)}: expected an integer from 1 to 65535.`,
+    );
+  }
+  return port;
+}
+
 export function assertLoopbackHost(host: string): string {
   const reject = (why: string): never => {
     throw new Error(
@@ -246,8 +261,8 @@ export class AcceleratorTransport {
     allowInsecureDowngrade = false,
   ) {
     this.#host = assertLoopbackHost(host);
-    this.#port = port;
-    this.#httpsPort = httpsPort;
+    this.#port = assertPort(port, "port");
+    this.#httpsPort = assertPort(httpsPort, "httpsPort");
     this.#httpsOnly = httpsOnly;
     this.#allowInsecureDowngrade = allowInsecureDowngrade;
   }
@@ -263,18 +278,39 @@ export class AcceleratorTransport {
     httpsOnly?: boolean;
     allowInsecureDowngrade?: boolean;
   }) {
-    if (config.port !== undefined) this.#port = config.port;
-    if (config.httpsPort !== undefined) this.#httpsPort = config.httpsPort;
+    const movedEndpoint =
+      (config.port !== undefined && config.port !== this.#port) ||
+      (config.httpsPort !== undefined && config.httpsPort !== this.#httpsPort) ||
+      (config.host !== undefined && config.host !== this.#host);
+    if (config.port !== undefined) this.#port = assertPort(config.port, "port");
+    if (config.httpsPort !== undefined) this.#httpsPort = assertPort(config.httpsPort, "httpsPort");
     if (config.host !== undefined) this.#host = assertLoopbackHost(config.host);
     if (config.httpsOnly !== undefined) this.#httpsOnly = config.httpsOnly;
     if (config.allowInsecureDowngrade !== undefined)
       this.#allowInsecureDowngrade = config.allowInsecureDowngrade;
     this.#protocol = null;
     this.#statusCache = null;
-    // A different endpoint has its own HTTPS history — carrying the old one over would either block a
+    // A different ENDPOINT has its own HTTPS history — carrying the old one over would either block a
     // legitimate HTTP-only endpoint or, worse, vouch for a new one we have never reached over TLS.
-    this.#httpsWasHealthy = false;
+    // Only an address change resets it: flipping a policy flag must not erase what we learned about
+    // the endpoint we are still talking to (codex: any `setAcceleratorConfig` used to clear it).
+    if (movedEndpoint) this.#httpsWasHealthy = false;
     this.#generation++;
+  }
+
+  /**
+   * Should this transport behave as HTTPS-only right now? True in explicit strict mode, and ALSO
+   * once a healthy HTTPS accelerator has answered at this endpoint (unless the integrator opted out).
+   *
+   * The second half is the fix for a hole the first version of F-01 left open: `allowsHttpDowngrade`
+   * was consulted only when an HTTPS `/prove` FAILED, so the plaintext path was still reachable by
+   * going around it — let the 10s status cache expire, take the HTTP port while HTTPS is
+   * unavailable, and the next dual probe simply pins HTTP with no downgrade check in sight. Refusing
+   * to construct an `http://` URL at PROBE time is what actually closes it: an unreachable HTTPS
+   * endpoint then reports offline and the prover falls back to WASM.
+   */
+  get #effectiveHttpsOnly(): boolean {
+    return this.#httpsOnly || !this.allowsHttpDowngrade;
   }
 
   /** The current configuration generation — capture before a probe, pass to {@link commitStatus}. */
@@ -312,7 +348,7 @@ export class AcceleratorTransport {
    * happened (the caller uses this to decide on an HTTP retry).
    */
   demoteHttpsPin(): boolean {
-    if (this.#httpsOnly || this.#protocol !== "https") return false;
+    if (this.#effectiveHttpsOnly || this.#protocol !== "https") return false;
     this.#protocol = null;
     this.#statusCache = null;
     return true;
@@ -353,7 +389,7 @@ export class AcceleratorTransport {
    * `https` iff the negotiated protocol is `https`, else the `http` default.
    */
   get baseUrl(): string {
-    if (this.#httpsOnly || this.#protocol === "https") {
+    if (this.#effectiveHttpsOnly || this.#protocol === "https") {
       return `https://${this.#host}:${this.#httpsPort}`;
     }
     return `http://${this.#host}:${this.#port}`;
@@ -416,7 +452,9 @@ export class AcceleratorTransport {
 
     const probe = () => {
       // Strict mode: probe HTTPS ONLY — never even *construct* an http URL (contract compliance).
-      if (this.#httpsOnly) return fire(httpsUrl, "https");
+      // Also taken once HTTPS has proven healthy here, which is what stops a later probe from
+      // quietly re-pinning plaintext (see `#effectiveHttpsOnly`).
+      if (this.#effectiveHttpsOnly) return fire(httpsUrl, "https");
       const httpUrl = `http://${this.#host}:${this.#port}/health`;
       return this.#probePreferHttps(fire(httpsUrl, "https"), fire(httpUrl, "http"));
     };
@@ -515,8 +553,10 @@ export class AcceleratorTransport {
    * {@link readJsonBounded} for the body.
    */
   async isProtocolHealthy(protocol: AcceleratorProtocol): Promise<boolean> {
-    // Strict mode never speaks plaintext, so it must not even probe it.
-    if (protocol === "http" && this.#httpsOnly) return false;
+    // Strict mode never speaks plaintext, so it must not even probe it — and neither does an
+    // endpoint that already answered over HTTPS (codex: this is the validate-before-downgrade call,
+    // so letting it run was the last way to reach the plaintext POST).
+    if (protocol === "http" && this.#effectiveHttpsOnly) return false;
     const url =
       protocol === "https"
         ? `https://${this.#host}:${this.#httpsPort}/health`

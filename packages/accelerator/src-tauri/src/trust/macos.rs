@@ -83,9 +83,10 @@ enum Anchor {
 /// A spawn failure — `security` blocked by policy, a locked or non-default login keychain, a different
 /// `HOME` under `sudo` — is `Unknown`, never `Absent`; pre-F-05 the `.ok()?` here turned every one of
 /// those into "no anchor to delete", which the removal path then reported as a clean removal. A
-/// NON-ZERO exit IS `Absent` (`absent_marker: None`): for `find-certificate` that overwhelmingly means
-/// "no such item", and it is the normal post-delete result, so treating it as `Unknown` would instead
-/// make every successful removal report failure.
+/// A NON-ZERO exit is `Absent` *provisionally* (`absent_marker: None`): for `find-certificate` that
+/// overwhelmingly means "no such item", and it is the normal post-delete result, so treating it as
+/// `Unknown` outright would make every successful removal report failure instead. The control question
+/// below then separates that from an unreadable keychain, which exits nonzero for the same reason.
 fn keychain_anchor() -> Anchor {
     let out = Command::new(SECURITY_BIN)
         .args(["find-certificate", "-Z", "-c", "Aztec Accelerator Local CA"])
@@ -93,17 +94,27 @@ fn keychain_anchor() -> Anchor {
         .output();
     // Bound the borrow before the match: a `&out` temporary in a match SCRUTINEE lives until the end
     // of the match, which would forbid reading `out` in an arm.
-    let probe = Probe::from_query(&out, None);
+    let mut probe = Probe::from_query(&out, None);
+    if probe == Probe::Unknown {
+        tracing::warn!("could not run security find-certificate; keychain state unknown");
+    }
+    // Round 2 (codex pass over F-05): `absent_marker: None` maps EVERY nonzero exit to `Absent`, and
+    // `security` exits nonzero both for "no such item" (normal, and the expected post-delete result)
+    // and for "could not read this keychain" (locked, permission-denied, wrong `HOME` under `sudo`) —
+    // so the second case still reported a clean removal. There is no locale-independent exit code
+    // that separates them, so ask a CONTROL question instead: can we read the keychain AT ALL? The
+    // same shape as the NSIS hook's re-query, and it costs one extra process only on the miss path.
+    if probe == Probe::Absent && !keychain_is_readable() {
+        tracing::warn!("the login keychain could not be read; its contents are unknown");
+        probe = Probe::Unknown;
+    }
     let stdout = match out {
         Ok(o) => o.stdout,
         Err(_) => Vec::new(),
     };
     match probe {
         Probe::Absent => Anchor::Absent,
-        Probe::Unknown => {
-            tracing::warn!("could not run security find-certificate; keychain state unknown");
-            Anchor::Unknown
-        }
+        Probe::Unknown => Anchor::Unknown,
         // It found something; if we cannot read the hash back we cannot delete it either.
         Probe::Present => match String::from_utf8_lossy(&stdout)
             .lines()
@@ -117,6 +128,18 @@ fn keychain_anchor() -> Anchor {
             }
         },
     }
+}
+
+/// Can `security` enumerate the login keychain at all? An unfiltered `find-certificate` succeeds on
+/// any keychain that holds at least one certificate — which every real login keychain does — so a
+/// FAILURE here means the store is unreadable rather than merely missing our anchor.
+fn keychain_is_readable() -> bool {
+    Command::new(SECURITY_BIN)
+        .arg("find-certificate")
+        .arg(login_keychain())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Convenience for the callers that only need "the current anchor, if we can name it".

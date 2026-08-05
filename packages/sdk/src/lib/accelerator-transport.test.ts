@@ -78,6 +78,38 @@ describe("AcceleratorTransport", () => {
     });
   });
 
+  // ── F-01 round 2 (codex pass over the fix) ──────────────────────────────────────────────────
+  // Validating `host` closed only HALF the authority. `port`/`httpsPort` are typed `number`, but
+  // types are erased at runtime, so a JS caller — or a config from JSON, a URL param, an env var —
+  // passes a string straight into the template.
+  describe("port validation", () => {
+    test("a port that re-points the authority is rejected", () => {
+      // `http://127.0.0.1:80@evil.com/prove` has authority `evil.com`: `127.0.0.1` is the username
+      // and `80` the password. The witness leaves the machine without touching the host check.
+      const evil = "80@evil.com" as unknown as number;
+      expect(() => new AcceleratorTransport("127.0.0.1", evil, 59834)).toThrow(
+        /Invalid accelerator port/,
+      );
+      expect(() => new AcceleratorTransport("127.0.0.1", 59833, evil)).toThrow(
+        /Invalid accelerator httpsPort/,
+      );
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(() => t.configure({ port: evil })).toThrow(/Invalid accelerator port/);
+      expect(() => t.configure({ httpsPort: evil })).toThrow(/Invalid accelerator httpsPort/);
+      // …and the transport is untouched by the rejected call.
+      expect(t.baseUrl).toBe("http://127.0.0.1:59833");
+    });
+
+    test("out-of-range and non-integer ports are rejected", () => {
+      for (const bad of [0, -1, 65536, 1.5, Number.NaN, "59833" as unknown as number]) {
+        expect(() => new AcceleratorTransport("127.0.0.1", bad, 59834)).toThrow(
+          /Invalid accelerator port/,
+        );
+      }
+      expect(new AcceleratorTransport("127.0.0.1", 1, 65535).baseUrl).toBe("http://127.0.0.1:1");
+    });
+  });
+
   // ── F-01: do not DOWNGRADE from a working HTTPS endpoint ────────────────────────────────────
   describe("allowsHttpDowngrade", () => {
     const healthy = { pin: "set", protocol: "https" } as const;
@@ -103,12 +135,51 @@ describe("AcceleratorTransport", () => {
       expect(t.allowsHttpDowngrade).toBe(true);
     });
 
-    test("reconfiguring forgets the old endpoint's HTTPS history", () => {
+    test("reconfiguring the ADDRESS forgets the old endpoint's HTTPS history", () => {
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
       t.commitStatus({ available: true, needsDownload: false }, healthy);
       expect(t.allowsHttpDowngrade).toBe(false);
       t.configure({ port: 12345 });
       expect(t.allowsHttpDowngrade).toBe(true);
+    });
+
+    test("but flipping a policy flag does NOT", () => {
+      // codex: any `setAcceleratorConfig` used to clear the history, so a dApp that toggles an
+      // unrelated flag handed back the plaintext downgrade for an endpoint it is still talking to.
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus({ available: true, needsDownload: false }, healthy);
+      t.configure({ httpsOnly: false });
+      expect(t.allowsHttpDowngrade).toBe(false);
+      // Re-setting the SAME address is not a move either.
+      t.configure({ port: 59833, host: "127.0.0.1" });
+      expect(t.allowsHttpDowngrade).toBe(false);
+    });
+
+    test("a later probe cannot re-pin plaintext once HTTPS has worked", async () => {
+      // codex CRITICAL: `allowsHttpDowngrade` was consulted only when an HTTPS `/prove` FAILED, so
+      // the plaintext path was reachable by going AROUND it — let the status cache expire, take the
+      // HTTP port while HTTPS is unavailable, and the next dual probe just pins HTTP. The fix is to
+      // stop constructing an http:// URL at PROBE time, so this now reports offline (→ WASM).
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus({ available: true, needsDownload: false }, healthy);
+
+      const seen: string[] = [];
+      const realFetch = globalThis.fetch;
+      // ky passes a Request, so read `.url` (matching the other helpers here) — `.toString()` on a
+      // Request yields "[object Request]" and would silently match nothing.
+      globalThis.fetch = ((input: any) => {
+        const url: string = typeof input === "string" ? input : input.url;
+        seen.push(url);
+        // HTTPS is gone; a squatter answers the plaintext port perfectly.
+        if (url.startsWith("https://")) return Promise.reject(new TypeError("connection refused"));
+        return Promise.resolve(Response.json({ status: "ok", api_version: 1 }));
+      }) as typeof fetch;
+      try {
+        await expect(t.probeHealth()).rejects.toThrow();
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      expect(seen.some((u) => u.startsWith("http://"))).toBe(false);
     });
   });
 

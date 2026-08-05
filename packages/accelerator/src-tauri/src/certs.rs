@@ -517,19 +517,19 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     write_new_cert_set(&staged)?;
 
-    // F-02: re-read and validate what is actually ON DISK. We generated it a moment ago, but the
-    // staged path is in the same user-writable directory, so this closes the write→trust window.
-    if let Err(why) = std::fs::read(&staged.ca_cert)
-        .map_err(|e| e.to_string())
-        .and_then(|pem| validate_ca_profile(&pem))
-    {
-        staged.remove();
-        tracing::error!(%why, "SECURITY: staged CA certificate is not ours — rotation aborted");
-        return Err(format!("staged CA certificate failed validation: {why}").into());
-    }
+    // F-02: validate what is actually ON DISK and trust THAT COPY. We generated it a moment ago, but
+    // the staged path is in the same user-writable directory, so this closes the write→trust window.
+    let vetted = match vetted_copy_of(&staged.ca_cert) {
+        Ok(v) => v,
+        Err(why) => {
+            staged.remove();
+            tracing::error!(%why, "SECURITY: staged CA certificate is not ours — rotation aborted");
+            return Err(format!("staged CA certificate failed validation: {why}").into());
+        }
+    };
 
     // Trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
-    if let Err(e) = crate::trust::trust_new_anchor(&staged.ca_cert) {
+    if let Err(e) = crate::trust::trust_new_anchor(vetted.path()) {
         staged.remove();
         return Err(
             format!("new CA cert could not be trusted — kept the existing certs: {e}").into(),
@@ -550,15 +550,10 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// Install the live CA cert (`ca.pem`) as a trusted root in the platform's browser stores. `Err` iff
 /// no store accepted it (the message carries the first store's failure detail — e.g. certutil missing).
 pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ca_cert = CertPaths::live().ca_cert;
     // F-02: never hand the OS trust store bytes we have not established are OUR profile. `ca.pem`
     // lives in a user-writable directory and every other check on it only proves self-consistency.
-    let pem = std::fs::read(&ca_cert)?;
-    if let Err(why) = validate_ca_profile(&pem) {
-        tracing::error!(%why, "SECURITY: refusing to install a CA certificate that is not ours");
-        return Err(format!("refusing to install this CA certificate: {why}").into());
-    }
-    let report = crate::trust::install_ca_trust(&ca_cert);
+    let vetted = vetted_copy_of(&CertPaths::live().ca_cert)?;
+    let report = crate::trust::install_ca_trust(vetted.path());
     if report.any_installed() {
         Ok(())
     } else {
@@ -569,6 +564,36 @@ pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>
             .unwrap_or_else(|| "certificate trust could not be installed".to_string());
         Err(detail.into())
     }
+}
+
+/// Read a CA cert, validate its profile, and return a private temp file holding **exactly the bytes
+/// that were validated**, for handing to the OS trust tools.
+///
+/// The copy is the point (round 2, codex pass over F-02). Validating bytes and then passing the
+/// original PATHNAME to `security` / `certutil` / NSS leaves a swap window: those tools re-open the
+/// file, and the same-user attacker this fix is about — who must already be able to write
+/// `certs_dir()` — can replace it in between. Linux's per-store loop opens it once PER STORE, which
+/// widens the window further. Trusting a `tempfile`-created path instead removes the window: the name
+/// is random and the handle is ours, so there is nothing to race.
+///
+/// The temp file lives until the returned guard drops, which must outlive the trust call — hence
+/// returning it rather than a `PathBuf`. `tempfile` creates it `0600` in the system temp dir.
+fn vetted_copy_of(
+    ca_cert: &std::path::Path,
+) -> Result<tempfile::NamedTempFile, Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Write;
+    let pem = std::fs::read(ca_cert)?;
+    if let Err(why) = validate_ca_profile(&pem) {
+        tracing::error!(%why, "SECURITY: refusing to install a CA certificate that is not ours");
+        return Err(format!("refusing to install this CA certificate: {why}").into());
+    }
+    let mut f = tempfile::Builder::new()
+        .prefix("aztec-accelerator-ca-")
+        .suffix(".pem")
+        .tempfile()?;
+    f.write_all(&pem)?;
+    f.flush()?;
+    Ok(f)
 }
 
 /// Whether the live CA cert is trusted in at least one platform store.

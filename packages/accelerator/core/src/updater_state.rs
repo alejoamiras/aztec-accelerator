@@ -65,6 +65,11 @@ const SCHEMA: u32 = 1;
 /// used to (F-04).
 pub const PENDING_TTL_SECS: u64 = 24 * 60 * 60;
 
+/// How far ahead of `now` a `pending_at` may legitimately sit — an NTP step or a wrong RTC between
+/// the write and the read. Anything further is a stamp we could not have written; see
+/// [`pending_is_live`].
+pub const CLOCK_SKEW_TOLERANCE_SECS: u64 = 15 * 60;
+
 /// Wall-clock seconds since the Unix epoch. Callers pass it in so every decision here stays pure and
 /// unit-testable; a pre-epoch clock yields 0, which simply expires any pending.
 pub fn now_unix() -> u64 {
@@ -142,16 +147,41 @@ pub fn load_state(path: &Path, now: u64) -> LoadedState {
     };
     // F-04: expire a stale intent. A missing `pending_at` (pre-F-04 file) counts as expired.
     let pending = pending.filter(|p| match parsed.pending_at {
-        Some(at) if now.saturating_sub(at) <= PENDING_TTL_SECS => true,
+        Some(at) if pending_is_live(at, now) => true,
         _ => {
             tracing::warn!(
                 pending = %p,
-                "dropping a stale/undated pending install intent (older than the TTL)"
+                "dropping a stale, undated, or future-dated pending install intent"
             );
             false
         }
     });
     LoadedState::Valid { floor, pending }
+}
+
+/// Is a `pending_at` stamp still inside the TTL *window*, in both directions?
+///
+/// The one-sided `now.saturating_sub(at) <= TTL` this replaces was defeated by a stamp in the
+/// FUTURE: `saturating_sub` floors at 0, so `pending_at: 18446744073709551615` read as "0 seconds
+/// old" forever and blocked every lower candidate permanently — the exact wedge the TTL exists to
+/// prevent, reachable with one field of a user-writable file. (Found by the codex pass over F-04.)
+///
+/// A small forward tolerance is still allowed: `record_pending` stamps the wall clock, so an NTP
+/// correction or a DST-confused RTC between write and read can legitimately put the stamp slightly
+/// ahead. Beyond that, a stamp we could not have written is treated as expired.
+fn pending_is_live(at: u64, now: u64) -> bool {
+    if at > now {
+        return at - now <= CLOCK_SKEW_TOLERANCE_SECS;
+    }
+    now - at <= PENDING_TTL_SECS
+}
+
+/// The `pending_at` currently on disk, if the file is readable and well-formed. [`load_state`]
+/// deliberately does not surface it (it is an expiry input, not part of the decision), but the
+/// mutators need it in order to preserve rather than refresh it.
+fn stored_pending_at(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<StateFile>(&bytes).ok()?.pending_at
 }
 
 fn gt(a: &Version, b: &Version) -> bool {
@@ -267,6 +297,7 @@ pub fn record_pending(path: &Path, current: &Version, candidate: &Version) -> st
 /// `Corrupt` file. MUST be called under the updater lock.
 pub fn commit_successful_launch(path: &Path, current: &Version) -> std::io::Result<()> {
     let now = now_unix();
+    let stamp = stored_pending_at(path);
     match load_state(path, now) {
         LoadedState::Corrupt => {
             quarantine_corrupt(path, now);
@@ -293,7 +324,11 @@ pub fn commit_successful_launch(path: &Path, current: &Version) -> std::io::Resu
             };
             // Drop pending once the running version has caught up to (or passed) it.
             let new_pending = pending.filter(|p| gt(p, current));
-            let pending_at = new_pending.as_ref().map(|_| now);
+            // PRESERVE the original stamp. Re-stamping it with `now` here meant every successful
+            // launch pushed the deadline out, so a pending that outlived its install NEVER expired on
+            // a machine used daily — the TTL was decorative. Only `record_pending`, which creates the
+            // intent, may date it. (Found by the codex pass over F-04.)
+            let pending_at = new_pending.as_ref().and(stamp);
             write_state(path, &new_floor, new_pending.as_ref(), pending_at)
         }
     }
@@ -555,6 +590,77 @@ mod tests {
             &v("1.0.9"),
             &v("1.0.8"),
             &load_state(&p, NOW)
+        ));
+    }
+
+    /// Round 2 (codex pass over F-04): the TTL was one-sided. `now.saturating_sub(at)` floors at 0,
+    /// so a stamp in the FUTURE read as "0 seconds old" — forever. One field of a user-writable file
+    /// restored the exact permanent wedge the TTL exists to prevent.
+    #[test]
+    fn a_future_pending_stamp_does_not_read_as_fresh() {
+        let d = tmp();
+        let p = d.path().join("s.json");
+        std::fs::write(
+            &p,
+            format!(
+                r#"{{"schema":1,"floor":"1.0.0","pending":"999.0.0","pending_at":{}}}"#,
+                u64::MAX
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(load_state(&p, NOW), valid("1.0.0", None));
+        assert!(candidate_allowed(
+            &v("1.0.9"),
+            &v("1.0.8"),
+            &load_state(&p, NOW)
+        ));
+
+        // A modest forward skew is still honoured — `record_pending` stamps the wall clock, and an
+        // NTP step between write and read is not an attack.
+        let skewed = NOW + CLOCK_SKEW_TOLERANCE_SECS - 1;
+        std::fs::write(
+            &p,
+            format!(r#"{{"schema":1,"floor":"1.0.0","pending":"3.0.0","pending_at":{skewed}}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(load_state(&p, NOW), valid("1.0.0", Some("3.0.0")));
+    }
+
+    /// Round 2 (codex pass over F-04): `commit_successful_launch` re-stamped a SURVIVING pending with
+    /// `now`, so every launch pushed the deadline out and the TTL never elapsed on a machine used
+    /// daily. Trigger: an install of 3.0.0 fails while 1.0.0 keeps running — the withdrawn release's
+    /// intent blocked its own replacement indefinitely.
+    #[test]
+    fn a_surviving_pending_keeps_its_original_deadline_across_launches() {
+        let d = tmp();
+        let p = d.path().join("s.json");
+        // The REAL clock: `commit_successful_launch` stamps and expires against `now_unix()`, and the
+        // fixed `NOW` above is a later epoch — under the new future-stamp rule a fixture dated from it
+        // would read as future-dated and be dropped before this test could observe anything.
+        let base = now_unix();
+        // An intent dated one hour before the TTL runs out.
+        let stamped = base - PENDING_TTL_SECS + 3600;
+        std::fs::write(
+            &p,
+            format!(r#"{{"schema":1,"floor":"1.0.0","pending":"3.0.0","pending_at":{stamped}}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+
+        // 1.0.0 launches successfully; 3.0.0 never installed, so the intent survives…
+        commit_successful_launch(&p, &v("1.0.0")).unwrap();
+        assert_eq!(load_state(&p, base), valid("1.0.0", Some("3.0.0")));
+
+        // …but it must NOT have been re-dated. Two hours later it is past the TTL and gone. Pre-fix
+        // the commit above rewrote the stamp to `now`, so this still read as live.
+        let later = base + 7200;
+        assert_eq!(load_state(&p, later), valid("1.0.0", None));
+        assert!(candidate_allowed(
+            &v("2.0.0"),
+            &v("1.0.0"),
+            &load_state(&p, later)
         ));
     }
 

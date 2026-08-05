@@ -211,7 +211,9 @@ pub fn versions_to_evict_for_size(
     in_use: Option<&AztecVersion>,
     max_total: u64,
 ) -> Vec<AztecVersion> {
-    let mut total: u64 = sized.iter().map(|(_, n)| *n).sum();
+    let mut total: u64 = sized
+        .iter()
+        .fold(0u64, |acc, (_, n)| acc.saturating_add(*n));
     if total <= max_total {
         return Vec::new();
     }
@@ -358,6 +360,7 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         planned.push(version);
     }
 
+    let mut deferred_by_active_window = false;
     for version in planned {
         let dir = base.join(version.as_str());
         // B2 (full-branch audit): skip a version whose dir was touched within the active window — it was
@@ -374,10 +377,50 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         // thing from the unbounded growth this cap exists to stop.
         if super::downloader::recently_active(&dir) {
             tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+            deferred_by_active_window = true;
             continue;
         }
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
+            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
+        }
+    }
+
+    // Round 2 (codex pass over F-06): if the active-window guard deferred anything, this pass may have
+    // left the cache OVER the cap — and cleanup only runs after a download, so an attacker who fills
+    // the cache inside one window and then simply STOPS leaves the excess there indefinitely. That
+    // falsifies the "reclaimed by the next cleanup" reasoning this fix originally shipped with. Wait
+    // out the window once and finish the job; the caller already runs us detached.
+    if deferred_by_active_window {
+        tokio::time::sleep(super::downloader::CACHE_ENTRY_ACTIVE_WINDOW).await;
+        Box::pin(cleanup_after_active_window(bundled, in_use)).await;
+    }
+}
+
+/// The retry half of the above, split out so the recursion is explicit and can only happen once:
+/// this pass does NOT re-arm the timer, so a cache that is still over the cap waits for the next
+/// download rather than looping.
+async fn cleanup_after_active_window(bundled: &AztecVersion, in_use: Option<&AztecVersion>) {
+    let cached: Vec<AztecVersion> = list_cached_versions()
+        .iter()
+        .filter_map(|s| AztecVersion::parse(s))
+        .collect();
+    let Some(base) = versions_base_dir() else {
+        return;
+    };
+    let sized: Vec<(AztecVersion, u64)> = cached
+        .iter()
+        .map(|v| (v.clone(), version_dir_size(&base.join(v.as_str()))))
+        .collect();
+    for version in versions_to_evict_for_size(&sized, bundled, in_use, CACHE_MAX_TOTAL_BYTES) {
+        let dir = base.join(version.as_str());
+        if super::downloader::recently_active(&dir) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                tracing::info!(version = %version, "Evicted to stay under the cache size cap (deferred pass)")
+            }
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
