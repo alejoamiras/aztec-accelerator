@@ -3,7 +3,7 @@
 //! through [`TrustReport`]. `security add-trusted-cert` raises the native password dialog — that is
 //! the consent ceremony for enabling HTTPS on macOS.
 
-use super::{AnchorRef, StoreStatus, TrustReport};
+use super::{AnchorRef, Probe, StoreStatus, TrustReport};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -56,18 +56,62 @@ fn verify_cert_trusted(cert_path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-/// SHA-1 of the currently-installed "Aztec Accelerator Local CA" anchor (if any) — captured before
-/// rotation so the OLD anchor can be removed after the NEW one is installed. Returns the first match.
-fn keychain_sha1() -> Option<String> {
-    let output = Command::new(SECURITY_BIN)
+/// The anchor currently in the login keychain — a [`Probe`] plus the SHA-1 needed to delete it. See
+/// [`Probe`] for why "could not ask" must not collapse into "absent" (F-05).
+enum Anchor {
+    Found(String),
+    Absent,
+    Unknown,
+}
+
+/// SHA-1 of the currently-installed "Aztec Accelerator Local CA" anchor — captured before rotation so
+/// the OLD anchor can be removed after the NEW one is installed. Returns the first match.
+///
+/// A spawn failure — `security` blocked by policy, a locked or non-default login keychain, a different
+/// `HOME` under `sudo` — is `Unknown`, never `Absent`; pre-F-05 the `.ok()?` here turned every one of
+/// those into "no anchor to delete", which the removal path then reported as a clean removal. A
+/// NON-ZERO exit IS `Absent` (`absent_marker: None`): for `find-certificate` that overwhelmingly means
+/// "no such item", and it is the normal post-delete result, so treating it as `Unknown` would instead
+/// make every successful removal report failure.
+fn keychain_anchor() -> Anchor {
+    let out = Command::new(SECURITY_BIN)
         .args(["find-certificate", "-Z", "-c", "Aztec Accelerator Local CA"])
         .arg(login_keychain())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("SHA-1 hash:"))
-        .map(|h| h.trim().to_string())
+        .output();
+    // Bound the borrow before the match: a `&out` temporary in a match SCRUTINEE lives until the end
+    // of the match, which would forbid reading `out` in an arm.
+    let probe = Probe::from_query(&out, None);
+    let stdout = match out {
+        Ok(o) => o.stdout,
+        Err(_) => Vec::new(),
+    };
+    match probe {
+        Probe::Absent => Anchor::Absent,
+        Probe::Unknown => {
+            tracing::warn!("could not run security find-certificate; keychain state unknown");
+            Anchor::Unknown
+        }
+        // It found something; if we cannot read the hash back we cannot delete it either.
+        Probe::Present => match String::from_utf8_lossy(&stdout)
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("SHA-1 hash:"))
+            .map(|h| h.trim().to_string())
+        {
+            Some(sha1) => Anchor::Found(sha1),
+            None => {
+                tracing::warn!("security find-certificate succeeded but no SHA-1 could be parsed");
+                Anchor::Unknown
+            }
+        },
+    }
+}
+
+/// Convenience for the callers that only need "the current anchor, if we can name it".
+fn keychain_sha1() -> Option<String> {
+    match keychain_anchor() {
+        Anchor::Found(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// Best-effort removal of a trusted cert by SHA-1. Returns whether the delete reported success.
@@ -123,23 +167,38 @@ pub fn remove(_ca_cert: &Path) -> TrustReport {
     // Loop deleting the first CN match until none remain (bounded). `find` returns the first; each
     // delete removes exactly it. Stop on a failed delete so an undeletable anchor doesn't spin.
     let mut delete_failed = false;
+    let mut unknown = false;
     for _ in 0..64 {
-        match keychain_sha1() {
-            Some(sha1) => {
+        match keychain_anchor() {
+            Anchor::Found(sha1) => {
                 if !delete_by_sha1(&sha1) {
                     delete_failed = true;
                     break;
                 }
             }
-            None => break,
+            Anchor::Absent => break,
+            // F-05: we could not even ask. Previously this broke out of the loop with
+            // `delete_failed == false` and the post-check then read "absent", so the caller reported a
+            // clean removal without a single delete having been attempted.
+            Anchor::Unknown => {
+                unknown = true;
+                break;
+            }
         }
     }
-    // `installed` = whether ANY of our CN anchors is still present (catches stale rotation anchors,
-    // not just the live cert — codex Low: the old live-cert-only check reported success while a
-    // same-CN anchor remained). The caller fails the Settings/CLI action when this stays true.
-    let remaining = keychain_sha1().is_some();
+    // `installed` = still present OR not provably gone. The caller fails the Settings/CLI action on
+    // either, so "could not determine" can never render as "removed".
+    let post = keychain_anchor();
+    let remaining = matches!(post, Anchor::Found(_));
+    let post_unknown = unknown || matches!(post, Anchor::Unknown);
     let detail = if remaining {
         Some("a CA anchor is still trusted after the removal attempt".to_string())
+    } else if post_unknown {
+        Some(
+            "could not verify removal — `security` could not query the login keychain, so the CA may \
+             still be trusted"
+                .to_string(),
+        )
     } else if delete_failed {
         Some("delete-certificate reported a failure".to_string())
     } else {
@@ -148,7 +207,7 @@ pub fn remove(_ca_cert: &Path) -> TrustReport {
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: remaining || delete_failed,
+            installed: remaining || post_unknown || delete_failed,
             detail,
         }],
     }

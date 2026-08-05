@@ -16,7 +16,7 @@
 //! user's consent), so the CI integration test seeds non-interactively via PowerShell
 //! `Import-Certificate` and exercises verify/remove instead (P4 spike I3; see `tests/trust_windows.rs`).
 
-use super::{AnchorRef, StoreStatus, TrustReport};
+use super::{AnchorRef, Probe, StoreStatus, TrustReport};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -65,14 +65,26 @@ fn add_store(ca_cert: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// certutil's HRESULT for "the requested object was not found" — printed as part of
+/// `CertUtil: -store command FAILED: 0x80092004 (...)`. The hex code is locale-independent, which is
+/// what lets us tell an honest "no such certificate" apart from a certutil that failed to run at all.
+pub(super) const CRYPT_E_NOT_FOUND: &str = "0x80092004";
+
 /// Is ANY anchor with our CN present? Used ONLY by the remove/uninstall path, which deletes every
 /// same-CN anchor (live + rotation leftovers) — the one place CN's "match all of ours" is what we want.
-fn is_present_by_cn() -> bool {
-    Command::new(certutil_exe())
+///
+/// Pre-F-05 this was `.map(|o| o.status.success()).unwrap_or(false)`: a `certutil.exe` that could not
+/// execute at all (a commonly restricted LOLBIN — EDR/AppLocker) read as "not present", which the
+/// removal path then reported as a clean removal. See [`Probe`].
+fn presence_by_cn() -> Probe {
+    let out = Command::new(certutil_exe())
         .args(["-user", "-store", "Root", CA_CN])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .output();
+    let probe = Probe::from_query(&out, Some(CRYPT_E_NOT_FOUND));
+    if probe == Probe::Unknown {
+        tracing::warn!("certutil could not read the CurrentUser Root store; its state is unknown");
+    }
+    probe
 }
 
 /// Is a cert with THIS exact serial present in `store`? Exit-code driven (locale-independent).
@@ -123,10 +135,23 @@ fn delete_by_serial(serial: &str) {
 }
 
 /// Delete every anchor named `CA_CN` (uninstall / Settings "Remove trust"). No dialog on delete.
-fn delete_by_cn() {
-    let _ = Command::new(certutil_exe())
+///
+/// Returns whether the delete is known to have run cleanly. F-05: the result used to be discarded
+/// entirely (`let _ = …`), so a certutil that could not execute was indistinguishable from a
+/// successful deletion. "Nothing to delete" (`CRYPT_E_NOT_FOUND`) counts as clean.
+fn delete_by_cn() -> bool {
+    let out = Command::new(certutil_exe())
         .args(["-user", "-delstore", "Root", CA_CN])
         .output();
+    // `Present` = the delete itself exited 0; `Absent` = there was nothing to delete. Both are clean.
+    // `Unknown` — certutil never ran, or failed for some other reason — is not.
+    match Probe::from_query(&out, Some(CRYPT_E_NOT_FOUND)) {
+        Probe::Present | Probe::Absent => true,
+        Probe::Unknown => {
+            tracing::warn!("certutil -delstore did not complete cleanly");
+            false
+        }
+    }
 }
 
 pub fn install(ca_cert: &Path) -> TrustReport {
@@ -159,16 +184,33 @@ pub fn status(ca_cert: &Path) -> TrustReport {
 
 pub fn remove(_ca_cert: &Path) -> TrustReport {
     // Uninstall: delete ALL our anchors by CN (covers rotation leftovers too).
-    delete_by_cn();
-    // `installed` reports whether ANY of our anchors remain — the caller fails the Settings/CLI
-    // removal when trust is still present (or certutil couldn't delete it).
-    let remaining = is_present_by_cn();
+    let deleted_cleanly = delete_by_cn();
+    // `installed` reports "still trusted OR not provably gone" — the caller fails the Settings/CLI
+    // removal on either, so a certutil that could not run can no longer render as a clean removal.
+    let (installed, detail) = match presence_by_cn() {
+        Probe::Present => (
+            true,
+            Some("a CA anchor is still trusted after the removal attempt".to_string()),
+        ),
+        Probe::Unknown => (
+            true,
+            Some(
+                "could not verify removal — certutil could not read the CurrentUser Root store, so \
+                 the CA may still be trusted"
+                    .to_string(),
+            ),
+        ),
+        Probe::Absent if !deleted_cleanly => (
+            true,
+            Some("certutil -delstore reported a failure".to_string()),
+        ),
+        Probe::Absent => (false, None),
+    };
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: remaining,
-            detail: remaining
-                .then(|| "a CA anchor is still trusted after the removal attempt".to_string()),
+            installed,
+            detail,
         }],
     }
 }

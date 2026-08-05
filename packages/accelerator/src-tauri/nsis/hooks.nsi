@@ -85,9 +85,26 @@
   aztec_postinstall_done:
 !macroend
 
+; ── POSTUNINSTALL and F-05 (audit 2026-07-31): removal must not fail silently ──
+;
+; `ExecWait` WITHOUT an output variable discards the exit code, so a `certutil` that never ran (a
+; commonly restricted LOLBIN — EDR/AppLocker block it) or that ran and failed was indistinguishable
+; from a clean delete: the user's uninstall left a trusted root behind and NOTHING recorded it
+; anywhere. Silent uninstalls show no details window, so `DetailPrint` alone would be unread.
+;
+; The verdict is taken the same way `trust/windows.rs` takes it — ASK AGAIN afterwards rather than
+; interpreting the delete's return code. `certutil -store` exits 0 only when it FOUND the anchor, so
+; "exit 0" means still-present and a launch failure means could-not-determine. That deliberately
+; avoids whitelisting `CRYPT_E_NOT_FOUND` by numeric value: "nothing to delete" is the NORMAL result
+; on every machine that never enabled HTTPS, and mistaking it for a failure would fire a scary
+; breadcrumb on virtually every uninstall — strictly worse than the silence it replaces.
 !macro NSIS_HOOK_POSTUNINSTALL
   Push $0
   Push $1
+  Push $2
+  Push $3
+  Push $4
+  Push $5
   ; Normalize both to canonical short (8.3) form before comparing. `$INSTDIR` is restored from the
   ; installer's registry value while `$EXEDIR` is derived from the launched path, so one directory can
   ; be spelled two ways (casing, trailing slash, long vs short name). A purely textual mismatch would
@@ -105,11 +122,46 @@
   ${EndIf}
   ${If} $UpdateMode <> 1
   ${AndIf} $0 != $1
+    ; A warning from a previous uninstall must not outlive it.
+    Delete "$PROFILE\.aztec-accelerator\CA-TRUST-NOT-REMOVED.txt"
     ; Absolute System32 certutil ($SYSDIR) — never a PATH lookup.
-    ExecWait '"$SYSDIR\certutil.exe" -user -delstore Root "Aztec Accelerator Local CA"'
+    ExecWait '"$SYSDIR\certutil.exe" -user -delstore Root "Aztec Accelerator Local CA"' $2
+    ; Then confirm, instead of trusting the delete's own word for it.
+    StrCpy $4 ""
+    ${If} $2 == "error"
+      StrCpy $4 "certutil.exe could not be launched, so the certificate was never removed."
+    ${Else}
+      ExecWait '"$SYSDIR\certutil.exe" -user -store Root "Aztec Accelerator Local CA"' $3
+      ${If} $3 == "error"
+        StrCpy $4 "certutil.exe could not be launched, so removal could not be confirmed."
+      ${ElseIf} $3 = 0
+        StrCpy $4 "the certificate is still present in the store (certutil -delstore exited $2)."
+      ${EndIf}
+    ${EndIf}
+    ${If} $4 != ""
+      DetailPrint "aztec: the local CA was NOT removed from your trust store — $4"
+      ClearErrors
+      FileOpen $5 "$PROFILE\.aztec-accelerator\CA-TRUST-NOT-REMOVED.txt" w
+      ${IfNot} ${Errors}
+        FileWrite $5 "Aztec Accelerator could not remove its local certificate authority.$\r$\n$\r$\n"
+        FileWrite $5 "Reason: $4$\r$\n$\r$\n"
+        FileWrite $5 "The certificate 'Aztec Accelerator Local CA' may still be trusted by this$\r$\n"
+        FileWrite $5 "account. To remove it by hand: press Win+R, run certmgr.msc, open$\r$\n"
+        FileWrite $5 "'Trusted Root Certification Authorities' > 'Certificates', find$\r$\n"
+        FileWrite $5 "'Aztec Accelerator Local CA' and delete it.$\r$\n$\r$\n"
+        FileWrite $5 "(That CA's private key was generated per-signature and never written to disk,$\r$\n"
+        FileWrite $5 "and it is name-constrained to loopback addresses, so it cannot be used to$\r$\n"
+        FileWrite $5 "issue certificates for real websites.)$\r$\n"
+        FileClose $5
+      ${EndIf}
+    ${EndIf}
     ; Remove the generated cert material from the user profile.
     RMDir /r "$PROFILE\.aztec-accelerator\certs"
   ${EndIf}
+  Pop $5
+  Pop $4
+  Pop $3
+  Pop $2
   Pop $1
   Pop $0
 !macroend

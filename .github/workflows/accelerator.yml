@@ -238,6 +238,19 @@ jobs:
             }
             Write-Host "ok [$($case.desc)]: marker survived=$survived"
 
+            # F-05 (audit 2026-07-31): the hook now VERIFIES the delete instead of firing and
+            # forgetting, and drops a CA-TRUST-NOT-REMOVED.txt when the CA may still be trusted. The
+            # wine harness (scripts/nsis-hook-test.sh) covers the positive case — no certutil, so it
+            # must warn. THIS runner is the opposite and more important direction: certutil exists and
+            # no such CA was ever installed, which is every ordinary user's uninstall. Whitelisting
+            # CRYPT_E_NOT_FOUND by numeric value instead of re-querying the store would fire a scary
+            # file here on literally every uninstall.
+            $warned = Join-Path $env:USERPROFILE ".aztec-accelerator\CA-TRUST-NOT-REMOVED.txt"
+            if (Test-Path $warned) {
+              throw "FAIL [$($case.desc)]: false unremoved-CA warning: $(Get-Content -Raw $warned)"
+            }
+            Write-Host "ok [$($case.desc)]: no false unremoved-CA warning"
+
             Remove-Item -Recurse -Force $certs, $dir -ErrorAction SilentlyContinue
           }
 
