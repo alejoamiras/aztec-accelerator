@@ -72,6 +72,24 @@ pub(crate) fn list_cached_versions_in(base: &Path) -> Vec<String> {
     versions
 }
 
+/// On-disk size of one cached version directory, in bytes. Unreadable entries count as 0 — this
+/// feeds an eviction decision, and a dir we cannot stat is not evidence of consumed space.
+///
+/// Shallow on purpose: a version dir holds `bb` plus its marker, both flat. Recursing would invite a
+/// symlink-following cost on a directory an attacker could shape.
+pub(crate) fn version_dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // F-007 integrity marker: every cached bb carries a `bb.sha256.json` recording the verified archive
 // digest + the FINAL-binary digest (post macOS codesign). The runtime rehashes the cached binary
@@ -344,6 +362,17 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn version_dir_size_sums_files_and_tolerates_a_missing_dir() {
+        let d = tempfile::tempdir().unwrap();
+        // F-06: the size cap is only as good as the measurement it evicts on.
+        assert_eq!(version_dir_size(&d.path().join("nope")), 0);
+        assert_eq!(version_dir_size(d.path()), 0);
+        std::fs::write(d.path().join(bb_binary_name()), vec![0u8; 1024]).unwrap();
+        std::fs::write(d.path().join(MARKER_NAME), vec![0u8; 76]).unwrap();
+        assert_eq!(version_dir_size(d.path()), 1100);
     }
 
     #[test]
