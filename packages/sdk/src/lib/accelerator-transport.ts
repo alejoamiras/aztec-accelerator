@@ -278,13 +278,26 @@ export class AcceleratorTransport {
     httpsOnly?: boolean;
     allowInsecureDowngrade?: boolean;
   }) {
+    // Validate EVERYTHING into locals before touching a single field. The previous version assigned
+    // as it went, so `configure({port: attackerPort, host: "evil.com"})` left the port pointing
+    // somewhere new while the host check threw — and because the throw skipped the resets below, the
+    // stale "healthy" status cache stayed valid for an endpoint that had moved (codex round 2). A
+    // rejected call must change nothing at all.
+    const port = config.port === undefined ? this.#port : assertPort(config.port, "port");
+    const httpsPort =
+      config.httpsPort === undefined ? this.#httpsPort : assertPort(config.httpsPort, "httpsPort");
+    // NORMALISED before comparing: `#host` holds the canonical spelling, so comparing the raw input
+    // against it made `configure({host: "127.1"})` — or "LOCALHOST", or a bare "::1" against the
+    // stored "[::1]" — read as a move and wipe the HTTPS history for an endpoint that never moved
+    // (codex round 2). Losing that history is what re-opens the plaintext downgrade.
+    const host = config.host === undefined ? this.#host : assertLoopbackHost(config.host);
+
     const movedEndpoint =
-      (config.port !== undefined && config.port !== this.#port) ||
-      (config.httpsPort !== undefined && config.httpsPort !== this.#httpsPort) ||
-      (config.host !== undefined && config.host !== this.#host);
-    if (config.port !== undefined) this.#port = assertPort(config.port, "port");
-    if (config.httpsPort !== undefined) this.#httpsPort = assertPort(config.httpsPort, "httpsPort");
-    if (config.host !== undefined) this.#host = assertLoopbackHost(config.host);
+      port !== this.#port || httpsPort !== this.#httpsPort || host !== this.#host;
+
+    this.#port = port;
+    this.#httpsPort = httpsPort;
+    this.#host = host;
     if (config.httpsOnly !== undefined) this.#httpsOnly = config.httpsOnly;
     if (config.allowInsecureDowngrade !== undefined)
       this.#allowInsecureDowngrade = config.allowInsecureDowngrade;

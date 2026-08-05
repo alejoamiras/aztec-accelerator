@@ -362,11 +362,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     // witness to the unprobed B (post-impl codex High). Every POST below uses these snapshots.
     const attemptUrl = `${this.#transport.baseUrl}/prove`;
     const attemptWasHttps = attemptUrl.startsWith("https:");
-    // Only snapshot the HTTP retry target when a retry is actually permitted. In strict `httpsOnly`
-    // mode an `http://` URL is never even CONSTRUCTED — that's the documented contract, so keep it
-    // literally true rather than computing a string we'd never use.
+    // Only snapshot the HTTP retry target when a retry is actually permitted. An `http://` URL is
+    // never even CONSTRUCTED when plaintext is off-limits — that's the documented contract, so keep
+    // it literally true rather than computing a string we'd never use. Gated on the EFFECTIVE policy,
+    // not the raw `httpsOnly` flag: once HTTPS has proven healthy here the downgrade is refused too,
+    // and the old check built the URL anyway (codex round 2 — harmless, but it falsified the claim).
     const httpRetryUrl =
-      attemptWasHttps && !this.#transport.httpsOnly ? this.#transport.proveUrlFor("http") : null;
+      attemptWasHttps && this.#transport.allowsHttpDowngrade
+        ? this.#transport.proveUrlFor("http")
+        : null;
 
     logger.info("Accelerator available, proving natively", { url: attemptUrl });
 

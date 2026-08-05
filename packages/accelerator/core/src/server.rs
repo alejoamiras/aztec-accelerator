@@ -241,6 +241,14 @@ impl AppState {
 }
 
 pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // F-06 (round 3): the ONE place both binaries pass through on the way up, so the cache-size cap
+    // gets a chance to bind even when the previous run left it over the limit — post-download
+    // eviction cannot help a cache nothing is downloading into. Detached: never delay the listener.
+    let bundled = state.bundled_version.clone();
+    tokio::spawn(async move {
+        crate::versions::sweep_cache_on_start(bundled.as_deref()).await;
+    });
+
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], PORT));
     let listener = bind_with_retry(addr).await?;

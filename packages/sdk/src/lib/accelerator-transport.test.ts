@@ -155,6 +155,75 @@ describe("AcceleratorTransport", () => {
       expect(t.allowsHttpDowngrade).toBe(false);
     });
 
+    test("a canonical re-spelling of the SAME host is not a move", () => {
+      // codex round 2: `movedEndpoint` compared the RAW input against the NORMALISED stored host, so
+      // `configure({host: "127.1"})` after healthy HTTPS looked like a move, wiped the history, and
+      // handed the plaintext downgrade back for an endpoint that had not moved at all.
+      // NOT "LOCALHOST": that normalises to "localhost", a genuinely different authority from
+      // "127.0.0.1" (it can resolve to ::1), so treating it as a move is correct — codex listed it as
+      // an equivalent trigger, but it is not one.
+      for (const spelling of ["127.1", "0x7f.0.0.1", "2130706433", "127.000.000.001"]) {
+        const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+        t.commitStatus({ available: true, needsDownload: false }, healthy);
+        t.configure({ host: spelling });
+        expect(t.allowsHttpDowngrade).toBe(false);
+        // Normalised back to the same address — and still HTTPS, since the history survived.
+        expect(t.baseUrl).toBe("https://127.0.0.1:59834");
+      }
+      // `::1` and `[::1]` are likewise the same endpoint.
+      const six = new AcceleratorTransport("::1", 59833, 59834);
+      six.commitStatus({ available: true, needsDownload: false }, healthy);
+      six.configure({ host: "[::1]" });
+      expect(six.allowsHttpDowngrade).toBe(false);
+
+      // A different loopback AUTHORITY — including the hostname form — still counts as a move.
+      for (const other of ["127.0.0.2", "localhost", "[::1]"]) {
+        const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+        t.commitStatus({ available: true, needsDownload: false }, healthy);
+        t.configure({ host: other });
+        expect(t.allowsHttpDowngrade).toBe(true);
+      }
+
+      const moved = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      moved.commitStatus({ available: true, needsDownload: false }, healthy);
+      moved.configure({ host: "127.0.0.2" });
+      expect(moved.allowsHttpDowngrade).toBe(true);
+    });
+
+    test("a REJECTED configure() changes nothing at all", () => {
+      // codex round 2: fields were assigned as validation proceeded, so a call that threw on `host`
+      // had already moved the port — and the throw skipped the cache/protocol/generation resets, so
+      // a stale "healthy" status stayed valid for an endpoint that had silently moved.
+      // Observe the HTTP baseUrl — it is the only thing that exposes `#port`, which is the field the
+      // old code moved before throwing. (The HTTPS branch reads `#httpsPort`, so asserting on it
+      // would have let the regression through: the first version of this test did exactly that.)
+      const plain = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(() => plain.configure({ port: 51337, host: "evil.com" })).toThrow(
+        /Invalid accelerator host/,
+      );
+      expect(plain.baseUrl).toBe("http://127.0.0.1:59833");
+
+      // …and a bad httpsPort arriving after a good host must not move the host either.
+      expect(() =>
+        plain.configure({ host: "127.0.0.2", httpsPort: "443@evil.com" as unknown as number }),
+      ).toThrow(/Invalid accelerator httpsPort/);
+      expect(plain.baseUrl).toBe("http://127.0.0.1:59833");
+
+      // The rest of the state must be untouched too: a throw used to skip the resets below the
+      // assignments, leaving a stale "healthy" cache valid for an endpoint that had already moved.
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.commitStatus({ available: true, needsDownload: false }, healthy);
+      const genBefore = t.generation;
+
+      expect(() => t.configure({ port: 51337, host: "evil.com" })).toThrow(
+        /Invalid accelerator host/,
+      );
+
+      expect(t.generation).toBe(genBefore);
+      expect(t.getFreshCachedStatus()).not.toBeNull();
+      expect(t.allowsHttpDowngrade).toBe(false);
+    });
+
     test("a later probe cannot re-pin plaintext once HTTPS has worked", async () => {
       // codex CRITICAL: `allowsHttpDowngrade` was consulted only when an HTTPS `/prove` FAILED, so
       // the plaintext path was reachable by going AROUND it — let the status cache expire, take the

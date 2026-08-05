@@ -252,6 +252,13 @@ pub fn verify_cached_bb(version: &AztecVersion) -> Result<PathBuf, String> {
 /// reads. Best-effort and silent: this is an optimisation of eviction ORDER, never a correctness gate,
 /// and a read-only or full filesystem must not fail a proof.
 ///
+/// **This is a hint, not a lease** (codex round 2, correctly). Cleanup reads the mtime and then
+/// unlinks; a proof that verifies and marks BETWEEN those two steps still loses its binary. What
+/// changed is the size of the window: from "any entry older than the 5-minute window is fair game
+/// while a proof is queued behind the semaphore" down to the gap between two adjacent operations in
+/// the cleanup loop. Closing it entirely needs the cross-request lease that `FINDINGS.md` B2 already
+/// defers; the failure mode meanwhile is a recoverable re-download, not a wrong proof.
+///
 /// Remove-then-create rather than an mtime syscall: adding or removing a directory ENTRY updates the
 /// directory's mtime on every platform we ship, whereas `File::set_modified` on a directory handle
 /// needs `FILE_FLAG_BACKUP_SEMANTICS` on Windows (which `File::open` does not set) and would silently

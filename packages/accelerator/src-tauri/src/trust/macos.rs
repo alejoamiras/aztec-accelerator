@@ -130,16 +130,20 @@ fn keychain_anchor() -> Anchor {
     }
 }
 
-/// Can `security` enumerate the login keychain at all? An unfiltered `find-certificate` succeeds on
-/// any keychain that holds at least one certificate — which every real login keychain does — so a
-/// FAILURE here means the store is unreadable rather than merely missing our anchor.
+/// Can we reach the login keychain at all?
+///
+/// This asks about the KEYCHAIN FILE, not its contents. The first version ran an unfiltered
+/// `find-certificate` and treated any nonzero exit as unreadable — but that command also exits
+/// nonzero on a keychain holding no certificates, so deleting our anchor when it was the LAST one
+/// made a genuinely successful removal report as unverifiable (codex round 2). A control question
+/// whose answer depends on how many certificates happen to be installed is not a control question.
+///
+/// Opening the file covers what this needs to catch: a `HOME` that resolves elsewhere under `sudo`,
+/// a keychain that was moved or never created, a permission-denied path. A LOCKED keychain still
+/// opens, so it remains a residual — `security` prompts or fails on use, and a spawn failure is
+/// already `Unknown`.
 fn keychain_is_readable() -> bool {
-    Command::new(SECURITY_BIN)
-        .arg("find-certificate")
-        .arg(login_keychain())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    std::fs::File::open(login_keychain()).is_ok()
 }
 
 /// Convenience for the callers that only need "the current anchor, if we can name it".

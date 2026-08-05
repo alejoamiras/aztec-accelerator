@@ -573,8 +573,24 @@ pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>
 /// original PATHNAME to `security` / `certutil` / NSS leaves a swap window: those tools re-open the
 /// file, and the same-user attacker this fix is about — who must already be able to write
 /// `certs_dir()` — can replace it in between. Linux's per-store loop opens it once PER STORE, which
-/// widens the window further. Trusting a `tempfile`-created path instead removes the window: the name
-/// is random and the handle is ours, so there is nothing to race.
+/// widens the window further. A random, freshly-created name removes the predictable target.
+///
+/// **Residual, stated plainly** (codex round 2, and it is right): this does NOT close the race
+/// against a determined same-UID attacker. No pathname-based scheme can — `0600` excludes other
+/// users, not another process running as *this* user, which can watch the temp directory and
+/// overwrite the file between our write and the tool's open. Holding the descriptor does not freeze
+/// the pathname's contents, and none of the three OS tools accept a file descriptor.
+///
+/// What it costs the attacker is real: an unpredictable name and a window measured in the time
+/// between two adjacent syscalls, instead of a fixed path they can camp on indefinitely. What
+/// remains is bounded by the ceremony around it — on macOS and Windows the trust dialog displays the
+/// certificate being installed, and on Linux (no dialog) a same-UID attacker can already drive
+/// `certutil` against their own NSS databases without involving this app at all.
+///
+/// The real closure, if the threat model ever needs it, is verifying identity AFTER the install:
+/// re-read the anchor the trust store actually ended up with and compare it to the bytes validated
+/// here, removing it on mismatch. That is per-backend work (SHA-1 on macOS, serial on Windows,
+/// nickname on Linux) and is deliberately not in this change.
 ///
 /// The temp file lives until the returned guard drops, which must outlive the trust call — hence
 /// returning it rather than a `PathBuf`. `tempfile` creates it `0600` in the system temp dir.

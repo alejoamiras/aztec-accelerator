@@ -397,6 +397,26 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
     }
 }
 
+/// Bring the cache under [`CACHE_MAX_TOTAL_BYTES`] at process start (F-06, round 3).
+///
+/// Eviction otherwise runs ONLY after a download, and the in-process deferred pass sleeps out the
+/// active window inside a detached task — which dies with the process. So an attacker who fills the
+/// cache inside one window and then stops, or simply a restart before the deferred pass fires, left
+/// the excess on disk indefinitely with nothing scheduled to reclaim it (codex round 2). A sweep at
+/// startup is what makes the cap eventually-true regardless of what happened in the previous run.
+///
+/// `in_use` is `None`: nothing is proving yet. Detached by the caller — this must never delay the
+/// listener coming up.
+pub async fn sweep_cache_on_start(bundled: Option<&str>) {
+    let Some(bundled) = bundled.and_then(AztecVersion::parse) else {
+        // An unparseable/absent bundled version means we cannot say what must be KEPT, and evicting
+        // without that is how you delete the fallback binary. Same defensive skip as the post-download
+        // path takes.
+        return;
+    };
+    cleanup_old_versions(&bundled, None).await;
+}
+
 /// The retry half of the above, split out so the recursion is explicit and can only happen once:
 /// this pass does NOT re-arm the timer, so a cache that is still over the cap waits for the next
 /// download rather than looping.
