@@ -21,6 +21,19 @@ fn login_keychain() -> PathBuf {
 
 /// Add a cert as a trusted root in the login Keychain (prompts the user). Trust is keyed to the
 /// cert's content, so a later atomic rename of the file does not invalidate it.
+///
+/// **No `-p` policy scoping, deliberately** (F-02, audit 2026-07-31). Narrowing the grant to
+/// `-p ssl` would also require `verify-cert -p ssl`, and the SSL policy matches a hostname against
+/// the certificate's SANs — our anchor is a CA with none, so the launch gate would false-negative and
+/// HTTPS would never come up on macOS. That is exactly the class of break the `-l` flag above
+/// documents (post-impl codex Critical), and NOTHING in CI could catch a repeat: installing a root
+/// needs interactive auth, so `tests/trust_macos.rs` covers only the query path.
+///
+/// The trade is acceptable because the grant's blast radius is set by the certificate, not the
+/// policy list: this anchor is KEYLESS (its private key was generated per-signature and never
+/// written anywhere) and name-constrained to loopback, so a broader policy grant on it still vouches
+/// for nothing. `certs::validate_ca_profile` is what keeps both of those properties true — it refuses
+/// to let any other certificate reach this function.
 fn add_trusted_cert(cert_path: &Path) -> Result<(), String> {
     let output = Command::new(SECURITY_BIN)
         .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
