@@ -11,6 +11,10 @@ Phase 3 reduce — Opus · Phase 4 verify — Opus
 `packages/accelerator/server` (headless crate), `packages/playground`, `packages/landing`,
 `.github/workflows`, `infra/tofu`. Generated/vendored paths excluded as non-eligible.
 
+**Remediation status (2026-08-06):** six findings are FIXED on branch
+`worktree-harden-security-bugs` — see [Remediation status](#remediation-status-2026-08-06) below.
+The findings table and the original remediation order are preserved as the audit found them.
+
 **Stakeholder-facing version:** `report.html` (per-finding one-sentence summary + plain-language
 explanation, technical trace collapsed). **Full detail:** `findings/consolidated.md` (reduce) and
 `findings/verified.md` (verification). **Raw corpus:** `raw/` — 16 cluster reports + 2 repo maps.
@@ -108,6 +112,10 @@ No finding was refuted outright and no band crossed a tier boundary.
 
 ### Remediation order
 
+> **Superseded 2026-08-06.** This is the order the audit recommended. What actually shipped, the
+> three places it deliberately diverged, and why, are in
+> [Remediation status](#remediation-status-2026-08-06).
+
 1. **F-04, items 1–2 (hours).** Fall back to `floor = current_running_version` on corrupt or
    impossible state and surface it in Settings. Removes a permanent, silent, *accidentally* triggerable
    lockout. Safe because `candidate_allowed` already enforces `candidate > current` before consulting
@@ -121,6 +129,89 @@ No finding was refuted outright and no band crossed a tier boundary.
    on macOS and an EKU restriction on Windows.
 5. **F-01 (hours–day for steps 1–2).** Default `httpsOnly` on when HTTPS is healthy; build URLs with
    `new URL()` and constrain `host` to loopback unless explicitly overridden.
+
+## Remediation status (2026-08-06)
+
+Six of the thirteen are fixed on `worktree-harden-security-bugs`; seven remain open. Every fix
+carries regression tests that were **mutation-proved** — each fix was reverted and the named test
+confirmed to fail — so the tests pin the defect, not merely the current behaviour.
+
+| ID | Status | Commits |
+|---|---|---|
+| F-01 | **Fixed** | `7df43b5`, `d902228`, `c1b86ad`, `b1928bb` |
+| F-02 | **Fixed, with an accepted residual** | `2676a97`, `d902228`, `b1928bb` |
+| F-04 | **Fixed** | `b04eb8b`, `47ea486`, `d902228` |
+| F-05 | **Fixed** | `578caa3`, `d902228`, `c1b86ad`, `b1928bb` |
+| F-06 | **Fixed, with an accepted residual** | `710fd94`, `47ea486`, `d902228`, `c1b86ad`, `a00e2ce`, `bd74929` |
+| F-08 | **Facet B fixed** (stderr containment). Facet A (witness residue) untouched | `d932eb3`, `d902228` |
+| F-03, F-07, F-09, F-10, F-11, F-12, F-13 | Open | — |
+
+### Where the fixes diverged from the recommended order
+
+Three of the audit's own recommendations were deliberately not followed. Each is argued at the call
+site in code, not only here.
+
+- **F-02: no `-p ssl` on macOS `add-trusted-cert`.** Scoping the grant forces `verify-cert -p ssl`,
+  whose SSL policy matches a hostname against the certificate's SANs — our anchor is a CA with none,
+  so the launch gate would false-negative and HTTPS would never come up. Nothing in CI could catch a
+  repeat: installing a root needs interactive auth, so `tests/trust_macos.rs` covers only the query
+  path. The anchor is keyless and loopback-constrained, so a broader policy grant on it still vouches
+  for nothing. Windows `certutil -addstore` offers no EKU scoping either.
+- **F-01: `httpsOnly` was not defaulted on.** It would break every dApp talking to an
+  HTTPS-disabled accelerator — the user's own choice in the onboarding wizard — and the TLS-free
+  headless server permanently. The shipped property is narrower and gets the same result: once a
+  healthy HTTPS endpoint has answered, the SDK will not DOWNGRADE from it, with a documented
+  `allowInsecureDowngrade` opt-out. An accelerator that never had HTTPS is unaffected.
+- **F-05: no new `NSIS_HOOK_PREUNINSTALL`.** A release cannot fix its own uninstaller, so a NEW
+  uninstall hook is a one-shot bet. The existing `POSTUNINSTALL` was hardened instead: it re-queries
+  the store rather than trusting the delete, and leaves a `CA-TRUST-NOT-REMOVED.txt` with
+  `certmgr.msc` instructions when the CA may still be trusted.
+
+### Accepted residuals
+
+- **F-02 — the same-UID file-replacement window is NOT closed.** The validated bytes are written to
+  a `tempfile` and that path is handed to the trust tools, which removes a fixed path an attacker
+  can pre-plant. It does not close the race: `0600` does not exclude another process running as the
+  same user, holding the descriptor does not freeze the pathname's contents, and none of the three OS
+  tools accept a file descriptor. The window spans each backend's spawn and every reopen inside it —
+  once per NSS store on Linux. The trust dialog is not a backstop, because a substituted certificate
+  can carry the same CN. What bounds it is that the same-UID attacker has easier routes anyway: on
+  Linux there is no dialog at all and they can drive `certutil` against their own NSS databases
+  without involving this app. **The closure is post-install identity verification per backend**
+  (SHA-1 on macOS, serial on Windows, nickname on Linux) and is not in this change.
+- **F-06 — `mark_in_use` is a hint, not a lease.** Cleanup reads a directory's mtime and then
+  unlinks it; a proof that verifies and marks between those two steps still loses its binary. The
+  window went from "any entry older than the five-minute active window while a proof is queued" down
+  to the gap between two adjacent operations in the cleanup loop. Full closure needs the
+  cross-request lease `FINDINGS.md` B2 already defers. The failure mode meanwhile is a recoverable
+  re-download, not execution of unverified code.
+- **F-05 — one-directional ambiguity on macOS.** A genuinely EMPTY login keychain reports "could not
+  verify" for a removal that had nothing to remove. That is the fail-closed direction, and it cannot
+  be narrowed from code testable outside macOS: `security`'s exit codes do not separate "no such
+  item" from "cannot read this store", its stderr strings are localisable, and locking a keychain in
+  CI needs interactive auth. A lead worth a real-Mac matrix (`security show-keychain-info`) is
+  recorded at the call site.
+
+### Post-fix adversarial review
+
+The six fixes then went through five rounds of independent review (Codex, `xhigh`, fresh context per
+round, converging at round five with no new findings). Those rounds surfaced **thirteen further
+bugs, nine of them defects in the fixes themselves rather than in the original code.** Two were
+Criticals introduced BY an earlier round's fix. The recurring shape is worth recording, because it is
+not something re-reading catches:
+
+- **Half-closed surfaces.** `host` was validated while the adjacent `port` was not, so
+  `{host: "127.0.0.1", port: "80@evil.com"}` built an authority of `evil.com`. The `/prove` retry was
+  guarded while the probe that pins the protocol was not.
+- **An argument applied inconsistently.** The type-erasure reasoning that justified validating the
+  numeric fields was not applied to the two booleans that ARE the transport's security policy;
+  `allowInsecureDowngrade: "false"` is truthy and switched the opt-out ON.
+- **A control that was decorative.** F-04's `pending` TTL was refreshed on every successful launch,
+  so it never elapsed on a machine used daily.
+
+One process note: a review round was hard-refused by the model provider as "possible cybersecurity
+risk" on the basis of adversarial phrasing in the prompt. The same substance in review vocabulary
+went through unchanged.
 
 ## Dropped / not pursued
 

@@ -123,6 +123,31 @@
   </div>
 </header>
 
+<div class="callout">
+  <h3>Status update — 6 August 2026: six of these are fixed</h3>
+  <p>
+    Everything below describes the codebase <strong>as the audit found it on 31 July</strong>. Six
+    findings have since been fixed on branch <code>worktree-harden-security-bugs</code>:
+    <strong>F-01</strong> (witness sent to an unauthenticated endpoint), <strong>F-02</strong>
+    (unvalidated CA installed into OS root stores), <strong>F-04</strong> (one local write
+    permanently disables updates), <strong>F-05</strong> (trust removal reports failure as success),
+    <strong>F-06</strong> (unbounded cache growth), and the stderr half of <strong>F-08</strong>.
+    Seven remain open: F-03, F-07, F-09, F-10, F-11, F-12, F-13.
+  </p>
+  <p>
+    Each fix carries regression tests that were <em>mutation-proved</em> — the fix was reverted and
+    the test confirmed to fail — so the tests pin the defect rather than the current behaviour. The
+    fixes then went through five rounds of independent adversarial review, which found thirteen
+    further bugs, nine of them in the fixes themselves. Two findings keep a documented residual that
+    is <strong>not</strong> claimed closed: F-02's same-user file-replacement window, and F-06's
+    eviction race, which is narrowed rather than eliminated.
+  </p>
+  <p>
+    Full detail, including three places the fixes deliberately diverged from this report's own
+    recommendations and why: <code>report.md</code> → “Remediation status (2026-08-06)”.
+  </p>
+</div>
+
 <div class="callout warn">
   <h3>Verification changed some of this — read this first</h3>
   <p>
