@@ -9,9 +9,22 @@
 //! by CI — do NOT read a green here as "the production login-keychain trust path is CI-covered."
 #![cfg(target_os = "macos")]
 
+/// Serialises the tests in this file.
+///
+/// Each one redirects `HOME` — a PROCESS-global — to its own throwaway profile, and cargo runs the
+/// tests in a file on parallel threads. That was harmless while there was exactly one test here,
+/// which is what the "single-threaded ignored test" note on each `set_var` was asserting. Adding a
+/// second test silently invalidated it: two tests can interleave `set_var` and then read each
+/// other's profile, so one asserts against certs that were generated somewhere else.
+///
+/// Holding this for the whole body restores the invariant the note claims. Poisoning is ignored on
+/// purpose — one failing test should report its own failure, not cascade into the others.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore = "macOS trust query (install needs interactive auth — see module docs); CI runs with --ignored"]
 fn generate_and_status_query_are_headless_safe() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // certs_exist() (via generate_and_save) validates the leaf+key into a rustls ServerConfig, which
     // needs a process CryptoProvider (installed in the real app's main(); idempotent here).
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -55,6 +68,7 @@ fn generate_and_status_query_are_headless_safe() {
 #[test]
 #[ignore = "macOS trust removal against an unreachable keychain (no prompt); CI runs with --ignored"]
 fn removal_against_an_unreachable_keychain_reports_incomplete() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let home = tempfile::tempdir().expect("temp HOME");

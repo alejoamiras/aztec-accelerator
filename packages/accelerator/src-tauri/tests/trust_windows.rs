@@ -9,9 +9,22 @@
 //! runbook, NOT here. Do NOT read a green here as "the production Root add/remove is CI-covered".
 #![cfg(target_os = "windows")]
 
+/// Serialises the tests in this file.
+///
+/// Each one redirects `HOME` — a PROCESS-global — to its own throwaway profile, and cargo runs the
+/// tests in a file on parallel threads. That was harmless while there was exactly one test here,
+/// which is what the "single-threaded ignored test" note on each `set_var` was asserting. Adding a
+/// second test silently invalidated it: two tests can interleave `set_var` and then read each
+/// other's profile, so one asserts against certs that were generated somewhere else.
+///
+/// Holding this for the whole body restores the invariant the note claims. Poisoning is ignored on
+/// purpose — one failing test should report its own failure, not cascade into the others.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore = "Windows trust read paths (add needs the interactive Root dialog — see module docs); CI runs with --ignored"]
 fn read_paths_are_headless_safe() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // certs_exist() (called by generate_and_save) now validates the leaf+key load into a rustls
     // ServerConfig, which needs a process CryptoProvider — the real app installs it in main(); tests
     // must too (idempotent).
@@ -52,6 +65,7 @@ fn read_paths_are_headless_safe() {
 #[test]
 #[ignore = "drives real certutil against CurrentUser\\Disallowed (no dialog); CI runs with --ignored"]
 fn disallowed_store_overrides_root() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let home = tempfile::tempdir().expect("temp HOME");
@@ -114,6 +128,7 @@ fn disallowed_store_overrides_root() {
 #[test]
 #[ignore = "drives real certutil -delstore against CurrentUser\\Root (no dialog); CI runs with --ignored"]
 fn removal_with_nothing_to_remove_reports_complete() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let home = tempfile::tempdir().expect("temp HOME");
@@ -123,6 +138,22 @@ fn removal_with_nothing_to_remove_reports_complete() {
 
     aztec_accelerator::certs::generate_and_save().expect("generate certs");
     let ca = aztec_accelerator::certs::live_ca_cert_path();
+
+    // Print what certutil ACTUALLY says for a filtered miss. The first version of the F-05 fix keyed
+    // "absent" on CRYPT_E_NOT_FOUND appearing here, which is false on a real runner — this line is so
+    // the next person reads reality out of the CI log instead of assuming, as I did.
+    let raw = std::process::Command::new("certutil")
+        .args(["-user", "-store", "Root", "Aztec Accelerator Local CA"])
+        .output();
+    match &raw {
+        Ok(o) => println!(
+            "[diagnostic] certutil -store Root <CN>: status={:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).trim(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => println!("[diagnostic] certutil could not be spawned: {e}"),
+    }
 
     let report = aztec_accelerator::trust::remove_ca_trust(&ca);
     assert!(
