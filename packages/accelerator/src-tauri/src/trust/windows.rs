@@ -111,6 +111,12 @@ fn presence_by_cn() -> Probe {
 /// Can certutil enumerate the CurrentUser `Root` store at all? An UNFILTERED `-store Root` succeeds
 /// whenever the store is readable, which separates "our certificate is not in it" from "we could not
 /// look" without depending on any particular error string or HRESULT.
+///
+/// Residual, same shape as the macOS control and stated for the same reason: if the CurrentUser Root
+/// store were genuinely EMPTY this may exit non-zero and we would report "could not verify" for a
+/// removal that had nothing to remove. That is the fail-closed direction, and it is far rarer than
+/// the case this replaces — a filtered miss is universal, an empty user Root store is not — but it is
+/// the same trade, not a closed one.
 fn root_store_is_readable() -> bool {
     Command::new(certutil_exe())
         .args(["-user", "-store", "Root"])
