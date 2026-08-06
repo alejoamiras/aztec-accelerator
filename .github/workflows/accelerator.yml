@@ -170,8 +170,12 @@ jobs:
       # job. Cheap + needs no certutil/keychain, so it's safe on every matrix leg.
       - run: cargo test --test tls_handshake -- --nocapture
       # Real trust-store test per OS. Windows: CurrentUser Root add/verify/remove (spike I3 — expected
-      # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
-      # interactive auth — spike I7, covered by the manual runbook, NOT here).
+      # silent in CI). macOS: headless-safe subset only (verify/status + F-05's removal
+      # classification, which `security find-certificate` can answer without a prompt; the INSTALL
+      # path needs interactive auth — spike I7, covered by the manual runbook, NOT here).
+      # F-05: this is the only place the macOS/Windows removal paths are EXECUTED rather than merely
+      # compiled — the unit tests cover the shared classifier, but each backend's own code is
+      # cfg-gated to its target and so invisible to the Linux `test` job.
       - run: cargo test --test ${{ matrix.test }} -- --ignored --nocapture
       # L3 (autostart plan §6): the real-OS autostart lifecycle — enable(quoted) → break → heal →
       # platform-OFF respected → never-resurrect — on each OS's real artifact store. ONE test per
