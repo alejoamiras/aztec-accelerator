@@ -42,9 +42,9 @@ makensis -V2 harness.test.nsi >/dev/null || { echo "makensis failed"; exit 1; }
 PROFILE="$WINEPREFIX/drive_c/users/$(whoami)"
 fails=0
 
-# label | pass /UPDATE? | pass _?=<dir>? | must the anchor survive?
+# label | pass /UPDATE? | pass _?=<dir>? | must the anchor survive? | expect the F-05 breadcrumb?
 run_case() {
-  local label="$1" update="$2" in_place="$3" must_survive="$4"
+  local label="$1" update="$2" in_place="$3" must_survive="$4" want_warning="${5:-no}"
   wine hooks-harness-setup.exe /S >/dev/null 2>&1
   local dir certs
   dir="$PROFILE/Temp/aztec-hooks-harness"
@@ -66,6 +66,25 @@ run_case() {
     echo "FAIL $label (anchor kept=$survived, expected=$must_survive)"
     fails=$((fails + 1))
   fi
+
+  # F-05 (audit 2026-07-31): the hook used to `ExecWait` certutil with NO output variable, so a
+  # certutil that could not RUN was indistinguishable from a successful delete and the uninstall left
+  # a trusted root behind with nothing recorded anywhere. Wine ships no certutil.exe, which makes this
+  # container a faithful stand-in for the blocked-LOLBIN machine the finding is about: the hook must
+  # now notice and leave the user a way to finish the job by hand. Pre-fix this file never appeared.
+  local warned=no
+  [ -f "$PROFILE/.aztec-accelerator/CA-TRUST-NOT-REMOVED.txt" ] && warned=yes
+  if [ "$warned" = "$want_warning" ]; then
+    echo "ok   $label (unremoved-CA warning=$warned)"
+  else
+    echo "FAIL $label (unremoved-CA warning=$warned, expected=$want_warning)"
+    fails=$((fails + 1))
+  fi
+  if [ "$warned" = yes ] && ! grep -q certmgr.msc "$PROFILE/.aztec-accelerator/CA-TRUST-NOT-REMOVED.txt"; then
+    echo "FAIL $label (warning does not tell the user how to remove it by hand)"
+    fails=$((fails + 1))
+  fi
+
   rm -rf "$PROFILE/.aztec-accelerator" "$dir"
 }
 
@@ -74,10 +93,13 @@ run_case() {
 # in-app updates skip the uninstall entirely: PageLeaveReinstall's update-mode guard). It is
 # invisible to the script ($CMDLINE is stripped of it) — its effect is that the uninstaller runs in
 # place instead of from a ~nsu*.tmp copy, which is what the hook actually keys on.
-#                                                          /UPDATE  _?=  survive
-run_case "upgrade via downloaded installer (no /UPDATE)"        no  yes  yes
-run_case "defense-in-depth: /UPDATE (dead in 2.8.1 silent)"   yes  yes  yes
-run_case "genuine uninstall (Add/Remove Programs)"              no   no   no
+# The `warn` column is the F-05 observable: only the branch that ACTUALLY tries to remove trust can
+# report a failure, so the two upgrade cases must stay silent — a warning there would mean the guard
+# leaked. Wine has no certutil, so the genuine uninstall must warn.
+#                                                          /UPDATE  _?=  survive  warn
+run_case "upgrade via downloaded installer (no /UPDATE)"        no  yes  yes       no
+run_case "defense-in-depth: /UPDATE (dead in 2.8.1 silent)"   yes  yes  yes       no
+run_case "genuine uninstall (Add/Remove Programs)"              no   no   no      yes
 
 # ── POSTINSTALL completion-token cases (piece-2 plan §6 T2) ──
 # The template invokes NSIS_HOOK_POSTINSTALL via !ifmacrodef, so a MISSPELLED macro is silently

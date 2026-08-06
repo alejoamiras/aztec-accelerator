@@ -9,9 +9,22 @@
 //! by CI — do NOT read a green here as "the production login-keychain trust path is CI-covered."
 #![cfg(target_os = "macos")]
 
+/// Serialises the tests in this file.
+///
+/// Each one redirects `HOME` — a PROCESS-global — to its own throwaway profile, and cargo runs the
+/// tests in a file on parallel threads. That was harmless while there was exactly one test here,
+/// which is what the "single-threaded ignored test" note on each `set_var` was asserting. Adding a
+/// second test silently invalidated it: two tests can interleave `set_var` and then read each
+/// other's profile, so one asserts against certs that were generated somewhere else.
+///
+/// Holding this for the whole body restores the invariant the note claims. Poisoning is ignored on
+/// purpose — one failing test should report its own failure, not cascade into the others.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore = "macOS trust query (install needs interactive auth — see module docs); CI runs with --ignored"]
 fn generate_and_status_query_are_headless_safe() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // certs_exist() (via generate_and_save) validates the leaf+key into a rustls ServerConfig, which
     // needs a process CryptoProvider (installed in the real app's main(); idempotent here).
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -36,5 +49,46 @@ fn generate_and_status_query_are_headless_safe() {
     assert!(
         report.stores.iter().any(|s| s.store.contains("Keychain")),
         "status should report the macOS Keychain store; got {report:?}"
+    );
+}
+
+/// F-05 on the REAL OS: a removal we could not verify must not report success.
+///
+/// The existing test above covers only the status/verify query, so every line the F-05 fix touched
+/// on macOS — `keychain_anchor`, `keychain_is_readable`, `remove` — was compiled by CI and never
+/// executed by it. A green `Cert Trust (macos)` therefore proved the backend builds, not that the
+/// removal classification works. Found while checking the fixes after PR #434 went green.
+///
+/// This is headless-safe for the same reason the test above is: `security find-certificate` reads,
+/// it never raises the authorization prompt that `add-trusted-cert` does. Pointing `HOME` at a
+/// throwaway directory means there is no `login.keychain-db` at all, which is exactly the
+/// "could not ask" state the fix is about — and pre-F-05 that state returned `None` from
+/// `keychain_sha1`, sailed through the delete loop without attempting anything, and reported a
+/// clean removal.
+#[test]
+#[ignore = "macOS trust removal against an unreachable keychain (no prompt); CI runs with --ignored"]
+fn removal_against_an_unreachable_keychain_reports_incomplete() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let home = tempfile::tempdir().expect("temp HOME");
+    // SAFETY: single-threaded ignored test; isolates the generated certs under a throwaway profile.
+    std::env::set_var("HOME", home.path());
+
+    aztec_accelerator::certs::generate_and_save().expect("generate certs");
+    let ca = aztec_accelerator::certs::live_ca_cert_path();
+
+    // There is no login keychain under this HOME, so removal cannot be confirmed either way.
+    let report = aztec_accelerator::trust::remove_ca_trust(&ca);
+    assert!(
+        report.removal_incomplete(),
+        "an unverifiable removal must report INCOMPLETE, not success; got {report:?}"
+    );
+    let detail = report
+        .removal_failure_detail()
+        .expect("an incomplete removal must carry a reason");
+    assert!(
+        detail.contains("could not verify") || detail.contains("still trusted"),
+        "the reason should say why it could not be confirmed; got {detail:?}"
     );
 }

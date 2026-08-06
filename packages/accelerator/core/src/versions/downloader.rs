@@ -212,7 +212,7 @@ fn unique_staging_dir(version_dir: &Path) -> Result<PathBuf, Box<dyn Error + Sen
 /// also leave the cache transiently ABOVE its retention limit if many versions are downloaded within one
 /// window — self-healing (a later cleanup, once they age out, evicts them). Both trades favor
 /// availability over strictness and are bounded. See FINDINGS.md B1/B2.
-const CACHE_ENTRY_ACTIVE_WINDOW: Duration = Duration::from_secs(5 * 60);
+pub(super) const CACHE_ENTRY_ACTIVE_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// True if `path` was modified within [`CACHE_ENTRY_ACTIVE_WINDOW`] (⇒ presumed active, do not delete).
 /// Fails SAFE: an unreadable/ambiguous mtime is treated as recent (keep it) rather than reaped.

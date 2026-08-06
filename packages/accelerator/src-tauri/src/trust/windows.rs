@@ -16,7 +16,7 @@
 //! user's consent), so the CI integration test seeds non-interactively via PowerShell
 //! `Import-Certificate` and exercises verify/remove instead (P4 spike I3; see `tests/trust_windows.rs`).
 
-use super::{AnchorRef, StoreStatus, TrustReport};
+use super::{AnchorRef, Probe, StoreStatus, TrustReport};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -65,11 +65,75 @@ fn add_store(ca_cert: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// certutil's HRESULT for "the requested object was not found". Kept as a FAST PATH only — see
+/// [`presence_by_cn`] for why it cannot be the sole discriminator.
+pub(super) const CRYPT_E_NOT_FOUND: &str = "0x80092004";
+
 /// Is ANY anchor with our CN present? Used ONLY by the remove/uninstall path, which deletes every
 /// same-CN anchor (live + rotation leftovers) — the one place CN's "match all of ours" is what we want.
-fn is_present_by_cn() -> bool {
-    Command::new(certutil_exe())
+///
+/// Pre-F-05 this was `.map(|o| o.status.success()).unwrap_or(false)`: a `certutil.exe` that could not
+/// execute at all (a commonly restricted LOLBIN — EDR/AppLocker) read as "not present", which the
+/// removal path then reported as a clean removal.
+///
+/// The first F-05 fix then over-corrected by keying "absent" on `CRYPT_E_NOT_FOUND` appearing in the
+/// output. That was simply the WRONG CONSTANT. Measured on a real runner
+/// (`tests/trust_windows.rs` prints it every run, so this is observed, not inferred):
+///
+/// ```text
+/// $ certutil -user -store Root "Aztec Accelerator Local CA"     # exit -2146893807
+/// Root "Trusted Root Certification Authorities"
+/// CertUtil: -store command FAILED: 0x80090011 (-2146893807 NTE_NOT_FOUND)
+/// CertUtil: Object was not found.
+/// ```
+///
+/// `NTE_NOT_FOUND`, not `CRYPT_E_NOT_FOUND`. So every ordinary removal — nothing of ours installed,
+/// or our anchor just successfully deleted — classified as `Unknown` and reported "could not verify
+/// removal". A control that fires on the happy path is worse than the fail-open it replaced, because
+/// it teaches the user to ignore it. Only a Windows runner could catch this: `windows.rs` is
+/// cfg-gated away from the Linux job, and the unit tests cover the shared classifier, not this.
+///
+/// The lesson taken here is NOT "add the other constant". It is that the verdict must not depend on
+/// which code certutil happens to print — so the second marker is deliberately not added, and the
+/// control question below carries the decision.
+///
+/// So the verdict no longer depends on a string certutil may not print. A filtered miss asks a
+/// CONTROL question instead — can certutil read the store AT ALL? — exactly as the macOS backend and
+/// the NSIS hook do. The marker stays as a fast path that skips the second process when it IS there.
+fn presence_by_cn() -> Probe {
+    let out = Command::new(certutil_exe())
         .args(["-user", "-store", "Root", CA_CN])
+        .output();
+    let probe = match Probe::from_query(&out, Some(CRYPT_E_NOT_FOUND)) {
+        // Found it, or certutil said "no such object" in so many words.
+        p @ (Probe::Present | Probe::Absent) => p,
+        // Non-zero for some other reason, or it never ran: ask whether the store is readable.
+        Probe::Unknown => {
+            if root_store_is_readable() {
+                Probe::Absent
+            } else {
+                Probe::Unknown
+            }
+        }
+    };
+    if probe == Probe::Unknown {
+        tracing::warn!("certutil could not read the CurrentUser Root store; its state is unknown");
+    }
+    probe
+}
+
+/// Can certutil enumerate the CurrentUser `Root` store at all? An UNFILTERED `-store Root` succeeds
+/// whenever the store is readable, which separates "our certificate is not in it" from "we could not
+/// look" without depending on any particular error string or HRESULT.
+///
+/// Residual, same shape as the macOS control and stated for the same reason: if the CurrentUser Root
+/// store were genuinely EMPTY this may exit non-zero and we would report "could not verify" for a
+/// removal that had nothing to remove. That is the fail-closed direction, and it is far rarer than
+/// the case this replaces — a filtered miss is universal, an empty user Root store is not — but it is
+/// the same trade, not a closed one.
+fn root_store_is_readable() -> bool {
+    Command::new(certutil_exe())
+        .args(["-user", "-store", "Root"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -123,10 +187,25 @@ fn delete_by_serial(serial: &str) {
 }
 
 /// Delete every anchor named `CA_CN` (uninstall / Settings "Remove trust"). No dialog on delete.
-fn delete_by_cn() {
-    let _ = Command::new(certutil_exe())
+///
+/// Returns whether the delete is known to have run cleanly. F-05: the result used to be discarded
+/// entirely (`let _ = …`), so a certutil that could not execute was indistinguishable from a
+/// successful deletion. "Nothing to delete" (`CRYPT_E_NOT_FOUND`) counts as clean.
+fn delete_by_cn() -> bool {
+    // Only "did certutil execute?" is decided here. Whether the anchor is GONE is decided by the
+    // re-query in `remove`, which is the same reasoning the NSIS hook uses: a delete's own exit code
+    // conflates "nothing to delete" with "could not delete", and on this tool it does so without a
+    // reliable marker to tell them apart (see `presence_by_cn`).
+    match Command::new(certutil_exe())
         .args(["-user", "-delstore", "Root", CA_CN])
-        .output();
+        .output()
+    {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not run certutil -delstore");
+            false
+        }
+    }
 }
 
 pub fn install(ca_cert: &Path) -> TrustReport {
@@ -159,16 +238,33 @@ pub fn status(ca_cert: &Path) -> TrustReport {
 
 pub fn remove(_ca_cert: &Path) -> TrustReport {
     // Uninstall: delete ALL our anchors by CN (covers rotation leftovers too).
-    delete_by_cn();
-    // `installed` reports whether ANY of our anchors remain — the caller fails the Settings/CLI
-    // removal when trust is still present (or certutil couldn't delete it).
-    let remaining = is_present_by_cn();
+    let deleted_cleanly = delete_by_cn();
+    // `installed` reports "still trusted OR not provably gone" — the caller fails the Settings/CLI
+    // removal on either, so a certutil that could not run can no longer render as a clean removal.
+    let (installed, detail) = match presence_by_cn() {
+        Probe::Present => (
+            true,
+            Some("a CA anchor is still trusted after the removal attempt".to_string()),
+        ),
+        Probe::Unknown => (
+            true,
+            Some(
+                "could not verify removal — certutil could not read the CurrentUser Root store, so \
+                 the CA may still be trusted"
+                    .to_string(),
+            ),
+        ),
+        Probe::Absent if !deleted_cleanly => (
+            true,
+            Some("certutil -delstore could not be run".to_string()),
+        ),
+        Probe::Absent => (false, None),
+    };
     TrustReport {
         stores: vec![StoreStatus {
             store: STORE.into(),
-            installed: remaining,
-            detail: remaining
-                .then(|| "a CA anchor is still trusted after the removal attempt".to_string()),
+            installed,
+            detail,
         }],
     }
 }

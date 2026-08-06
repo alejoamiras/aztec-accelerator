@@ -170,8 +170,12 @@ jobs:
       # job. Cheap + needs no certutil/keychain, so it's safe on every matrix leg.
       - run: cargo test --test tls_handshake -- --nocapture
       # Real trust-store test per OS. Windows: CurrentUser Root add/verify/remove (spike I3 — expected
-      # silent in CI). macOS: headless-safe subset only (verify/status; the install path needs
-      # interactive auth — spike I7, covered by the manual runbook, NOT here).
+      # silent in CI). macOS: headless-safe subset only (verify/status + F-05's removal
+      # classification, which `security find-certificate` can answer without a prompt; the INSTALL
+      # path needs interactive auth — spike I7, covered by the manual runbook, NOT here).
+      # F-05: this is the only place the macOS/Windows removal paths are EXECUTED rather than merely
+      # compiled — the unit tests cover the shared classifier, but each backend's own code is
+      # cfg-gated to its target and so invisible to the Linux `test` job.
       - run: cargo test --test ${{ matrix.test }} -- --ignored --nocapture
       # L3 (autostart plan §6): the real-OS autostart lifecycle — enable(quoted) → break → heal →
       # platform-OFF respected → never-resurrect — on each OS's real artifact store. ONE test per
@@ -237,6 +241,19 @@ jobs:
               throw "FAIL [$($case.desc)]: marker survived=$survived, expected=$($case.survives)"
             }
             Write-Host "ok [$($case.desc)]: marker survived=$survived"
+
+            # F-05 (audit 2026-07-31): the hook now VERIFIES the delete instead of firing and
+            # forgetting, and drops a CA-TRUST-NOT-REMOVED.txt when the CA may still be trusted. The
+            # wine harness (scripts/nsis-hook-test.sh) covers the positive case — no certutil, so it
+            # must warn. THIS runner is the opposite and more important direction: certutil exists and
+            # no such CA was ever installed, which is every ordinary user's uninstall. Whitelisting
+            # CRYPT_E_NOT_FOUND by numeric value instead of re-querying the store would fire a scary
+            # file here on literally every uninstall.
+            $warned = Join-Path $env:USERPROFILE ".aztec-accelerator\CA-TRUST-NOT-REMOVED.txt"
+            if (Test-Path $warned) {
+              throw "FAIL [$($case.desc)]: false unremoved-CA warning: $(Get-Content -Raw $warned)"
+            }
+            Write-Host "ok [$($case.desc)]: no false unremoved-CA warning"
 
             Remove-Item -Recurse -Force $certs, $dir -ErrorAction SilentlyContinue
           }

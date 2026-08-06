@@ -2,7 +2,7 @@
 //! policy. q7e3-F-07: split from the `versions` module root; the root re-exports keep external paths
 //! unchanged.
 
-use super::cache_layout::{list_cached_versions, versions_base_dir};
+use super::cache_layout::{list_cached_versions, version_dir_size, versions_base_dir};
 
 /// Network tier derived from a version string's prerelease suffix.
 /// Controls how many cached bb versions are retained per tier.
@@ -180,6 +180,61 @@ pub fn versions_to_evict(
     to_evict
 }
 
+/// Hard ceiling on the TOTAL size of `~/.aztec-accelerator/versions/` (F-06, audit 2026-07-31).
+///
+/// The per-tier retention limits above are a *count* policy, and `Mainnet` has none at all —
+/// `retention_limit()` returns `None`, "keep all". Every stable Aztec release is Mainnet, and so is
+/// every version whose prerelease suffix we do not recognise, because [`NetworkTier::from_version`]
+/// falls through to it. `x-aztec-version` is an ordinary request header, so an approved origin could
+/// name a new Mainnet-classified version per request and each one that resolves to a real Aztec
+/// release downloads another ~37 MB `bb` that NOTHING would ever evict — the cache grew without
+/// bound and the only limit was the disk.
+///
+/// A total-size cap is the honest control here: it binds regardless of tier, needs no notion of
+/// "accepted" versions, and does not care how a version got classified. 2 GiB is roughly 55 cached
+/// binaries — far past any real workflow, and small enough that filling it is not a disk-exhaustion
+/// event.
+pub const CACHE_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Which versions to evict to bring the cache back under `max_total`, given each candidate's on-disk
+/// size. Oldest first.
+///
+/// `sized` is `(version, bytes)` for everything currently cached. Two versions are pinned — the
+/// BUNDLED one (it is what the app falls back TO) and the IN-USE one (deleting the binary a
+/// concurrent `bb::prove` is about to execute turns a fail-closed `find_bb` into a spurious hard
+/// error; same guard as [`evictions`]). Both still COUNT toward the total, because they really do
+/// occupy the disk — pinning them means the cap may be missed, never that it is miscounted. Sorting
+/// uses the same version-aware `sort_key` as the tier policy, so "rc.2" precedes "rc.10".
+pub fn versions_to_evict_for_size(
+    sized: &[(AztecVersion, u64)],
+    bundled: &AztecVersion,
+    in_use: Option<&AztecVersion>,
+    max_total: u64,
+) -> Vec<AztecVersion> {
+    let mut total: u64 = sized
+        .iter()
+        .fold(0u64, |acc, (_, n)| acc.saturating_add(*n));
+    if total <= max_total {
+        return Vec::new();
+    }
+    let pinned = |v: &AztecVersion| {
+        v.as_str() == bundled.as_str() || in_use.is_some_and(|u| u.as_str() == v.as_str())
+    };
+    let mut candidates: Vec<&(AztecVersion, u64)> =
+        sized.iter().filter(|(v, _)| !pinned(v)).collect();
+    candidates.sort_by(|a, b| a.0.sort_key().cmp(b.0.sort_key()));
+
+    let mut to_evict = Vec::new();
+    for (version, bytes) in candidates {
+        if total <= max_total {
+            break;
+        }
+        total = total.saturating_sub(*bytes);
+        to_evict.push(version.clone());
+    }
+    to_evict
+}
+
 /// Aztec versions whose bundled `bb` is KNOWN to be vulnerable — a REVOCATION list, **EMPTY by default**.
 ///
 /// `x-aztec-version` carries the **Aztec** version (the SDK's `@aztec/stdlib` dependency version), NOT a
@@ -289,19 +344,106 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
     let Some(base) = versions_base_dir() else {
         return;
     };
-    for version in evictions(&cached, bundled, in_use) {
+    // Tier-count evictions first, then whatever the SIZE cap still demands of the survivors. Order
+    // matters: the count policy is the cheaper, more targeted one, and doing it first means the size
+    // cap usually finds nothing left to do.
+    let mut planned = evictions(&cached, bundled, in_use);
+    let evicted_by_count: std::collections::HashSet<String> =
+        planned.iter().map(|v| v.as_str().to_string()).collect();
+    let survivors: Vec<(AztecVersion, u64)> = cached
+        .iter()
+        .filter(|v| !evicted_by_count.contains(v.as_str()))
+        .map(|v| (v.clone(), version_dir_size(&base.join(v.as_str()))))
+        .collect();
+    for version in versions_to_evict_for_size(&survivors, bundled, in_use, CACHE_MAX_TOTAL_BYTES) {
+        tracing::warn!(version = %version, "Evicting to stay under the cache size cap");
+        planned.push(version);
+    }
+
+    let mut deferred_by_active_window = false;
+    for version in planned {
         let dir = base.join(version.as_str());
         // B2 (full-branch audit): skip a version whose dir was touched within the active window — it was
         // just downloaded (and is likely about to be proved by a CONCURRENT request whose own cleanup
         // exempts a DIFFERENT in_use version). Age-gating stops two concurrent detached cleanups from
         // evicting each other's fresh-in-use binary. A truly-old in-use version is still a narrow,
         // recoverable (re-download) TOCTOU — a full cross-request lease is deferred (see FINDINGS.md B2).
+        //
+        // F-06 note: this exemption applies to the SIZE-cap evictions too, so a burst of downloads can
+        // transiently overshoot `CACHE_MAX_TOTAL_BYTES` by whatever lands inside one active window —
+        // everything in it is "recently active" and therefore unevictable. Correctness wins here:
+        // overriding the guard would let one request delete the binary another is about to execute. The
+        // overshoot is bounded by the burst rate and reclaimed by the next cleanup, which is a different
+        // thing from the unbounded growth this cap exists to stop.
         if super::downloader::recently_active(&dir) {
             tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+            deferred_by_active_window = true;
             continue;
         }
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
+            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
+        }
+    }
+
+    // Round 2 (codex pass over F-06): if the active-window guard deferred anything, this pass may have
+    // left the cache OVER the cap — and cleanup only runs after a download, so an attacker who fills
+    // the cache inside one window and then simply STOPS leaves the excess there indefinitely. That
+    // falsifies the "reclaimed by the next cleanup" reasoning this fix originally shipped with. Wait
+    // out the window once and finish the job; the caller already runs us detached.
+    if deferred_by_active_window {
+        tokio::time::sleep(super::downloader::CACHE_ENTRY_ACTIVE_WINDOW).await;
+        cleanup_after_active_window(bundled, in_use).await;
+    }
+}
+
+/// Bring the cache under [`CACHE_MAX_TOTAL_BYTES`] at process start (F-06, round 3).
+///
+/// Eviction otherwise runs ONLY after a download, and the in-process deferred pass sleeps out the
+/// active window inside a detached task — which dies with the process. So an attacker who fills the
+/// cache inside one window and then stops, or simply a restart before the deferred pass fires, left
+/// the excess on disk indefinitely with nothing scheduled to reclaim it (codex round 2). A sweep at
+/// startup is what makes the cap eventually-true regardless of what happened in the previous run.
+///
+/// `in_use` is `None`: nothing is proving yet. Detached by the caller — this must never delay the
+/// listener coming up. Takes `&str` rather than `Option<&str>`: every caller has a version to pass
+/// (the `DEFAULT_BB_VERSION` sentinel when none is configured), so the `None` arm was a state that
+/// could not occur — codex round 5.
+pub async fn sweep_cache_on_start(bundled: &str) {
+    let Some(bundled) = AztecVersion::parse(bundled) else {
+        // An unparseable bundled version means we cannot say what must be KEPT, and evicting without
+        // that is how you delete the fallback binary. Callers pass the same `"unknown"` sentinel the
+        // post-download path uses when none is configured, so this is the genuinely-broken case only.
+        return;
+    };
+    cleanup_old_versions(&bundled, None).await;
+}
+
+/// The retry half of the above. It does NOT call back into `cleanup_old_versions`, so there is no
+/// recursion and no re-armed timer: a cache still over the cap after this pass waits for the next
+/// download or the next startup sweep rather than looping. (The `Box::pin` this used to carry was
+/// guarding against a recursion that does not exist — codex round 5.)
+async fn cleanup_after_active_window(bundled: &AztecVersion, in_use: Option<&AztecVersion>) {
+    let cached: Vec<AztecVersion> = list_cached_versions()
+        .iter()
+        .filter_map(|s| AztecVersion::parse(s))
+        .collect();
+    let Some(base) = versions_base_dir() else {
+        return;
+    };
+    let sized: Vec<(AztecVersion, u64)> = cached
+        .iter()
+        .map(|v| (v.clone(), version_dir_size(&base.join(v.as_str()))))
+        .collect();
+    for version in versions_to_evict_for_size(&sized, bundled, in_use, CACHE_MAX_TOTAL_BYTES) {
+        let dir = base.join(version.as_str());
+        if super::downloader::recently_active(&dir) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                tracing::info!(version = %version, "Evicted to stay under the cache size cap (deferred pass)")
+            }
             Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
@@ -470,6 +612,90 @@ mod tests {
         assert_eq!(NetworkTier::Devnet.retention_limit(), Some(3));
         assert_eq!(NetworkTier::Testnet.retention_limit(), Some(5));
         assert_eq!(NetworkTier::Mainnet.retention_limit(), None);
+    }
+
+    // ── F-06 regression (audit 2026-07-31) ─────────────────────────────────────────────────────
+    // `x-aztec-version` is an ordinary request header, and `NetworkTier::from_version` routes every
+    // stable release — AND every prerelease suffix it does not recognise — to `Mainnet`, whose
+    // `retention_limit()` is `None` ("keep all"). So the count policy below never evicted them: each
+    // distinct version an origin named downloaded another ~37 MB `bb` that NOTHING would ever remove.
+    // These fail against the pre-fix code, where no size bound existed anywhere.
+
+    /// 37 MB — one real `bb`, so the arithmetic below reads in units of actual cached binaries.
+    const BB: u64 = 37 * 1024 * 1024;
+
+    /// The tier policy leaves every one of these in place forever; the size cap is what bounds them.
+    #[test]
+    fn mainnet_versions_grow_without_bound_until_the_size_cap_binds() {
+        let versions: Vec<AztecVersion> = (0..60).map(|i| av(&format!("5.0.{i}"))).collect();
+        let bundled = av("5.0.0");
+
+        // The count policy declines to evict a single one — this is the defect, pinned.
+        assert!(versions_to_evict(&versions, &bundled).is_empty());
+
+        let sized: Vec<(AztecVersion, u64)> = versions.iter().map(|v| (v.clone(), BB)).collect();
+        let evicted = versions_to_evict_for_size(&sized, &bundled, None, CACHE_MAX_TOTAL_BYTES);
+        assert!(
+            !evicted.is_empty(),
+            "the size cap must bound an all-Mainnet cache"
+        );
+
+        // What survives is genuinely under the cap.
+        let remaining: u64 = sized
+            .iter()
+            .filter(|(v, _)| !evicted.iter().any(|e| e.as_str() == v.as_str()))
+            .map(|(_, n)| n)
+            .sum();
+        assert!(
+            remaining <= CACHE_MAX_TOTAL_BYTES,
+            "{remaining} bytes left, cap is {CACHE_MAX_TOTAL_BYTES}"
+        );
+        // Oldest go first, and the bundled version is never one of them.
+        assert!(evicted.contains(&av("5.0.1")));
+        assert!(!evicted.iter().any(|v| v.as_str() == "5.0.0"));
+    }
+
+    /// An unrecognised prerelease suffix also lands in `Mainnet` — so a remote origin does not even
+    /// need real releases to name new keep-forever versions. The cap does not care how a version got
+    /// classified, which is exactly why it is the right control here.
+    #[test]
+    fn the_cap_binds_regardless_of_how_a_version_was_classified() {
+        assert_eq!(
+            NetworkTier::from_version("5.0.0-quux.7"),
+            NetworkTier::Mainnet
+        );
+        let sized = vec![
+            (av("5.0.0-quux.1"), BB),
+            (av("5.0.0-quux.2"), BB),
+            (av("5.0.0-quux.3"), BB),
+        ];
+        let evicted = versions_to_evict_for_size(&sized, &av("9.9.9"), None, 2 * BB);
+        assert_eq!(evicted, vec![av("5.0.0-quux.1")]);
+    }
+
+    /// Under the cap, the cap does nothing — it must not fight the tier policy.
+    #[test]
+    fn a_cache_under_the_cap_is_left_alone() {
+        let sized = vec![(av("5.0.0"), BB), (av("5.0.1"), BB)];
+        assert!(
+            versions_to_evict_for_size(&sized, &av("5.0.0"), None, CACHE_MAX_TOTAL_BYTES)
+                .is_empty()
+        );
+    }
+
+    /// Neither pinned version may be evicted to satisfy the cap — the bundled one is the fallback,
+    /// and the in-use one is about to be executed by a concurrent prove (F-007's race).
+    #[test]
+    fn the_bundled_and_in_use_versions_are_never_evicted_for_size() {
+        let sized = vec![
+            (av("5.0.0"), BB),
+            (av("5.0.1"), BB),
+            (av("5.0.2"), BB),
+            (av("5.0.3"), BB),
+        ];
+        // Cap of one binary against four: everything evictable must go, and only those two survive.
+        let evicted = versions_to_evict_for_size(&sized, &av("5.0.0"), Some(&av("5.0.1")), BB);
+        assert_eq!(evicted, vec![av("5.0.2"), av("5.0.3")]);
     }
 
     #[test]

@@ -72,6 +72,26 @@ pub(crate) fn list_cached_versions_in(base: &Path) -> Vec<String> {
     versions
 }
 
+/// On-disk size of one cached version directory, in bytes. Unreadable entries count as 0 — this
+/// feeds an eviction decision, and a dir we cannot stat is not evidence of consumed space.
+///
+/// Shallow on purpose: a version dir holds `bb` plus its marker, both flat. Recursing would invite a
+/// symlink-following cost on a directory an attacker could shape.
+pub(crate) fn version_dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                // Saturating, not `sum()`: apparent sizes come from the filesystem, and a sparse file
+                // can report an enormous length, which would panic a debug build and wrap a release
+                // one (codex). A saturated total still compares correctly against any real cap.
+                .fold(0u64, |acc, m| acc.saturating_add(m.len()))
+        })
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // F-007 integrity marker: every cached bb carries a `bb.sha256.json` recording the verified archive
 // digest + the FINAL-binary digest (post macOS codesign). The runtime rehashes the cached binary
@@ -215,8 +235,43 @@ pub fn verify_cached_bb(version: &AztecVersion) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("bb {version}: {NO_TRUSTED_CACHE_ROOT}"))?;
     verify_bb_entry(&bb_path, &marker_path, version.as_str(), current_platform())
         .map_err(|e| format!("bb {version}: {e}"))?;
+    // This is the moment a proof COMMITS to a cached version, so it is the moment to mark the entry
+    // active. Round 2 (codex pass over F-06): the size cap can now evict a Mainnet version, which the
+    // count policy never could, and `cleanup_old_versions` only exempts the ONE version its own
+    // request downloaded. Sequence: proof A resolves an old cached 5.0.0 and queues on the prove
+    // semaphore; proof B downloads 5.0.1; B's detached cleanup is over the cap, sees 5.0.0 as old, and
+    // deletes the binary A is about to execute. Refreshing the mtime here puts A's version inside the
+    // active window for as long as it keeps being used.
+    if let Some(dir) = bb_path.parent() {
+        mark_in_use(dir);
+    }
     Ok(bb_path)
 }
+
+/// Refresh a cached version directory's mtime, which is what [`super::downloader::recently_active`]
+/// reads. Best-effort and silent: this is an optimisation of eviction ORDER, never a correctness gate,
+/// and a read-only or full filesystem must not fail a proof.
+///
+/// **This is a hint, not a lease** (codex round 2, correctly). Cleanup reads the mtime and then
+/// unlinks; a proof that verifies and marks BETWEEN those two steps still loses its binary. What
+/// changed is the size of the window: from "any entry older than the 5-minute window is fair game
+/// while a proof is queued behind the semaphore" down to the gap between two adjacent operations in
+/// the cleanup loop. Closing it entirely needs the cross-request lease that `FINDINGS.md` B2 already
+/// defers; the failure mode meanwhile is a recoverable re-download, not a wrong proof.
+///
+/// Remove-then-create rather than an mtime syscall: adding or removing a directory ENTRY updates the
+/// directory's mtime on every platform we ship, whereas `File::set_modified` on a directory handle
+/// needs `FILE_FLAG_BACKUP_SEMANTICS` on Windows (which `File::open` does not set) and would silently
+/// no-op there — exactly the platform where a stale binary is hardest to debug.
+fn mark_in_use(dir: &Path) {
+    let marker = dir.join(IN_USE_MARKER);
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::write(&marker, b"");
+}
+
+/// Filename of the touch marker written by [`mark_in_use`]. Ignored by `list_cached_versions_in`
+/// (which keys on `bb` + the integrity marker) and irrelevant to `verify_bb_entry`.
+pub(crate) const IN_USE_MARKER: &str = ".last-used";
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +399,17 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn version_dir_size_sums_files_and_tolerates_a_missing_dir() {
+        let d = tempfile::tempdir().unwrap();
+        // F-06: the size cap is only as good as the measurement it evicts on.
+        assert_eq!(version_dir_size(&d.path().join("nope")), 0);
+        assert_eq!(version_dir_size(d.path()), 0);
+        std::fs::write(d.path().join(bb_binary_name()), vec![0u8; 1024]).unwrap();
+        std::fs::write(d.path().join(MARKER_NAME), vec![0u8; 76]).unwrap();
+        assert_eq!(version_dir_size(d.path()), 1100);
     }
 
     #[test]

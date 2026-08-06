@@ -226,7 +226,7 @@ pub async fn prove(
     // (e.g., client disconnect, timeout). Without it, an orphaned bb would run to
     // completion wasting CPU while holding the prove semaphore.
     cmd.kill_on_drop(true);
-    let child = cmd.spawn()?;
+    let child = spawn_capturing_stderr(&mut cmd)?;
     let output = match tokio::time::timeout(PROVE_TIMEOUT, child.wait_with_output()).await {
         Ok(result) => result?,
         Err(_) => {
@@ -263,6 +263,32 @@ fn prepend_field_count_header(raw_proof: &[u8]) -> Vec<u8> {
     result.extend_from_slice(&field_count.to_be_bytes());
     result.extend_from_slice(raw_proof);
     result
+}
+
+/// Spawn a child with its stderr CAPTURED rather than inherited (F-08b, audit 2026-07-31).
+///
+/// `std::process::Command` — and therefore `tokio`'s — defaults every stdio handle to
+/// `Stdio::inherit()`. With stderr inherited, `wait_with_output()` returns an **always-empty**
+/// `Output::stderr` (tokio takes `self.stderr`, which is `None`), so the `if !stderr.is_empty()`
+/// guard below never fired: the 500-char truncation and the "log server-side only" containment it
+/// implements were dead code that had never executed once. Meanwhile `bb`'s real diagnostics — which
+/// the surrounding comments describe as potentially carrying workspace paths and witness-derived
+/// material — went straight to whatever stream this process inherited, bypassing both the truncation
+/// and the `0700` rolling log directory.
+///
+/// Piping it is what makes the existing control real. `wait_with_output()` drains the pipe
+/// concurrently with the wait, so there is no fill-the-pipe-buffer deadlock. stdout is deliberately
+/// left inherited: it carries no diagnostics we redact, and changing it is not this fix's business.
+///
+/// Configuration and spawn are ONE function on purpose (round 2, codex pass over F-08b). As two, the
+/// first version was a config helper that production had to remember to call — the same shape as the
+/// bug itself, where the setting was simply never applied. A test that drove the helper directly
+/// would have kept passing if the call site were dropped. There is now no call site to drop.
+fn spawn_capturing_stderr(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.spawn()
 }
 
 /// Truncate `bb` stderr for logging, cutting at 500 CHARACTERS (not bytes). `from_utf8_lossy` yields
@@ -326,6 +352,41 @@ mod tests {
         assert!(witness.exists());
         // CREATE_NEW must reject a second write to the same path (planted-file / symlink defense).
         assert!(write_witness(&witness, b"again").is_err());
+    }
+
+    /// F-08b regression. Pre-fix the child inherited stderr, so `Output::stderr` was unconditionally
+    /// empty, `truncate_stderr` was unreachable from production, and `bb`'s output escaped the app's
+    /// `0700` log directory entirely. Drives the REAL spawn helper — the same one `prove` uses, so
+    /// there is no separate call site that could be removed while this still passed — against a
+    /// stand-in child that writes to stderr.
+    #[tokio::test]
+    async fn child_stderr_is_captured_so_the_truncation_control_can_run() {
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = tokio::process::Command::new("/bin/sh");
+            c.args(["-c", "echo bb-diagnostic-line >&2"]);
+            c
+        };
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/C", "echo bb-diagnostic-line 1>&2"]);
+            c
+        };
+
+        let output = spawn_capturing_stderr(&mut cmd)
+            .unwrap()
+            .wait_with_output()
+            .await
+            .unwrap();
+
+        let captured = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            captured.contains("bb-diagnostic-line"),
+            "stderr was not captured — the truncation/containment path is dead again: {captured:?}"
+        );
+        // And the captured text is what the (previously unreachable) control operates on.
+        assert_eq!(truncate_stderr(captured.trim()), "bb-diagnostic-line");
     }
 
     #[test]

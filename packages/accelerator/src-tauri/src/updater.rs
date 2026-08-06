@@ -48,13 +48,29 @@ pub(crate) fn acquire_updater_lock() -> Option<std::fs::File> {
     use fs2::FileExt as _;
     let parent = updater_state_path()?.parent()?.to_path_buf();
     let _ = std::fs::create_dir_all(&parent);
-    let file = std::fs::OpenOptions::new()
+    let lock_path = parent.join("updater.lock");
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(parent.join("updater.lock"))
-        .ok()?;
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            // F-04 variant C: this is NOT "another instance holds it" (that is the try_lock branch
+            // below, which logs). The lock FILE is unopenable — permissions stripped, or replaced by a
+            // directory — which silently disabled installs, floor commits AND the autostart heal with
+            // no signal whatsoever. Say so loudly instead.
+            tracing::error!(
+                error = %e,
+                path = %lock_path.display(),
+                "SECURITY: cannot open the updater lock; auto-update and the autostart self-heal are \
+                 disabled until this file is repaired or removed"
+            );
+            return None;
+        }
+    };
     match file.try_lock_exclusive() {
         Ok(()) => Some(file),
         Err(_) => {
@@ -133,11 +149,20 @@ fn layer_b_gate(candidate: &Version, current: &Version) -> Result<(), String> {
     let Some(path) = updater_state_path() else {
         return Err("cannot resolve the updater-state path".to_string());
     };
-    let state = updater_state::load_state(&path);
+    let state = updater_state::load_state(&path, updater_state::now_unix());
     if updater_state::running_below_floor(current, &state) {
-        return Err(
-            "running build is BELOW the version floor (possible out-of-band rollback); refusing all updates"
-                .to_string(),
+        // F-04: a DIAGNOSTIC, not a veto. Refusing every update here was the permanent, silent
+        // lockout: reachable by a forged floor *or* by a user deliberately downgrading to an older
+        // build, and unrecoverable because nothing in the tree repaired the file. The floor is still
+        // enforced literally by `candidate_allowed` — blocking a candidate below it is the feature —
+        // but `commit_successful_launch` now RESETS it to the running build, so the state repairs
+        // itself within one launch. The candidate must still beat the running build regardless, which
+        // is the anti-rollback rule that does not depend on this file at all.
+        tracing::error!(
+            running = %current,
+            "SECURITY: the persisted version floor is ABOVE the running build (out-of-band downgrade, \
+             user downgrade, or a forged state file); it will be reset to the running version by the \
+             next successful-launch commit rather than disabling updates permanently"
         );
     }
     if !updater_state::candidate_allowed(candidate, current, &state) {

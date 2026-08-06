@@ -95,7 +95,7 @@ const CA_VALIDITY_DAYS: i64 = 3650;
 fn ca_params(now: OffsetDateTime) -> CertificateParams {
     let mut p = CertificateParams::default();
     p.distinguished_name
-        .push(DnType::CommonName, "Aztec Accelerator Local CA");
+        .push(DnType::CommonName, CA_COMMON_NAME);
     p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     p.not_before = now;
@@ -112,6 +112,107 @@ fn ca_params(now: OffsetDateTime) -> CertificateParams {
         excluded_subtrees: vec![],
     });
     p
+}
+
+/// The CN every anchor of ours carries. Also what the trust backends delete by.
+pub const CA_COMMON_NAME: &str = "Aztec Accelerator Local CA";
+
+/// Reject anything that is not the CA profile [`ca_params`] builds, BEFORE it reaches an OS trust
+/// store (F-02, audit 2026-07-31).
+///
+/// `certs_dir()` is an ordinary user-writable directory. The install path read `ca.pem` and handed
+/// the bytes straight to the platform trust store, and the only checks anywhere near it —
+/// `certs_exist()` / `leaf_matches_ca()` — verify the set is SELF-CONSISTENT, which an attacker who
+/// can write the directory trivially satisfies by planting a complete CA + leaf + key of their own.
+/// The app would then install THEIR root: on macOS/Windows behind a trust dialog the user has every
+/// reason to accept (it is the app they just clicked "Enable HTTPS" in), and on Linux silently into
+/// the NSS databases, with no prompt at all.
+///
+/// What makes our anchor harmless is not that it is ours — it is the profile: a keyless CA whose
+/// name constraints limit it to loopback, so it can vouch for nothing on the real internet. This
+/// check is what makes that property load-bearing instead of merely true-by-habit. It cannot stop an
+/// attacker who already runs as the user from installing a root by other means; it stops them from
+/// using OUR consent ceremony to do it, which is the part we control.
+///
+/// Deliberately structural, not an equality check against a pinned blob: rotation generates a fresh
+/// CA every ~2 years, so there is no fixed certificate to compare against.
+pub fn validate_ca_profile(pem_bytes: &[u8]) -> Result<(), String> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(pem_bytes)
+        .map_err(|e| format!("not a readable PEM certificate: {e}"))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
+        .map_err(|e| format!("not a readable X.509 certificate: {e}"))?;
+
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if cn != CA_COMMON_NAME {
+        return Err(format!(
+            "subject CN is {cn:?}, not {CA_COMMON_NAME:?} — refusing to install a foreign CA"
+        ));
+    }
+
+    match cert.basic_constraints() {
+        Ok(Some(bc)) if bc.value.ca => {}
+        _ => return Err("not a CA certificate (basicConstraints CA is not true)".into()),
+    }
+
+    match cert.key_usage() {
+        Ok(Some(ku)) if ku.value.key_cert_sign() => {}
+        _ => return Err("keyUsage does not include keyCertSign".into()),
+    }
+
+    // The load-bearing one. An anchor with NO name constraints — or with a permitted subtree outside
+    // loopback — can vouch for any site on the internet once it is trusted.
+    let nc = match cert.name_constraints() {
+        Ok(Some(nc)) => nc,
+        _ => return Err("no nameConstraints extension — an unconstrained root".into()),
+    };
+    if !nc.critical {
+        return Err("nameConstraints is not marked critical, so a verifier may ignore it".into());
+    }
+    if nc
+        .value
+        .excluded_subtrees
+        .as_ref()
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err("unexpected excludedSubtrees in nameConstraints".into());
+    }
+    let permitted = nc
+        .value
+        .permitted_subtrees
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .ok_or("nameConstraints has no permittedSubtrees, which constrains nothing")?;
+    for subtree in permitted {
+        if !is_loopback_subtree(&subtree.base) {
+            return Err(format!(
+                "nameConstraints permits {:?}, which is outside loopback",
+                subtree.base
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Is one permitted subtree confined to loopback? Mirrors [`ca_params`]'s three entries; the IP forms
+/// are the RFC 5280 address-plus-mask encoding (4+4 bytes for v4, 16+16 for v6).
+fn is_loopback_subtree(base: &x509_parser::extensions::GeneralName<'_>) -> bool {
+    use x509_parser::extensions::GeneralName;
+    const V4: &[u8] = &[127, 0, 0, 1, 255, 255, 255, 255];
+    const V6: &[u8] = &[
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, //
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    ];
+    match base {
+        GeneralName::DNSName(name) => *name == "localhost",
+        GeneralName::IPAddress(bytes) => *bytes == V4 || *bytes == V6,
+        _ => false,
+    }
 }
 
 /// Params for the served leaf cert (the one the HTTPS server presents).
@@ -416,8 +517,19 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     write_new_cert_set(&staged)?;
 
+    // F-02: validate what is actually ON DISK and trust THAT COPY. We generated it a moment ago, but
+    // the staged path is in the same user-writable directory, so this closes the write→trust window.
+    let vetted = match vetted_copy_of(&staged.ca_cert) {
+        Ok(v) => v,
+        Err(why) => {
+            staged.remove();
+            tracing::error!(%why, "SECURITY: staged CA certificate is not ours — rotation aborted");
+            return Err(format!("staged CA certificate failed validation: {why}").into());
+        }
+    };
+
     // Trust + verify the NEW anchor BEFORE swapping. Fail-closed — discard staging, keep live.
-    if let Err(e) = crate::trust::trust_new_anchor(&staged.ca_cert) {
+    if let Err(e) = crate::trust::trust_new_anchor(vetted.path()) {
         staged.remove();
         return Err(
             format!("new CA cert could not be trusted — kept the existing certs: {e}").into(),
@@ -438,7 +550,10 @@ fn rotate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// Install the live CA cert (`ca.pem`) as a trusted root in the platform's browser stores. `Err` iff
 /// no store accepted it (the message carries the first store's failure detail — e.g. certutil missing).
 pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let report = crate::trust::install_ca_trust(&CertPaths::live().ca_cert);
+    // F-02: never hand the OS trust store bytes we have not established are OUR profile. `ca.pem`
+    // lives in a user-writable directory and every other check on it only proves self-consistency.
+    let vetted = vetted_copy_of(&CertPaths::live().ca_cert)?;
+    let report = crate::trust::install_ca_trust(vetted.path());
     if report.any_installed() {
         Ok(())
     } else {
@@ -449,6 +564,56 @@ pub fn install_ca_trust() -> Result<(), Box<dyn std::error::Error + Send + Sync>
             .unwrap_or_else(|| "certificate trust could not be installed".to_string());
         Err(detail.into())
     }
+}
+
+/// Read a CA cert, validate its profile, and return a private temp file holding **exactly the bytes
+/// that were validated**, for handing to the OS trust tools.
+///
+/// The copy is the point (round 2, codex pass over F-02). Validating bytes and then passing the
+/// original PATHNAME to `security` / `certutil` / NSS leaves a swap window: those tools re-open the
+/// file, and the same-user attacker this fix is about — who must already be able to write
+/// `certs_dir()` — can replace it in between. Linux's per-store loop opens it once PER STORE, which
+/// widens the window further. A random, freshly-created name removes the predictable target.
+///
+/// **This is an explicit RISK ACCEPTANCE, not a closure** (codex rounds 2 and 4, both correct). It
+/// does not stop a determined same-UID attacker, and no pathname-based scheme can: `0600` excludes
+/// other users, not another process running as *this* user; holding the descriptor does not freeze
+/// the pathname's contents; and none of the three OS tools accept a file descriptor.
+///
+/// Two things I initially claimed and should not have. The window is NOT "two adjacent syscalls" —
+/// it spans each backend's spawn and every reopen inside it, which on Linux is once per NSS store.
+/// And the trust dialog is NOT a reliable backstop: a substituted certificate can carry the same CN,
+/// so the dialog shows the user what they expect to see.
+///
+/// What the random name does buy is the removal of a fixed, predictable path an attacker can
+/// pre-plant and camp on. What bounds the rest is the alternative available to that attacker
+/// anyway: on Linux there is no dialog and a same-UID process can drive `certutil` against its own
+/// NSS databases without involving this app; on macOS/Windows it must win a live race against a
+/// user-initiated action to gain anything this app's consent ceremony would not otherwise refuse.
+///
+/// The closure, when the threat model demands one, is verifying identity AFTER the install: read
+/// back the anchor the trust store actually ended up with and compare it to the bytes validated
+/// here, removing it on mismatch. That is per-backend work (SHA-1 on macOS, serial on Windows,
+/// nickname on Linux) and is deliberately not in this change.
+///
+/// The temp file lives until the returned guard drops, which must outlive the trust call — hence
+/// returning it rather than a `PathBuf`. `tempfile` creates it `0600` in the system temp dir.
+fn vetted_copy_of(
+    ca_cert: &std::path::Path,
+) -> Result<tempfile::NamedTempFile, Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Write;
+    let pem = std::fs::read(ca_cert)?;
+    if let Err(why) = validate_ca_profile(&pem) {
+        tracing::error!(%why, "SECURITY: refusing to install a CA certificate that is not ours");
+        return Err(format!("refusing to install this CA certificate: {why}").into());
+    }
+    let mut f = tempfile::Builder::new()
+        .prefix("aztec-accelerator-ca-")
+        .suffix(".pem")
+        .tempfile()?;
+    f.write_all(&pem)?;
+    f.flush()?;
+    Ok(f)
 }
 
 /// Whether the live CA cert is trusted in at least one platform store.
@@ -512,6 +677,94 @@ mod tests {
         let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
 
         (ca_cert, ca_key, leaf_cert, leaf_key)
+    }
+
+    // ── F-02 regression (audit 2026-07-31) ────────────────────────────────────────────────────
+    // `certs_dir()` is user-writable and the install path handed `ca.pem` straight to the OS trust
+    // store. `certs_exist()` / `leaf_matches_ca()` only prove the set is SELF-consistent, which an
+    // attacker who can write the directory satisfies by planting a complete CA + leaf + key of their
+    // own — so the app installed THEIR root, silently on Linux. These fail against the pre-fix code,
+    // where no profile check existed at all.
+
+    /// The anchor we actually ship must pass our own gate. This is also what pins the assumptions the
+    /// validator makes about `ca_params` — including that rcgen marks nameConstraints CRITICAL.
+    #[test]
+    fn our_own_generated_ca_passes_validation() {
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let ca = ca_params(OffsetDateTime::now_utc())
+            .self_signed(&key)
+            .unwrap();
+        validate_ca_profile(ca.pem().as_bytes()).expect("the production CA profile must validate");
+    }
+
+    /// Build a CA the way an attacker planting `ca.pem` would, with one knob per rejection reason.
+    fn rogue_ca(tweak: impl FnOnce(&mut CertificateParams)) -> String {
+        let mut p = ca_params(OffsetDateTime::now_utc());
+        tweak(&mut p);
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        p.self_signed(&key).unwrap().pem()
+    }
+
+    /// The headline case: a real, well-formed, self-consistent CA that simply is not ours. Pre-fix it
+    /// would have been installed as a trusted root — with no name constraints, it can vouch for any
+    /// site on the internet.
+    #[test]
+    fn an_unconstrained_foreign_ca_is_refused() {
+        let pem = rogue_ca(|p| {
+            p.distinguished_name = rcgen::DistinguishedName::new();
+            p.distinguished_name
+                .push(DnType::CommonName, "Evil Root CA");
+            p.name_constraints = None;
+        });
+        let why = validate_ca_profile(pem.as_bytes()).unwrap_err();
+        assert!(why.contains("foreign CA"), "unexpected reason: {why}");
+    }
+
+    /// …and it stays refused when the attacker copies our CN to look legitimate. The name constraints
+    /// are the property that actually makes the anchor harmless, so they are checked independently.
+    #[test]
+    fn our_name_on_an_unconstrained_ca_is_still_refused() {
+        let why =
+            validate_ca_profile(rogue_ca(|p| p.name_constraints = None).as_bytes()).unwrap_err();
+        assert!(
+            why.contains("unconstrained root"),
+            "unexpected reason: {why}"
+        );
+    }
+
+    /// Constrained, but to something that is not loopback — the subtle version of the same attack.
+    #[test]
+    fn constraints_that_reach_beyond_loopback_are_refused() {
+        let pem = rogue_ca(|p| {
+            p.name_constraints = Some(NameConstraints {
+                permitted_subtrees: vec![GeneralSubtree::DnsName("example.com".into())],
+                excluded_subtrees: vec![],
+            });
+        });
+        let why = validate_ca_profile(pem.as_bytes()).unwrap_err();
+        assert!(why.contains("outside loopback"), "unexpected reason: {why}");
+    }
+
+    /// An empty permittedSubtrees list constrains nothing, and must not read as "constrained".
+    #[test]
+    fn empty_constraints_are_refused() {
+        let pem = rogue_ca(|p| {
+            p.name_constraints = Some(NameConstraints {
+                permitted_subtrees: vec![],
+                excluded_subtrees: vec![],
+            });
+        });
+        assert!(validate_ca_profile(pem.as_bytes()).is_err());
+    }
+
+    /// Everything that is not a certificate at all.
+    #[test]
+    fn garbage_is_refused() {
+        assert!(validate_ca_profile(b"").is_err());
+        assert!(validate_ca_profile(
+            b"-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----"
+        )
+        .is_err());
     }
 
     #[test]

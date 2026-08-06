@@ -80,9 +80,11 @@ interface AcceleratorProverOptions {
 
 ```typescript
 interface AcceleratorConfig {
-  port?: number;      // HTTP port. Default: 59833
+  port?: number;       // HTTP port. Default: 59833
   httpsPort?: number;  // HTTPS port (Safari). Default: 59834
-  host?: string;       // Host. Default: "127.0.0.1"
+  host?: string;       // Host — must be loopback. Default: "127.0.0.1"
+  httpsOnly?: boolean; // Strict: HTTPS only, never construct an http:// URL. Default: false
+  allowInsecureDowngrade?: boolean; // Allow the plaintext retry after HTTPS worked. Default: false
 }
 ```
 
@@ -182,9 +184,43 @@ check the accelerator itself uses to recognize a sibling instance). Concretely:
   stalled responder can't hang detection.
 - Safari blocks HTTP-from-HTTPS, so HTTPS is the only responder there.
 
+Those bullets describe the probe **before HTTPS has ever answered at this endpoint**. Once it has,
+the preference becomes a commitment: the SDK stops probing the plaintext endpoint at all, so a later
+probe cannot quietly re-pin HTTP if HTTPS goes away and something else takes port 59833. An
+unreachable HTTPS endpoint then reports offline and proving falls back to WASM. Changing the
+configured address resets that — a different endpoint has its own history — but changing only a
+policy flag does not.
+
 The pinned protocol also drives the subsequent `/prove` request. If a pinned-HTTPS `/prove` later
-fails at the network layer (trust removed, listener stopped), the SDK drops the pin and retries once
-over HTTP before falling back to WASM — a broken HTTPS path never fails proving outright.
+fails at the network layer (trust removed, listener stopped), the SDK falls back to WASM rather than
+retrying the same private witness over plaintext HTTP — **once HTTPS has worked at an endpoint, the
+SDK will not downgrade it.** Any local account can bind `127.0.0.1:59833`, and the health-contract
+check is collision resistance rather than authentication, so that plaintext retry was reachable by a
+different user on the same machine. Set `allowInsecureDowngrade` (or
+`AZTEC_ACCELERATOR_ALLOW_INSECURE_DOWNGRADE=1`) if you would rather have the proof.
+
+This does **not** affect an accelerator with HTTPS switched off, or the TLS-free headless server: the
+SDK never saw a healthy HTTPS endpoint there, so there is nothing to downgrade from and HTTP is used
+exactly as before. Encryption is the default wherever it is available; declining it stays the user's
+call.
+
+**Every connection setting is validated at runtime, not just by its type.** TypeScript types are
+erased at runtime, so a value that arrives from JSON, an env var, or plain JavaScript is whatever it
+is — and `/prove` carries the private witness, so a setting that re-points the URL sends it off the
+machine.
+
+- `host` is parsed with `URL` and rejected if it carries a port, path, query, fragment, or
+  credentials, or resolves anywhere but `127.0.0.0/8`, `::1`, or `localhost`. The accelerator's CA is
+  name-constrained to loopback, so a remote host could not present a certificate this SDK's trust
+  model would accept anyway.
+- `port` and `httpsPort` must be integers in 1–65535. A string here is not harmless: `"80@evil.com"`
+  turns `http://127.0.0.1:80@evil.com/prove` into an authority of `evil.com`, with `127.0.0.1`
+  demoted to a username — past the host check entirely.
+- `httpsOnly` and `allowInsecureDowngrade` must be actual booleans. `"false"` is truthy, so coercing
+  it would switch the opt-out **on** via a value that reads as off.
+
+A rejected setting throws and changes nothing at all — the transport is left exactly as it was,
+including its cached status and negotiated protocol.
 
 **Strict mode (`httpsOnly`).** dApps that require an encrypted channel can force it: the SDK then
 probes and POSTs over HTTPS **only**, never constructing an `http://` URL — an unreachable/untrusted
@@ -208,6 +244,7 @@ const prover = new AcceleratorProver({ accelerator: { httpsOnly: true } });
 | `AZTEC_ACCELERATOR_PORT` | `59833` | Override the HTTP port |
 | `AZTEC_ACCELERATOR_HTTPS_PORT` | `59834` | Override the HTTPS port |
 | `AZTEC_ACCELERATOR_HTTPS_ONLY` | `false` | `1`/`true` → strict HTTPS-only transport (no HTTP fallback) |
+| `AZTEC_ACCELERATOR_ALLOW_INSECURE_DOWNGRADE` | `false` | `1`/`true` → after a healthy HTTPS endpoint fails mid-proof, allow the plaintext HTTP retry |
 
 ### Programmatic Configuration
 

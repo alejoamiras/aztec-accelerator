@@ -1,0 +1,730 @@
+<title>Aztec Accelerator — Security Audit, 31 Jul 2026</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --surface:#fff; --fg:#14181f; --muted:#5a6472; --hairline:#dfe3ea;
+    --code:#eef1f6; --link:#0e6f7e; --accent:#0e6f7e;
+    --high:#8f1d1d; --high-bg:#fdeaea; --med:#8a5a00; --med-bg:#fdf3e0;
+    --low:#4a5260; --low-bg:#eef0f4; --green:#1c6b45; --green-bg:#e6f4ec;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0f1216; --surface:#161b22; --fg:#e7ebf0; --muted:#98a2b3; --hairline:#252c36;
+      --code:#1c222b; --link:#5fd3e4; --accent:#5fd3e4;
+      --high:#ff9b9b; --high-bg:#3a1a1a; --med:#ffce7a; --med-bg:#3a2c12;
+      --low:#aab3c0; --low-bg:#232932; --green:#8fe0b4; --green-bg:#14301f;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1216; --surface:#161b22; --fg:#e7ebf0; --muted:#98a2b3; --hairline:#252c36;
+    --code:#1c222b; --link:#5fd3e4; --accent:#5fd3e4;
+    --high:#ff9b9b; --high-bg:#3a1a1a; --med:#ffce7a; --med-bg:#3a2c12;
+    --low:#aab3c0; --low-bg:#232932; --green:#8fe0b4; --green-bg:#14301f;
+  }
+  :root[data-theme="light"]{
+    --bg:#f7f8fa; --surface:#fff; --fg:#14181f; --muted:#5a6472; --hairline:#dfe3ea;
+    --code:#eef1f6; --link:#0e6f7e; --accent:#0e6f7e;
+    --high:#8f1d1d; --high-bg:#fdeaea; --med:#8a5a00; --med-bg:#fdf3e0;
+    --low:#4a5260; --low-bg:#eef0f4; --green:#1c6b45; --green-bg:#e6f4ec;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.62 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:840px; margin:0 auto; padding:3rem 1.25rem 5rem}
+  header{border-bottom:1px solid var(--hairline); padding-bottom:1.5rem; margin-bottom:2rem}
+  .eyebrow{
+    font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin:0 0 .75rem
+  }
+  h1{font-size:1.85rem; line-height:1.2; letter-spacing:-.02em; margin:0 0 .6rem; text-wrap:balance}
+  .sub{color:var(--muted); margin:0; font-size:.95rem}
+  .stats{display:flex; flex-wrap:wrap; gap:.5rem; margin:1.6rem 0 0}
+  .stat{
+    background:var(--surface); border:1px solid var(--hairline); border-radius:7px;
+    padding:.5rem .8rem; font-size:.85rem; display:flex; gap:.45rem; align-items:baseline
+  }
+  .stat b{font-size:1.15rem; font-variant-numeric:tabular-nums; letter-spacing:-.01em}
+  h2{
+    font-size:1.15rem; letter-spacing:-.01em; margin:2.75rem 0 1rem;
+    padding-bottom:.4rem; border-bottom:1px solid var(--hairline)
+  }
+  h3{font-size:1rem; margin:1.75rem 0 .5rem}
+  p{margin:0 0 .85rem}
+  a{color:var(--link)}
+  code{
+    font:0.86em/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    background:var(--code); padding:.12em .38em; border-radius:4px; overflow-wrap:anywhere
+  }
+  .callout{border-left:3px solid var(--green); background:var(--green-bg); border-radius:0 8px 8px 0;
+    padding:1rem 1.15rem; margin:1.25rem 0}
+  .callout.warn{border-left-color:var(--med); background:var(--med-bg)}
+  .callout h3{margin:0 0 .5rem; font-size:.95rem}
+  .callout p:last-child, .callout ol:last-child, .callout ul:last-child{margin-bottom:0}
+  .finding{
+    background:var(--surface); border:1px solid var(--hairline); border-radius:9px;
+    padding:1.2rem 1.3rem; margin:1rem 0
+  }
+  .fh{display:flex; flex-wrap:wrap; gap:.55rem; align-items:baseline; margin-bottom:.5rem}
+  .fid{font:600 .78rem/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted)}
+  .ftitle{font-weight:650; letter-spacing:-.01em; flex:1 1 100%; margin-top:.15rem}
+  .chip{
+    display:inline-block; font:600 .7rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    padding:.12rem .5rem; border-radius:100px; letter-spacing:.02em; white-space:nowrap
+  }
+  .c-high{background:var(--high-bg); color:var(--high)}
+  .c-med{background:var(--med-bg); color:var(--med)}
+  .c-low{background:var(--low-bg); color:var(--low)}
+  .c-info{background:var(--low-bg); color:var(--muted)}
+  .meta{margin:.1rem 0 .8rem; display:flex; flex-wrap:wrap; gap:.35rem}
+  .nut{
+    margin:.2rem 0 .9rem; font-size:1.02rem; line-height:1.5; font-weight:520;
+    color:var(--fg); border-left:2px solid var(--accent); padding-left:.75rem
+  }
+  .eli5 p{margin:0 0 .6rem}
+  .eli5 p:last-child{margin-bottom:0}
+  .eli5 strong{color:var(--fg)}
+  details{margin-top:.9rem; border-top:1px solid var(--hairline); padding-top:.7rem}
+  summary{
+    cursor:pointer; font:600 .82rem/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--muted)
+  }
+  summary:hover{color:var(--accent)}
+  details[open] summary{margin-bottom:.7rem}
+  details p{font-size:.9rem}
+  ul,ol{margin:0 0 .85rem; padding-left:1.3rem}
+  li{margin-bottom:.3rem}
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse; width:100%; font-size:.88rem; margin-bottom:.85rem}
+  th,td{text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--hairline); vertical-align:top}
+  th{font-weight:650; color:var(--muted); font-size:.8rem; letter-spacing:.02em}
+  footer{margin-top:3.5rem; padding-top:1.25rem; border-top:1px solid var(--hairline);
+    color:var(--muted); font-size:.85rem}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Whole-codebase audit · run 9c4cb0c</p>
+  <h1>Aztec Accelerator — security findings</h1>
+  <p class="sub">
+    31 July 2026 · scope: desktop app (<code>src-tauri</code> + in-app <code>core</code>) and the
+    published SDK · 8 clusters, each audited independently by two different model families
+    (Claude Opus + Codex xhigh) and then reduced by a coordinator.
+  </p>
+  <div class="stats">
+    <span class="stat"><b>13</b> findings</span>
+    <span class="stat"><b>0</b> critical</span>
+    <span class="stat"><b>2</b> high</span>
+    <span class="stat"><b>10</b> medium</span>
+    <span class="stat"><b>1</b> low</span>
+  </div>
+</header>
+
+<div class="callout">
+  <h3>Status update — 6 August 2026: six of these are fixed</h3>
+  <p>
+    Everything below describes the codebase <strong>as the audit found it on 31 July</strong>. Six
+    findings have since been fixed on branch <code>worktree-harden-security-bugs</code>:
+    <strong>F-01</strong> (witness sent to an unauthenticated endpoint), <strong>F-02</strong>
+    (unvalidated CA installed into OS root stores), <strong>F-04</strong> (one local write
+    permanently disables updates), <strong>F-05</strong> (trust removal reports failure as success),
+    <strong>F-06</strong> (unbounded cache growth), and the stderr half of <strong>F-08</strong>.
+    Seven remain open: F-03, F-07, F-09, F-10, F-11, F-12, F-13.
+  </p>
+  <p>
+    Each fix carries regression tests that were <em>mutation-proved</em> — the fix was reverted and
+    the test confirmed to fail — so the tests pin the defect rather than the current behaviour. The
+    fixes then went through five rounds of independent adversarial review, which found thirteen
+    further bugs, nine of them in the fixes themselves. Two findings keep a documented residual that
+    is <strong>not</strong> claimed closed: F-02's same-user file-replacement window, and F-06's
+    eviction race, which is narrowed rather than eliminated.
+  </p>
+  <p>
+    Full detail, including three places the fixes deliberately diverged from this report's own
+    recommendations and why: <code>report.md</code> → “Remediation status (2026-08-06)”.
+  </p>
+</div>
+
+<div class="callout warn">
+  <h3>Verification changed some of this — read this first</h3>
+  <p>
+    Five findings were independently re-read from source <em>before</em> the verifier saw the claims.
+    Nothing was refuted outright, but three were trimmed and two rationales were wrong:
+  </p>
+  <ul>
+    <li><strong>F-03's version-floor claim is refuted.</strong> The launch floor commits the binary's own
+      compiled-in version, not the value a spoofed responder reports, so a forged probe is a no-op there.
+      The self-eviction half stands. Band drops 6.8 → ~5.0.</li>
+    <li><strong>F-01's "not covered by any accepted residual" was wrong.</strong> The plaintext-by-default
+      posture <em>is</em> a documented accepted decision. The finding still holds as High, but on the
+      narrower ground that the authentication half of prior F-001's fix never shipped. Its
+      <code>host</code> facet drops to Low — there is no environment-variable path to set it.</li>
+    <li><strong>F-08's disclosure is asserted, not demonstrated.</strong> The certain harm is that the
+      prover's diagnostics are lost entirely; the leak magnitude is unproven, and "accumulates over
+      months" is unsupported.</li>
+    <li><strong>F-02 and F-04 confirmed as written</strong>, including the claim the verifier tried
+      hardest to break.</li>
+  </ul>
+  <p>Nothing here has been fixed — no code changes have been made from this audit.</p>
+</div>
+
+<div class="callout">
+  <h3>Cheapest fixes first</h3>
+  <p>Three of these are hours of work and each removes a whole class of problem:</p>
+  <ol>
+    <li><strong>F-05 — trust removal fails open.</strong> The correct tri-state already exists in
+      <code>trust/linux.rs:328-350</code>; port it to macOS and Windows. Also bounds F-02's damage.</li>
+    <li><strong>F-04 (items 1–2) — permanent update lockout. Do this one first.</strong> Verification
+      established this is not primarily an attack: <em>a user who downgrades to an older build — the
+      normal response to a bad release — is permanently and silently cut off from every future update,
+      including the fix.</em> Fall back to <code>floor = current_running_version</code> on corrupt or
+      impossible state, and surface it in Settings. Costs nothing:
+      <code>candidate_allowed</code> already enforces <code>candidate &gt; current</code> before it
+      ever consults the file (verified).</li>
+    <li><strong>F-08 (facet B) — dead stderr containment.</strong> One line restores a control that
+      was written, tested, and has never actually run.</li>
+  </ol>
+</div>
+
+<p style="color:var(--muted);font-size:.9rem;margin:2.5rem 0 -.5rem">Each finding opens with a one-sentence summary, then a short plain-language explanation, with the file-and-line detail collapsed underneath.</p>
+<h2>The two High findings</h2>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-high">High 8.1</span><span class="fid">F-01</span>
+    <span class="chip c-info">verified: partial</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">confidence: high</span>
+    <span class="chip c-info">escalation of prior F-001</span>
+    <span class="ftitle">The SDK hands the private witness to an endpoint it never authenticates, in cleartext, by default</span>
+  </div>
+  <p class="nut">Your private transaction data is handed to whatever program answers a local port — in plaintext — because the app only asks it a question any program can answer correctly.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The SDK decides where to send your complete private transaction
+    data by asking whatever program answers on a local port one question: “are you the accelerator?”
+    It accepts a 31-byte JSON answer as proof. Any program on the machine can give that answer. The
+    encrypted mode that would actually prove identity is <em>off by default</em>.</p>
+    <p><strong>What an attacker would do.</strong> Run any unprivileged program that grabs port 59833
+    before the real app does, answer the one question correctly, and receive every private witness the
+    user's dApps generate — then quietly forward each one to the real accelerator so proofs still
+    succeed and nothing looks wrong. On a privacy chain, the witness is the plaintext of everything
+    the chain exists to hide.</p>
+    <p><strong>The fix.</strong> Default to the authenticated mode when it is available, and require an
+    explicit opt-in for plaintext. Separately, build URLs with a real URL parser instead of string
+    concatenation — today <code>host: "127.0.0.1@attacker.tld"</code> sends data to
+    <code>attacker.tld</code> while the log still reads <code>127.0.0.1</code>.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p><strong>Trace.</strong> <code>accelerator-prover.ts:126</code> (<code>httpsOnly</code> false) →
+    <code>accelerator-transport.ts:317-319</code> plaintext probe fired →
+    <code>:333-335</code> <code>#isHealthy = response.ok &amp;&amp; isRecognizedHealthBody(body)</code>
+    → <code>:383-392</code> healthy HTTP wins when nothing is bound on <code>:59834</code> →
+    <code>accelerator-prover.ts:222-226</code> protocol pinned <code>http</code> → <code>:362</code>
+    <code>serializePrivateExecutionSteps</code> → sink <code>accelerator-transport.ts:455</code>.</p>
+    <p><strong>Why mitigations fail.</strong> The SDK's own comment concedes the identity check is
+    “collision resistance, not authentication” (<code>accelerator-transport.ts:44-50</code>).
+    <code>redirect:"error"</code> stops steering the witness after the endpoint is chosen, not choosing
+    the wrong one. The generation guard is sound but prevents an <em>unprobed</em> endpoint, not a
+    <em>probed-but-unauthenticated</em> one. The disclosed residual in the README describes the
+    <code>httpsOnly</code> case, where the bar is forging browser trust; in the default mode the bar is
+    binding a port. <strong>Corrected by verification:</strong> the plaintext-by-default posture IS a
+    documented accepted decision (<code>https-by-default-onboarding-2026-07-09/plan.md:18,131</code>) —
+    the earlier claim that it was covered by no residual was wrong. The finding stands on the narrower
+    ground that prior F-001 asked for endpoint authentication and only the body-shape half shipped. The
+    <code>host</code> facet drops to Low: there is no environment-variable ingress for it.</p>
+    <p><strong>Prior audit.</strong> F-001's fix had two halves — authenticate the server, and stop
+    trusting unrecognized bodies. Only the second shipped. This adds two sinks F-001 did not cover: the
+    HTTPS→HTTP demotion re-probe, and the unvalidated <code>host</code> option.</p>
+    <p><strong>Effort.</strong> Hours to a day for both steps; a per-install shared secret (the fix
+    F-001 actually asked for) is days.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-high">High 7.8</span><span class="fid">F-02</span>
+    <span class="chip c-info">verified: confirmed</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">confidence: high</span>
+    <span class="chip c-info">new</span>
+    <span class="ftitle">The app installs whatever certificate is on disk into the OS root store, unvalidated and unscoped</span>
+  </div>
+  <p class="nut">The app installs whatever certificate is sitting in its folder into your operating system's trusted list: it checks the files match each other, not that they are its own.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Before installing its own certificate authority into your operating
+    system's trust store, the app checks that the three certificate files on disk are
+    <em>consistent with each other</em> — not that they are the ones it created. A check written to
+    detect a half-finished file swap silently became the only thing standing between “our certificate”
+    and “someone else's.”</p>
+    <p><strong>What an attacker would do.</strong> Drop three files into
+    <code>~/.aztec-accelerator/certs/</code> — a certificate authority they hold the private key for,
+    plus a matching localhost certificate. When the user next runs first-time setup (the HTTPS toggle
+    is pre-checked), the app installs the attacker's authority as a trusted root, and the operating
+    system's approval prompt names <em>Aztec Accelerator</em> as the requester. The attacker can then
+    impersonate any website to that user's browsers — and on macOS and Windows the trust is not
+    limited to websites, so it also covers signed software.</p>
+    <p><strong>The fix.</strong> Re-parse the certificate immediately before every trust-store write and
+    require it to match the app's own profile: correct subject, CA flag, key usage, and the critical
+    loopback name-constraint. Then scope the grant — <code>-p ssl</code> on macOS, an EKU restriction on
+    Windows. Linux already scopes it correctly, which shows the narrower grant is achievable.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p><strong>Trace.</strong> Attacker writes <code>ca.pem</code>, <code>localhost.pem</code>,
+    <code>localhost.key</code> → <code>commands.rs:566-577</code> <code>complete_onboarding</code> →
+    <code>:392</code> <code>certs_exist() &amp;&amp; is_ca_trusted()</code> →
+    <code>certs.rs:145-152</code> <code>certs_exist()</code> returns true (files exist, leaf not expired,
+    leaf matches key, <code>leaf_matches_ca()</code> passes) — <em>it never inspects the CA's own
+    basicConstraints, keyUsage, subject, or nameConstraints</em> → <code>certs.rs:228-234</code>
+    <code>generate_and_save()</code> no-ops because the set already “exists” → <code>:440-452</code>
+    <code>install_ca_trust()</code> → <code>trust/macos.rs:24-39</code> (<code>add-trusted-cert</code>,
+    <strong>no <code>-p</code> policy</strong>) / <code>trust/windows.rs:59-66</code>
+    (<code>-addstore Root</code>, no EKU) / <code>trust/linux.rs:283-300</code>
+    (<code>-t "C,,"</code>, correctly scoped).</p>
+    <p><strong>Why mitigations fail.</strong> The keyless-CA design protects the anchor the app
+    <em>mints</em> — a planted CA simply has a key. Name constraints exist only because
+    <code>ca_params()</code> puts them there; a planted CA omits them and nothing checks. File
+    permissions bound other users, not the same user — who this codebase already treats as in-scope.
+    The OS consent dialog names the application, not the certificate's constraints.</p>
+    <p><strong>Also affected.</strong> <code>rotate()</code> → <code>trust_new_anchor()</code>
+    (<code>certs.rs:412-434</code>) has the same gap on staged files.</p>
+    <p><strong>Effort.</strong> About a day — one validation function plus the two platform flags.</p>
+  </details>
+</div>
+
+<h2>Medium findings</h2>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med ~5.0</span><span class="fid">F-03</span>
+    <span class="chip c-info">verified: partial — band ↓</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">escalation of prior F-002</span>
+    <span class="ftitle">A forgeable <code>/health</code> shape is treated as proof of process identity</span>
+  </div>
+  <p class="nut">The app asks itself that same weak question, so an impostor holding the port can make the real app quietly shut down and can poison its rollback protection.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The same weak “are you the accelerator?” check from F-01 is used by
+    the app on itself. If another program is already on the port, the real app assumes that program
+    <em>is</em> a legitimate copy of itself.</p>
+    <p><strong>What an attacker would do.</strong> Squat the port; on Windows the genuine app then exits
+    with a success code deliberately chosen so its supervisor will not restart it — no tray icon, no
+    error. The impostor keeps the port and keeps receiving witnesses.
+    <em>Correction from verification:</em> an earlier draft of this finding also claimed the impostor
+    could poison the anti-rollback version floor. That is wrong — the floor commits the running
+    binary's own compiled-in version, not the probed value, so a forged probe is a no-op there.</p>
+    <p><strong>The fix.</strong> Use an OS single-instance primitive (named mutex, abstract socket, lock
+    file) for the “am I redundant?” decision instead of an HTTP probe, and never advance the version
+    floor from a self-declared value.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p><code>probe.rs:14-17</code> is the entire identity test (two constant fields, both part of the
+    public contract). Sink A: <code>probe.rs:24-45</code> → <code>main.rs:294-303</code>
+    <code>app_handle.exit(0)</code> — the comment at <code>:290-292</code> confirms the exit code is
+    chosen so restart-on-failure will not retry. Sink B: <code>probe.rs:54-71</code> →
+    <code>main.rs:347-355</code> <code>commit_launch_floor()</code>. Sink C: <code>probe.rs:41,64</code>
+    parse the response with no size cap. Bind side: <code>bind.rs:30</code> sets no
+    <code>SO_EXCLUSIVEADDRUSE</code> on Windows.</p>
+    <p><strong>Prior audit.</strong> Escalation of F-002 (Medium). The prior fix was never applied, and
+    F-004's own remediation (<code>commit_launch_floor</code>) was then built on top of the unfixed
+    probe.</p>
+    <p><strong>Effort.</strong> Sinks B and C are hours; sink A is 1–2 days (platform-specific).</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 6.5</span><span class="fid">F-04</span>
+    <span class="chip c-info">verified: confirmed</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">new</span>
+    <span class="ftitle">A one-shot local write permanently disables the update channel — and survives reinstall</span>
+  </div>
+  <p class="nut">Writing about 40 bytes into a file in your home folder switches off every future security update, permanently — and reinstalling does not clear it.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Two files in the user's home directory — the updater's version floor
+    and the Windows update marker — are trusted without any authenticity check. Anything running as the
+    user can write them once and permanently switch off updates, crash recovery, and the autostart
+    self-repair.</p>
+    <p><strong>What an attacker would do.</strong> Write about 40 bytes:
+    <code>{"schema":1,"floor":"999.0.0"}</code>. That is a perfectly valid file, so nothing rejects it,
+    and the value only ever moves upward, so nothing undoes it. Every future security fix is refused,
+    silently. Uninstalling and reinstalling does not help — the uninstaller only removes the
+    certificate folder. A user who simply downgrades to an older build trips the same trap by accident.</p>
+    <p><strong>The fix.</strong> On corrupt or impossible state, fall back to
+    <code>floor = current_running_version</code> rather than refusing forever. The anti-rollback
+    property is preserved regardless, because the candidate-must-exceed-current check does not depend
+    on the file at all.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>Variant A (valid poison): <code>updater_state.rs:75-99</code> parses cleanly →
+    <code>updater.rs:136-142</code> <code>layer_b_gate</code> → <code>updater_state.rs:140-142</code>
+    <code>running_below_floor</code> → refuse. Irreversible because <code>:162-173</code> and
+    <code>:189-198</code> are monotonic-max. Variant B (corrupt): every mint at
+    <code>:76-98</code> → <code>:122-123</code> rejects all candidates; both mutators
+    (<code>:154-159</code>, <code>:183-187</code>) refuse to repair. Variant C (lock denial):
+    <code>updater.rs:51-57</code> <code>.ok()?</code> silently conflates “another instance holds it”
+    with “unopenable”, disabling installs, floor commits, and — as collateral — the autostart heal
+    (<code>autostart.rs:1365-1367</code>). Windows marker equivalent:
+    <code>update_marker.rs:141-168</code> validates shape only; a forged 24-hour deadline suppresses
+    heal, rearm and updates, and the disarm at <code>updater.rs:443</code> is not rolled back.</p>
+    <p><strong>Persistence.</strong> <code>nsis/hooks.nsi:88-113</code> removes only <code>certs/</code>;
+    macOS and Linux have no uninstall hook at all.</p>
+    <p><strong>Effort.</strong> Items 1–2 are hours and remove the permanent lockout; authenticating the
+    marker is 1–2 days.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 6.1</span><span class="fid">F-05</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">fix: hours · CHEAPEST</span>
+    <span class="ftitle">Trust removal fails open on macOS and Windows — failure is reported as success</span>
+  </div>
+  <p class="nut">When you revoke the app's certificate authority, “we could not check” is reported back to you as “removed”, so it can stay trusted forever.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> When the user revokes the app's certificate authority, the code
+    treats “I could not ask the operating system” as “it is gone.” Settings says removed; the uninstall
+    command exits successfully; the trusted root is still installed.</p>
+    <p><strong>What an attacker would do.</strong> Mostly nothing — this fires on its own. A blocked
+    <code>certutil.exe</code> (commonly restricted by endpoint security), a locked macOS keychain, or
+    running the uninstall under a different <code>HOME</code> all produce a false success. An attacker
+    who planted a certificate under F-02 only needs to make the removal fail to keep it trusted forever.</p>
+    <p><strong>The fix.</strong> Linux already solved this with a three-state result —
+    <em>present / absent / could not determine</em> — where “could not determine” counts as still
+    trusted and fails loudly. Port those ~20 lines to the other two platforms, and make the Windows
+    uninstaller call the verified command instead of a bare unchecked one.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>macOS: <code>trust/macos.rs:61-71</code> <code>keychain_sha1()</code> swallows spawn failure into
+    <code>None</code> and never inspects <code>output.status</code> → the delete loop breaks before
+    attempting any deletion (<code>:126-136</code>) → <code>:140</code> reports not-present →
+    <code>StoreStatus{installed:false}</code>. Windows: <code>trust/windows.rs:125-130</code> discards
+    the delete result entirely; <code>:70-76</code> <code>unwrap_or(false)</code> makes a spawn failure
+    read as “absent”. Sinks: <code>trust/mod.rs:88-100</code> <code>removal_incomplete()</code> false →
+    Settings success and <code>main.rs:486-507</code> exit code 0. Reference implementation:
+    <code>trust/linux.rs:328-350</code> (<code>Present::{Yes,No,Unknown}</code>) and <code>:497</code>.
+    Amplifier: <code>nsis/hooks.nsi:109</code> runs a bare <code>certutil -delstore</code> with no
+    exit-code check on the one path where removal matters most.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 6.3</span><span class="fid">F-06</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">new</span>
+    <span class="ftitle">An HTTP header chooses which native binary gets downloaded and executed, and how much disk is consumed</span>
+  </div>
+  <p class="nut">A website can name any old version of the prover in a request header, and the app will download it, install it, and run it on your private data.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Any approved website can name a version in a request header, and the
+    app will fetch that version of the prover binary from GitHub, install it, and run it against the
+    private witness. There is no floor, no allowlist of tested versions, and the revocation list is an
+    empty compile-time constant — so revoking a bad version requires shipping a whole new app release.</p>
+    <p><strong>What an attacker would do.</strong> Two things. Pick an old release with a memory-safety
+    bug and feed it crafted input, since the same origin controls both the binary choice and the bytes
+    it processes. Or simply enumerate hundreds of historical releases with a 2-byte request body each —
+    the download completes before the body is ever examined — filling the disk with tens of gigabytes
+    that are never evicted, because unrecognized prerelease labels fall into a keep-forever tier.</p>
+    <p><strong>The fix.</strong> Bound the accepted range to versions this build was tested against, cap
+    the cache by total size, and make the retention policy fail <em>closed</em> for unknown tiers rather
+    than keeping forever.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>Selection: <code>prove.rs:249-253</code> header → <code>version_policy.rs:240-260</code>, whose
+    only semantic gate is an empty <code>KNOWN_VULNERABLE_VERSIONS</code> (<code>:194</code>) →
+    <code>release_metadata.rs:54-60</code> builds the URL from the attacker's string →
+    <code>downloader.rs:55</code> installs (on macOS the app <em>re-signs</em> it,
+    <code>:83-86</code>) → <code>bb.rs:206,229</code> executes. Retention:
+    <code>version_policy.rs:52</code> Mainnet limit is <code>None</code>; <code>:30-44</code> routes any
+    unrecognized prerelease into Mainnet; <code>:299</code> exempts anything under 5 minutes old; and
+    the only eviction call site is the post-download <code>tokio::spawn</code> at
+    <code>prove.rs:287-299</code>. A third facet: each version-bearing request hashes the whole 37 MB
+    binary <em>twice</em> synchronously on the async runtime (<code>prove.rs:108</code>,
+    <code>bb.rs:38</code>).</p>
+    <p><strong>Not the same as SEC-02</strong> (the accepted “digest comes from the same control plane”
+    gap) — this holds even with a perfect digest chain, because the attacker selects an authentic binary.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 6.0</span><span class="fid">F-08</span>
+    <span class="chip c-info">verified: partial</span>
+    <span class="chip c-info">claude</span><span class="chip c-info">fix: hours · CHEAPEST</span>
+    <span class="ftitle">Witness data escapes the controls designed to contain it</span>
+  </div>
+  <p class="nut">Private witness files are deleted only by a cleanup step the app's own Quit button skips, and the redaction code for the prover's error output has never once run.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Two containment controls do not do what they appear to. The private
+    witness file is deleted only by a destructor that the app's own Quit and auto-update restart paths
+    skip — so quitting mid-proof leaves the plaintext on disk permanently, with nothing to clean it up
+    later. And the prover's error output was supposed to be truncated and kept server-side, but the
+    child process inherits the app's output streams, so the captured buffer is always empty and that
+    code has never executed.</p>
+    <p><strong>What an attacker would do.</strong> Nothing active — residue accumulates on its own, and
+    whoever later gets same-user access, the laptop, or the backup can read it. <em>Verification note:</em>
+    the volume ("months of witnesses") is unsupported, and for the stderr half the demonstrated harm is
+    that the prover's diagnostics are lost entirely rather than a proven leak.</p>
+    <p><strong>The fix.</strong> Sweep the workspace directory at startup (the version cache already has
+    exactly this), and either pipe the child's stderr so the existing truncation runs, or discard it
+    explicitly.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>Facet A: <code>bb.rs:194-198</code> writes the witness into a <code>TempDir</code> whose
+    <code>Drop</code> is the only deletion; skipped by <code>main.rs:301,396</code>,
+    <code>updater.rs:542</code>, <code>commands.rs:666</code>, and the Windows NSIS handoff. No startup
+    reaper exists anywhere (repo-wide grep). Facet B: <code>bb.rs:206-229</code> configures no stdio, so
+    <code>std::process::Command</code> defaults to inherit; <code>wait_with_output()</code> therefore
+    returns an empty stderr and the guard at <code>:238-241</code> is unreachable, leaving
+    <code>truncate_stderr</code> (<code>:272-280</code>) dead. The 0700 log dir and its rotation never
+    see the data. Verified against tokio's shipped source.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 5.9</span><span class="fid">F-09</span>
+    <span class="chip c-info">codex only</span><span class="chip c-info">cross-model disagreement</span>
+    <span class="ftitle">The updater accepts a byte-for-byte replay of a withdrawn but validly signed release</span>
+  </div>
+  <p class="nut">A withdrawn-but-still-signed release can be replayed at users, because a signature proves a release is genuine, not that it is current.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> If a release is published and then withdrawn — because it was broken
+    or malicious — anyone who can serve the update feed can replay that exact signed manifest, and it
+    still verifies. Signatures prove authenticity, not currency.</p>
+    <p><strong>What an attacker would do.</strong> Requires control of the update feed, so this is
+    gated behind a separate compromise. Given that, they can pin every user to a specific withdrawn
+    version rather than the current one.</p>
+    <p><strong>The fix.</strong> Persist the highest version and newest publication date ever seen, and
+    refuse anything at or below both. Note this was found by only one of the two model families — the
+    Claude leg explicitly verified the envelope binding as complete and did not flag replay, which is
+    exactly the kind of divergence worth recording.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>Layer A binds every consumed field to the signature, and the plugin plus
+    <code>candidate_allowed</code> both enforce <code>candidate &gt; current</code> — so a
+    <em>downgrade</em> is blocked. What is not blocked is a <em>lateral</em> replay of a higher,
+    withdrawn, validly signed release. Escalation of prior F-004's residual. Real-world severity is
+    gated on prior F-005 (deploy trust reaching the update feed), which lives in the out-of-scope
+    infrastructure and was not re-verified here.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 5.6</span><span class="fid">F-10</span>
+    <span class="chip c-info">both models</span><span class="chip c-info">confidence: moderate</span>
+    <span class="ftitle">Consent windows accept clicks before the anti-click-steal guard applies</span>
+  </div>
+  <p class="nut">A second approval popup can appear under your cursor in the same spot and accept the reflexive re-click — permanently approving a site you never saw.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The approval popup ignores clicks for 700 ms after it gains focus, so
+    a window appearing under the user's cursor cannot capture a click. But when a <em>queued</em> popup
+    is promoted, the buttons are enabled by a once-per-second poll — so the guard can be fully expired
+    at the moment the buttons become clickable. Separately, three other windows that appear unprompted
+    and take focus (onboarding, certificate renewal, update prompt) do not use the guard at all.</p>
+    <p><strong>What an attacker would do.</strong> Open two approval prompts from two origins at once.
+    The second sits invisibly beneath the first at identical coordinates. The user clicks Allow on the
+    one they expected; it closes; the second appears in the same pixels. The reflexive “it didn't
+    register” re-click can land on an origin the user never saw — and approval here is permanent.</p>
+    <p><strong>The fix.</strong> Re-arm the guard on the moment buttons become enabled, not on focus.
+    Apply the guard to the other three consent windows — on Linux the onboarding “Start” click installs
+    a browser-trusted CA with no OS prompt at all.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>Guard armed on focus (<code>bridge.js:30,34-37,40-42</code>); buttons enabled by a 1000 ms poll
+    (<code>authorize.js:81-87</code>, <code>:68</code>); promotion at
+    <code>commands.rs:226-233</code>. Worst case is deterministic rather than racy: if the user had
+    already clicked the queued window, it already holds focus, so <code>set_focus()</code> fires no
+    focus event and the promoted popup goes live with no guard at all. No test covers this — the
+    Playwright mock sets the guard to 0 ms (<code>e2e/tauri-mock.js:14</code>) and the WebDriver spec
+    sleeps past it. Unguarded consent controls: <code>onboarding.js:86</code>,
+    <code>renewal.js:5-11</code>, <code>update-prompt.js:8-15</code>, against the invariant asserted at
+    <code>bridge.js:38-39</code>.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 5.9</span><span class="fid">F-07</span>
+    <span class="chip c-info">both models</span>
+    <span class="ftitle">Authorization-prompt flooding starves every legitimate site of the consent path</span>
+  </div>
+  <p class="nut">Ten iframes from one attacker page fill every approval slot, so your real dApp is refused outright and never even shows you a prompt.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> Ten pending approval slots, shared globally, first-come-first-served,
+    with no grouping by site and no memory of denials.</p>
+    <p><strong>What an attacker would do.</strong> One page with ten sub-domain iframes fills all ten
+    slots. The user's real dApp is refused outright and appears broken, with no prompt ever shown. Each
+    attacker popup auto-denies after 60 seconds and is immediately re-requested — nothing remembers the
+    denial — so the queue never drains and the user faces an endless stream of near-identical dialogs.</p>
+    <p><strong>The fix.</strong> Group the cap by registrable domain, remember denials with a backoff,
+    and reserve at least one slot for an origin not seen before.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p><code>authorization.rs:344-346</code> is the only global limiter (10 slots, un-grouped);
+    <code>auth.rs:118-121</code> returns <code>OriginDenied</code> and records nothing.
+    <code>MAX_PIGGYBACK_SENDERS</code> bounds fan-out within one origin only. The single-active-popup
+    arbiter reduces click-hijacking but lengthens the drain to ~60 s per queued origin, strengthening
+    the availability impact. <code>MAX_INFLIGHT_PROVE</code> does not apply — authorization runs before
+    it.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 5.4</span><span class="fid">F-12</span>
+    <span class="chip c-info">claude</span><span class="chip c-info">documented risk decision</span>
+    <span class="ftitle">AppImage provenance uses a containment test, so any ancestor passes as <code>$APPDIR</code></span>
+  </div>
+  <p class="nut">The check for “is this really my AppImage?” accepts any parent folder, so two environment variables let an attacker choose what the app pins as startup persistence.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> On Linux the app trusts two environment variables to learn where its
+    own AppImage lives, guarding against inherited values by checking that its executable sits
+    <em>somewhere under</em> the claimed directory. Setting that directory to <code>/</code> satisfies
+    the check for any absolute path.</p>
+    <p><strong>What an attacker would do.</strong> Set two environment variables in the user's session
+    and drop a payload. The app then writes that payload's path into the autostart entry and the
+    systemd recovery unit — persistence that rewrites itself on every launch and is attributed to a
+    legitimately signed application.</p>
+    <p><strong>Important context.</strong> This is <em>not</em> an unnoticed bug. When the containment
+    check was added earlier the same day, <code>APPDIR=/</code> was explicitly considered and the risk
+    accepted on the grounds that spoofing it already implies control of the app's launch environment.
+    That was a reasonable call under a correctness lens; it is worth re-taking under a security lens,
+    because the payoff here is durable persistence rather than a one-time action.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p><code>autostart.rs:1197</code> <code>exe_c.starts_with(&amp;dir_c)</code> is the whole provenance
+    test. Consumers: <code>:1227-1229</code> (<code>.desktop</code> <code>Exec=</code>),
+    <code>crash_recovery.rs:264</code> (systemd <code>ExecStart=</code>, reads the env independently),
+    and <code>autostart.rs:1627-1632</code>, where the poisoned path is passed as the ownership
+    reference — inverting the very anti-theft gate added alongside it. Suggested fix: compare the device
+    ID of <code>current_exe()</code> against <code>/</code>, or require <code>$APPDIR</code> to be a real
+    mountpoint per <code>/proc/self/mountinfo</code>. Effort: hours including the test.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-med">Med 5.3</span><span class="fid">F-11</span>
+    <span class="chip c-info">both models</span>
+    <span class="ftitle">The SDK reads the prove response with no size cap, deadline, or abort path</span>
+  </div>
+  <p class="nut">The app carefully bounds the small health response but not the large proof response, so a hostile responder can hang or crash the browser tab.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The health check in the same file is carefully bounded — 64 KB cap,
+    2-second deadline, stall detection. The much larger prove response, from the same untrusted
+    responder, has none of that. The HTTP client's timeout stops counting once headers arrive.</p>
+    <p><strong>What an attacker would do.</strong> Answer the prove request with headers and then either
+    nothing or an endless stream. The dApp's promise never settles or its tab runs out of memory — and
+    the UI has already been told the proof succeeded, because that message fires before the body is read.</p>
+    <p><strong>The fix.</strong> Reuse <code>readJsonBounded</code>, which already exists in the same
+    file, and accept a caller-supplied abort signal.</p>
+  </div>
+  <details>
+    <summary>Technical trace</summary>
+    <p>Sink <code>accelerator-prover.ts:508</code>. ky clears its timeout timer when
+    <code>fetch()</code> resolves at headers (<code>utils/timeout.js</code>); its 10 MB error-body cap is
+    only applied on the non-2xx path (<code>Ky.js:143</code>), so a 200 never touches it. The hardened
+    counterpart is <code>accelerator-transport.ts:63-143</code>, added deliberately for exactly this
+    threat on <code>/health</code>. The asymmetry is the evidence it is an oversight, not an accepted
+    residual.</p>
+  </details>
+</div>
+
+<div class="finding">
+  <div class="fh">
+    <span class="chip c-low">Low 3.8</span><span class="fid">F-13</span>
+    <span class="chip c-info">claude</span><span class="chip c-info">fix: &lt;1 hour</span>
+    <span class="ftitle"><code>schtasks.exe</code> is located through an environment variable its sibling deliberately distrusts</span>
+  </div>
+  <p class="nut">One Windows helper is located through an environment variable that the code directly next door deliberately distrusts — the fix is copying four lines.</p>
+  <div class="eli5">
+    <p><strong>What it is.</strong> The Windows crash-recovery code finds <code>schtasks.exe</code> via
+    <code>%SystemRoot%</code>. The trust-store code next door resolves the same class of tool by
+    preferring the hardcoded <code>C:\Windows\System32</code> path first, and its comment explains
+    exactly why. The hardening was applied to one and not the other.</p>
+    <p><strong>What an attacker would do.</strong> Point <code>%SystemRoot%</code> somewhere else. Omit
+    the binary and every update is silently refused; supply a stub that lies about the task's state and
+    the updater proceeds to rewrite files while the every-minute relaunch task is still armed.</p>
+    <p><strong>The fix.</strong> Copy the four lines from <code>trust/windows.rs:36-47</code>.</p>
+  </div>
+</div>
+
+<h2>Cross-cutting observations</h2>
+
+<h3>Hardening applied on the write path but not the read path</h3>
+<p>
+  The update marker is created with owner-only Windows ACLs, but the code that <em>reads</em> a marker
+  never checks the owner or ACL of one it did not create. The certificate set is written with 0600
+  permissions and atomic renames, but the code that installs it never re-validates what it is
+  installing. In both cases the protective work went into producing the file, and the consuming path
+  trusts whatever it finds.
+</p>
+
+<h3>A control exists on one platform and not its siblings</h3>
+<p>
+  Linux has the tri-state trust-removal result; macOS and Windows do not (F-05). Linux scopes the
+  certificate trust grant; macOS and Windows do not (F-02). <code>trust/windows.rs</code> distrusts
+  <code>%SystemRoot%</code>; <code>crash_recovery.rs</code> does not (F-13) — and the former's comment
+  even cites the latter as the pattern it follows. Each of these is a fix that was reasoned through
+  once and applied incompletely.
+</p>
+
+<h3>Documentation asserts invariants the code does not enforce</h3>
+<p>
+  <code>bridge.js:38-39</code> states that every consequential control is guarded; three of four are
+  not. <code>cache_layout.rs:208</code> calls the integrity marker “the single authority the runtime
+  trusts”, which overstates what an unauthenticated JSON file can be. <code>probe.rs:11-13</code> claims
+  its check prevents an arbitrary process from being accepted; it checks two public constants. These
+  comments are load-bearing for reviewers, and each one currently misleads.
+</p>
+
+<h3>Yesterday's fixes are today's findings</h3>
+<p>
+  Two remediations from the previous audit became findings here: the launch-floor commit (F-004's fix)
+  is gated on the forgeable probe from F-002, whose own fix was never applied; and the updater state
+  file it introduced is a one-line permanent-lockout primitive. This is the strongest argument for
+  auditing remediation code specifically, rather than treating a closed finding as closed ground.
+</p>
+
+<h2>Coverage gaps — what this audit did not examine</h2>
+<ul>
+  <li><strong>Out of scope by request:</strong> the headless server crate, the playground and landing
+    packages, all CI/CD workflows, and the Terraform infrastructure. F-09's real-world severity depends
+    on prior F-005, which lives in that infrastructure and was not re-verified.</li>
+  <li><strong>One missing cross-model leg.</strong> The Codex agent for the persistence cluster did not
+    finish in time to be folded into the reduce stage, so F-12 and F-13 have no second-family
+    corroboration — in exactly the cluster flagged as a priority concern.</li>
+  <li><strong>One unresolved uncertainty flag.</strong> <code>snapshot_restore_roundtrip_for_tests</code>
+    is a public function in the production library that mutates real autostart state; no caller was
+    found, and no agent examined whether it is reachable in a shipped build.</li>
+  <li><strong>Depth.</strong> This ran at medium effort: two independent agents per cluster with no
+    cross-rebuttal round, and verification limited to five findings by severity bucket.</li>
+</ul>
+
+<footer>
+  <p>
+    Artifacts on disk under <code>audit/security/2026-07-31-9c4cb0c/</code>:
+    <code>report.md</code> (engineering detail), <code>findings/consolidated.md</code> (reduce stage),
+    <code>findings/verified.md</code> (verification), <code>raw/</code> (all 16 cluster reports and the
+    two repo maps), <code>raw/SCOPE.md</code> (scope and deviations).
+  </p>
+  <p>
+    Method: 8 clusters by entrypoint and sink family · 2 independent agents per cluster from different
+    model families · coordinator reduce with deduplication by root cause · verification re-reads source
+    before seeing the claim. Same-user local code execution is treated as in scope, consistently with
+    the codebase's own stance; no finding is unauthenticated-remote, which is why none is rated Critical.
+  </p>
+</footer>
+</div>
