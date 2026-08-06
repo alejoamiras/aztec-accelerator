@@ -99,3 +99,35 @@ fn disallowed_store_overrides_root() {
         ])
         .output();
 }
+
+/// F-05's other direction on the REAL OS: a removal that genuinely had nothing to remove must report
+/// COMPLETE.
+///
+/// The fix makes "could not determine" report as still-trusted, which is the fail-closed direction —
+/// but a control that fails closed too eagerly cries wolf on every ordinary uninstall, and that is
+/// how a security control gets switched off. Here `certutil` works and our CA was never installed,
+/// which is every normal user's machine: `delete_by_cn` reports clean via `CRYPT_E_NOT_FOUND` and
+/// `presence_by_cn` reports absent, so removal must be reported as done.
+///
+/// Headless-safe: `-delstore` raises no dialog (only `-addstore Root` does), and there is nothing to
+/// delete. This complements the NSIS harness, which covers the same direction for the INSTALLER path.
+#[test]
+#[ignore = "drives real certutil -delstore against CurrentUser\\Root (no dialog); CI runs with --ignored"]
+fn removal_with_nothing_to_remove_reports_complete() {
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let home = tempfile::tempdir().expect("temp HOME");
+    // SAFETY: single-threaded ignored test; isolates generated certs under a throwaway profile.
+    std::env::set_var("USERPROFILE", home.path());
+    std::env::set_var("HOME", home.path());
+
+    aztec_accelerator::certs::generate_and_save().expect("generate certs");
+    let ca = aztec_accelerator::certs::live_ca_cert_path();
+
+    let report = aztec_accelerator::trust::remove_ca_trust(&ca);
+    assert!(
+        !report.removal_incomplete(),
+        "certutil works and nothing of ours is installed, so removal must report COMPLETE — a \
+         false 'still trusted' here would fire on every ordinary uninstall; got {report:?}"
+    );
+}
