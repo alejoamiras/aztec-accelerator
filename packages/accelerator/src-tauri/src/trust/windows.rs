@@ -77,11 +77,25 @@ pub(super) const CRYPT_E_NOT_FOUND: &str = "0x80092004";
 /// removal path then reported as a clean removal.
 ///
 /// The first F-05 fix then over-corrected by keying "absent" on `CRYPT_E_NOT_FOUND` appearing in the
-/// output. **That assumption is false on a real runner** — a filtered `-store` miss exits non-zero
-/// WITHOUT printing that code, so every ordinary removal (nothing of ours installed, or our anchor
-/// just successfully deleted) classified as `Unknown` and reported "could not verify removal". A
-/// control that fires on the happy path is worse than the fail-open it replaced, because it teaches
-/// the user to ignore it. Caught by `tests/trust_windows.rs`, which only a Windows runner can run.
+/// output. That was simply the WRONG CONSTANT. Measured on a real runner
+/// (`tests/trust_windows.rs` prints it every run, so this is observed, not inferred):
+///
+/// ```text
+/// $ certutil -user -store Root "Aztec Accelerator Local CA"     # exit -2146893807
+/// Root "Trusted Root Certification Authorities"
+/// CertUtil: -store command FAILED: 0x80090011 (-2146893807 NTE_NOT_FOUND)
+/// CertUtil: Object was not found.
+/// ```
+///
+/// `NTE_NOT_FOUND`, not `CRYPT_E_NOT_FOUND`. So every ordinary removal — nothing of ours installed,
+/// or our anchor just successfully deleted — classified as `Unknown` and reported "could not verify
+/// removal". A control that fires on the happy path is worse than the fail-open it replaced, because
+/// it teaches the user to ignore it. Only a Windows runner could catch this: `windows.rs` is
+/// cfg-gated away from the Linux job, and the unit tests cover the shared classifier, not this.
+///
+/// The lesson taken here is NOT "add the other constant". It is that the verdict must not depend on
+/// which code certutil happens to print — so the second marker is deliberately not added, and the
+/// control question below carries the decision.
 ///
 /// So the verdict no longer depends on a string certutil may not print. A filtered miss asks a
 /// CONTROL question instead — can certutil read the store AT ALL? — exactly as the macOS backend and

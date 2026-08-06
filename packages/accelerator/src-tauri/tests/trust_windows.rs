@@ -139,9 +139,10 @@ fn removal_with_nothing_to_remove_reports_complete() {
     aztec_accelerator::certs::generate_and_save().expect("generate certs");
     let ca = aztec_accelerator::certs::live_ca_cert_path();
 
-    // Print what certutil ACTUALLY says for a filtered miss. The first version of the F-05 fix keyed
-    // "absent" on CRYPT_E_NOT_FOUND appearing here, which is false on a real runner — this line is so
-    // the next person reads reality out of the CI log instead of assuming, as I did.
+    // Print what certutil ACTUALLY says for a filtered miss, every run. The first version of the F-05
+    // fix keyed "absent" on CRYPT_E_NOT_FOUND appearing here; the real code is NTE_NOT_FOUND
+    // (0x80090011). Keeping this in the log is what makes the next change to that logic evidence-based
+    // rather than a second guess.
     let raw = std::process::Command::new("certutil")
         .args(["-user", "-store", "Root", "Aztec Accelerator Local CA"])
         .output();
