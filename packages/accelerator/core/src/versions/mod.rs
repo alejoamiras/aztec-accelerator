@@ -15,7 +15,7 @@ pub use cache_layout::{
     bb_binary_name, list_cached_versions, verify_cached_bb, version_bb_path, versions_base_dir,
 };
 pub use downloader::download_bb;
-pub use leases::{acquire as acquire_lease, is_leased, Lease};
+pub use leases::{acquire as acquire_lease, Lease};
 pub use release_metadata::{current_platform, download_url};
 pub use version_policy::{
     check_version_selectable, cleanup_old_versions, is_valid_version, sweep_cache_on_start,

@@ -252,14 +252,21 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
         .bundled_version
         .clone()
         .unwrap_or_else(|| DEFAULT_BB_VERSION.to_string());
-    tokio::spawn(async move {
-        crate::versions::sweep_cache_on_start(&bundled).await;
-    });
 
     let app = router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], PORT));
     let listener = bind_with_retry(addr).await?;
     tracing::info!("Accelerator server listening on {addr}");
+
+    // ONLY after the bind succeeds. The in-use lease that protects a cached binary from eviction is
+    // per-process, and that is sound only because exactly one instance ever evicts. Spawning this
+    // before the bind broke that: a second instance would sweep the shared cache during its bind
+    // retry — with its own empty registry, so blind to the running instance's leases — before finally
+    // losing the port and exiting. This ordering is load-bearing, not stylistic (F-06 follow-up,
+    // found by a codex review).
+    tokio::spawn(async move {
+        crate::versions::sweep_cache_on_start(&bundled).await;
+    });
     axum::serve(listener, app).await?;
     Ok(())
 }

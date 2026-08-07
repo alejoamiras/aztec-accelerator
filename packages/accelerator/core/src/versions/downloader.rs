@@ -297,8 +297,24 @@ pub(crate) fn install_version_dir(
         write_bb_marker(&staging, version, archive_digest, &binary_digest)?;
 
         // Fail-closed publish: drop any live entry, then rename the stage into place.
+        //
+        // Except when a proof is holding it. Two concurrent first-time downloads of the same version
+        // are possible, and the later publisher would otherwise delete the directory the earlier
+        // one's proof is resolving or executing from (F-06 follow-up, found by a codex review).
+        // Keeping the existing entry is safe: it is already digest-verified and marker-backed, so it
+        // is the same binary this stage would have published.
         if version_dir.exists() {
+            let Some(_reservation) = super::leases::begin_evict(version) else {
+                tracing::info!(
+                    version = %version,
+                    "A proof is using this version; keeping the published copy and discarding the fresh stage"
+                );
+                let _ = std::fs::remove_dir_all(&staging);
+                return Ok(());
+            };
             std::fs::remove_dir_all(version_dir)?;
+            std::fs::rename(&staging, version_dir)?;
+            return Ok(());
         }
         std::fs::rename(&staging, version_dir)?;
         Ok(())

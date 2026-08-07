@@ -376,14 +376,8 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         // overshoot is bounded by the burst rate and reclaimed by the next cleanup, which is a different
         // thing from the unbounded growth this cap exists to stop.
         //
-        if is_protected(version.as_str(), super::downloader::recently_active(&dir)) {
-            tracing::debug!(version = %version, "Skipping eviction of a protected version");
+        if evict_if_unheld(&version, &dir, super::downloader::recently_active(&dir)) {
             deferred_by_active_window = true;
-            continue;
-        }
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
-            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
 
@@ -398,21 +392,33 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
     }
 }
 
-/// May this version be deleted right now? `true` means leave it alone.
+/// Delete a version directory, but only if no proof holds it — and hold that exclusion across the
+/// deletion itself.
 ///
-/// Two protections, deliberately ordered. A LEASE is the authoritative answer to "is a proof using
-/// this?" — it is held for the whole execution, so a proof that sat behind the prove semaphore for an
-/// hour is still safe. `recently_active` (the directory's mtime inside a five-minute window) is the
-/// weaker fallback, kept only for the gap where a version has been downloaded but no proof holds it
-/// yet.
+/// This is the F-06 closure and the shape matters. Asking "is it leased?" and then deleting is the
+/// same check-then-act the mtime window had: the answer can go stale between the two steps. So the
+/// reservation returned by `begin_evict` is kept alive for the whole `remove_dir_all`, which means a
+/// proof cannot acquire this version at any point during the deletion — it sees `None` and treats the
+/// binary as absent, which it is about to be.
 ///
-/// Split out from the eviction loops because it is the F-06 decision worth pinning: before the lease
-/// existed, cleanup read an mtime and then unlinked, so a proof starting between those two steps lost
-/// its binary — and the size cap made that reachable for `Mainnet` versions the count policy could
-/// never evict. Taking `recently_active` as an argument rather than computing it keeps this a pure
-/// policy function the tests can drive without touching the filesystem clock.
-fn is_protected(version: &str, recently_active: bool) -> bool {
-    super::leases::is_leased(version) || recently_active
+/// `recently_active` is the weaker fallback for the one gap a lease cannot cover: a version that has
+/// been downloaded but that no proof holds yet. Checked first because it needs no reservation.
+///
+/// Returns whether the caller should count this as "deferred by the active window" for the retry pass.
+fn evict_if_unheld(version: &AztecVersion, dir: &std::path::Path, recently_active: bool) -> bool {
+    if recently_active {
+        tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+        return true;
+    }
+    let Some(_reservation) = super::leases::begin_evict(version.as_str()) else {
+        tracing::debug!(version = %version, "Skipping eviction of a version held by a proof");
+        return false;
+    };
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
+        Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
+    }
+    false
 }
 
 /// Bring the cache under [`CACHE_MAX_TOTAL_BYTES`] at process start (F-06, round 3).
@@ -455,15 +461,7 @@ async fn cleanup_after_active_window(bundled: &AztecVersion, in_use: Option<&Azt
         .collect();
     for version in versions_to_evict_for_size(&sized, bundled, in_use, CACHE_MAX_TOTAL_BYTES) {
         let dir = base.join(version.as_str());
-        if is_protected(version.as_str(), super::downloader::recently_active(&dir)) {
-            continue;
-        }
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => {
-                tracing::info!(version = %version, "Evicted to stay under the cache size cap (deferred pass)")
-            }
-            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
-        }
+        evict_if_unheld(&version, &dir, super::downloader::recently_active(&dir));
     }
 }
 
@@ -718,43 +716,60 @@ mod tests {
 
     // ── F-06 residual closure: the in-use lease ───────────────────────────────────────────────
     // Before the lease, cleanup answered "is anyone using this?" from the directory's mtime: it read
-    // the timestamp and then unlinked, so a proof that started between those two steps lost its
-    // binary, and a proof queued behind the semaphore for longer than the five-minute window was
-    // never protected at all. F-06's size cap made that reachable for `Mainnet` versions, which the
-    // per-tier count policy could never evict.
+    // the timestamp and then unlinked, so a proof starting between those two steps lost its binary,
+    // and a proof queued behind the prove permit for longer than the window was never protected at
+    // all. F-06's size cap made that reachable for `Mainnet` versions the count policy could never
+    // evict. These drive the REAL eviction function, deletion included.
 
-    /// THE property. A leased version survives even when nothing else would protect it — the mtime
-    /// window has already elapsed. Pre-lease this returned false and the binary was deleted.
+    fn seeded_version_dir(tag: &str) -> (tempfile::TempDir, AztecVersion, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let version = av(&format!("5.0.0-evict-{tag}"));
+        let dir = d.path().join(version.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bb"), b"binary").unwrap();
+        (d, version, dir)
+    }
+
+    /// THE property. A held version survives eviction even though nothing else protects it — its
+    /// activity window has already elapsed. Pre-lease, this directory was deleted.
     #[test]
-    fn a_leased_version_is_protected_even_once_its_activity_window_has_elapsed() {
-        let name = "5.0.0-policy-leased";
-        assert!(
-            !is_protected(name, false),
-            "unleased and inactive: evictable, or the cap could never bind"
-        );
+    fn a_held_version_survives_eviction() {
+        let (_d, version, dir) = seeded_version_dir("held");
+        let lease = super::super::leases::acquire(version.as_str()).unwrap();
 
-        let lease = super::super::leases::acquire(name);
-        assert!(
-            is_protected(name, false),
-            "a proof holds this — evicting it is the bug F-06's cap made reachable"
-        );
+        let deferred = evict_if_unheld(&version, &dir, false);
 
+        assert!(
+            dir.exists(),
+            "a proof is executing this binary — it must not be deleted"
+        );
+        assert!(
+            !deferred,
+            "a lease is not the active-window deferral; it must not re-arm the retry pass"
+        );
         drop(lease);
-        assert!(!is_protected(name, false), "released, so evictable again");
     }
 
-    /// The weaker guard is still there for the window before a lease exists — a version that has
-    /// just been downloaded but that no proof holds yet.
+    /// …and once released it is evictable, or the size cap could never bind.
     #[test]
-    fn the_activity_window_still_protects_an_unleased_but_fresh_version() {
-        assert!(is_protected("5.0.0-policy-fresh", true));
+    fn an_unheld_version_is_evicted() {
+        let (_d, version, dir) = seeded_version_dir("unheld");
+        assert!(!evict_if_unheld(&version, &dir, false));
+        assert!(
+            !dir.exists(),
+            "nothing holds it and its window elapsed — it should be gone"
+        );
     }
 
-    /// A lease protects only what it names.
+    /// The weaker guard still covers the gap a lease cannot: downloaded, not yet held by any proof.
     #[test]
-    fn a_lease_does_not_protect_unrelated_versions() {
-        let _l = super::super::leases::acquire("5.0.0-policy-mine");
-        assert!(!is_protected("5.0.0-policy-theirs", false));
+    fn a_recently_active_version_is_deferred_not_deleted() {
+        let (_d, version, dir) = seeded_version_dir("fresh");
+        assert!(
+            evict_if_unheld(&version, &dir, true),
+            "must report deferral so the retry pass re-arms"
+        );
+        assert!(dir.exists());
     }
 
     #[test]
