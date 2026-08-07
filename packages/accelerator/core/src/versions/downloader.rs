@@ -6,7 +6,8 @@
 //! The smaller identity/platform/layout/cache concerns stay in the `versions` module root.
 
 use super::cache_layout::{
-    bb_binary_name, sha256_file, verify_cached_bb, versions_base_dir, write_bb_marker,
+    bb_binary_name, sha256_file, verify_bb_entry, verify_cached_bb, versions_base_dir,
+    write_bb_marker, MARKER_NAME,
 };
 use super::release_metadata::{
     current_platform, download_url, fetch_github_asset_digest, http_client, sha256_hex,
@@ -310,17 +311,36 @@ pub(crate) fn install_version_dir(
                     std::fs::rename(&staging, version_dir)?;
                     return Ok(());
                 }
-                // A proof is executing the published copy. Keep it and drop our stage: it is already
-                // digest-verified and marker-backed, so it is the same binary this stage would have
-                // published, and deleting it would pull the file out from under a running proof.
-                Err(super::leases::Contended::Held) => {
-                    tracing::info!(
-                        version = %version,
-                        "A proof is using this version; keeping the published copy and discarding the fresh stage"
-                    );
-                    let _ = std::fs::remove_dir_all(&staging);
-                    return Ok(());
-                }
+                // A proof is executing the published copy, so deleting it would pull the file out
+                // from under a running proof. Keep it — but only after PROVING it is good.
+                //
+                // "It is leased, therefore it is verified" is false: `bb::prove` leases before
+                // `find_bb` verifies, so a caller can hold an entry whose verification then fails.
+                // Without this re-check, a download staged to REPAIR a corrupt entry would discard
+                // its valid stage and report success over the corrupt one (found by a codex review).
+                Err(super::leases::Contended::Held) => match verify_bb_entry(
+                    &version_dir.join(bb_binary_name()),
+                    &version_dir.join(MARKER_NAME),
+                    version,
+                    current_platform(),
+                ) {
+                    Ok(_) => {
+                        tracing::info!(
+                            version = %version,
+                            "A proof is using this version and it verifies; keeping it and discarding the fresh stage"
+                        );
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Err(std::io::Error::other(format!(
+                            "bb {version}: a proof holds this entry but it does not verify ({e}); \
+                             cannot replace it while in use — retry once the proof finishes"
+                        ))
+                        .into());
+                    }
+                },
                 // A cleanup pass is DELETING it. Keeping it would report success over a directory
                 // that is about to stop existing (found by a codex review). Fail so the caller
                 // retries once the eviction has finished.

@@ -202,7 +202,7 @@ fn read_bb_marker_at(
 
 /// Fail-closed integrity check for a bb at explicit paths: the binary must be a present regular file
 /// whose streamed SHA-256 matches its valid marker's `binary_sha256`. Path-parameterized for testing.
-fn verify_bb_entry(
+pub(super) fn verify_bb_entry(
     bb_path: &Path,
     marker_path: &Path,
     expect_version: &str,

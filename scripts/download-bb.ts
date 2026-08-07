@@ -130,6 +130,27 @@ function versionDir(version: string): string {
  * refusal beats a silent race, and `BB_VERSIONS_DIR` already exists for anyone who wants an
  * independent cache. (Hole found by a codex review of the app-side lease.)
  */
+/**
+ * Split the accelerator-guard flag out of the argument list.
+ *
+ * `--force` is a FLAG, not a version. The first cut of the guard read it with `args.includes` but
+ * left it in the list, so it flowed into the version parser and was downloaded as though it were a
+ * version — the escape hatch was advertised and broken at the same time (found by a codex review).
+ */
+export function parseGuardFlags(args: string[]): { forced: boolean; rest: string[] } {
+  return {
+    forced: args.includes("--force"),
+    rest: args.filter((a) => a !== "--force"),
+  };
+}
+
+export function usingSharedCache(): boolean {
+  // `BB_VERSIONS_DIR` points this run at its own cache, so there is nothing to collide with and the
+  // guard must not fire. (It was advertised as an escape hatch while not actually being one — found
+  // by a codex review.)
+  return !process.env.BB_VERSIONS_DIR;
+}
+
 async function acceleratorIsRunning(): Promise<boolean> {
   try {
     const res = await fetch("http://127.0.0.1:59833/health", {
@@ -537,13 +558,15 @@ async function main(): Promise<void> {
 
   const args = process.argv.slice(2);
 
+  const { forced, rest } = parseGuardFlags(args);
+
   // Read-only paths (--help, --list) are always fine; everything below can delete a live entry.
   const readOnly =
-    args.length === 0 ||
-    args.includes("--help") ||
-    args.includes("-h") ||
-    args.includes("--list");
-  if (!readOnly && !args.includes("--force") && (await acceleratorIsRunning())) {
+    rest.length === 0 ||
+    rest.includes("--help") ||
+    rest.includes("-h") ||
+    rest.includes("--list");
+  if (!readOnly && !forced && usingSharedCache() && (await acceleratorIsRunning())) {
     console.error(
       "The Aztec Accelerator is running and shares this cache.\n" +
         `Cache: ${versionsBaseDir()}\n\n` +
@@ -553,7 +576,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+  if (rest.length === 0 || rest.includes("--help") || rest.includes("-h")) {
     console.log(`Usage: bun scripts/download-bb.ts <version>[,<version>,...] [--list]
 
 Downloads + verifies bb binaries for specific Aztec versions.
@@ -566,7 +589,7 @@ Platform: ${currentPlatform()}`);
     process.exit(0);
   }
 
-  if (args.includes("--list")) {
+  if (rest.includes("--list")) {
     const cached = listCachedVersions();
     console.log(`Cache: ${versionsBaseDir()}`);
     if (cached.length === 0) {
@@ -578,7 +601,7 @@ Platform: ${currentPlatform()}`);
     process.exit(0);
   }
 
-  const versions = args
+  const versions = rest
     .flatMap((a) => a.split(","))
     .map((v) => v.trim())
     .filter(Boolean);
@@ -604,7 +627,19 @@ Platform: ${currentPlatform()}`);
   }
 
   console.log("");
-  cleanupOldVersions(downloaded);
+
+  // Re-probe. The check above ran BEFORE downloads that can take minutes, so the app may have
+  // started in the meantime — and retention eviction below deletes live entries. This narrows the
+  // window to the gap between this line and the deletions; it does not eliminate it, which is why
+  // the residual is documented in `core/src/versions/leases.rs` rather than claimed closed.
+  if (!forced && usingSharedCache() && (await acceleratorIsRunning())) {
+    console.error(
+      "The Aztec Accelerator started while this was downloading; skipping retention cleanup so a\n" +
+        "binary in use is not deleted. Re-run once it has quit to reclaim space.",
+    );
+  } else {
+    cleanupOldVersions(downloaded);
+  }
 
   const cached = listCachedVersions();
   console.log(`\nCached versions: ${cached.join(", ") || "(none)"}`);
