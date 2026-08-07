@@ -387,7 +387,19 @@ function createStagingDir(version: string): string {
  * Download + verify + stage + finalize + marker + fail-closed publish for one version. Skips (verified)
  * if the cache already holds a marker-valid binary.
  */
-export async function downloadBb(version: string): Promise<void> {
+/**
+ * Called immediately before the destructive publish, so the liveness answer is fresh.
+ *
+ * The guard in `main` runs once at startup, and a download can take minutes — during which the app
+ * can start, publish this version itself, and lease it. Publishing then delete-renames a directory a
+ * proof may be executing. Re-checking at the last moment narrows that to the gap between the check
+ * and the rename; closing it entirely needs cross-process exclusion, which is the accepted residual
+ * documented in `packages/accelerator/core/src/versions/leases.rs`. (Found by a codex review: the
+ * first attempt at this re-probe covered only retention cleanup, which runs AFTER publication.)
+ */
+export type PublishGuard = () => Promise<boolean>;
+
+export async function downloadBb(version: string, guard?: PublishGuard): Promise<void> {
   assertValidVersion(version);
 
   if (verifyCachedBb(version)) {
@@ -460,6 +472,13 @@ export async function downloadBb(version: string): Promise<void> {
     // the two leaves NO live entry (⇒ verified re-download next use) plus a `.tmp.<rand>` stage
     // (reaped by the next install's stage-unique naming + cleanup). Deliberately NOT atomic replacement.
     const vdir = versionDir(version);
+    if (existsSync(vdir) && guard && !(await guard())) {
+      rmSync(stage, { recursive: true, force: true });
+      throw new Error(
+        `the Aztec Accelerator started while this was downloading and may be using ${version}; ` +
+          "refusing to replace it. Quit the app and re-run, or pass --force.",
+      );
+    }
     if (existsSync(vdir)) rmSync(vdir, { recursive: true, force: true });
     renameSync(stage, vdir);
   } catch (err) {
@@ -618,7 +637,11 @@ Platform: ${currentPlatform()}`);
   const downloaded = new Set<string>();
   for (const version of versions) {
     try {
-      await downloadBb(version);
+      await downloadBb(version, async () => {
+        // `true` = safe to publish. Mirrors the startup guard's policy exactly.
+        if (forced || !usingSharedCache()) return true;
+        return !(await acceleratorIsRunning());
+      });
       downloaded.add(version);
     } catch (err) {
       console.error(`  ✗ ${version}: ${err instanceof Error ? err.message : String(err)}`);

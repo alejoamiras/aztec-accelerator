@@ -589,6 +589,101 @@ mod tests {
     /// F-007 staged verified install: `install_version_dir` extracts + finalizes + writes the marker in
     /// a unique staging dir, then publishes fail-closed — replacing any stale entry wholesale, leaving
     /// no staging dir, and producing a marker whose `binary_sha256` matches the FINAL published binary.
+    /// A valid gzipped tar carrying a single fake `bb`, plus its archive digest.
+    fn fake_tarball() -> (Vec<u8>, String) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let bb_content = b"#!/bin/sh\necho fake-bb\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bb_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, bb_binary_name(), &bb_content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+        let digest = sha256_hex(&tarball);
+        (tarball, digest)
+    }
+
+    // ── Publisher contention (F-06 lease) ─────────────────────────────────────────────────────
+    // `install_version_dir` deletes any live entry before renaming its stage into place. These pin
+    // what it does when that entry is contended. The parsing tests elsewhere do not reach this
+    // wiring, which is exactly how a bug survived here through a review round.
+
+    /// A proof holds the published copy and it verifies: keep it, drop our stage, report success.
+    /// Deleting it would pull the binary out from under a running proof.
+    #[test]
+    fn publishing_over_a_held_and_valid_entry_preserves_it() {
+        let (tarball, digest) = fake_tarball();
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-held-valid");
+
+        // Publish once so a valid, marker-backed entry exists.
+        install_version_dir(&version_dir, &tarball, "5.0.0-held-valid", &digest).unwrap();
+        let published = std::fs::read(version_dir.join(bb_binary_name())).unwrap();
+
+        // Now a proof holds it and a second publish arrives.
+        let _lease = super::super::leases::acquire("5.0.0-held-valid").unwrap();
+        install_version_dir(&version_dir, &tarball, "5.0.0-held-valid", &digest)
+            .expect("a held-and-valid entry is preserved, not an error");
+
+        assert!(
+            version_dir.exists(),
+            "the entry a proof is executing must survive"
+        );
+        assert_eq!(
+            std::fs::read(version_dir.join(bb_binary_name())).unwrap(),
+            published,
+            "the original bytes must still be there"
+        );
+    }
+
+    /// A proof holds it but it does NOT verify: we may not replace it (in use) and must not claim
+    /// success over it. Pre-fix this discarded a valid stage and returned Ok over the corrupt entry.
+    #[test]
+    fn publishing_over_a_held_but_corrupt_entry_fails_loudly() {
+        let (tarball, digest) = fake_tarball();
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-held-corrupt");
+
+        install_version_dir(&version_dir, &tarball, "5.0.0-held-corrupt", &digest).unwrap();
+        // Corrupt the published binary so it no longer matches its marker.
+        std::fs::write(version_dir.join(bb_binary_name()), b"tampered").unwrap();
+
+        let _lease = super::super::leases::acquire("5.0.0-held-corrupt").unwrap();
+        let err = install_version_dir(&version_dir, &tarball, "5.0.0-held-corrupt", &digest)
+            .expect_err("must not report success over an entry that does not verify");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "the error should say why: {err}"
+        );
+    }
+
+    /// A cleanup pass is DELETING it. Keeping it would vouch for a directory about to disappear.
+    #[test]
+    fn publishing_over_an_evicting_entry_fails_rather_than_vouching_for_it() {
+        let (tarball, digest) = fake_tarball();
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-evicting");
+
+        install_version_dir(&version_dir, &tarball, "5.0.0-evicting", &digest).unwrap();
+
+        let _reservation = super::super::leases::begin_evict("5.0.0-evicting").unwrap();
+        let err = install_version_dir(&version_dir, &tarball, "5.0.0-evicting", &digest)
+            .expect_err("a directory being deleted must not be reported as published");
+        assert!(
+            err.to_string().contains("evicting"),
+            "the error should name the reason: {err}"
+        );
+    }
+
     #[test]
     fn install_version_dir_stages_marks_and_publishes() {
         use flate2::write::GzEncoder;
