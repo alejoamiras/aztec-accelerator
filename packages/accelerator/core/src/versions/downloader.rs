@@ -304,17 +304,34 @@ pub(crate) fn install_version_dir(
         // Keeping the existing entry is safe: it is already digest-verified and marker-backed, so it
         // is the same binary this stage would have published.
         if version_dir.exists() {
-            let Some(_reservation) = super::leases::begin_evict(version) else {
-                tracing::info!(
-                    version = %version,
-                    "A proof is using this version; keeping the published copy and discarding the fresh stage"
-                );
-                let _ = std::fs::remove_dir_all(&staging);
-                return Ok(());
-            };
-            std::fs::remove_dir_all(version_dir)?;
-            std::fs::rename(&staging, version_dir)?;
-            return Ok(());
+            match super::leases::begin_evict(version) {
+                Ok(_reservation) => {
+                    std::fs::remove_dir_all(version_dir)?;
+                    std::fs::rename(&staging, version_dir)?;
+                    return Ok(());
+                }
+                // A proof is executing the published copy. Keep it and drop our stage: it is already
+                // digest-verified and marker-backed, so it is the same binary this stage would have
+                // published, and deleting it would pull the file out from under a running proof.
+                Err(super::leases::Contended::Held) => {
+                    tracing::info!(
+                        version = %version,
+                        "A proof is using this version; keeping the published copy and discarding the fresh stage"
+                    );
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Ok(());
+                }
+                // A cleanup pass is DELETING it. Keeping it would report success over a directory
+                // that is about to stop existing (found by a codex review). Fail so the caller
+                // retries once the eviction has finished.
+                Err(super::leases::Contended::Evicting) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(std::io::Error::other(format!(
+                        "bb {version}: a cleanup pass is evicting this version; retry"
+                    ))
+                    .into());
+                }
+            }
         }
         std::fs::rename(&staging, version_dir)?;
         Ok(())

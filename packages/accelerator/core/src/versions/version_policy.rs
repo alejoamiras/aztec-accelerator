@@ -404,15 +404,24 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
 /// `recently_active` is the weaker fallback for the one gap a lease cannot cover: a version that has
 /// been downloaded but that no proof holds yet. Checked first because it needs no reservation.
 ///
-/// Returns whether the caller should count this as "deferred by the active window" for the retry pass.
+/// Returns whether the caller should schedule a retry pass — true for anything skipped, whether by
+/// the activity window or by contention.
 fn evict_if_unheld(version: &AztecVersion, dir: &std::path::Path, recently_active: bool) -> bool {
     if recently_active {
         tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
         return true;
     }
-    let Some(_reservation) = super::leases::begin_evict(version.as_str()) else {
-        tracing::debug!(version = %version, "Skipping eviction of a version held by a proof");
-        return false;
+    let _reservation = match super::leases::begin_evict(version.as_str()) {
+        Ok(r) => r,
+        Err(why) => {
+            tracing::debug!(version = %version, ?why, "Skipping eviction of a contended version");
+            // Report this as deferred so the retry pass re-arms. A held version is exactly as
+            // reclaimable-later as a recently-active one, and treating it otherwise meant a version
+            // held during the only retry left the cache over its ceiling until the next download
+            // (found by a codex review). A version still held during the retry as well waits for the
+            // next download or the startup sweep — bounded, and noted in `cleanup_old_versions`.
+            return true;
+        }
     };
     match std::fs::remove_dir_all(dir) {
         Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
@@ -744,8 +753,9 @@ mod tests {
             "a proof is executing this binary — it must not be deleted"
         );
         assert!(
-            !deferred,
-            "a lease is not the active-window deferral; it must not re-arm the retry pass"
+            deferred,
+            "skipped for ANY reason must re-arm the retry pass — treating a held version as
+             'not deferred' left the cache over its ceiling when the proof outlived the one retry"
         );
         drop(lease);
     }

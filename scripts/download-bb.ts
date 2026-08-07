@@ -116,6 +116,30 @@ export function versionsBaseDir(): string {
 function versionDir(version: string): string {
   return join(versionsBaseDir(), version);
 }
+
+/**
+ * Refuse to mutate the cache while the accelerator app is running.
+ *
+ * This script and the app share `~/.aztec-accelerator/versions` by default, and this script both
+ * replaces live entries and applies its own retention deletion. The app protects a binary a proof is
+ * executing with an in-process lease (`core/src/versions/leases.rs`) — which, being in-process, is
+ * blind to us. So `bun run bb:download` during a proof could delete the binary out from under it.
+ *
+ * A cross-process lock would be the complete answer; this is the proportionate one. The exposure is a
+ * developer-tooling collision whose worst outcome is a failed proof and a re-download, so a clear
+ * refusal beats a silent race, and `BB_VERSIONS_DIR` already exists for anyone who wants an
+ * independent cache. (Hole found by a codex review of the app-side lease.)
+ */
+async function acceleratorIsRunning(): Promise<boolean> {
+  try {
+    const res = await fetch("http://127.0.0.1:59833/health", {
+      signal: AbortSignal.timeout(700),
+    });
+    return res.ok;
+  } catch {
+    return false; // nothing listening, or it is not answering — either way we are not racing it.
+  }
+}
 export function versionBbPath(version: string): string {
   return join(versionDir(version), "bb");
 }
@@ -512,6 +536,22 @@ async function main(): Promise<void> {
   }
 
   const args = process.argv.slice(2);
+
+  // Read-only paths (--help, --list) are always fine; everything below can delete a live entry.
+  const readOnly =
+    args.length === 0 ||
+    args.includes("--help") ||
+    args.includes("-h") ||
+    args.includes("--list");
+  if (!readOnly && !args.includes("--force") && (await acceleratorIsRunning())) {
+    console.error(
+      "The Aztec Accelerator is running and shares this cache.\n" +
+        `Cache: ${versionsBaseDir()}\n\n` +
+        "Downloading now can delete a binary a proof is currently executing. Quit the app first,\n" +
+        "point this run at its own cache with BB_VERSIONS_DIR=..., or pass --force if you are sure.",
+    );
+    process.exit(1);
+  }
 
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(`Usage: bun scripts/download-bb.ts <version>[,<version>,...] [--list]

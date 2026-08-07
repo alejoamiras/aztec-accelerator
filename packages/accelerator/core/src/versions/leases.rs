@@ -24,14 +24,23 @@
 //! as long as its guard lives. A version cannot be acquired while it is being deleted, and cannot be
 //! deleted while it is held.
 //!
-//! ## Why in-process is sufficient
+//! ## Scope: in-process, and what that does NOT cover
 //!
 //! Exactly one accelerator instance serves at a time — the port bind in `server::start` decides which,
-//! and eviction is only ever started AFTER that bind succeeds (a losing instance exits without ever
-//! sweeping; this ordering is load-bearing and noted at the call site). Cleanup is otherwise spawned
-//! from this process's own prove path. So every party that could evict and every party that could be
-//! executing a binary live in this address space, and a `Mutex` is the whole synchronisation story. A
-//! file-based lease would add stale-lock and PID-reuse questions to buy nothing.
+//! and eviction only starts AFTER that bind succeeds (a losing instance exits without ever sweeping;
+//! that ordering is load-bearing and noted at the call site). Cleanup is otherwise spawned from this
+//! process's own prove path. So within the app, every evictor and every executor share this address
+//! space and a `Mutex` is the whole synchronisation story.
+//!
+//! **It does not cover other processes, and one exists.** `scripts/download-bb.ts` defaults to the
+//! same `~/.aztec-accelerator/versions` directory and both replaces live entries and applies its own
+//! retention deletion, with no knowledge of this registry. A developer running `bun run bb:download`
+//! while the app is proving can still delete a binary in use. (An earlier revision of this comment
+//! claimed every party lived in this address space — that was simply false; found by a codex review.)
+//! That tool now refuses to touch the cache while the accelerator is answering on its port, which
+//! converts a silent race into a clear message; a genuine cross-process protocol is not built here
+//! because the remaining exposure is a developer-tooling collision whose worst outcome is a failed
+//! proof and a re-download.
 //!
 //! ## Refcounted, not a flag
 //!
@@ -127,19 +136,31 @@ pub fn acquire(version: &str) -> Option<Lease> {
     }
 }
 
-/// Reserve `version` for deletion, or `None` if a proof holds it (or another pass already reserved).
+/// Why a reservation was refused. The distinction matters to the publisher: "a proof is using this"
+/// means the existing copy is worth keeping, while "someone is deleting it" means it is about to stop
+/// existing and keeping it would be a lie. Collapsing the two let a download report success over a
+/// directory that was mid-deletion (found by a codex review of the first reservation design).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Contended {
+    /// At least one proof holds it.
+    Held,
+    /// A cleanup pass is deleting it right now.
+    Evicting,
+}
+
+/// Reserve `version` for deletion, or report who has it.
 ///
 /// The returned guard must be held across the actual `remove_dir_all`. That is the whole point: from
 /// an acquirer's perspective the reservation and the deletion are one critical section, so there is no
 /// gap for a proof to slip into.
-pub fn begin_evict(version: &str) -> Option<EvictReservation> {
+pub fn begin_evict(version: &str) -> Result<EvictReservation, Contended> {
     let mut map = lock();
     match map.get(version) {
-        // Held by a proof, or already reserved by another pass — either way, not ours to delete.
-        Some(_) => None,
+        Some(State::Held(_)) => Err(Contended::Held),
+        Some(State::Evicting) => Err(Contended::Evicting),
         None => {
             map.insert(version.to_string(), State::Evicting);
-            Some(EvictReservation {
+            Ok(EvictReservation {
                 version: version.to_string(),
             })
         }
@@ -212,7 +233,7 @@ mod tests {
     fn a_held_version_cannot_be_reserved_for_deletion() {
         let name = v("held-vs-evict");
         let _l = acquire(&name).unwrap();
-        assert!(begin_evict(&name).is_none());
+        assert_eq!(begin_evict(&name).err(), Some(Contended::Held));
     }
 
     /// Two cleanup passes must not both delete the same directory.
@@ -220,7 +241,11 @@ mod tests {
     fn two_passes_cannot_both_reserve() {
         let name = v("double-evict");
         let _first = begin_evict(&name).expect("first pass wins");
-        assert!(begin_evict(&name).is_none(), "second pass must back off");
+        assert_eq!(
+            begin_evict(&name).err(),
+            Some(Contended::Evicting),
+            "second pass must back off, and must know it was a deletion not a proof"
+        );
     }
 
     /// A panicking proof must not pin its version for the life of the process.
@@ -258,9 +283,6 @@ mod tests {
         let _l = acquire(&a).unwrap();
         assert!(is_leased(&a));
         assert!(!is_leased(&b));
-        assert!(
-            begin_evict(&b).is_some(),
-            "unrelated versions stay evictable"
-        );
+        assert!(begin_evict(&b).is_ok(), "unrelated versions stay evictable");
     }
 }
