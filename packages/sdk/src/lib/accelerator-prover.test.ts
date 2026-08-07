@@ -227,6 +227,47 @@ describe("AcceleratorProver", () => {
       serializeSpy.mockRestore();
     });
 
+    test("falls back to WASM on 503 (accelerator unavailable)", async () => {
+      // The accelerator answers 503 when it is shutting down, and (as of the F-06 version lease) when
+      // the cached bb for this version is being evicted. Both used to reach `throw err`, because the
+      // network-failure branch is gated on `!(err instanceof HTTPError)` and a 503 is one — so
+      // quitting the app mid-proof failed the dApp's transaction outright. The accelerator is an
+      // optimisation; the only correct degradation is WASM.
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            api_version: 1,
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+        "/prove": () =>
+          Response.json(
+            { error: "service_unavailable", message: "Proving service shutting down" },
+            { status: 503 },
+          ),
+      });
+      const serializeSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const phases: string[] = [];
+
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        onPhase: (phase) => phases.push(phase),
+      });
+
+      // Reaching the WASM prover at all is the assertion — the mock rejects, which is how this suite
+      // observes "we got there". Pre-fix the 503 propagated instead and this threw an HTTPError.
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test",
+      );
+
+      expect(phases).toContain("fallback");
+      expect(wasmSpy).toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serializeSpy.mockRestore();
+    });
+
     test("falls back to WASM with denied phase on 403 (origin not authorized)", async () => {
       mockFetch({
         "/health": () =>

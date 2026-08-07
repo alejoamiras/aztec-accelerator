@@ -409,6 +409,10 @@ pub(crate) enum ProveError {
     /// the single prove permit (slowloris / stalled upload). Distinct from PayloadTooLarge.
     BodyReadTimeout,
     ServiceUnavailable,
+    /// The cached bb for the requested version is being evicted right now (F-06 lease). Same 503 as
+    /// a shutdown — the SDK degrades to WASM on either — but a truthful body, because "shutting down"
+    /// would send someone debugging this to entirely the wrong place.
+    VersionEvicting,
     DownloadFailed {
         version: String,
         detail: String,
@@ -451,6 +455,11 @@ impl IntoResponse for ProveError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
                 "Proving service shutting down".to_string(),
+            ),
+            ProveError::VersionEvicting => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "version_evicting",
+                "The cached bb for this version is being evicted; retry".to_string(),
             ),
             ProveError::DownloadFailed { version, detail } => (
                 StatusCode::INTERNAL_SERVER_ERROR,

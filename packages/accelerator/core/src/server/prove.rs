@@ -327,7 +327,7 @@ pub(crate) async fn prove(
             Some(lease) => Some(lease),
             None => {
                 tracing::warn!(version = %v, "Version is being evicted; refusing rather than racing the deletion");
-                return Err(ProveError::ServiceUnavailable);
+                return Err(ProveError::VersionEvicting);
             }
         },
         None => None,
