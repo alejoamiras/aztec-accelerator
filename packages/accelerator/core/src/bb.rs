@@ -188,6 +188,10 @@ pub async fn prove(
     version: Option<&versions::AztecVersion>,
     threads: Option<usize>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    // Take the lease BEFORE resolving the path, and hold it for this whole function — the window
+    // being closed is between "cleanup decided this version was evictable" and "we executed it".
+    // `_lease` is bound (not `_`) so it lives to the end of the scope rather than dropping instantly.
+    let _lease = version.map(|v| versions::acquire_lease(v.as_str()));
     let bb_path =
         find_bb(version).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
