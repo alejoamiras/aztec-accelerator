@@ -314,6 +314,25 @@ pub(crate) async fn prove(
     }
     let threads = compute_threads(&state);
 
+    // Lease the version BEFORE waiting for the prove permit. `bb::prove` leases too, but that is far
+    // too late on its own: this request may sit in the permit queue for the length of another proof,
+    // and a cleanup pass in that window would evict the binary out from under it — the exact failure
+    // the mtime heuristic could not express and that the first cut of this lease still allowed
+    // (found by a codex review). Held (RAII) for the rest of the handler.
+    //
+    // `None` means a cleanup is deleting this version right now; report unavailable rather than race
+    // it. The next request re-downloads.
+    let _version_lease = match version_for_prove.as_ref() {
+        Some(v) => match versions::acquire_lease(v.as_str()) {
+            Some(lease) => Some(lease),
+            None => {
+                tracing::warn!(version = %v, "Version is being evicted; refusing rather than racing the deletion");
+                return Err(ProveError::VersionEvicting);
+            }
+        },
+        None => None,
+    };
+
     // A1: acquire the single prove permit ONLY now — around the CPU-bound proof — not across the body
     // read + version download above (which ran concurrently under the inflight cap). bb saturates all
     // cores, so proofs still run strictly one at a time; only the serialized *proving* is gated, not I/O.

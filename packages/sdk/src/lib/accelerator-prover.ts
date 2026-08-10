@@ -410,6 +410,24 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         this.#onPhase?.("denied");
         return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
       }
+      // 503: the accelerator cannot serve this proof right now — it is shutting down, or the cached
+      // bb for this version is being evicted. Degrade rather than fail: the accelerator is an
+      // optimisation, and this file's own rule is to fall back to WASM rather than fail the dApp.
+      //
+      // Without this a 503 fell through to `throw err` below, because the network-failure branch is
+      // gated on `!(err instanceof HTTPError)` and an HTTP 503 is one. That made "quit the app
+      // mid-proof" a hard transaction failure, and the accelerator's version-eviction path would have
+      // added a second way to hit it.
+      //
+      // Deliberately 503 only, not all 5xx: a blanket rule would silently mask genuine
+      // misconfiguration (an oversize payload, say) as "slow but working".
+      if (err instanceof HTTPError && err.response.status === 503) {
+        logger.warn("Accelerator is unavailable (503), falling back to WASM");
+        return this.#fallbackToWasm(
+          executionSteps,
+          "Local proof completed while the accelerator was unavailable",
+        );
+      }
       // Network-level failure: no HTTP response at all (TLS handshake/cert failure, connection
       // refused, timeout). The HTTPS listener/trust may have changed since /health pinned it.
       if (!(err instanceof HTTPError)) {
@@ -482,6 +500,13 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             if (retryErr instanceof HTTPError && retryErr.response.status === 403) {
               this.#onPhase?.("denied");
               return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
+            }
+            if (retryErr instanceof HTTPError && retryErr.response.status === 503) {
+              logger.warn("Accelerator is unavailable (503) on retry, falling back to WASM");
+              return this.#fallbackToWasm(
+                executionSteps,
+                "Local proof completed while the accelerator was unavailable",
+              );
             }
             logger.warn("HTTP retry also failed, falling back to WASM", {
               error: String(retryErr),

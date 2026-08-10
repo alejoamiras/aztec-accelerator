@@ -202,7 +202,7 @@ fn read_bb_marker_at(
 
 /// Fail-closed integrity check for a bb at explicit paths: the binary must be a present regular file
 /// whose streamed SHA-256 matches its valid marker's `binary_sha256`. Path-parameterized for testing.
-fn verify_bb_entry(
+pub(super) fn verify_bb_entry(
     bb_path: &Path,
     marker_path: &Path,
     expect_version: &str,
@@ -252,12 +252,14 @@ pub fn verify_cached_bb(version: &AztecVersion) -> Result<PathBuf, String> {
 /// reads. Best-effort and silent: this is an optimisation of eviction ORDER, never a correctness gate,
 /// and a read-only or full filesystem must not fail a proof.
 ///
-/// **This is a hint, not a lease** (codex round 2, correctly). Cleanup reads the mtime and then
-/// unlinks; a proof that verifies and marks BETWEEN those two steps still loses its binary. What
-/// changed is the size of the window: from "any entry older than the 5-minute window is fair game
-/// while a proof is queued behind the semaphore" down to the gap between two adjacent operations in
-/// the cleanup loop. Closing it entirely needs the cross-request lease that `FINDINGS.md` B2 already
-/// defers; the failure mode meanwhile is a recoverable re-download, not a wrong proof.
+/// **This is a hint; the LEASE is the real guard** (see `versions::leases`). It was written when the
+/// mtime window was the only protection, and on its own it could not close the race: cleanup read the
+/// mtime and then unlinked, so a proof starting between those two steps still lost its binary, and a
+/// proof queued behind the semaphore for longer than the window was never protected at all.
+///
+/// `is_protected` now consults the lease FIRST and falls back to this. The mtime is still worth
+/// refreshing because it covers the one gap a lease cannot: a version downloaded but not yet held by
+/// any proof.
 ///
 /// Remove-then-create rather than an mtime syscall: adding or removing a directory ENTRY updates the
 /// directory's mtime on every platform we ship, whereas `File::set_modified` on a directory handle

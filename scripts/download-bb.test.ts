@@ -32,6 +32,8 @@ import {
   verifyCachedBb,
   versionBbPath,
   versionMarkerPath,
+  parseGuardFlags,
+  usingSharedCache,
 } from "./download-bb";
 
 // These tests exercise the exported functions on the host platform (Linux CI = amd64-linux, matching
@@ -417,5 +419,39 @@ describe("cross-language contract fixtures", () => {
     );
     expect(Array.isArray(r.assets)).toBe(true);
     for (const a of r.assets) expect(a.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+});
+
+describe("accelerator-collision guard", () => {
+  // This script shares ~/.aztec-accelerator/versions with the running app by default, and both
+  // replaces live entries and evicts by retention. The app protects a binary a proof is executing
+  // with an in-process lease, which cannot see us — so the guard is what stops `bun run bb:download`
+  // deleting a binary mid-proof. Both of its escape hatches shipped broken the first time.
+
+  test("--force is consumed as a flag, never treated as a version", () => {
+    const { forced, rest } = parseGuardFlags(["--force", "5.0.0"]);
+    expect(forced).toBe(true);
+    // The bug: "--force" left in the list is parsed as a version and downloaded.
+    expect(rest).toEqual(["5.0.0"]);
+    expect(rest).not.toContain("--force");
+  });
+
+  test("without --force nothing is stripped", () => {
+    const { forced, rest } = parseGuardFlags(["5.0.0", "5.0.1"]);
+    expect(forced).toBe(false);
+    expect(rest).toEqual(["5.0.0", "5.0.1"]);
+  });
+
+  test("BB_VERSIONS_DIR opts out of the shared cache, so the guard must not fire", () => {
+    const prev = process.env.BB_VERSIONS_DIR;
+    try {
+      delete process.env.BB_VERSIONS_DIR;
+      expect(usingSharedCache()).toBe(true);
+      process.env.BB_VERSIONS_DIR = "/tmp/private-bb-cache";
+      expect(usingSharedCache()).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.BB_VERSIONS_DIR;
+      else process.env.BB_VERSIONS_DIR = prev;
+    }
   });
 });

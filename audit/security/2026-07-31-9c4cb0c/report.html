@@ -138,9 +138,15 @@
     Each fix carries regression tests that were <em>mutation-proved</em> — the fix was reverted and
     the test confirmed to fail — so the tests pin the defect rather than the current behaviour. The
     fixes then went through five rounds of independent adversarial review, which found thirteen
-    further bugs, nine of them in the fixes themselves. Two findings keep a documented residual that
-    is <strong>not</strong> claimed closed: F-02's same-user file-replacement window, and F-06's
-    eviction race, which is narrowed rather than eliminated.
+    further bugs, nine of them in the fixes themselves.
+  </p>
+  <p>
+    <strong>Update, 10 August:</strong> F-06's eviction race is now fully closed by an in-use lease
+    (a further five review rounds). F-02's same-user file-replacement window remains open and is now
+    known to be <em>untestable on Windows</em> — five separate routes to seed the certificate store
+    without a consent dialog were measured and all failed, so closing it there would mean shipping
+    security code CI can compile but never run. It stays an explicitly accepted risk rather than a
+    claimed fix.
   </p>
   <p>
     Full detail, including three places the fixes deliberately diverged from this report's own

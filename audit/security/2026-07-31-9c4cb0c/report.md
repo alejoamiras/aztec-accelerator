@@ -15,6 +15,10 @@ Phase 3 reduce — Opus · Phase 4 verify — Opus
 `worktree-harden-security-bugs` — see [Remediation status](#remediation-status-2026-08-06) below.
 The findings table and the original remediation order are preserved as the audit found them.
 
+**Residual closure (2026-08-10):** one of the three accepted residuals is now CLOSED and the other
+two are confirmed NOT closable at acceptable cost, with the evidence recorded — see
+[Residual closure](#residual-closure-2026-08-10).
+
 **Stakeholder-facing version:** `report.html` (per-finding one-sentence summary + plain-language
 explanation, technical trace collapsed). **Full detail:** `findings/consolidated.md` (reduce) and
 `findings/verified.md` (verification). **Raw corpus:** `raw/` — 16 cluster reports + 2 repo maps.
@@ -212,6 +216,103 @@ not something re-reading catches:
 One process note: a review round was hard-refused by the model provider as "possible cybersecurity
 risk" on the basis of adversarial phrasing in the prompt. The same substance in review vocabulary
 went through unchanged.
+
+## Residual closure (2026-08-10)
+
+The 2026-08-06 remediation left three accepted residuals. Each was then assessed for whether it could
+be closed with tests that actually run. Recorded here because two of the three answers are negative
+and rest on measurements that would otherwise be lost (the throwaway branch that produced them is
+deleted).
+
+### F-06's eviction race — CLOSED
+
+Fixed by an in-use lease with reservation-based eviction (PR #435). A proof leases the version before
+resolving its binary and holds it through execution; eviction takes a reservation rather than asking a
+question, so reserve-and-delete is one critical section.
+
+Five rounds of adversarial review were needed, and **every round found a defect in the previous
+round's fix** — that is the part worth remembering:
+
+| Round | What was still wrong |
+|---|---|
+| 1 | The lease was a *predicate*, so `is_leased()` then `remove_dir_all` was the same check-then-act it replaced |
+| 1 | Proofs waiting on the prove permit were unprotected — the exact case the fix claimed to cover |
+| 1 | A third deletion path (the download publisher) consulted nothing |
+| 1 | The single-process premise was false: the startup sweep ran BEFORE the port bind |
+| 2 | "Held" and "being deleted" were conflated, so a download reported success over a directory mid-deletion |
+| 2 | A SECOND process shares the cache (`scripts/download-bb.ts`), which the module comment explicitly denied |
+| 2 | A held candidate never re-armed the retry pass, so the size cap could stay exceeded |
+| 3 | "Held" does not imply "valid" — `bb::prove` leases before `find_bb` verifies |
+| 3 | Both advertised escape hatches were broken (`--force` parsed as a version; `BB_VERSIONS_DIR` bypassed nothing) |
+| 4 | The re-probe ran AFTER `downloadBb`, but the destructive publish is INSIDE it |
+
+The reviewer's verdict on whether that pattern indicted the approach: it did not — the findings came
+from untested integration boundaries, above all the second writer, rather than from the state machine.
+
+**A pre-existing UX bug surfaced while assessing this.** The new "version is being evicted" refusal
+returns 503, and the SDK's WASM fallback is gated on `!(err instanceof HTTPError)` — so a 503 fell
+through to a thrown error. Only 403 ever degraded. That meant quitting the accelerator mid-proof
+already failed the dApp's transaction outright, before any of this work. Fixed in the same PR; the
+mitigation ships with the trigger.
+
+**Still open by choice:** cross-process exclusion. `scripts/download-bb.ts` shares
+`~/.aztec-accelerator/versions` by default and the lease cannot see it. The tool now refuses to run
+while the accelerator answers on its port and re-checks immediately before publishing, but a
+check-to-unlink gap remains. Accepted as a low-impact developer-tooling residual — worst outcome is a
+failed proof and a re-download. Building cross-process locking for it was explicitly advised against.
+
+### F-02's same-UID window — NOT closed, and now known to be untestable on Windows
+
+The closure would be post-install identity verification: read back the anchor the trust store actually
+ended up with and compare it to the bytes that were validated. Writing that is easy. The question was
+whether it could be TESTED, because the production install path raises a consent dialog on macOS and
+Windows and CI cannot answer a dialog.
+
+A throwaway spike measured it. **The verification only needs the certificate PRESENT, not TRUSTED** —
+trust settings are what prompt — so the question became whether a test can seed a store
+non-interactively and read it back.
+
+**macOS: YES.** `security create-keychain` → `unlock` → `import` → `find-certificate` all complete
+silently against a keychain under a temp `HOME`, and the SHA-1 read back matches the SHA-1 of the
+seeded file exactly:
+
+```
+store=[8ED7D0F2B489F595C80685D44CF8D562B58602A0]
+ file=[8ED7D0F2B489F595C80685D44CF8D562B58602A0]
+```
+
+**Windows: NO.** Five routes, each timeboxed in its own CI step:
+
+| Route | Result |
+|---|---|
+| `Import-Certificate -CertStoreLocation Cert:\CurrentUser\Root` | hangs — consent dialog |
+| .NET `X509Store("Root","CurrentUser").Add()` | hangs — consent dialog |
+| `certutil -user -addstore Root` | hangs — consent dialog |
+| machine `Root` + expected inheritance | seeds silently, but **invisible** to `certutil -user -store Root` |
+| machine group-policy `Root` + inheritance | same — seeds, invisible |
+
+The last two are the useful negative: `certutil -user -store Root` reads the per-user physical store
+only, NOT machine roots, so the logical-store inheritance that would have made this testable does not
+apply to the production query. Windows guards `CurrentUser\Root` at every layer.
+
+Ruled out without spending a run, on advice: direct `HKCU\...\SystemCertificates\Root\Certificates`
+blob writes (an ordinary store open filters unprotected registry roots, so it would not satisfy the
+real query), a `ProtectedRoots` policy override (no documented one exists), and running as SYSTEM
+(different profile; only helps for machine Root, already covered above).
+
+**Conclusion:** F-02's closure is implementable and genuinely testable on macOS and Linux, and
+untestable on Windows by any route found. Shipping security code that CI compiles but never executes
+is the exact shape of the `NTE_NOT_FOUND` defect this remediation already produced once, so the
+residual stands rather than being closed on two platforms and asserted on the third.
+
+### F-05's empty-store ambiguity — not pursued
+
+A genuinely empty certificate store makes the removal control answer "could not verify" for a removal
+that had nothing to remove. It fails safe, costs a manual re-check, and the candidate replacement
+(`security show-keychain-info`) needs a real-Mac matrix across supported macOS versions to establish
+that it succeeds on an empty unlocked keychain and fails without prompting otherwise. Trading a
+verified-safe behaviour for an unverified one is how the `NTE_NOT_FOUND` defect happened. The lead is
+recorded at the call site for anyone with the hardware.
 
 ## Dropped / not pursued
 

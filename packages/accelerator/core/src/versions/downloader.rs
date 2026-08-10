@@ -6,7 +6,8 @@
 //! The smaller identity/platform/layout/cache concerns stay in the `versions` module root.
 
 use super::cache_layout::{
-    bb_binary_name, sha256_file, verify_cached_bb, versions_base_dir, write_bb_marker,
+    bb_binary_name, sha256_file, verify_bb_entry, verify_cached_bb, versions_base_dir,
+    write_bb_marker, MARKER_NAME,
 };
 use super::release_metadata::{
     current_platform, download_url, fetch_github_asset_digest, http_client, sha256_hex,
@@ -297,8 +298,60 @@ pub(crate) fn install_version_dir(
         write_bb_marker(&staging, version, archive_digest, &binary_digest)?;
 
         // Fail-closed publish: drop any live entry, then rename the stage into place.
+        //
+        // Except when a proof is holding it. Two concurrent first-time downloads of the same version
+        // are possible, and the later publisher would otherwise delete the directory the earlier
+        // one's proof is resolving or executing from (F-06 follow-up, found by a codex review).
+        // Keeping the existing entry is safe: it is already digest-verified and marker-backed, so it
+        // is the same binary this stage would have published.
         if version_dir.exists() {
-            std::fs::remove_dir_all(version_dir)?;
+            match super::leases::begin_evict(version) {
+                Ok(_reservation) => {
+                    std::fs::remove_dir_all(version_dir)?;
+                    std::fs::rename(&staging, version_dir)?;
+                    return Ok(());
+                }
+                // A proof is executing the published copy, so deleting it would pull the file out
+                // from under a running proof. Keep it — but only after PROVING it is good.
+                //
+                // "It is leased, therefore it is verified" is false: `bb::prove` leases before
+                // `find_bb` verifies, so a caller can hold an entry whose verification then fails.
+                // Without this re-check, a download staged to REPAIR a corrupt entry would discard
+                // its valid stage and report success over the corrupt one (found by a codex review).
+                Err(super::leases::Contended::Held) => match verify_bb_entry(
+                    &version_dir.join(bb_binary_name()),
+                    &version_dir.join(MARKER_NAME),
+                    version,
+                    current_platform(),
+                ) {
+                    Ok(_) => {
+                        tracing::info!(
+                            version = %version,
+                            "A proof is using this version and it verifies; keeping it and discarding the fresh stage"
+                        );
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&staging);
+                        return Err(std::io::Error::other(format!(
+                            "bb {version}: a proof holds this entry but it does not verify ({e}); \
+                             cannot replace it while in use — retry once the proof finishes"
+                        ))
+                        .into());
+                    }
+                },
+                // A cleanup pass is DELETING it. Keeping it would report success over a directory
+                // that is about to stop existing (found by a codex review). Fail so the caller
+                // retries once the eviction has finished.
+                Err(super::leases::Contended::Evicting) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(std::io::Error::other(format!(
+                        "bb {version}: a cleanup pass is evicting this version; retry"
+                    ))
+                    .into());
+                }
+            }
         }
         std::fs::rename(&staging, version_dir)?;
         Ok(())
@@ -536,6 +589,101 @@ mod tests {
     /// F-007 staged verified install: `install_version_dir` extracts + finalizes + writes the marker in
     /// a unique staging dir, then publishes fail-closed — replacing any stale entry wholesale, leaving
     /// no staging dir, and producing a marker whose `binary_sha256` matches the FINAL published binary.
+    /// A valid gzipped tar carrying a single fake `bb`, plus its archive digest.
+    fn fake_tarball() -> (Vec<u8>, String) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let bb_content = b"#!/bin/sh\necho fake-bb\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bb_content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, bb_binary_name(), &bb_content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tarball = encoder.finish().unwrap();
+        let digest = sha256_hex(&tarball);
+        (tarball, digest)
+    }
+
+    // ── Publisher contention (F-06 lease) ─────────────────────────────────────────────────────
+    // `install_version_dir` deletes any live entry before renaming its stage into place. These pin
+    // what it does when that entry is contended. The parsing tests elsewhere do not reach this
+    // wiring, which is exactly how a bug survived here through a review round.
+
+    /// A proof holds the published copy and it verifies: keep it, drop our stage, report success.
+    /// Deleting it would pull the binary out from under a running proof.
+    #[test]
+    fn publishing_over_a_held_and_valid_entry_preserves_it() {
+        let (tarball, digest) = fake_tarball();
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-held-valid");
+
+        // Publish once so a valid, marker-backed entry exists.
+        install_version_dir(&version_dir, &tarball, "5.0.0-held-valid", &digest).unwrap();
+        let published = std::fs::read(version_dir.join(bb_binary_name())).unwrap();
+
+        // Now a proof holds it and a second publish arrives.
+        let _lease = super::super::leases::acquire("5.0.0-held-valid").unwrap();
+        install_version_dir(&version_dir, &tarball, "5.0.0-held-valid", &digest)
+            .expect("a held-and-valid entry is preserved, not an error");
+
+        assert!(
+            version_dir.exists(),
+            "the entry a proof is executing must survive"
+        );
+        assert_eq!(
+            std::fs::read(version_dir.join(bb_binary_name())).unwrap(),
+            published,
+            "the original bytes must still be there"
+        );
+    }
+
+    /// A proof holds it but it does NOT verify: we may not replace it (in use) and must not claim
+    /// success over it. Pre-fix this discarded a valid stage and returned Ok over the corrupt entry.
+    #[test]
+    fn publishing_over_a_held_but_corrupt_entry_fails_loudly() {
+        let (tarball, digest) = fake_tarball();
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-held-corrupt");
+
+        install_version_dir(&version_dir, &tarball, "5.0.0-held-corrupt", &digest).unwrap();
+        // Corrupt the published binary so it no longer matches its marker.
+        std::fs::write(version_dir.join(bb_binary_name()), b"tampered").unwrap();
+
+        let _lease = super::super::leases::acquire("5.0.0-held-corrupt").unwrap();
+        let err = install_version_dir(&version_dir, &tarball, "5.0.0-held-corrupt", &digest)
+            .expect_err("must not report success over an entry that does not verify");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "the error should say why: {err}"
+        );
+    }
+
+    /// A cleanup pass is DELETING it. Keeping it would vouch for a directory about to disappear.
+    #[test]
+    fn publishing_over_an_evicting_entry_fails_rather_than_vouching_for_it() {
+        let (tarball, digest) = fake_tarball();
+        let base = tempfile::tempdir().unwrap();
+        let version_dir = base.path().join("5.0.0-evicting");
+
+        install_version_dir(&version_dir, &tarball, "5.0.0-evicting", &digest).unwrap();
+
+        let _reservation = super::super::leases::begin_evict("5.0.0-evicting").unwrap();
+        let err = install_version_dir(&version_dir, &tarball, "5.0.0-evicting", &digest)
+            .expect_err("a directory being deleted must not be reported as published");
+        assert!(
+            err.to_string().contains("evicting"),
+            "the error should name the reason: {err}"
+        );
+    }
+
     #[test]
     fn install_version_dir_stages_marks_and_publishes() {
         use flate2::write::GzEncoder;

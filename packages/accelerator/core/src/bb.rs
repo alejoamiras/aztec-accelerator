@@ -188,6 +188,21 @@ pub async fn prove(
     version: Option<&versions::AztecVersion>,
     threads: Option<usize>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    // Take the lease BEFORE resolving the path, and hold it for this whole function — the window
+    // being closed is between "cleanup decided this version was evictable" and "we executed it".
+    // `_lease` is bound (not `_`) so it lives to the end of the scope rather than dropping instantly.
+    // The server leases before it waits for the prove permit; this second lease covers direct callers
+    // of `prove` and costs nothing (the registry is refcounted, so nesting is fine). `None` means a
+    // cleanup is deleting this version right now — fail rather than execute a binary being unlinked.
+    let _lease = match version {
+        Some(v) => match versions::acquire_lease(v.as_str()) {
+            Some(l) => Some(l),
+            None => {
+                return Err(format!("bb {v}: the cached version is being evicted").into());
+            }
+        },
+        None => None,
+    };
     let bb_path =
         find_bb(version).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 

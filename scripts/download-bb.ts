@@ -116,6 +116,51 @@ export function versionsBaseDir(): string {
 function versionDir(version: string): string {
   return join(versionsBaseDir(), version);
 }
+
+/**
+ * Refuse to mutate the cache while the accelerator app is running.
+ *
+ * This script and the app share `~/.aztec-accelerator/versions` by default, and this script both
+ * replaces live entries and applies its own retention deletion. The app protects a binary a proof is
+ * executing with an in-process lease (`core/src/versions/leases.rs`) — which, being in-process, is
+ * blind to us. So `bun run bb:download` during a proof could delete the binary out from under it.
+ *
+ * A cross-process lock would be the complete answer; this is the proportionate one. The exposure is a
+ * developer-tooling collision whose worst outcome is a failed proof and a re-download, so a clear
+ * refusal beats a silent race, and `BB_VERSIONS_DIR` already exists for anyone who wants an
+ * independent cache. (Hole found by a codex review of the app-side lease.)
+ */
+/**
+ * Split the accelerator-guard flag out of the argument list.
+ *
+ * `--force` is a FLAG, not a version. The first cut of the guard read it with `args.includes` but
+ * left it in the list, so it flowed into the version parser and was downloaded as though it were a
+ * version — the escape hatch was advertised and broken at the same time (found by a codex review).
+ */
+export function parseGuardFlags(args: string[]): { forced: boolean; rest: string[] } {
+  return {
+    forced: args.includes("--force"),
+    rest: args.filter((a) => a !== "--force"),
+  };
+}
+
+export function usingSharedCache(): boolean {
+  // `BB_VERSIONS_DIR` points this run at its own cache, so there is nothing to collide with and the
+  // guard must not fire. (It was advertised as an escape hatch while not actually being one — found
+  // by a codex review.)
+  return !process.env.BB_VERSIONS_DIR;
+}
+
+async function acceleratorIsRunning(): Promise<boolean> {
+  try {
+    const res = await fetch("http://127.0.0.1:59833/health", {
+      signal: AbortSignal.timeout(700),
+    });
+    return res.ok;
+  } catch {
+    return false; // nothing listening, or it is not answering — either way we are not racing it.
+  }
+}
 export function versionBbPath(version: string): string {
   return join(versionDir(version), "bb");
 }
@@ -342,7 +387,19 @@ function createStagingDir(version: string): string {
  * Download + verify + stage + finalize + marker + fail-closed publish for one version. Skips (verified)
  * if the cache already holds a marker-valid binary.
  */
-export async function downloadBb(version: string): Promise<void> {
+/**
+ * Called immediately before the destructive publish, so the liveness answer is fresh.
+ *
+ * The guard in `main` runs once at startup, and a download can take minutes — during which the app
+ * can start, publish this version itself, and lease it. Publishing then delete-renames a directory a
+ * proof may be executing. Re-checking at the last moment narrows that to the gap between the check
+ * and the rename; closing it entirely needs cross-process exclusion, which is the accepted residual
+ * documented in `packages/accelerator/core/src/versions/leases.rs`. (Found by a codex review: the
+ * first attempt at this re-probe covered only retention cleanup, which runs AFTER publication.)
+ */
+export type PublishGuard = () => Promise<boolean>;
+
+export async function downloadBb(version: string, guard?: PublishGuard): Promise<void> {
   assertValidVersion(version);
 
   if (verifyCachedBb(version)) {
@@ -415,6 +472,13 @@ export async function downloadBb(version: string): Promise<void> {
     // the two leaves NO live entry (⇒ verified re-download next use) plus a `.tmp.<rand>` stage
     // (reaped by the next install's stage-unique naming + cleanup). Deliberately NOT atomic replacement.
     const vdir = versionDir(version);
+    if (existsSync(vdir) && guard && !(await guard())) {
+      rmSync(stage, { recursive: true, force: true });
+      throw new Error(
+        `the Aztec Accelerator started while this was downloading and may be using ${version}; ` +
+          "refusing to replace it. Quit the app and re-run, or pass --force.",
+      );
+    }
     if (existsSync(vdir)) rmSync(vdir, { recursive: true, force: true });
     renameSync(stage, vdir);
   } catch (err) {
@@ -513,7 +577,25 @@ async function main(): Promise<void> {
 
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+  const { forced, rest } = parseGuardFlags(args);
+
+  // Read-only paths (--help, --list) are always fine; everything below can delete a live entry.
+  const readOnly =
+    rest.length === 0 ||
+    rest.includes("--help") ||
+    rest.includes("-h") ||
+    rest.includes("--list");
+  if (!readOnly && !forced && usingSharedCache() && (await acceleratorIsRunning())) {
+    console.error(
+      "The Aztec Accelerator is running and shares this cache.\n" +
+        `Cache: ${versionsBaseDir()}\n\n` +
+        "Downloading now can delete a binary a proof is currently executing. Quit the app first,\n" +
+        "point this run at its own cache with BB_VERSIONS_DIR=..., or pass --force if you are sure.",
+    );
+    process.exit(1);
+  }
+
+  if (rest.length === 0 || rest.includes("--help") || rest.includes("-h")) {
     console.log(`Usage: bun scripts/download-bb.ts <version>[,<version>,...] [--list]
 
 Downloads + verifies bb binaries for specific Aztec versions.
@@ -526,7 +608,7 @@ Platform: ${currentPlatform()}`);
     process.exit(0);
   }
 
-  if (args.includes("--list")) {
+  if (rest.includes("--list")) {
     const cached = listCachedVersions();
     console.log(`Cache: ${versionsBaseDir()}`);
     if (cached.length === 0) {
@@ -538,7 +620,7 @@ Platform: ${currentPlatform()}`);
     process.exit(0);
   }
 
-  const versions = args
+  const versions = rest
     .flatMap((a) => a.split(","))
     .map((v) => v.trim())
     .filter(Boolean);
@@ -555,7 +637,11 @@ Platform: ${currentPlatform()}`);
   const downloaded = new Set<string>();
   for (const version of versions) {
     try {
-      await downloadBb(version);
+      await downloadBb(version, async () => {
+        // `true` = safe to publish. Mirrors the startup guard's policy exactly.
+        if (forced || !usingSharedCache()) return true;
+        return !(await acceleratorIsRunning());
+      });
       downloaded.add(version);
     } catch (err) {
       console.error(`  ✗ ${version}: ${err instanceof Error ? err.message : String(err)}`);
@@ -564,7 +650,19 @@ Platform: ${currentPlatform()}`);
   }
 
   console.log("");
-  cleanupOldVersions(downloaded);
+
+  // Re-probe. The check above ran BEFORE downloads that can take minutes, so the app may have
+  // started in the meantime — and retention eviction below deletes live entries. This narrows the
+  // window to the gap between this line and the deletions; it does not eliminate it, which is why
+  // the residual is documented in `core/src/versions/leases.rs` rather than claimed closed.
+  if (!forced && usingSharedCache() && (await acceleratorIsRunning())) {
+    console.error(
+      "The Aztec Accelerator started while this was downloading; skipping retention cleanup so a\n" +
+        "binary in use is not deleted. Re-run once it has quit to reclaim space.",
+    );
+  } else {
+    cleanupOldVersions(downloaded);
+  }
 
   const cached = listCachedVersions();
   console.log(`\nCached versions: ${cached.join(", ") || "(none)"}`);

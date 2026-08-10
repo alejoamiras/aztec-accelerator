@@ -375,14 +375,9 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         // overriding the guard would let one request delete the binary another is about to execute. The
         // overshoot is bounded by the burst rate and reclaimed by the next cleanup, which is a different
         // thing from the unbounded growth this cap exists to stop.
-        if super::downloader::recently_active(&dir) {
-            tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+        //
+        if evict_if_unheld(&version, &dir, super::downloader::recently_active(&dir)) {
             deferred_by_active_window = true;
-            continue;
-        }
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
-            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
         }
     }
 
@@ -395,6 +390,44 @@ pub async fn cleanup_old_versions(bundled: &AztecVersion, in_use: Option<&AztecV
         tokio::time::sleep(super::downloader::CACHE_ENTRY_ACTIVE_WINDOW).await;
         cleanup_after_active_window(bundled, in_use).await;
     }
+}
+
+/// Delete a version directory, but only if no proof holds it — and hold that exclusion across the
+/// deletion itself.
+///
+/// This is the F-06 closure and the shape matters. Asking "is it leased?" and then deleting is the
+/// same check-then-act the mtime window had: the answer can go stale between the two steps. So the
+/// reservation returned by `begin_evict` is kept alive for the whole `remove_dir_all`, which means a
+/// proof cannot acquire this version at any point during the deletion — it sees `None` and treats the
+/// binary as absent, which it is about to be.
+///
+/// `recently_active` is the weaker fallback for the one gap a lease cannot cover: a version that has
+/// been downloaded but that no proof holds yet. Checked first because it needs no reservation.
+///
+/// Returns whether the caller should schedule a retry pass — true for anything skipped, whether by
+/// the activity window or by contention.
+fn evict_if_unheld(version: &AztecVersion, dir: &std::path::Path, recently_active: bool) -> bool {
+    if recently_active {
+        tracing::debug!(version = %version, "Skipping eviction of a recently-active version");
+        return true;
+    }
+    let _reservation = match super::leases::begin_evict(version.as_str()) {
+        Ok(r) => r,
+        Err(why) => {
+            tracing::debug!(version = %version, ?why, "Skipping eviction of a contended version");
+            // Report this as deferred so the retry pass re-arms. A held version is exactly as
+            // reclaimable-later as a recently-active one, and treating it otherwise meant a version
+            // held during the only retry left the cache over its ceiling until the next download
+            // (found by a codex review). A version still held during the retry as well waits for the
+            // next download or the startup sweep — bounded, and noted in `cleanup_old_versions`.
+            return true;
+        }
+    };
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => tracing::info!(version = %version, "Evicted old bb version"),
+        Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
+    }
+    false
 }
 
 /// Bring the cache under [`CACHE_MAX_TOTAL_BYTES`] at process start (F-06, round 3).
@@ -437,15 +470,7 @@ async fn cleanup_after_active_window(bundled: &AztecVersion, in_use: Option<&Azt
         .collect();
     for version in versions_to_evict_for_size(&sized, bundled, in_use, CACHE_MAX_TOTAL_BYTES) {
         let dir = base.join(version.as_str());
-        if super::downloader::recently_active(&dir) {
-            continue;
-        }
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => {
-                tracing::info!(version = %version, "Evicted to stay under the cache size cap (deferred pass)")
-            }
-            Err(e) => tracing::warn!(version = %version, error = %e, "Failed to evict bb version"),
-        }
+        evict_if_unheld(&version, &dir, super::downloader::recently_active(&dir));
     }
 }
 
@@ -696,6 +721,65 @@ mod tests {
         // Cap of one binary against four: everything evictable must go, and only those two survive.
         let evicted = versions_to_evict_for_size(&sized, &av("5.0.0"), Some(&av("5.0.1")), BB);
         assert_eq!(evicted, vec![av("5.0.2"), av("5.0.3")]);
+    }
+
+    // ── F-06 residual closure: the in-use lease ───────────────────────────────────────────────
+    // Before the lease, cleanup answered "is anyone using this?" from the directory's mtime: it read
+    // the timestamp and then unlinked, so a proof starting between those two steps lost its binary,
+    // and a proof queued behind the prove permit for longer than the window was never protected at
+    // all. F-06's size cap made that reachable for `Mainnet` versions the count policy could never
+    // evict. These drive the REAL eviction function, deletion included.
+
+    fn seeded_version_dir(tag: &str) -> (tempfile::TempDir, AztecVersion, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let version = av(&format!("5.0.0-evict-{tag}"));
+        let dir = d.path().join(version.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bb"), b"binary").unwrap();
+        (d, version, dir)
+    }
+
+    /// THE property. A held version survives eviction even though nothing else protects it — its
+    /// activity window has already elapsed. Pre-lease, this directory was deleted.
+    #[test]
+    fn a_held_version_survives_eviction() {
+        let (_d, version, dir) = seeded_version_dir("held");
+        let lease = super::super::leases::acquire(version.as_str()).unwrap();
+
+        let deferred = evict_if_unheld(&version, &dir, false);
+
+        assert!(
+            dir.exists(),
+            "a proof is executing this binary — it must not be deleted"
+        );
+        assert!(
+            deferred,
+            "skipped for ANY reason must re-arm the retry pass — treating a held version as
+             'not deferred' left the cache over its ceiling when the proof outlived the one retry"
+        );
+        drop(lease);
+    }
+
+    /// …and once released it is evictable, or the size cap could never bind.
+    #[test]
+    fn an_unheld_version_is_evicted() {
+        let (_d, version, dir) = seeded_version_dir("unheld");
+        assert!(!evict_if_unheld(&version, &dir, false));
+        assert!(
+            !dir.exists(),
+            "nothing holds it and its window elapsed — it should be gone"
+        );
+    }
+
+    /// The weaker guard still covers the gap a lease cannot: downloaded, not yet held by any proof.
+    #[test]
+    fn a_recently_active_version_is_deferred_not_deleted() {
+        let (_d, version, dir) = seeded_version_dir("fresh");
+        assert!(
+            evict_if_unheld(&version, &dir, true),
+            "must report deferral so the retry pass re-arms"
+        );
+        assert!(dir.exists());
     }
 
     #[test]
