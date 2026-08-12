@@ -63,9 +63,14 @@ pub fn classify(owner_image: Option<&std::path::Path>, our_image: &std::path::Pa
 /// "stay resident" would give a transient lookup failure ~1440 chances a day to strand a duplicate
 /// tray process showing an error — a defect generator, not a residual risk.
 ///
-/// The security cost is small and stated: an attacker who can force the lookup to fail keeps the
-/// attack. But they are *holding the listening socket*, so their row is in the table; forcing
-/// `Unknown` means releasing the port, which forfeits the squat.
+/// **The residual, stated accurately.** An earlier version of this comment claimed that forcing
+/// `Unknown` requires releasing the socket, so an attacker could not both squat and hide. **That was
+/// wrong** (post-impl codex): `OpenProcess` access is DACL-controlled, so a same-user squatter can
+/// deny query access to itself while keeping the port. That specific case is now caught — it maps to
+/// [`PortOwner::Foreign`] via `Lookup::Guarded`, see [`classify_port_owner`] — but the honest residual
+/// is that any OTHER route to `Unknown` (table churn, a PID that exits between the two calls) still
+/// permits the bow-out. Those are transient and not attacker-controlled on demand; closing them would
+/// mean treating every transient failure as hostile, on a path that runs once a minute.
 pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
     healthy_aztec_answered && owner != PortOwner::Foreign
 }
@@ -76,9 +81,11 @@ pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
 /// `None` — i.e. [`PortOwner::Unknown`] — on any doubt: no row, MORE than one row (an ambiguous
 /// answer must never be guessed into a verdict), a process we cannot open, or an unreadable path.
 #[cfg(windows)]
-fn owner_image_of_port(port: u16) -> Option<std::path::PathBuf> {
+fn owner_image_of_port(port: u16) -> Lookup {
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER,
+    };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
         TCP_TABLE_OWNER_PID_LISTENER,
@@ -88,98 +95,157 @@ fn owner_image_of_port(port: u16) -> Option<std::path::PathBuf> {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    // The table is racy by nature (rows come and go), so size then fetch, and tolerate one retry.
+    // Over-align the storage. `Vec<u8>` has alignment 1, and dereferencing it as a 4-aligned
+    // `MIB_TCPTABLE_OWNER_PID` is undefined behaviour even where x86 tolerates it in practice
+    // (post-impl codex). Backing it with `u32` gives the alignment the structs require; rows are
+    // still read with `read_unaligned` because the table may carry padding between entries.
+    let mut words: Vec<u32> = Vec::new();
     let mut size: u32 = 0;
-    let mut buf: Vec<u8> = Vec::new();
-    for _ in 0..3 {
+    let mut fetched = false;
+    for _ in 0..4 {
+        let ptr = if words.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            words.as_mut_ptr().cast()
+        };
         let rc = unsafe {
             GetExtendedTcpTable(
-                if buf.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    buf.as_mut_ptr().cast()
-                },
+                ptr,
                 &mut size,
-                0, // no sort — we filter ourselves
+                0, // unsorted — we filter ourselves
                 AF_INET as u32,
                 TCP_TABLE_OWNER_PID_LISTENER,
                 0,
             )
         };
         if rc == 0 {
+            fetched = true;
             break;
         }
         if rc != ERROR_INSUFFICIENT_BUFFER {
-            return None;
+            return Lookup::NoAnswer;
         }
-        buf = vec![0u8; size as usize];
+        // The table grows between the sizing call and the fetch, hence the loop rather than one
+        // resize — but never leave it having only RESIZED, which would read an unfilled buffer.
+        words = vec![0u32; (size as usize).div_ceil(4)];
     }
-    if buf.is_empty() || (buf.len() as u32) < size {
-        return None;
+    if !fetched || words.is_empty() {
+        return Lookup::NoAnswer;
     }
 
-    // SAFETY: on success the buffer holds a MIB_TCPTABLE_OWNER_PID whose `dwNumEntries` is followed
-    // by that many MIB_TCPROW_OWNER_PID. Bounds are re-checked against the buffer length below
-    // rather than trusted, so a malformed count cannot walk off the end.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-    let count = table.dwNumEntries as usize;
+    let bytes = words.as_ptr().cast::<u8>();
+    let capacity = (words.len() * 4).min(size as usize);
+    // The row array begins where the single inline row does; deriving the header this way keeps it
+    // correct if the struct ever gains fields.
     let header =
         std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() - std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-    if header + count.saturating_mul(row_size) > buf.len() {
-        return None;
+    if capacity < std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
+        return Lookup::NoAnswer;
+    }
+    // SAFETY: `bytes` points at `capacity` initialised bytes; `read_unaligned` imposes no alignment
+    // requirement, and every row index is bounds-checked against `capacity` before it is read.
+    let table = unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCPTABLE_OWNER_PID>()) };
+    let count = table.dwNumEntries as usize;
+    if header + count.saturating_mul(row_size) > capacity {
+        return Lookup::NoAnswer;
     }
 
-    let want = port.to_be() as u32; // dwLocalPort is in network byte order, in the low 16 bits
+    // Both fields are network byte order. Match the LOOPBACK address specifically: a listener on
+    // 0.0.0.0 or another interface shares the port number without being the local service we mean.
+    let want_port = port.to_be() as u32;
+    let want_addr = u32::from_ne_bytes([127, 0, 0, 1]);
     let mut pid: Option<u32> = None;
     for i in 0..count {
-        let row =
-            unsafe { &*(buf.as_ptr().add(header + i * row_size) as *const MIB_TCPROW_OWNER_PID) };
-        if row.dwLocalPort != want {
+        let row = unsafe {
+            std::ptr::read_unaligned(
+                bytes
+                    .add(header + i * row_size)
+                    .cast::<MIB_TCPROW_OWNER_PID>(),
+            )
+        };
+        if row.dwLocalPort != want_port || row.dwLocalAddr != want_addr {
             continue;
         }
         match pid {
-            // Two listeners claiming the same port is exactly the ambiguity this must not resolve.
-            Some(seen) if seen != row.dwOwningPid => return None,
+            // Two listeners claiming the same endpoint is exactly the ambiguity we must not resolve.
+            Some(seen) if seen != row.dwOwningPid => return Lookup::NoAnswer,
             Some(_) => {}
             None => pid = Some(row.dwOwningPid),
         }
     }
-    let pid = pid?;
+    let Some(pid) = pid else {
+        return Lookup::NoAnswer;
+    };
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
-        return None;
+        // Distinguish "it is gone" from "it refused to be identified". `OpenProcess` access is
+        // DACL-controlled, so a same-user squatter can deny `PROCESS_QUERY_LIMITED_INFORMATION` on
+        // ITSELF while keeping the socket — which would otherwise force `Unknown` and hand it the
+        // eviction anyway (post-impl codex). A genuine sibling of ours sets no such DACL.
+        return if unsafe { GetLastError() } == ERROR_ACCESS_DENIED {
+            Lookup::Guarded
+        } else {
+            Lookup::NoAnswer
+        };
     }
     let mut wide = [0u16; 32768]; // MAX_PATH is not the real limit for this API
     let mut len = wide.len() as u32;
     let ok = unsafe { QueryFullProcessImageNameW(handle, 0, wide.as_mut_ptr(), &mut len) };
     unsafe { CloseHandle(handle) };
     if ok == 0 || len == 0 {
-        return None;
+        return Lookup::NoAnswer;
     }
-    Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+    Lookup::Image(std::path::PathBuf::from(std::ffi::OsString::from_wide(
         &wide[..len as usize],
     )))
 }
 
-/// Off Windows we do not look, so nobody is ever identified — which yields [`PortOwner::Unknown`],
-/// and the bow-out this guards is Windows-only anyway.
+/// What the OS lookup came back with, before it is judged against our own image.
+///
+/// Only the Windows lookup constructs `Image` and `Guarded` — off Windows the stub below always
+/// answers `NoAnswer`, so those two are legitimately never built there. The `match` in
+/// [`classify_port_owner`] still handles all three on every platform, which is the point: the
+/// decision is shared, only the lookup is platform-specific.
+#[cfg_attr(not(windows), allow(dead_code))]
+enum Lookup {
+    /// The owning process's image path.
+    Image(std::path::PathBuf),
+    /// No usable answer: no matching row, an ambiguous one, a process that had already exited, or a
+    /// platform where we do not look. Benign and usually transient.
+    NoAnswer,
+    /// A process owns the socket but **refused to be identified** — `OpenProcess` returned
+    /// `ERROR_ACCESS_DENIED`. Not transient, and not something a sibling of ours does.
+    Guarded,
+}
+
+/// Off Windows we do not look, so nobody is ever identified.
 ///
 /// A stub rather than a `cfg` branch inside [`classify_port_owner`] so the DECISION path is identical
 /// on every platform: only the *lookup* is platform-specific, and `classify` is therefore compiled,
 /// reachable and exercised everywhere rather than being dead code off Windows.
 #[cfg(not(windows))]
-fn owner_image_of_port(_port: u16) -> Option<std::path::PathBuf> {
-    None
+fn owner_image_of_port(_port: u16) -> Lookup {
+    Lookup::NoAnswer
 }
 
 /// Who owns [`super::PORT`]?
+///
+/// `Guarded` maps to [`PortOwner::Foreign`], which is the one place this deviates from "an
+/// unidentified owner is Unknown". `OpenProcess` access is DACL-controlled, so a same-user squatter
+/// can deny query access to ITSELF while holding the socket; treating that as Unknown would let it
+/// force the bow-out and keep the whole attack (post-impl codex). Refusing to be identified is not
+/// something our own build does, so it is judged as what it is.
 pub fn classify_port_owner(port: u16) -> PortOwner {
     let Ok(ours) = std::env::current_exe() else {
         return PortOwner::Unknown;
     };
-    classify(owner_image_of_port(port).as_deref(), &ours)
+    match owner_image_of_port(port) {
+        Lookup::Image(image) => classify(Some(image.as_path()), &ours),
+        Lookup::Guarded => PortOwner::Foreign,
+        Lookup::NoAnswer => PortOwner::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -248,13 +314,16 @@ mod tests {
     fn resolves_the_owner_of_a_listener_this_process_opened() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let image = owner_image_of_port(port)
-            .expect("GetExtendedTcpTable must resolve a same-user listener we opened ourselves");
+        let Lookup::Image(image) = owner_image_of_port(port) else {
+            panic!("GetExtendedTcpTable must resolve a same-user listener we opened ourselves");
+        };
         let ours = std::env::current_exe().unwrap();
         assert_eq!(
             classify(Some(&image), &ours),
             PortOwner::Ours,
             "a socket opened by THIS process must classify as Ours (got {image:?} vs {ours:?})"
         );
+        // The whole path, including the loopback-address filter and the Guarded mapping.
+        assert_eq!(classify_port_owner(port), PortOwner::Ours);
     }
 }

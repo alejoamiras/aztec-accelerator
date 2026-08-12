@@ -283,19 +283,35 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
     });
     // F-03 sink B: from here until the serving loop ends, THIS process owns `:59833`. That is an
     // in-process fact no other process can forge, unlike the `/health` answer the floor tracker used
-    // to rely on alone.
-    BIND_OWNED.store(true, Ordering::SeqCst);
-    let served = axum::serve(listener, app).await;
-    // Cleared on the way out so the flag can never outlive the listener it describes: a stale `true`
-    // after `serve` returns would let the floor advance for a build whose server is gone.
-    BIND_OWNED.store(false, Ordering::SeqCst);
-    served?;
+    // to rely on alone. An RAII guard, not a store/store pair: clearing the flag AFTER the `.await`
+    // is skipped entirely if this future is dropped or aborted, or if the serve loop unwinds — and a
+    // stale `true` would let the version floor advance for a build whose server is gone
+    // (post-impl codex).
+    let _bind_owned = BindOwnedGuard::acquire();
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
 /// Set for exactly as long as this process is serving on [`PORT`] (F-03 sink B, audit
 /// 2026-07-31-9c4cb0c).
 static BIND_OWNED: AtomicBool = AtomicBool::new(false);
+
+/// Holds [`BIND_OWNED`] for its lifetime and clears it on `Drop` — including on cancellation, on a
+/// dropped future, and while unwinding.
+struct BindOwnedGuard;
+
+impl BindOwnedGuard {
+    fn acquire() -> Self {
+        BIND_OWNED.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for BindOwnedGuard {
+    fn drop(&mut self) {
+        BIND_OWNED.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Does THIS process currently own the `:59833` listener?
 ///
