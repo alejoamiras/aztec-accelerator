@@ -75,30 +75,37 @@ pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
     healthy_aztec_answered && owner != PortOwner::Foreign
 }
 
-/// Resolve the image path of the process owning the IPv4 listener on `port`, via
-/// `GetExtendedTcpTable` + `QueryFullProcessImageNameW`.
+/// Resolve who owns the listener on `port`, via `GetExtendedTcpTable` +
+/// `QueryFullProcessImageNameW`.
 ///
-/// `None` — i.e. [`PortOwner::Unknown`] — on any doubt: no row, MORE than one row (an ambiguous
-/// answer must never be guessed into a verdict), a process we cannot open, or an unreadable path.
+/// Yields [`Lookup::NoAnswer`] whenever we genuinely do not know — a failed or unparseable table
+/// scan, no matching row, or a process that vanished. Several owners are RESOLVED rather than
+/// discarded as ambiguous; refusal to be identified is [`Lookup::Guarded`].
+///
+/// An `AF_INET6` socket bound to `::` with `IPV6_V6ONLY=0` is dual-stack: it serves IPv4 loopback and
+/// reserves the port on both stacks, but appears ONLY in the TCP6 table — so querying `AF_INET`
+/// alone reported `NoAnswer` for it, i.e. straight back to the bow-out. Successive review rounds each
+/// narrowed this lookup and each missed an adjacent case (port-only, then loopback-only, then
+/// family-only); what it has to answer is simply "who is holding this endpoint".
 #[cfg(windows)]
 fn owner_image_of_port(port: u16) -> Lookup {
-    // BOTH address families. An `AF_INET6` socket bound to `::` with `IPV6_V6ONLY=0` is dual-stack:
-    // it serves IPv4 loopback and reserves the port on both stacks, but appears ONLY in the TCP6
-    // table — so querying `AF_INET` alone reported `NoAnswer` for it, i.e. straight back to the
-    // bow-out (post-impl codex round 3). Rounds 1 and 2 each narrowed this filter and each missed an
-    // adjacent case; the union is what actually matches "who is holding this endpoint".
-    let mut pids = owning_pids_v4(port);
-    // The v6 table is consulted ONLY when IPv4 yielded nobody. Windows defaults `IPV6_V6ONLY` to
-    // ENABLED and the table does not expose it, so a `::` listener is usually NOT dual-stack — and
-    // unioning it unconditionally meant an unrelated IPv6-only neighbour on this port could be judged
-    // `Foreign` alongside our own genuine IPv4 sibling, stranding a duplicate tray. That is the exact
-    // failure D-ITEM7's polarity exists to avoid, and the previous round's fix introduced it.
+    // A FAILED IPv4 scan is not the same as a successful one that found nobody, and conflating them
+    // reintroduces the very regression the gate exists to prevent: with a genuine IPv4 sibling plus
+    // an unrelated IPv6-only `::` neighbour, one transient table failure would fall through to v6,
+    // judge the neighbour `Foreign`, and strand a duplicate tray. A failed scan means we do not know
+    // — which is `NoAnswer`, full stop.
+    let Some(mut pids) = owning_pids_v4(port) else {
+        return Lookup::NoAnswer;
+    };
+    // The v6 table is consulted ONLY after a SUCCESSFUL IPv4 scan that found nobody. Windows defaults
+    // `IPV6_V6ONLY` to ENABLED and the table does not expose it, so a `::` listener is usually NOT
+    // dual-stack; unioning it unconditionally would let an innocent neighbour keep us resident.
     //
-    // Gating on "IPv4 found nobody" is what makes including `::` sound rather than speculative: we
-    // only reach this code because our own `127.0.0.1` bind failed with `AddrInUse`, so if no IPv4
-    // socket owns the port, something else does — and a dual-stack `::` listener is the explanation.
+    // Gating this way is what makes including `::` sound rather than speculative: we only reach this
+    // code because our own `127.0.0.1` bind failed with `AddrInUse`, so if no IPv4 socket owns the
+    // port, something else does — and a dual-stack `::` listener is the explanation.
     if pids.is_empty() {
-        pids = owning_pids_v6(port);
+        pids = owning_pids_v6(port).unwrap_or_default();
     }
     if pids.is_empty() {
         return Lookup::NoAnswer;
@@ -158,17 +165,19 @@ fn fetch_tcp_table(family: u32) -> Option<(Vec<u32>, usize)> {
 }
 
 /// PIDs owning an IPv4 listener that serves `127.0.0.1:port` — loopback or the `0.0.0.0` wildcard.
+///
+/// `None` means the scan FAILED (table fetch error, or a table too short/inconsistent to parse);
+/// `Some(vec![])` means the scan succeeded and nobody owns the port. The caller must not conflate
+/// them — see [`owner_image_of_port`].
 #[cfg(windows)]
-fn owning_pids_v4(port: u16) -> Vec<u32> {
+fn owning_pids_v4(port: u16) -> Option<Vec<u32>> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
     };
     use windows_sys::Win32::Networking::WinSock::AF_INET;
 
     let mut pids = Vec::new();
-    let Some((words, capacity)) = fetch_tcp_table(AF_INET as u32) else {
-        return pids;
-    };
+    let (words, capacity) = fetch_tcp_table(AF_INET as u32)?;
     let bytes = words.as_ptr().cast::<u8>();
     // The row array begins where the single inline row does; deriving the header this way keeps it
     // correct if the struct ever gains fields.
@@ -176,14 +185,14 @@ fn owning_pids_v4(port: u16) -> Vec<u32> {
         std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() - std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     if capacity < std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
-        return pids;
+        return None;
     }
     // SAFETY: `bytes` points at `capacity` initialised bytes; `read_unaligned` imposes no alignment
     // requirement, and the row count is bounds-checked against `capacity` before any row is read.
     let table = unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCPTABLE_OWNER_PID>()) };
     let count = table.dwNumEntries as usize;
     if header + count.saturating_mul(row_size) > capacity {
-        return pids;
+        return None;
     }
 
     let want_port = port.to_be() as u32; // network byte order, in the low 16 bits
@@ -207,7 +216,7 @@ fn owning_pids_v4(port: u16) -> Vec<u32> {
             pids.push(row.dwOwningPid);
         }
     }
-    pids
+    Some(pids)
 }
 
 /// PIDs owning an IPv6 listener that can serve `127.0.0.1:port`.
@@ -223,28 +232,26 @@ fn owning_pids_v4(port: u16) -> Vec<u32> {
 /// stay resident, never remove one — and if we are running this code at all, our bind already failed,
 /// which a dual-stack `::` listener is a leading explanation for.
 #[cfg(windows)]
-fn owning_pids_v6(port: u16) -> Vec<u32> {
+fn owning_pids_v6(port: u16) -> Option<Vec<u32>> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
     };
     use windows_sys::Win32::Networking::WinSock::AF_INET6;
 
     let mut pids = Vec::new();
-    let Some((words, capacity)) = fetch_tcp_table(AF_INET6 as u32) else {
-        return pids;
-    };
+    let (words, capacity) = fetch_tcp_table(AF_INET6 as u32)?;
     let bytes = words.as_ptr().cast::<u8>();
     let header = std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>()
         - std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
     let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
     if capacity < std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>() {
-        return pids;
+        return None;
     }
     // SAFETY: as in `owning_pids_v4` — `read_unaligned`, with the row count bounds-checked first.
     let table = unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCP6TABLE_OWNER_PID>()) };
     let count = table.dwNumEntries as usize;
     if header + count.saturating_mul(row_size) > capacity {
-        return pids;
+        return None;
     }
 
     let want_port = port.to_be() as u32;
@@ -268,7 +275,7 @@ fn owning_pids_v6(port: u16) -> Vec<u32> {
             pids.push(row.dwOwningPid);
         }
     }
-    pids
+    Some(pids)
 }
 
 /// Resolve one PID's image, distinguishing "refused" from "gone".
@@ -471,7 +478,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         assert!(
-            owning_pids_v4(port).contains(&std::process::id()),
+            owning_pids_v4(port)
+                .expect("the IPv4 table scan must succeed")
+                .contains(&std::process::id()),
             "GetExtendedTcpTable must resolve a same-user listener we opened ourselves"
         );
         // The whole path: table scan, address filters, image comparison, and aggregation.
@@ -493,7 +502,7 @@ mod tests {
             return;
         };
         let port = listener.local_addr().unwrap().port();
-        let pids = owning_pids_v6(port);
+        let pids = owning_pids_v6(port).expect("the IPv6 table scan must succeed");
         assert!(
             pids.contains(&std::process::id()),
             "a `::` listener opened by THIS process must appear in the TCP6 owner table (got {pids:?})"
