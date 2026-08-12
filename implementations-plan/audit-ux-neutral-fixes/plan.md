@@ -278,7 +278,27 @@ Sweep scope is `prove_tmp_parent()` only. `create_prove_tempdir` falls back to O
 when no data-local dir resolves (`bb.rs:144-146`); prefix-matching `prove-*` in a shared `/tmp` could
 delete a stranger's directory. That residue stays unreaped, deliberately.
 
-**Item 2 — bind the mount source to `$APPIMAGE`. (Revision 3 reverses revision 2 here.)**
+**Item 2 — the mount our exe lives on must be a `fuse.*` mount. (Rev 5, settled by experiment.)**
+
+> **Phase 0 refuted rev 3's design.** Rev 3 reversed rev 2 to adopt codex's "bind the mount source to
+> canonical `$APPIMAGE`". A real capture from our own released 1.0.7 AppImage shows the mount source is
+> the **basename only** — `Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage`, no directory component — so
+> there is nothing to compare an absolute `$APPIMAGE` against. The design cannot be built as specified.
+> Two review rounds argued this; one 3-minute experiment settled it. See `lessons/phase-0.md`.
+>
+> **Adopted rule**: the mountinfo entry whose mountpoint is canonical `$APPDIR` must have an fstype
+> starting with `fuse.`, and our exe must live under that mountpoint. Real data backs the
+> discriminator: AppImage = `fuse.<basename>`, `/` = `ext4`, snaps = `squashfs`.
+>
+> This is **strictly stronger than both audited designs** — rev 2's two-`stat` test could not tell a
+> fuse mount from a real `/usr` partition, so it left the split-`/usr` bypass open; `fuse.` closes it.
+> Free bonus: the fstype subtype carries the AppImage basename, so comparing it to
+> `basename($APPIMAGE)` catches an `$APPDIR` inherited from a *different* AppImage.
+>
+> Residual: an attacker who controls our environment **and** names their payload identically still
+> passes. Unfixable from mountinfo; such an actor can already write `~/.config/autostart` directly.
+
+<details><summary>Superseded rev 3 reasoning (kept for the ledger)</summary>
 
 Revision 2 proposed a two-`stat` mountpoint test and rejected the `/proc/self/mountinfo` design on the
 grounds that a poisoned `$APPIMAGE` defeats both. **That was self-contradictory and the fresh pass
@@ -296,6 +316,8 @@ the fixture cannot be obtained, item 2 falls back to the two-`stat` mountpoint t
 labelled partial hardening** in the code, the plan, and the report — not silently shipped as closure.
 
 Residual either way: `/usr`-as-its-own-filesystem passes the weaker test. Stated, not hidden.
+
+</details>
 
 **Item 3 — the cap cannot be guessed, and one sample is not a maximum.** Measure a real proof via
 `test:e2e:remote`, then set the cap from *headroom over the largest plausible circuit*, not from the

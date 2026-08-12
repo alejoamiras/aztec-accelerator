@@ -1,57 +1,105 @@
-# Phase 0 — de-risk the unknowns
+# Phase 0 — experiments before design
 
-## I-3: does the Rust `--lib` suite run on the Windows and macOS CI legs?
+## I-3 (from rev 1): does the Rust `--lib` suite run on Windows / macOS CI?
 
-**Answer: YES — and this corrects the plan's own framing of the `NTE_NOT_FOUND` rule.**
+**Answer: YES.** `.github/workflows/accelerator.yml`:
 
-Evidence, `.github/workflows/accelerator.yml`:
+| Leg | Runner | Runs |
+|---|---|---|
+| `windows-build` (`:590`) | `windows-latest` | `cargo test` src-tauri (`:608`) **and** core (`:612`) |
+| `cert-trust` macOS (`:188`) | `macos-*` | `cargo test` src-tauri only |
+| `rust-tests` (`:103`) | `ubuntu-latest` | both crates |
 
-| Leg | Runner | Runs | Gate |
-|---|---|---|---|
-| `windows-build` "Windows Build Smoke" (`:590`) | `windows-latest` | `cargo test` (src-tauri, `:608`) **and** `cargo test --manifest-path ../core` (`:612`) | `needs.changes.outputs.desktop == 'true'` |
-| `cert-trust` macOS leg (`:188`) | `macos-*` | `cargo test` (src-tauri only) | matrix `platform == 'macos'` |
-| `rust-tests` (`:103`) | `ubuntu-latest` | both crates | `desktop == 'true'` |
+A `#[cfg(windows)]` unit test is **not** decoration. One reviewer claimed the Windows leg runs only
+the `--test trust_*` integration suites; it read the `cert-trust` matrix and missed the separate
+`windows-build` job.
 
-So a `#[cfg(windows)]` unit test in either crate **does execute on real Windows**. It is not
-decoration. `core` is not run on the macOS leg (only `src-tauri` is) — worth knowing, but no item in
-this plan puts a macOS-gated test in `core`.
+### What this corrected about the plan
 
-The workflow already records the same lesson one platform over (`:185-187`): *"Until this line NO
-workflow ran one on macOS, so every `#[cfg(target_os = "macos")]` unit test … had never compiled
-anywhere."*
+Rev 1 justified the "everything must be pure" rule with "cfg-gated code compiles but never executes".
+Given the table, that is **wrong for unit tests**. The accurate lesson, which both auditors converged
+on independently:
 
-### What this changes about the plan
+> Purity buys testability of **decision logic**. It buys nothing for **platform constants, env-var
+> names, error codes, and path formats** — which is exactly where `cfg`-gated bugs live.
 
-The `NTE_NOT_FOUND` rule as written in `plan.md` justifies itself with "cfg-gated code compiles but
-never executes". Given the table above, that justification is **too broad and partly wrong** for unit
-tests. The accurate version of the lesson is narrower:
+`CRYPT_E_NOT_FOUND` was a wrong constant *value*; a pure function handed that same wrong constant
+catches nothing anywhere. Only real Windows found it.
 
-> A pure function helps when the decision is a function of inputs a test can **construct**. It does
-> not help — and did not fail — where the decision depends on a **real external tool's real output**.
+---
 
-`NTE_NOT_FOUND` was exactly the second case: the constant lived in production code whose only
-exercise is a real `certutil` invocation against a real cert store, reachable only from the `#[ignore]`d
-real-OS integration suites. No unit test on any platform could have produced that string.
+## Experiment 1 — real `/proc/self/mountinfo` from a genuine AppImage
 
-Both plan items survive the correction, with better reasons:
+**Method**: downloaded our own released `Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage` (`gh release
+download accelerator-v1.0.7`), mounted it with `--appimage-mount`, captured `/proc/self/mountinfo`
+while mounted, unmounted. Deliberately not hand-written — inventing what a real system prints is the
+`NTE_NOT_FOUND` mistake.
 
-- **F-13**: "which path do we use" is a function of *does the hardcoded file exist* + *env value* —
-  both constructible. Pure function is right, and the `#[cfg(windows)]` wrapper test is now also
-  available as a real second check on the Windows leg.
-- **F-12**: mountinfo content is a constructible string. Pure function is right.
+**The real line:**
 
-The rule to carry forward is therefore: **prefer purity where inputs are constructible; where a
-decision depends on a real tool's real output, no amount of purity substitutes for running it on the
-real OS** — which is what the `#[ignore]`d suites are for.
+```
+76 47 0:68 / /home/homelab/.cache/tmp/.mount_Aztec-doOHJf ro,nosuid,nodev,relatime shared:417 \
+  - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage \
+  ro,user_id=1000,group_id=1000
+```
 
-## I-4: `/proc/self/mountinfo` inside an AppImage mount
+Contrast from the same capture:
 
-Not resolved locally — needs a real AppImage run to capture a truthful fixture; a hand-written one
-would be exactly the `NTE_NOT_FOUND` mistake (inventing what a real system prints). Options, cheapest
-first:
+```
+47 1 252:0 / / rw,relatime shared:1 - ext4 /dev/mapper/ubuntu--vg-ubuntu--lv rw
+54 47 7:0 / /snap/canonical-livepatch/406 ro,nodev,relatime shared:88 - squashfs /dev/loop0 ro,…
+```
 
-1. Capture it in CI on the Linux leg during an existing AppImage-producing job, print it, copy it into
-   the test fixture.
-2. Build the AppImage locally once and read it.
+### Result: this REFUTES the design rev 3 adopted
 
-Blocking for item 2 only; every other item proceeds. **Do not write the fixture from memory.**
+Rev 3 reversed rev 2 to adopt codex's design: *bind the mount source to canonical `$APPIMAGE`*.
+**The mount source is the BASENAME, not the path** — `Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage`,
+with no directory component. There is nothing to compare a canonical absolute `$APPIMAGE` against, so
+the design cannot be implemented as specified. A basename comparison is satisfied by any attacker who
+names their payload identically.
+
+Two review rounds argued about this design; one experiment settled it. **Cost: ~3 minutes.** This is
+the argument for Phase 0 existing at all.
+
+### What the sample DOES support — the rule now adopted
+
+`fstype` is the discriminator, and it is clean:
+
+| Path | fstype | Passes a `fuse.` test? |
+|---|---|---|
+| genuine AppImage mount | `fuse.<AppImage basename>` | **yes** |
+| `/` | `ext4` | no |
+| `/usr`, `/home`, `/opt` (normal) | not a mount, or `ext4`/`xfs` | no |
+| snap mounts | `squashfs` | no |
+
+**Rule**: *find the mountinfo entry whose mountpoint is canonical `$APPDIR`; its fstype must start with
+`fuse.`; our exe must live under that mountpoint.*
+
+This is **strictly stronger than either audited design**:
+- vs. rev 2's two-`stat` mountpoint test — that could not tell a fuse mount from a real `/usr`
+  partition, so it left the split-`/usr` bypass open. `fuse.` closes it.
+- vs. rev 3's mount-source binding — which cannot be built at all.
+
+Bonus check available at no cost: the fstype subtype carries the AppImage's basename, so
+`subtype == basename($APPIMAGE)` catches an `$APPDIR` inherited from a *different* AppImage.
+
+**Honest residual**: an attacker who both controls our environment and names their payload identically
+to ours still passes. Unfixable from mountinfo. Such an actor can already write
+`~/.config/autostart/*.desktop` directly, so the marginal gain is nil.
+
+**Incidental finding**: the mountpoint was `~/.cache/tmp/.mount_Aztec-doOHJf`, not `/tmp/...`, because
+the AppImage runtime honours `$TMPDIR`. Any rule keying on a `/tmp` prefix would be wrong. Nothing in
+the plan does, but it was close.
+
+---
+
+## Experiment 2 — `GetExtendedTcpTable` on CI (item 7)
+
+Cannot be run locally (no Windows host). Deliberately **not** landed as a throwaway spike: the spike
+code and the production code are the same FFI call, so the "spike" is written as the permanent
+regression test and shipped early in the stack to get its CI answer while later phases proceed.
+
+Test shape: open a listener on an ephemeral port in-process, resolve its owning PID via
+`GetExtendedTcpTable`, assert it equals `std::process::id()`, resolve the image path and assert it
+matches `current_exe()`. If it cannot see a same-user socket without elevation, item 7 reverts to
+deferred per the approved goal.
