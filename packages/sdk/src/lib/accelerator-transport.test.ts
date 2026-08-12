@@ -850,6 +850,27 @@ describe("AcceleratorTransport", () => {
       expect(performance.now() - started).toBeLessThan(5_000);
     });
 
+    test("a peer that dribbles one-byte chunks does not blow up allocation", async () => {
+      // The byte cap bounds BYTES, not allocation. Retaining one Uint8Array object per chunk let a
+      // peer stay under the cap while consuming orders of magnitude more memory in per-object
+      // overhead (post-impl codex round 7). 200k single-byte chunks is well under any cap and would
+      // previously have retained 200k objects; now it copies into one contiguous buffer.
+      const oneByteChunks = Array.from({ length: 200_000 }, () => new Uint8Array([0x20]));
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const c of oneByteChunks) controller.enqueue(c);
+          controller.enqueue(new TextEncoder().encode('{"proof":"AAAA"}'));
+          controller.close();
+        },
+      });
+      const res = new Response(body, { headers: { "content-type": "application/json" } });
+      // Leading whitespace is valid JSON padding, so this parses — the assertion is that it
+      // completes at all, and quickly, rather than thrashing.
+      const started = performance.now();
+      expect(await transport().readProveBody(res, 8 * 1024 * 1024, 10_000)).toBe("AAAA");
+      expect(performance.now() - started).toBeLessThan(5_000);
+    });
+
     test("a body that is not JSON, or lacks a string proof, is rejected", async () => {
       const t = transport();
       expect(await t.readProveBody(new Response("not json"))).toBeUndefined();

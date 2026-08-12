@@ -195,7 +195,11 @@ async function readJsonBounded(
       return JSON.parse(text);
     }
     const reader = stream.getReader();
-    const chunks: Uint8Array[] = [];
+    // A CONTIGUOUS buffer grown geometrically, not an array of chunks. Retaining one `Uint8Array`
+    // object per chunk bounds the BYTES but not the allocation: a peer that dribbles millions of
+    // one-byte chunks stays under the cap while the per-object overhead consumes orders of magnitude
+    // more (post-impl codex round 7). Copying as we go makes peak memory O(maxBytes).
+    let buffer = new Uint8Array(Math.min(maxBytes, 64 * 1024));
     let total = 0;
     // A deadline that fires mid-body cancels the reader → the pending read() resolves `done` with a
     // PARTIAL buffer. Track that it fired so a truncated-but-coincidentally-valid body is NOT parsed as
@@ -233,23 +237,25 @@ async function readJsonBounded(
           }
           continue; // never retained — empty chunks carry no body bytes
         }
-        total += value.byteLength;
-        if (total > maxBytes) {
+        if (total + value.byteLength > maxBytes) {
           void reader.cancel().catch(() => {}); // fire-and-forget — do not await a possibly-stuck cancel
           return undefined;
         }
-        chunks.push(value);
+        if (total + value.byteLength > buffer.byteLength) {
+          const grown = new Uint8Array(
+            Math.min(maxBytes, Math.max(buffer.byteLength * 2, total + value.byteLength)),
+          );
+          grown.set(buffer.subarray(0, total));
+          buffer = grown;
+        }
+        buffer.set(value, total);
+        total += value.byteLength;
       }
     } finally {
       clearTimeout(deadline);
     }
     if (timedOut) return undefined; // partial body from a deadline cancel — never "healthy"
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.byteLength;
-    }
+    const merged = buffer.subarray(0, total);
     return JSON.parse(new TextDecoder().decode(merged));
   } catch {
     return undefined;
