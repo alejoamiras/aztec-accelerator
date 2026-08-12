@@ -77,6 +77,8 @@
   .c-med{background:var(--med-bg); color:var(--med)}
   .c-low{background:var(--low-bg); color:var(--low)}
   .c-info{background:var(--low-bg); color:var(--muted)}
+  .c-fixed{background:var(--green-bg); color:var(--green); font-weight:700}
+  .c-open{background:var(--med-bg); color:var(--med); font-weight:700}
   .meta{margin:.1rem 0 .8rem; display:flex; flex-wrap:wrap; gap:.35rem}
   .nut{
     margin:.2rem 0 .9rem; font-size:1.02rem; line-height:1.5; font-weight:520;
@@ -116,6 +118,8 @@
   </p>
   <div class="stats">
     <span class="stat"><b>13</b> findings</span>
+    <span class="stat"><b>10</b> fixed</span>
+    <span class="stat"><b>3</b> open by choice</span>
     <span class="stat"><b>0</b> critical</span>
     <span class="stat"><b>2</b> high</span>
     <span class="stat"><b>10</b> medium</span>
@@ -219,7 +223,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-high">High 8.1</span><span class="fid">F-01</span>
+    <span class="chip c-high">High 8.1</span><span class="fid">F-01</span><span class="chip c-fixed">fixed 6 Aug</span>
     <span class="chip c-info">verified: partial</span>
     <span class="chip c-info">both models</span><span class="chip c-info">confidence: high</span>
     <span class="chip c-info">escalation of prior F-001</span>
@@ -270,7 +274,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-high">High 7.8</span><span class="fid">F-02</span>
+    <span class="chip c-high">High 7.8</span><span class="fid">F-02</span><span class="chip c-fixed">fixed 6 Aug — residual accepted</span>
     <span class="chip c-info">verified: confirmed</span>
     <span class="chip c-info">both models</span><span class="chip c-info">confidence: high</span>
     <span class="chip c-info">new</span>
@@ -323,7 +327,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med ~5.0</span><span class="fid">F-03</span>
+    <span class="chip c-med">Med ~5.0</span><span class="fid">F-03</span><span class="chip c-fixed">fixed 12 Aug — all three sinks</span>
     <span class="chip c-info">verified: partial — band ↓</span>
     <span class="chip c-info">both models</span><span class="chip c-info">escalation of prior F-002</span>
     <span class="ftitle">A forgeable <code>/health</code> shape is treated as proof of process identity</span>
@@ -361,7 +365,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 6.5</span><span class="fid">F-04</span>
+    <span class="chip c-med">Med 6.5</span><span class="fid">F-04</span><span class="chip c-fixed">fixed 6 Aug</span>
     <span class="chip c-info">verified: confirmed</span>
     <span class="chip c-info">both models</span><span class="chip c-info">new</span>
     <span class="ftitle">A one-shot local write permanently disables the update channel — and survives reinstall</span>
@@ -404,7 +408,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 6.1</span><span class="fid">F-05</span>
+    <span class="chip c-med">Med 6.1</span><span class="fid">F-05</span><span class="chip c-fixed">fixed 6 Aug</span>
     <span class="chip c-info">both models</span><span class="chip c-info">fix: hours · CHEAPEST</span>
     <span class="ftitle">Trust removal fails open on macOS and Windows — failure is reported as success</span>
   </div>
@@ -439,7 +443,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 6.3</span><span class="fid">F-06</span>
+    <span class="chip c-med">Med 6.3</span><span class="fid">F-06</span><span class="chip c-fixed">fixed 6 + 10 Aug</span>
     <span class="chip c-info">both models</span><span class="chip c-info">new</span>
     <span class="ftitle">An HTTP header chooses which native binary gets downloaded and executed, and how much disk is consumed</span>
   </div>
@@ -478,7 +482,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 6.0</span><span class="fid">F-08</span>
+    <span class="chip c-med">Med 6.0</span><span class="fid">F-08</span><span class="chip c-fixed">fixed — facet B 6 Aug, facet A 12 Aug</span>
     <span class="chip c-info">verified: partial</span>
     <span class="chip c-info">claude</span><span class="chip c-info">fix: hours · CHEAPEST</span>
     <span class="ftitle">Witness data escapes the controls designed to contain it</span>
@@ -514,7 +518,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 5.9</span><span class="fid">F-09</span>
+    <span class="chip c-med">Med 5.9</span><span class="fid">F-09</span><span class="chip c-open">OPEN — owner deferred</span>
     <span class="chip c-info">codex only</span><span class="chip c-info">cross-model disagreement</span>
     <span class="ftitle">The updater accepts a byte-for-byte replay of a withdrawn but validly signed release</span>
   </div>
@@ -544,7 +548,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 5.6</span><span class="fid">F-10</span>
+    <span class="chip c-med">Med 5.6</span><span class="fid">F-10</span><span class="chip c-open">OPEN — changes consent UX</span>
     <span class="chip c-info">both models</span><span class="chip c-info">confidence: moderate</span>
     <span class="ftitle">Consent windows accept clicks before the anti-click-steal guard applies</span>
   </div>
@@ -579,7 +583,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 5.9</span><span class="fid">F-07</span>
+    <span class="chip c-med">Med 5.9</span><span class="fid">F-07</span><span class="chip c-open">OPEN — changes consent UX</span>
     <span class="chip c-info">both models</span>
     <span class="ftitle">Authorization-prompt flooding starves every legitimate site of the consent path</span>
   </div>
@@ -607,7 +611,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 5.4</span><span class="fid">F-12</span>
+    <span class="chip c-med">Med 5.4</span><span class="fid">F-12</span><span class="chip c-fixed">fixed 12 Aug</span>
     <span class="chip c-info">claude</span><span class="chip c-info">documented risk decision</span>
     <span class="ftitle">AppImage provenance uses a containment test, so any ancestor passes as <code>$APPDIR</code></span>
   </div>
@@ -641,7 +645,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-med">Med 5.3</span><span class="fid">F-11</span>
+    <span class="chip c-med">Med 5.3</span><span class="fid">F-11</span><span class="chip c-fixed">fixed 12 Aug — body bound; phase order deferred</span>
     <span class="chip c-info">both models</span>
     <span class="ftitle">The SDK reads the prove response with no size cap, deadline, or abort path</span>
   </div>
@@ -669,7 +673,7 @@
 
 <div class="finding">
   <div class="fh">
-    <span class="chip c-low">Low 3.8</span><span class="fid">F-13</span>
+    <span class="chip c-low">Low 3.8</span><span class="fid">F-13</span><span class="chip c-fixed">fixed 12 Aug</span>
     <span class="chip c-info">claude</span><span class="chip c-info">fix: &lt;1 hour</span>
     <span class="ftitle"><code>schtasks.exe</code> is located through an environment variable its sibling deliberately distrusts</span>
   </div>
