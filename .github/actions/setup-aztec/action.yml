@@ -87,33 +87,26 @@ runs:
           echo "aztec's snappy binding loads"
           exit 0
         fi
-        echo "::warning::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding — installing the one its own package.json asks for"
-        # Install the EXACT version snappy declares, not `latest`. Installing latest resolves the
-        # module but then dies with `this.bridge.setLastError is not a function`, because the napi
-        # bridge only matches the wrapper it shipped with — a different failure that looks like the
-        # same one unless you read past the first line.
-        # Install EVERY binding snappy declares, at the declared version — rather than guessing which
-        # one the loader will reach for. Both guesses were wrong in turn: `linux-x64-gnu` is not what
-        # it asks for (it names `wasm32-wasi` in the error), and `latest` resolves the module but then
-        # dies with `this.bridge.setLastError is not a function`, because the napi bridge only matches
-        # the wrapper it shipped with. Installing the declared set is simply completing the install
-        # the upstream installer left unfinished.
-        WANT=$(node -p "
-          const o = require('$AZTEC_DIR/node_modules/snappy/package.json').optionalDependencies || {};
-          Object.entries(o).map(([k, v]) => k + '@' + v).join(' ')
-        ")
-        if [ -z "$WANT" ]; then
-          echo "::error::snappy declares no optional bindings to install — the upstream tree is shaped differently than expected"
-          exit 1
-        fi
-        echo "installing snappy's declared bindings: $WANT"
-        # shellcheck disable=SC2086 # deliberate word splitting: several packages
-        npm install --no-save --no-audit --no-fund $WANT
-        if probe; then
-          echo "repaired with the declared binding version"
-          exit 0
-        fi
-        echo "::error::aztec ${{ steps.detect.outputs.version }} still cannot load snappy after installing its own declared binding ($WANT). This is an UPSTREAM packaging break, not a fault in this repository — the installer reports success while leaving snappy unusable. Pin an aztec version whose install is intact, or wait for upstream."
+        # DIAGNOSE ONLY — deliberately no repair. Three were attempted and all failed:
+        #   1. the bindings at `@latest` — resolved the module, then died on
+        #      `this.bridge.setLastError is not a function` (a napi bridge only matches its own
+        #      wrapper), and npm churned the tree doing it: "added 9 packages, removed 1 package".
+        #   2. `@napi-rs/snappy-linux-x64-gnu` at snappy's DECLARED version — the wrong package; the
+        #      loader names `wasm32-wasi` in its own error.
+        #   3. every binding snappy declares, at its declared version — still failed.
+        # Whatever is broken lives inside the upstream install (note its own "packages have install
+        # scripts not yet covered by allowScripts" warning), and patching another project's dependency
+        # tree from CI produced side effects without fixing it.
+        #
+        # The remaining fix is a VERSION BUMP, which is deliberately not done here: this repo bumps
+        # @aztec through `aztec-stable.yml` (workflow_dispatch, `merge_mode: none` so the PR stays open
+        # for review) precisely so a dependency bump is a reviewed decision rather than a side effect.
+        # `npm view @aztec/stdlib dist-tags` reports latest = 5.1.0 against the pinned 5.0.1.
+        #
+        # What this step still earns: a ~2-minute failure naming the cause, instead of a 12-minute
+        # "Aztec node failed to respond" timeout with ERR_MODULE_NOT_FOUND buried in a post-mortem log
+        # dump.
+        echo "::error::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding, so \`aztec start\` cannot run. UPSTREAM packaging break, not a fault in this repository. Three in-CI repair attempts failed (see this step's comment). Fix by bumping @aztec via aztec-stable.yml — dist-tag latest is ahead of the pin — or wait for upstream."
         exit 1
 
     - name: Update PATH
