@@ -793,4 +793,84 @@ describe("AcceleratorTransport", () => {
       expect(urls.some((u) => u.startsWith("http://"))).toBe(false);
     });
   });
+
+  /**
+   * F-11 (audit 2026-07-31-9c4cb0c). The `/prove` body used to be read with a bare `res.json()`.
+   * ky's `timeout` bounds time-to-HEADERS only, so a responder that answered `200` and then streamed
+   * forever buffered without limit and never settled — the dApp's WASM fallback could not run,
+   * because the promise it would have caught never rejected.
+   */
+  describe("readProveBody (F-11: cap + deadline on the /prove body)", () => {
+    const transport = () => new AcceleratorTransport("127.0.0.1", 59833, 59834);
+
+    /** A stream that emits `chunks` and then never closes — the "200 then stall" shape. */
+    function stalling(chunks: Uint8Array[] = []): Response {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const c of chunks) controller.enqueue(c);
+          // deliberately never close()
+        },
+      });
+      return new Response(body, { headers: { "content-type": "application/json" } });
+    }
+
+    test("a normal proof body is returned unchanged", async () => {
+      const proof = Buffer.from("a realistic-enough proof").toString("base64");
+      expect(await transport().readProveBody(Response.json({ proof }))).toBe(proof);
+    });
+
+    test("an over-cap body is rejected rather than buffered", async () => {
+      // 9 MiB of base64 — past the 8 MiB transfer cap, and ~65x any proof the protocol can emit.
+      const huge = "A".repeat(9 * 1024 * 1024);
+      expect(await transport().readProveBody(Response.json({ proof: huge }))).toBeUndefined();
+    });
+
+    test("a body that stalls after 200 hits the deadline instead of hanging forever", async () => {
+      // Deadline overridden to 200ms: asserting this against the real 60s production value would
+      // cost a minute of CI per run to prove exactly the same thing.
+      const result = await transport().readProveBody(
+        stalling([new TextEncoder().encode('{"proof":"AAAA"')]),
+        8 * 1024 * 1024,
+        200,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    test("a stalling stream that floods past the cap is cut off by the cap, not the deadline", async () => {
+      // The cap must terminate the read on its own rather than being a backstop the deadline reaches
+      // first. A 10s deadline that is never approached is what proves the cap did the work.
+      const mib = new Uint8Array(1024 * 1024);
+      const started = performance.now();
+      const result = await transport().readProveBody(
+        stalling(Array.from({ length: 12 }, () => mib)),
+        8 * 1024 * 1024,
+        10_000,
+      );
+      expect(result).toBeUndefined();
+      expect(performance.now() - started).toBeLessThan(5_000);
+    });
+
+    test("a body that is not JSON, or lacks a string proof, is rejected", async () => {
+      const t = transport();
+      expect(await t.readProveBody(new Response("not json"))).toBeUndefined();
+      expect(await t.readProveBody(Response.json({ nope: 1 }))).toBeUndefined();
+      expect(await t.readProveBody(Response.json({ proof: 12345 }))).toBeUndefined();
+      expect(await t.readProveBody(Response.json(null))).toBeUndefined();
+    });
+
+    test("the /health cap stays at its own smaller value — policy is per-endpoint", async () => {
+      // 128 KiB is fine for /prove (8 MiB cap) but must be over-cap for /health (64 KiB), which is
+      // what proves the two endpoints did not get collapsed onto one shared constant.
+      const medium = "A".repeat(128 * 1024);
+      expect(await transport().readProveBody(Response.json({ proof: medium }))).toBe(medium);
+
+      globalThis.fetch = mock(async () =>
+        Response.json({ status: "ok", api_version: 1, pad: medium }),
+      ) as unknown as typeof globalThis.fetch;
+      // The same 128 KiB payload through /health is over ITS cap, so the body is dropped to
+      // `undefined` and the responder cannot be recognized as healthy.
+      const probe = await new AcceleratorTransport("127.0.0.1", 59833, 59834).probeHealth();
+      expect(probe.body).toBeUndefined();
+    });
+  });
 });

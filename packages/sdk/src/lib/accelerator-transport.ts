@@ -28,6 +28,35 @@ const HEALTH_BODY_MAX_BYTES = 64 * 1024;
 const PROVE_TIMEOUT_MS = ms("10 min");
 
 /**
+ * Deadline + byte cap for reading a `/prove` BODY (F-11, audit 2026-07-31-9c4cb0c). `PROVE_TIMEOUT_MS`
+ * above is ky's timeout, which stops counting once HEADERS arrive — so before this, an endpoint could
+ * answer `200` and then stream forever into an unbounded buffer.
+ *
+ * **The cap is derived, not sampled.** A single observed proof is a lower bound, not a protocol
+ * maximum, so it is computed from the protocol's own declared sizes:
+ *
+ * - `@aztec/stdlib`'s `chonk_proof.ts` documents the proof data itself as **≈52 KB** uncompressed
+ *   ("always >= 40KB") and ≈35 KB compressed.
+ * - Public inputs ride along on top: `numPublicInputs = fields.length - CHONK_PROOF_LENGTH`, and the
+ *   widest relevant kernel output is `PRIVATE_TO_ROLLUP_KERNEL_CIRCUIT_PUBLIC_INPUTS_LENGTH` = 1281
+ *   fields × 32 B ≈ 41 KB.
+ * - So ≈93 KB of raw proof, ≈124 KB once base64'd, plus a negligible JSON envelope.
+ *
+ * 8 MiB is therefore ~65× the largest response the protocol can currently produce — room for the
+ * scheme to grow an order of magnitude without a code change — while still far too small to exhaust a
+ * browser tab. Sizing this too LOW breaks proving for every user, which is why the headroom is large
+ * and the derivation is written down rather than left as a magic number.
+ */
+const PROVE_BODY_TIMEOUT_MS = ms("60 sec");
+const PROVE_BODY_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * Cap on the decoded proof, applied to the base64 STRING before `Buffer.from` allocates
+ * (post-audit codex). A body that fits `PROVE_BODY_MAX_BYTES` still decodes to ~0.75× its size in a
+ * fresh buffer, so bounding only the transfer leaves a second allocation unbounded.
+ */
+const PROVE_DECODED_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
  * Validate a configured `host` and return it, or throw (F-01, audit 2026-07-31).
  *
  * `host` was interpolated raw into six URL templates (`https://${host}:${port}/prove` and friends).
@@ -143,8 +172,18 @@ export function isRecognizedHealthBody(body: unknown): boolean {
  * Read + JSON-parse a response body with a hard deadline and byte cap. Consumes the body (no
  * `clone()` — a clone tees the stream and can buffer an unbounded pending branch). Returns
  * `undefined` on any failure: non-JSON, over-cap, deadline, or stream error.
+ *
+ * The cap and deadline are PARAMETERS, defaulting to the `/health` policy (F-11, audit
+ * 2026-07-31-9c4cb0c). `/prove` returns JSON too — `{"proof": "<base64>"}` — so it reuses this exact
+ * reader rather than getting a second one: the empty-chunk, partial-body and never-settling-cancel
+ * defences below were each found by adversarial review, and a parallel implementation would have to
+ * re-earn all of them. Only the POLICY differs per endpoint; the mechanics must not.
  */
-async function readJsonBounded(response: Response): Promise<unknown> {
+async function readJsonBounded(
+  response: Response,
+  maxBytes: number = HEALTH_BODY_MAX_BYTES,
+  timeoutMs: number = HEALTH_BODY_TIMEOUT_MS,
+): Promise<unknown> {
   try {
     const stream = response.body;
     if (!stream) {
@@ -154,14 +193,11 @@ async function readJsonBounded(response: Response): Promise<unknown> {
       const text = await Promise.race([
         response.text(),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("health body deadline")),
-            HEALTH_BODY_TIMEOUT_MS,
-          );
+          timer = setTimeout(() => reject(new Error("body deadline")), timeoutMs);
         }),
       ]).finally(() => clearTimeout(timer));
       // Measure ENCODED bytes, not UTF-16 code units (codex Low).
-      if (new TextEncoder().encode(text).length > HEALTH_BODY_MAX_BYTES) return undefined;
+      if (new TextEncoder().encode(text).length > maxBytes) return undefined;
       return JSON.parse(text);
     }
     const reader = stream.getReader();
@@ -175,7 +211,7 @@ async function readJsonBounded(response: Response): Promise<unknown> {
     const deadline = setTimeout(() => {
       timedOut = true;
       void reader.cancel().catch(() => {});
-    }, HEALTH_BODY_TIMEOUT_MS);
+    }, timeoutMs);
     const started = performance.now();
     // A stream that endlessly enqueues ZERO-LENGTH chunks resolves every read() immediately, starving
     // the microtask loop so the `setTimeout` deadline never fires and `total` never grows (codex).
@@ -190,7 +226,7 @@ async function readJsonBounded(response: Response): Promise<unknown> {
         // Elapsed check BEFORE `done`: a stream that spams empty chunks past the deadline and THEN
         // closes would otherwise reach `done` first, skip this check, clear the still-unfired timer,
         // and get parsed as healthy (codex Medium).
-        if (performance.now() - started > HEALTH_BODY_TIMEOUT_MS) {
+        if (performance.now() - started > timeoutMs) {
           timedOut = true;
           void reader.cancel().catch(() => {});
           return undefined;
@@ -204,7 +240,7 @@ async function readJsonBounded(response: Response): Promise<unknown> {
           continue; // never retained — empty chunks carry no body bytes
         }
         total += value.byteLength;
-        if (total > HEALTH_BODY_MAX_BYTES) {
+        if (total > maxBytes) {
           void reader.cancel().catch(() => {}); // fire-and-forget — do not await a possibly-stuck cancel
           return undefined;
         }
@@ -652,5 +688,34 @@ export class AcceleratorTransport {
         ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
       },
     });
+  }
+
+  /**
+   * Read a `/prove` success body under a byte cap and a body deadline, returning the base64 proof
+   * string — or `undefined` if the body is over-cap, stalls, is not JSON, or lacks a string `proof`
+   * (F-11, audit 2026-07-31-9c4cb0c).
+   *
+   * Before this, the caller read the body with a bare `res.json()`: `PROVE_TIMEOUT_MS` is ky's
+   * timeout and stops counting at HEADERS, so an endpoint answering `200` and then streaming forever
+   * had no bound at all. The witness has already left the machine by this point, so the exposure here
+   * is availability — but it is the dApp's tab that dies, and the fallback path never runs because
+   * the promise simply never settles.
+   *
+   * Deliberately the SAME reader as `/health`, with a different policy — see {@link readJsonBounded}.
+   */
+  async readProveBody(
+    response: Response,
+    // Overridable ONLY so the deadline path can be tested in milliseconds; a test that proves
+    // settlement by actually waiting out the 60 s production deadline costs a minute of CI per run.
+    maxBytes: number = PROVE_BODY_MAX_BYTES,
+    timeoutMs: number = PROVE_BODY_TIMEOUT_MS,
+  ): Promise<string | undefined> {
+    const body = await readJsonBounded(response, maxBytes, timeoutMs);
+    if (typeof body !== "object" || body === null) return undefined;
+    const proof = (body as { proof?: unknown }).proof;
+    if (typeof proof !== "string") return undefined;
+    // Bound the DECODE too: a string that fits the transfer cap still allocates ~0.75× again.
+    if (proof.length > PROVE_DECODED_MAX_BYTES) return undefined;
+    return proof;
   }
 }
