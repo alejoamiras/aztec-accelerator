@@ -63,6 +63,23 @@ runs:
       run: |
         export CI=1
         export FOUNDRY_DIR="$HOME/.foundry"
+        # Extend this repo's 7-day release quarantine to the aztec installer's OWN npm resolution.
+        #
+        # `bunfig.toml`'s `minimumReleaseAge` governs our dependencies; the installer runs its own
+        # unlocked `npm install @aztec/...`, so nothing was quarantining ITS transitive tree. Aztec
+        # depends on `snappy: ^7.2.2` with no lockfile, so a fresh install takes whatever is newest.
+        #
+        # That is not hypothetical: `snappy@7.4.0` was published 2026-08-12T13:36Z and cannot load its
+        # native binding, which broke `aztec start` on 5.0.1 AND 5.1.0 simultaneously, with no change
+        # on our side. The surfaced error is a red herring — it names `@napi-rs/snappy-wasm32-wasi`,
+        # which is CORRECTLY absent on linux-x64 (`cpu: ["wasm32"]`); the loader only mentions it while
+        # falling back after the native binding fails. Installing the wasm package by hand just
+        # advances into the broken WASI path (`this.bridge.setLastError is not a function`).
+        #
+        # Seven days is the same window bunfig already applies, and it would have prevented this
+        # outage. If a bad release ever survives past it, pin instead by pre-creating the version
+        # directory's package.json with `{"overrides":{"snappy":"<good>"}}` before this runs.
+        export npm_config_min_release_age=7
         curl -fsSL "https://install.aztec.network/${{ steps.detect.outputs.version }}/install" \
           | VERSION=${{ steps.detect.outputs.version }} bash
         ls -la ~/.aztec/versions/${{ steps.detect.outputs.version }}/bin/
