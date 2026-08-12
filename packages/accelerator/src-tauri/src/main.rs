@@ -291,15 +291,32 @@ fn spawn_http_server(
             // supervisor's restart-on-failure does NOT loop us). A foreign process / no answer is a
             // real error: surface it and stay resident. WINDOWS-ONLY for now (the dual-launch is a new
             // Windows issue); the `&&` short-circuits so /health is only probed on Windows.
-            if addr_in_use
-                && cfg!(target_os = "windows")
-                && aztec_accelerator::server::healthy_aztec_on_port().await
-            {
-                tracing::warn!(
-                    "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
-                );
-                app_handle.exit(0);
-                return;
+            // F-03 sink A: `/health` answering "ok" proves only that SOMETHING is listening — both
+            // fields are public contract, so any local process can say it and evict the real app,
+            // taking its HTTPS listener down with it (which is what opens F-01 on Windows). Ask the
+            // OS who owns the socket as well.
+            //
+            // D-ITEM7 polarity: `may_bow_out` exits unless the owner is POSITIVELY foreign, so
+            // `Ours` and `Unknown` both behave exactly as before. This path runs every minute on
+            // Windows (the crash-recovery task's PT1M trigger), so treating a transient lookup
+            // failure as "stay resident" would strand duplicate tray processes.
+            if addr_in_use && cfg!(target_os = "windows") {
+                let healthy = aztec_accelerator::server::healthy_aztec_on_port().await;
+                let owner = aztec_accelerator::server::classify_port_owner(59833);
+                if aztec_accelerator::server::may_bow_out(healthy, owner) {
+                    tracing::warn!(
+                        ?owner,
+                        "Another healthy Aztec instance owns :59833 — this instance is redundant; exiting cleanly"
+                    );
+                    app_handle.exit(0);
+                    return;
+                }
+                if healthy {
+                    tracing::error!(
+                        ?owner,
+                        "A process answering /health owns :59833 but is NOT our image — staying resident rather than letting it evict us"
+                    );
+                }
             }
             tracing::error!("Accelerator server error: {e}");
             let msg = if addr_in_use {
@@ -330,10 +347,12 @@ fn spawn_update_poller(app_handle: AppHandle, config: ConfigState) {
 /// the monotonic version floor to the running version. Two guards matter (audit H3):
 ///   - 3 consecutive HEALTHY probes (not merely "process started") means a build that boots but
 ///     immediately wedges its server never ratchets the floor;
-///   - the reported `/health.version` must equal `CARGO_PKG_VERSION`. The redundant-instance bow-out
-///     is Windows-only, so on macOS/Linux a broken new build that LOST the `:59833` bind would still
-///     see the healthy INCUMBENT's `/health` and could otherwise commit ITS OWN (never-run) version.
-///     Matching the version proves we are observing our own server (we own the bind).
+///   - the reported `/health.version` must equal `CARGO_PKG_VERSION`, AND this process must actually
+///     own the `:59833` bind. The version match alone does NOT prove we are observing our own server
+///     — the comment here used to claim it did, which is what made F-03 sink B look safe. On
+///     macOS/Linux a broken new build that LOST the bind still sees the healthy INCUMBENT's
+///     `/health`, and any local process can serve those fields. Ownership of the bind is the
+///     in-process fact that cannot be forged.
 ///
 /// Runs once; gated off for webdriver builds.
 #[cfg(not(feature = "webdriver"))]
@@ -344,11 +363,15 @@ fn spawn_floor_tracker() {
         // Bounded (~2 min) so a genuinely unhealthy build never commits the floor.
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_secs(3)).await;
-            if aztec_accelerator::server::healthy_aztec_version_on_port()
-                .await
-                .as_deref()
-                == Some(want)
-            {
+            // F-03 sink B: the probe proves the server SERVES (a bound-but-wedged build must never
+            // ratchet the floor), and `we_own_the_bind()` proves the server is OURS. Neither alone
+            // is sufficient, and the probe alone was forgeable by any local process.
+            let probed = aztec_accelerator::server::healthy_aztec_version_on_port().await;
+            if aztec_accelerator::server::should_commit_floor(
+                aztec_accelerator::server::we_own_the_bind(),
+                probed.as_deref(),
+                want,
+            ) {
                 consecutive += 1;
                 if consecutive >= 3 {
                     aztec_accelerator::updater::commit_launch_floor();

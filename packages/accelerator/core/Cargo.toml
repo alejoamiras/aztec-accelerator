@@ -52,6 +52,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Memory",
   "Win32_System_Threading",
   "Win32_Storage_FileSystem",
+  # F-03 sink A: GetExtendedTcpTable, to ask the OS which process owns :59833 rather than trusting
+  # a /health answer any local process can forge. A FEATURE on the crate above, not a new crate.
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
 ] }
 
 [dev-dependencies]
