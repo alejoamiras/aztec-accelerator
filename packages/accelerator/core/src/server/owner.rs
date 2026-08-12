@@ -151,11 +151,16 @@ fn owner_image_of_port(port: u16) -> Lookup {
         return Lookup::NoAnswer;
     }
 
-    // Both fields are network byte order. Match the LOOPBACK address specifically: a listener on
-    // 0.0.0.0 or another interface shares the port number without being the local service we mean.
+    // Both fields are network byte order.
+    //
+    // Accept the WILDCARD address as well as loopback. A listener on `0.0.0.0:59833` accepts the
+    // `127.0.0.1` connection our probe makes and blocks our specific bind just the same — filtering
+    // to loopback alone (which is what round 1 of review asked for, and it was too narrow) binned
+    // such an owner as `NoAnswer`, i.e. straight back to the bow-out this exists to guard.
     let want_port = port.to_be() as u32;
-    let want_addr = u32::from_ne_bytes([127, 0, 0, 1]);
-    let mut pid: Option<u32> = None;
+    let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
+    let wildcard = u32::from_ne_bytes([0, 0, 0, 0]);
+    let mut pids: Vec<u32> = Vec::new();
     for i in 0..count {
         let row = unsafe {
             std::ptr::read_unaligned(
@@ -164,18 +169,32 @@ fn owner_image_of_port(port: u16) -> Lookup {
                     .cast::<MIB_TCPROW_OWNER_PID>(),
             )
         };
-        if row.dwLocalPort != want_port || row.dwLocalAddr != want_addr {
+        if row.dwLocalPort != want_port {
             continue;
         }
-        match pid {
-            // Two listeners claiming the same endpoint is exactly the ambiguity we must not resolve.
-            Some(seen) if seen != row.dwOwningPid => return Lookup::NoAnswer,
-            Some(_) => {}
-            None => pid = Some(row.dwOwningPid),
+        if row.dwLocalAddr != loopback && row.dwLocalAddr != wildcard {
+            continue;
+        }
+        if !pids.contains(&row.dwOwningPid) {
+            pids.push(row.dwOwningPid);
         }
     }
-    let Some(pid) = pid else {
+    if pids.is_empty() {
         return Lookup::NoAnswer;
+    }
+    // Several owners CAN legitimately coexist on one port (a wildcard listener alongside a specific
+    // one). Resolving every one of them and judging conservatively beats declaring the whole answer
+    // ambiguous, which would also have landed on the bow-out.
+    Lookup::Owners(pids.into_iter().map(image_of_pid).collect())
+}
+
+/// Resolve one PID's image, distinguishing "refused" from "gone".
+#[cfg(windows)]
+fn image_of_pid(pid: u32) -> Lookup {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -212,12 +231,38 @@ fn owner_image_of_port(port: u16) -> Lookup {
 enum Lookup {
     /// The owning process's image path.
     Image(std::path::PathBuf),
-    /// No usable answer: no matching row, an ambiguous one, a process that had already exited, or a
-    /// platform where we do not look. Benign and usually transient.
+    /// No usable answer: no matching row, a process that had already exited, or a platform where we
+    /// do not look. Benign and usually transient.
     NoAnswer,
     /// A process owns the socket but **refused to be identified** — `OpenProcess` returned
     /// `ERROR_ACCESS_DENIED`. Not transient, and not something a sibling of ours does.
     Guarded,
+    /// One entry per distinct process owning the port. More than one is legitimate — a wildcard
+    /// listener can coexist with a specific one — so every owner is resolved and judged rather than
+    /// the whole answer being discarded as ambiguous.
+    Owners(Vec<Lookup>),
+}
+
+/// Reduce per-owner verdicts to one, conservatively (F-03 sink A).
+///
+/// Pure, so the rule is table-tested on every platform even though only Windows produces the input:
+/// - **any** owner that is foreign or refuses identification ⇒ `Foreign` (do not bow out);
+/// - **all** owners identified as our own image ⇒ `Ours`;
+/// - anything else ⇒ `Unknown`.
+///
+/// "Any foreign wins" is the direction that matters: with a squatter alongside a genuine sibling, the
+/// squatter is the reason to stay resident.
+pub fn aggregate(verdicts: &[PortOwner]) -> PortOwner {
+    if verdicts.is_empty() {
+        return PortOwner::Unknown;
+    }
+    if verdicts.contains(&PortOwner::Foreign) {
+        return PortOwner::Foreign;
+    }
+    if verdicts.iter().all(|v| *v == PortOwner::Ours) {
+        return PortOwner::Ours;
+    }
+    PortOwner::Unknown
 }
 
 /// Off Windows we do not look, so nobody is ever identified.
@@ -241,10 +286,19 @@ pub fn classify_port_owner(port: u16) -> PortOwner {
     let Ok(ours) = std::env::current_exe() else {
         return PortOwner::Unknown;
     };
-    match owner_image_of_port(port) {
-        Lookup::Image(image) => classify(Some(image.as_path()), &ours),
+    judge(owner_image_of_port(port), &ours)
+}
+
+/// Turn one lookup result into a verdict, recursing through the multi-owner case.
+fn judge(lookup: Lookup, ours: &std::path::Path) -> PortOwner {
+    match lookup {
+        Lookup::Image(image) => classify(Some(image.as_path()), ours),
         Lookup::Guarded => PortOwner::Foreign,
         Lookup::NoAnswer => PortOwner::Unknown,
+        Lookup::Owners(owners) => {
+            let verdicts: Vec<PortOwner> = owners.into_iter().map(|o| judge(o, ours)).collect();
+            aggregate(&verdicts)
+        }
     }
 }
 
@@ -304,6 +358,25 @@ mod tests {
     #[test]
     fn non_windows_never_claims_to_know_the_owner() {
         assert_eq!(classify_port_owner(59833), PortOwner::Unknown);
+    }
+
+    /// A port can legitimately have several owners — a wildcard `0.0.0.0` listener alongside a
+    /// specific `127.0.0.1` one. Round 1 of review narrowed the address filter to loopback only,
+    /// which binned a wildcard owner as "no answer" and handed it the bow-out; round 2 caught that.
+    /// The aggregate rule is what makes several owners a decision rather than a shrug.
+    #[test]
+    fn several_owners_are_judged_conservatively() {
+        use PortOwner::{Foreign, Ours, Unknown};
+        // One squatter alongside a genuine sibling is still a reason to stay resident.
+        assert_eq!(aggregate(&[Ours, Foreign]), Foreign);
+        assert_eq!(aggregate(&[Foreign, Ours]), Foreign);
+        // A refused identification already maps to Foreign before it reaches here.
+        assert_eq!(aggregate(&[Ours, Ours]), Ours);
+        // Anything unresolved among otherwise-ours owners is not "ours".
+        assert_eq!(aggregate(&[Ours, Unknown]), Unknown);
+        assert_eq!(aggregate(&[Unknown]), Unknown);
+        // No owners at all is not a verdict.
+        assert_eq!(aggregate(&[]), Unknown);
     }
 
     /// The spike that decides whether item 7 ships at all: can we resolve a same-user socket's owner
