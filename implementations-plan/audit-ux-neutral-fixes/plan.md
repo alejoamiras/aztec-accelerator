@@ -6,7 +6,7 @@ behaviour are excluded and stay with the owner.
 
 Base: `df38283`. Worktree/branch: `audit-ux-neutral-fixes` / `worktree-audit-ux-neutral-fixes`.
 
-**Revision 3** — post dual audit (codex `019fed5a` + fable) **and** a final fresh-context codex pass
+**Revision 4** — post dual audit (codex `019fed5a` + fable) **and** a final fresh-context codex pass
 (`codex-UcXKrZpx`). Six of my own claims were wrong across the two rounds and are corrected here,
 including one — item 2 — where revision 3 **reverses** revision 2. Full reasoning in
 [`decision-ledger.md`](decision-ledger.md). Recon: [`recon.md`](recon.md). Competing outline:
@@ -209,9 +209,41 @@ Item 7's failure direction is **security-monotone**: `Unknown` → do **not** `e
 
 **But it is not unconditionally UX-neutral, and revision 2 overclaimed that.** If the lookup returns
 `Unknown` against a *genuine* incumbent, today's clean silent exit becomes a **resident duplicate
-showing a tray error**. That is user-visible. Item 7 is UX-neutral only while the owner lookup
-succeeds; its failure mode trades a silent exit for a visible duplicate. This is the single strongest
-reason it belongs at the owner gate rather than in the autonomous set.
+showing a tray error**. That is user-visible.
+
+### D-ITEM7 (binding design constraint, rev 4) — exit unless positively `Foreign`
+
+Revision 3 still under-sold the frequency. **The bow-out is a per-minute hot path on Windows, not a
+once-per-logon edge**: `crash_recovery.rs:494` sets `<Interval>PT1M</Interval>`, and `main.rs`'s own
+comment states "the Run-key-vs-tick race is absorbed by the exit-0-if-healthy guard". Task Scheduler
+attempts a launch every 60 seconds. A verdict of `Unknown` meaning "stay resident" would therefore give
+a transient lookup failure **up to 1440 chances a day** to strand a permanent duplicate tray process.
+That is not a residual risk; it is a defect generator.
+
+**The rule is therefore inverted from revision 3, and this is not optional:**
+
+```
+exit(0)  iff  healthy_aztec_on_port() && owner != PortOwner::Foreign
+```
+
+| Verdict | Action | vs. today |
+|---|---|---|
+| `Ours` | exit(0) | identical |
+| `Unknown` | **exit(0)** | identical |
+| `Foreign` | stay resident, surface the error | **the fix** |
+
+The check may only ever **add** a reason to stay resident, never remove one. This makes item 7 exactly
+behaviour-preserving on every path except the attack it closes.
+
+**Security cost of this polarity, stated plainly**: an attacker who can force the lookup to fail keeps
+the attack. That cost is small — the attacker is *holding the listening socket*, so their row is in the
+table; forcing `Unknown` means releasing the port, which forfeits the squat. Trading a theoretical
+attacker-induced-lookup-failure path for exact behavioural parity on a path that runs 1440×/day is the
+right trade.
+
+**The two-instance Windows test remains a hard gate anyway.** This is the item I have now been wrong
+about twice — deferred for a false reason, then declared innocuous when it was not. That argues for
+testing the design rather than trusting the argument.
 
 **Item 5 — the guard is the bind, not a clock:**
 
@@ -363,10 +395,34 @@ test**, not only the self-listener probe. The self-listener proves the API is av
 prove packaged dual-launch behaviour or path normalisation. Additionally an injected-lookup-failure
 test asserting `Unknown` ⇒ stays resident.
 
-### Phase 5 — reconcile and ship
+### Phase 5 — reconcile, review, ship as a stack
 
-Update `report.md` + `report.html` remediation tables; record the F-12 residuals and the excluded
-`SO_EXCLUSIVEADDRUSE`; `/code-review max --fix`; codex iteration loop until clean; PR; watch CI.
+1. **Reconcile the record.** Update `report.md` + `report.html` remediation tables. Record, as
+   residuals rather than closures: F-12's `/usr`-as-own-filesystem case (and the partial-hardening
+   downgrade if Phase 0 failed), item 1's retained env fallback, item 7's `Unknown`-exits polarity and
+   its security cost, F-11's deferred phase-ordering, and the excluded `SO_EXCLUSIVEADDRUSE`.
+2. **`/code-review max --fix`** over the whole branch.
+3. **Codex iteration loop** — fresh session per round, `xhigh`, scoped to *these* changes: find bugs
+   and improvements. Iterate until a round returns nothing load-bearing. **Explicitly ask each round to
+   flag over-engineering**, and treat "this is more machinery than the finding warrants" as a valid
+   finding to act on. The last two PRs each took five rounds and every round found a defect in the
+   previous round's fix — budget for that, do not assume round 1 is clean.
+4. **Ship as a stack of PRs**, not one blob. `gh stack` (github/gh-stack v0.1.0) is installed.
+
+   One PR per phase, in dependency order — each reviewable alone, each independently revertable:
+
+   | PR | Branch | Contents |
+   |---|---|---|
+   | 1 | `…-p1-resolvers` | F-13 + F-12 |
+   | 2 | `…-p2-bounded-reads` | F-11 (+ `AbortSignal`) + F-03 sink C |
+   | 3 | `…-p3-witness-reaper` | F-08a |
+   | 4 | `…-p4-f03-identity` | F-03 sinks B + A |
+   | 5 | `…-p5-report` | report reconciliation |
+
+   `gh stack init` → `gh stack add <branch>` per phase → `gh stack submit`. Phase 4 is the one a human
+   should read hardest; the stack exists so it is not buried under four unrelated diffs.
+5. **Watch CI on the whole stack**, especially the `windows-build` leg — items 1 and 7 are inert
+   without it.
 
 ---
 
