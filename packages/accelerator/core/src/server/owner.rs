@@ -63,14 +63,25 @@ pub fn classify(owner_image: Option<&std::path::Path>, our_image: &std::path::Pa
 /// "stay resident" would give a transient lookup failure ~1440 chances a day to strand a duplicate
 /// tray process showing an error — a defect generator, not a residual risk.
 ///
-/// **The residual, stated accurately.** An earlier version of this comment claimed that forcing
-/// `Unknown` requires releasing the socket, so an attacker could not both squat and hide. **That was
-/// wrong** (post-impl codex): `OpenProcess` access is DACL-controlled, so a same-user squatter can
-/// deny query access to itself while keeping the port. That specific case is now caught — it maps to
-/// [`PortOwner::Foreign`] via `Lookup::Guarded`, see [`classify_port_owner`] — but the honest residual
-/// is that any OTHER route to `Unknown` (table churn, a PID that exits between the two calls) still
-/// permits the bow-out. Those are transient and not attacker-controlled on demand; closing them would
-/// mean treating every transient failure as hostile, on a path that runs once a minute.
+/// **The residual, stated accurately — this comment has been wrong twice, so it is worth reading.**
+///
+/// It first claimed that forcing `Unknown` requires releasing the socket, so an attacker could not
+/// both squat and hide. Wrong: `OpenProcess` access is DACL-controlled, so a same-user squatter can
+/// deny query access to itself while keeping the port. That case is caught now — it maps to
+/// [`PortOwner::Foreign`] via `Lookup::Guarded`.
+///
+/// It then claimed the remaining routes to `Unknown` were "not attacker-controlled". Also wrong,
+/// under the listener-scan design that preceded this one: a process could accept the health
+/// connection, close only its LISTENING socket, and answer over the accepted socket, leaving the
+/// scan with nobody to find. [`classify_port_owner`] no longer scans listeners for exactly this
+/// reason.
+///
+/// What genuinely remains: an attacker who accepts our identification connection and tears it down
+/// fast enough to win a race against the table lookup gets `Unknown`, and `Unknown` exits. It is a
+/// race they must win on every probe rather than a state they can hold, and losing it means being
+/// seen as `Foreign` — and if they drop the connection instead, the separate `/health` probe fails
+/// too, so `healthy` is false and we stay resident anyway. Closing it entirely would mean treating
+/// every transient failure as hostile, on a path that runs once a minute.
 pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
     healthy_aztec_answered && owner != PortOwner::Foreign
 }
