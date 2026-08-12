@@ -92,17 +92,23 @@ runs:
         # module but then dies with `this.bridge.setLastError is not a function`, because the napi
         # bridge only matches the wrapper it shipped with — a different failure that looks like the
         # same one unless you read past the first line.
+        # Install EVERY binding snappy declares, at the declared version — rather than guessing which
+        # one the loader will reach for. Both guesses were wrong in turn: `linux-x64-gnu` is not what
+        # it asks for (it names `wasm32-wasi` in the error), and `latest` resolves the module but then
+        # dies with `this.bridge.setLastError is not a function`, because the napi bridge only matches
+        # the wrapper it shipped with. Installing the declared set is simply completing the install
+        # the upstream installer left unfinished.
         WANT=$(node -p "
           const o = require('$AZTEC_DIR/node_modules/snappy/package.json').optionalDependencies || {};
-          const k = Object.keys(o).find(k => k.includes('linux-x64-gnu')) || Object.keys(o)[0];
-          k ? k + '@' + o[k] : ''
+          Object.entries(o).map(([k, v]) => k + '@' + v).join(' ')
         ")
         if [ -z "$WANT" ]; then
           echo "::error::snappy declares no optional bindings to install — the upstream tree is shaped differently than expected"
           exit 1
         fi
-        echo "installing $WANT"
-        npm install --no-save --no-audit --no-fund "$WANT"
+        echo "installing snappy's declared bindings: $WANT"
+        # shellcheck disable=SC2086 # deliberate word splitting: several packages
+        npm install --no-save --no-audit --no-fund $WANT
         if probe; then
           echo "repaired with the declared binding version"
           exit 0
