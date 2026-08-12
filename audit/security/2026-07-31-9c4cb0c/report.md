@@ -189,11 +189,30 @@ rather than buried under four unrelated diffs. Plan, decision ledger and lessons
   dependency of `src-tauri` (it is dev-only there) and is named as a follow-up rather than smuggled in.
 - **F-03 sink A: `Unknown` exits.** The bow-out exits unless the socket owner is *positively* foreign,
   so `Ours` and `Unknown` both behave exactly as before and the check can only ever add a reason to
-  stay resident. An attacker who can force the owner lookup to fail therefore keeps the attack. The
-  polarity is deliberate: the bow-out is a per-minute hot path on Windows (`crash_recovery.rs`
-  registers a `PT1M` trigger), so treating `Unknown` as "stay resident" would give a transient lookup
-  failure ~1440 chances a day to strand a duplicate tray process. Forcing `Unknown` also means
-  releasing the listening socket, which forfeits the squat.
+  stay resident. The polarity is deliberate: the bow-out is a per-minute hot path on Windows
+  (`crash_recovery.rs` registers a `PT1M` trigger), so treating `Unknown` as "stay resident" would give
+  a transient lookup failure ~1440 chances a day to strand a duplicate tray process.
+
+  The residual is **a race, not a state**: an attacker who accepts the identification connection and
+  tears it down fast enough to beat the table lookup gets `Unknown`, and `Unknown` exits. They must
+  win it on every probe, losing it means being seen as foreign, and dropping the connection to win it
+  also fails the separate `/health` probe — which leaves us resident anyway.
+
+  *Two earlier statements of this residual were wrong and are corrected here.* The first claimed
+  forcing `Unknown` requires releasing the socket; `OpenProcess` is DACL-controlled, so a same-user
+  process can deny query access to itself while holding the port (now treated as foreign). The second
+  claimed the remaining routes were not attacker-controlled; under the listener-scan design they were
+  — a process could accept the health connection, close only its *listening* socket, and answer over
+  the accepted socket, leaving the scan nothing to find. **That is why the implementation identifies
+  the owner by connection rather than by enumerating listeners.**
+
+- **F-03 sink A: identification is by connection, not listener enumeration.** Six review rounds each
+  widened the "which listener rows count as owning this port" predicate — port-only, loopback, the
+  `0.0.0.0` wildcard, the IPv6 table for dual-stack `::`, scan-failure vs. empty — and each widening
+  exposed an adjacent case. The shipped design connects to the port and asks the OS who owns *that
+  connection*: the OS has already resolved wildcards, address families and `IPV6_V6ONLY` by the time
+  it accepts, so the answer is one row found by an exact port pair with no address predicate at all.
+  Roughly 150 lines of parser and aggregation were deleted along with the bypass.
 - **F-08a: the OS-temp fallback is not swept.** `create_prove_tempdir` falls back to the OS temp dir on
   non-Windows when no data-local dir resolves; prefix-matching `prove-*` in a shared `/tmp` could
   delete a stranger's directory, so that residue is left deliberately.
