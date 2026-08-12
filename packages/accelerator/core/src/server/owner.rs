@@ -82,26 +82,40 @@ pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
 /// answer must never be guessed into a verdict), a process we cannot open, or an unreadable path.
 #[cfg(windows)]
 fn owner_image_of_port(port: u16) -> Lookup {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER,
-    };
+    // BOTH address families. An `AF_INET6` socket bound to `::` with `IPV6_V6ONLY=0` is dual-stack:
+    // it serves IPv4 loopback and reserves the port on both stacks, but appears ONLY in the TCP6
+    // table — so querying `AF_INET` alone reported `NoAnswer` for it, i.e. straight back to the
+    // bow-out (post-impl codex round 3). Rounds 1 and 2 each narrowed this filter and each missed an
+    // adjacent case; the union is what actually matches "who is holding this endpoint".
+    let mut pids = owning_pids_v4(port);
+    for pid in owning_pids_v6(port) {
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    if pids.is_empty() {
+        return Lookup::NoAnswer;
+    }
+    // Several owners CAN legitimately coexist on one port (a wildcard listener alongside a specific
+    // one). Resolving every one and judging conservatively beats declaring the whole answer
+    // ambiguous, which would also have landed on the bow-out.
+    Lookup::Owners(pids.into_iter().map(image_of_pid).collect())
+}
+
+/// Fetch an extended TCP listener table for `family`, as `u32` words plus the valid byte length.
+///
+/// The storage is over-aligned deliberately: `Vec<u8>` has alignment 1, and dereferencing it as a
+/// 4-aligned table struct is undefined behaviour even where x86 tolerates it (post-impl codex round
+/// 1). Rows are still read with `read_unaligned`, because the table may carry padding between entries.
+#[cfg(windows)]
+fn fetch_tcp_table(family: u32) -> Option<(Vec<u32>, usize)> {
+    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-        TCP_TABLE_OWNER_PID_LISTENER,
-    };
-    use windows_sys::Win32::Networking::WinSock::AF_INET;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER,
     };
 
-    // Over-align the storage. `Vec<u8>` has alignment 1, and dereferencing it as a 4-aligned
-    // `MIB_TCPTABLE_OWNER_PID` is undefined behaviour even where x86 tolerates it in practice
-    // (post-impl codex). Backing it with `u32` gives the alignment the structs require; rows are
-    // still read with `read_unaligned` because the table may carry padding between entries.
     let mut words: Vec<u32> = Vec::new();
     let mut size: u32 = 0;
-    let mut fetched = false;
     for _ in 0..4 {
         let ptr = if words.is_empty() {
             std::ptr::null_mut()
@@ -113,54 +127,61 @@ fn owner_image_of_port(port: u16) -> Lookup {
                 ptr,
                 &mut size,
                 0, // unsorted — we filter ourselves
-                AF_INET as u32,
+                family,
                 TCP_TABLE_OWNER_PID_LISTENER,
                 0,
             )
         };
         if rc == 0 {
-            fetched = true;
-            break;
+            let capacity = (words.len() * 4).min(size as usize);
+            return if words.is_empty() {
+                None
+            } else {
+                Some((words, capacity))
+            };
         }
         if rc != ERROR_INSUFFICIENT_BUFFER {
-            return Lookup::NoAnswer;
+            return None;
         }
-        // The table grows between the sizing call and the fetch, hence the loop rather than one
-        // resize — but never leave it having only RESIZED, which would read an unfilled buffer.
+        // The table can grow between the sizing call and the fetch, hence the loop rather than one
+        // resize — but never return having only RESIZED, which would read an unfilled buffer.
         words = vec![0u32; (size as usize).div_ceil(4)];
     }
-    if !fetched || words.is_empty() {
-        return Lookup::NoAnswer;
-    }
+    None
+}
 
+/// PIDs owning an IPv4 listener that serves `127.0.0.1:port` — loopback or the `0.0.0.0` wildcard.
+#[cfg(windows)]
+fn owning_pids_v4(port: u16) -> Vec<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+    let mut pids = Vec::new();
+    let Some((words, capacity)) = fetch_tcp_table(AF_INET as u32) else {
+        return pids;
+    };
     let bytes = words.as_ptr().cast::<u8>();
-    let capacity = (words.len() * 4).min(size as usize);
     // The row array begins where the single inline row does; deriving the header this way keeps it
     // correct if the struct ever gains fields.
     let header =
         std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() - std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     if capacity < std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
-        return Lookup::NoAnswer;
+        return pids;
     }
     // SAFETY: `bytes` points at `capacity` initialised bytes; `read_unaligned` imposes no alignment
-    // requirement, and every row index is bounds-checked against `capacity` before it is read.
+    // requirement, and the row count is bounds-checked against `capacity` before any row is read.
     let table = unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCPTABLE_OWNER_PID>()) };
     let count = table.dwNumEntries as usize;
     if header + count.saturating_mul(row_size) > capacity {
-        return Lookup::NoAnswer;
+        return pids;
     }
 
-    // Both fields are network byte order.
-    //
-    // Accept the WILDCARD address as well as loopback. A listener on `0.0.0.0:59833` accepts the
-    // `127.0.0.1` connection our probe makes and blocks our specific bind just the same — filtering
-    // to loopback alone (which is what round 1 of review asked for, and it was too narrow) binned
-    // such an owner as `NoAnswer`, i.e. straight back to the bow-out this exists to guard.
-    let want_port = port.to_be() as u32;
+    let want_port = port.to_be() as u32; // network byte order, in the low 16 bits
     let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
     let wildcard = u32::from_ne_bytes([0, 0, 0, 0]);
-    let mut pids: Vec<u32> = Vec::new();
     for i in 0..count {
         let row = unsafe {
             std::ptr::read_unaligned(
@@ -179,13 +200,68 @@ fn owner_image_of_port(port: u16) -> Lookup {
             pids.push(row.dwOwningPid);
         }
     }
-    if pids.is_empty() {
-        return Lookup::NoAnswer;
+    pids
+}
+
+/// PIDs owning an IPv6 listener that can serve `127.0.0.1:port`.
+///
+/// Only two local addresses qualify: the unspecified address `::` (a dual-stack wildcard, which
+/// reserves the port on both stacks) and the IPv4-mapped loopback `::ffff:127.0.0.1`. **`::1` is
+/// deliberately excluded** — an IPv6-loopback listener neither serves IPv4 nor blocks our IPv4 bind,
+/// so counting it could make us stay resident against a perfectly innocent neighbour, which is the
+/// duplicate-tray failure this design works hard to avoid.
+///
+/// `IPV6_V6ONLY` is not exposed in this table, so a `::` listener that is v6-only is included here
+/// even though it does not really serve IPv4. That direction is safe: it can only add a reason to
+/// stay resident, never remove one — and if we are running this code at all, our bind already failed,
+/// which a dual-stack `::` listener is a leading explanation for.
+#[cfg(windows)]
+fn owning_pids_v6(port: u16) -> Vec<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET6;
+
+    let mut pids = Vec::new();
+    let Some((words, capacity)) = fetch_tcp_table(AF_INET6 as u32) else {
+        return pids;
+    };
+    let bytes = words.as_ptr().cast::<u8>();
+    let header = std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>()
+        - std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
+    let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
+    if capacity < std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>() {
+        return pids;
     }
-    // Several owners CAN legitimately coexist on one port (a wildcard listener alongside a specific
-    // one). Resolving every one of them and judging conservatively beats declaring the whole answer
-    // ambiguous, which would also have landed on the bow-out.
-    Lookup::Owners(pids.into_iter().map(image_of_pid).collect())
+    // SAFETY: as in `owning_pids_v4` — `read_unaligned`, with the row count bounds-checked first.
+    let table = unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCP6TABLE_OWNER_PID>()) };
+    let count = table.dwNumEntries as usize;
+    if header + count.saturating_mul(row_size) > capacity {
+        return pids;
+    }
+
+    let want_port = port.to_be() as u32;
+    const UNSPECIFIED: [u8; 16] = [0; 16];
+    const V4_MAPPED_LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1];
+    for i in 0..count {
+        let row = unsafe {
+            std::ptr::read_unaligned(
+                bytes
+                    .add(header + i * row_size)
+                    .cast::<MIB_TCP6ROW_OWNER_PID>(),
+            )
+        };
+        if row.dwLocalPort != want_port {
+            continue;
+        }
+        if row.ucLocalAddr != UNSPECIFIED && row.ucLocalAddr != V4_MAPPED_LOOPBACK {
+            continue;
+        }
+        if !pids.contains(&row.dwOwningPid) {
+            pids.push(row.dwOwningPid);
+        }
+    }
+    pids
 }
 
 /// Resolve one PID's image, distinguishing "refused" from "gone".
@@ -396,7 +472,27 @@ mod tests {
             PortOwner::Ours,
             "a socket opened by THIS process must classify as Ours (got {image:?} vs {ours:?})"
         );
-        // The whole path, including the loopback-address filter and the Guarded mapping.
+        // The whole path, including the address filters and the Guarded mapping.
+        assert_eq!(classify_port_owner(port), PortOwner::Ours);
+    }
+
+    /// The TCP6 table is a second, structurally different table (16-byte addresses, scope ids), and
+    /// it is where a dual-stack `::` listener appears — the case that was invisible until round 3.
+    /// This exercises that parse against a real listener rather than trusting the struct layout.
+    #[cfg(windows)]
+    #[test]
+    fn resolves_an_ipv6_listener_this_process_opened() {
+        let Ok(listener) = std::net::TcpListener::bind("[::]:0") else {
+            // No IPv6 on the runner: nothing to assert, and failing here would be noise.
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        let pids = owning_pids_v6(port);
+        assert!(
+            pids.contains(&std::process::id()),
+            "a `::` listener opened by THIS process must appear in the TCP6 owner table (got {pids:?})"
+        );
+        // And it must reach the same verdict through the real entry point.
         assert_eq!(classify_port_owner(port), PortOwner::Ours);
     }
 }
