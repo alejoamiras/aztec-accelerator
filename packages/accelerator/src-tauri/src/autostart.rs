@@ -1243,6 +1243,28 @@ fn mount_fstype_at<'a>(
     mountpoint: &Path,
     resolved_mnt_id: Option<u64>,
 ) -> Option<&'a str> {
+    // When the kernel has told us WHICH mount the path resolves to, match on that id alone and never
+    // compare pathnames at all. The id came from opening `$APPDIR`, so the entry carrying it IS that
+    // mount by construction — re-deriving the same fact from a string is redundant, and worse, it
+    // makes the authoritative answer depend on the fragile half: mountpoints are byte strings, and a
+    // lossily-decoded non-UTF-8 mountpoint can never equal ours, so filtering by pathname FIRST would
+    // discard our own genuine mount before the id was ever consulted (post-impl codex round 6).
+    if let Some(id) = resolved_mnt_id {
+        for line in mountinfo.lines() {
+            let Some((before, after)) = line.split_once(" - ") else {
+                continue;
+            };
+            let Some(raw_id) = before.split_whitespace().next() else {
+                continue;
+            };
+            if raw_id.parse::<u64>() != Ok(id) {
+                continue;
+            }
+            return after.split_whitespace().next();
+        }
+        return None;
+    }
+
     // (mount id, parent id, fstype) for every entry at this mountpoint.
     let mut matches: Vec<(u64, u64, &'a str)> = Vec::new();
     for line in mountinfo.lines() {
@@ -1281,19 +1303,11 @@ fn mount_fstype_at<'a>(
     //     mountID=116 parentID=27 fstype=binfmt_misc   <- parent is the other match; 116 is on top
     // and `stat -f` there reports `binfmt_misc`. Both readings agreed on that sample, which is
     // exactly why it could not settle the question on its own.
-    // When the caller could ask the kernel which mount the path ACTUALLY resolves to, that answer is
-    // authoritative and no inference is needed. Same-path parentage identifies the leaf among mounts
-    // at this pathname, but a mount can still be hidden by an overmounted ANCESTOR — in which case
-    // resolution reaches a different filesystem than the leaf here suggests (post-impl codex round 5).
-    if let Some(id) = resolved_mnt_id {
-        return matches
-            .iter()
-            .find(|(mount_id, _, _)| *mount_id == id)
-            .map(|(_, _, fstype)| *fstype);
-    }
-
-    // Fallback for environments that cannot supply it (no readable procfs / older kernel): pick the
-    // leaf among same-path mounts. Weaker, but never worse than having no rule at all.
+    // Fallback for environments that cannot supply a resolved mount id (unopenable `$APPDIR`, no
+    // readable fdinfo): pick the leaf among same-path mounts. Weaker — and it inherits the
+    // lossy-decode limitation above, so a non-UTF-8 mountpoint is not matched here. Recorded rather
+    // than fixed: reaching this path at all requires procfs readable enough for mountinfo but not for
+    // fdinfo, and the primary path above has no such dependency.
     match matches.as_slice() {
         [] => None,
         [(_, _, fstype)] => Some(fstype),
@@ -2186,10 +2200,26 @@ mod tests {
             Some("ext4"),
             "and when it says ext4, the buried fuse entry must not be reported"
         );
-        // An id naming no entry here is not an answer.
+        // An id naming no entry is not an answer.
         assert_eq!(
             mount_fstype_at(&stacked, Path::new("/tmp/.mount_AbC"), Some(12345)),
             None
+        );
+
+        // And the id must be consulted WITHOUT first filtering by pathname: the AppImage runtime
+        // creates its mount with `mkdtemp` under raw `$TMPDIR` bytes, so OUR OWN mountpoint can be
+        // non-UTF-8. Lossy decoding then changes that path, and a pathname filter would discard the
+        // genuine mount before the id was ever looked at (post-impl codex round 6).
+        let mut raw: Vec<u8> = b"76 47 0:68 / /tmp/.mount_".to_vec();
+        raw.push(0xff);
+        raw.extend_from_slice(
+            b" ro,nosuid,relatime shared:417 - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage x ro\n",
+        );
+        let undecodable = String::from_utf8_lossy(&raw);
+        assert_eq!(
+            mount_fstype_at(&undecodable, Path::new("/tmp/.mount_AbC"), Some(76)),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage"),
+            "a mountpoint we cannot decode must still resolve through its mount id"
         );
 
         // The provenance decision follows: with the ext4 mount resolving, this is not our AppImage.
