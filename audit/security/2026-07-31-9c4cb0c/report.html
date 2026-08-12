@@ -149,8 +149,24 @@
     claimed fix.
   </p>
   <p>
+    <strong>Update, 12 August:</strong> every remaining finding whose fix <em>no user can perceive</em>
+    is now closed — F-03 (all three sinks), F-08 facet A, F-11's body-bound facet, F-12 and F-13.
+    <strong>Ten of thirteen findings are fixed.</strong> The three still open are open by choice, not
+    by oversight: F-07 and F-10 change what a user sees during the consent ceremony, and F-09's fix
+    reintroduces the permanent-update-lockout shape F-04 had to remove.
+  </p>
+  <p>
+    Two of this report's own remediation proposals were <em>refuted by experiment</em> during that
+    pass. F-03's suggested shared per-install token cannot authenticate anything against the modelled
+    same-user actor, who reads any <code>0600</code> file we own — the fix asks the OS which process
+    owns the socket instead. And F-12's suggested “bind the mount source to <code>$APPIMAGE</code>”
+    cannot be built: mounting a real released AppImage shows the mount source is the <em>basename
+    only</em>, with no directory to compare against.
+  </p>
+  <p>
     Full detail, including three places the fixes deliberately diverged from this report's own
-    recommendations and why: <code>report.md</code> → “Remediation status (2026-08-06)”.
+    recommendations, and every residual left open on purpose: <code>report.md</code> →
+    “Remediation status (2026-08-06)” and “UX-neutral remediation (2026-08-12)”.
   </p>
 </div>
 

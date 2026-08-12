@@ -148,7 +148,72 @@ confirmed to fail — so the tests pin the defect, not merely the current behavi
 | F-05 | **Fixed** | `578caa3`, `d902228`, `c1b86ad`, `b1928bb` |
 | F-06 | **Fixed, with an accepted residual** | `710fd94`, `47ea486`, `d902228`, `c1b86ad`, `a00e2ce`, `bd74929` |
 | F-08 | **Facet B fixed** (stderr containment). Facet A (witness residue) untouched | `d932eb3`, `d902228` |
-| F-03, F-07, F-09, F-10, F-11, F-12, F-13 | Open | — |
+| F-03, F-07, F-09, F-10, F-11, F-12, F-13 | Open at the time of writing — see [UX-neutral remediation](#ux-neutral-remediation-2026-08-12) | — |
+
+## UX-neutral remediation (2026-08-12)
+
+A second pass closed every remaining finding **whose fix no user can perceive** — no new prompt, no
+new click, no changed default, no changed timing. The three that alter what a user sees stay open by
+owner decision.
+
+| ID | Status | Where |
+|---|---|---|
+| F-03 | **Fixed — all three sinks** | sinks A + B in `p4-f03-identity`, sink C in `p2-bounded-reads` |
+| F-08 | **Fixed — facet A now too** (facet B shipped 2026-08-06) | `p3-witness-reaper` |
+| F-11 | **Fixed — body-bound facet.** Phase-ordering facet deferred (below) | `p2-bounded-reads` |
+| F-12 | **Fixed** | `p1-resolvers` |
+| F-13 | **Fixed** | `p1-resolvers` |
+| F-07, F-10 | **Open — owner decision.** Both change consent UX | — |
+| F-09 | **Open — owner deferred.** Its fix reintroduces F-04's permanent-lockout shape | — |
+
+Shipped as a stack of five PRs, one per phase, so the F-03 identity work could be read on its own
+rather than buried under four unrelated diffs. Plan, decision ledger and lessons:
+`implementations-plan/audit-ux-neutral-fixes/`.
+
+### Residuals — recorded as residuals, not as closures
+
+- **F-12: `$APPIMAGE` is still not authenticated.** The fix proves `$APPDIR` is a genuine FUSE mount
+  containing our executable, which kills `APPDIR=/`, `$HOME`, `/opt`, and `/usr`. It does **not** bind
+  `$APPIMAGE` itself. An audit round proposed doing exactly that by comparing the mountinfo *source*
+  to a canonical `$APPIMAGE` — a Phase-0 experiment refuted it: mounting our own released 1.0.7
+  AppImage shows the source is the **basename only**, with no directory component, so there is nothing
+  to compare an absolute path against. Comparing basenames was considered and rejected: one sample
+  cannot establish that the fuse subtype is *always* the AppImage basename, and a false negative
+  silently drops us to `current_exe()`, which inside an AppImage points into a mount that vanishes at
+  exit. An attacker who both controls our process environment and names their payload identically
+  therefore still passes — and can already write `~/.config/autostart/*.desktop` directly.
+- **F-13: the environment fallback remains.** Both resolvers still fall back to `%SystemRoot%` on the
+  rare Windows root where `C:\Windows` is not it, so the CI test passes because `C:\Windows` exists on
+  the runner. The finding was the *asymmetry* between the two siblings, and that is closed.
+  `GetSystemDirectoryW` for both is the complete fix; it needs `windows-sys` promoted to a production
+  dependency of `src-tauri` (it is dev-only there) and is named as a follow-up rather than smuggled in.
+- **F-03 sink A: `Unknown` exits.** The bow-out exits unless the socket owner is *positively* foreign,
+  so `Ours` and `Unknown` both behave exactly as before and the check can only ever add a reason to
+  stay resident. An attacker who can force the owner lookup to fail therefore keeps the attack. The
+  polarity is deliberate: the bow-out is a per-minute hot path on Windows (`crash_recovery.rs`
+  registers a `PT1M` trigger), so treating `Unknown` as "stay resident" would give a transient lookup
+  failure ~1440 chances a day to strand a duplicate tray process. Forcing `Unknown` also means
+  releasing the listening socket, which forfeits the squat.
+- **F-08a: the OS-temp fallback is not swept.** `create_prove_tempdir` falls back to the OS temp dir on
+  non-Windows when no data-local dir resolves; prefix-matching `prove-*` in a shared `/tmp` could
+  delete a stranger's directory, so that residue is left deliberately.
+- **F-08a: no cross-process lock.** The reaper is gated on winning the `:59833` bind — the same
+  ordering F-06 established — plus a 24-hour floor for the seam where `bind_with_retry` can take the
+  port from a predecessor still finishing a proof. A per-workspace advisory lock is the
+  correct-by-construction alternative and is named in the code as the upgrade path; it was judged
+  disproportionate to a Med/Low disk-hygiene finding.
+- **F-11: `"proved"` still fires before the body is read.** The SDK emits the phase, then reads. A
+  hostile or slow endpoint therefore shows "proved" while bytes are still arriving. Correcting the
+  order changes what a user sees, so it is **out of scope for a UX-neutral pass** and joins F-07/F-10
+  as an owner decision.
+- **F-11: no caller `AbortSignal`.** Deliberately not built. `PrivateKernelProver.createChonkProof`
+  takes `(executionSteps)` with no options bag, so a signal parameter would be unreachable from PXE
+  and dead API in this codebase.
+- **`SO_EXCLUSIVEADDRUSE` not applied.** An audit round suggested it as defence-in-depth against
+  incumbent-socket theft — a different attack from sink A's first-to-bind race. It is *not* blocked on
+  a new crate (`socket2` is already in `Cargo.lock`); it is deferred because it changes rebind
+  semantics, and `bind_with_retry` exists precisely to wait out a prior instance during an in-place
+  updater restart. Making the socket exclusive risks turning a restart overlap into a failed start.
 
 ### Where the fixes diverged from the recommended order
 
