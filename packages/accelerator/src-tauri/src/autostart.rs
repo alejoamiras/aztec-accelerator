@@ -1238,6 +1238,7 @@ pub(crate) fn appimage_self(
 /// past. Mountpoints are octal-escaped by the kernel, so a path containing a space arrives as `\040`.
 #[cfg(target_os = "linux")]
 fn mount_fstype_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str> {
+    let mut found = None;
     for line in mountinfo.lines() {
         // A malformed or truncated line must be SKIPPED, never abort the scan — `?` here would make
         // one unparseable entry hide every mount after it.
@@ -1250,9 +1251,15 @@ fn mount_fstype_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str>
         if Path::new(&unescape_mountinfo(raw_mp)) != mountpoint {
             continue;
         }
-        return after.split_whitespace().next();
+        // Keep looking rather than returning: mounts can be STACKED on one mountpoint, and mountinfo
+        // lists them in mount order, so the VISIBLE filesystem is the last matching entry. Returning
+        // the first would let a lower `fuse.` mount hidden under a later one still read as our
+        // AppImage (post-impl codex). `?` here would be the same abort-the-whole-scan bug as above.
+        if let Some(fstype) = after.split_whitespace().next() {
+            found = Some(fstype);
+        }
     }
-    None
+    found
 }
 
 /// Decode the kernel's octal escaping of mountinfo path fields (space, tab, newline, backslash).
@@ -2006,6 +2013,35 @@ mod tests {
             Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage")
         );
         assert_eq!(mount_fstype_at(REAL_MOUNTINFO, Path::new("/nope")), None);
+    }
+
+    /// Mounts can be STACKED on one mountpoint. mountinfo lists them in mount order, so the visible
+    /// filesystem is the LAST matching entry — taking the first would let an attacker shadow a real
+    /// `fuse.` mount with a later one (or, as here, be fooled by a hidden lower one).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stacked_mounts_resolve_to_the_topmost_visible_one() {
+        use super::{appimage_self, mount_fstype_at};
+        use std::path::Path;
+        let stacked = format!(
+            "{REAL_MOUNTINFO}\n\
+             99 47 0:71 / /tmp/.mount_AbC rw,relatime shared:500 - ext4 /dev/sdc1 rw"
+        );
+        assert_eq!(
+            mount_fstype_at(&stacked, Path::new("/tmp/.mount_AbC")),
+            Some("ext4"),
+            "the later (visible) mount wins"
+        );
+        // And the provenance decision follows it: the fuse mount is no longer what is mounted there.
+        assert_eq!(
+            appimage_self(
+                Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
+                Some("/tmp/.mount_AbC".into()),
+                Path::new("/tmp/.mount_AbC/usr/bin/AztecAccelerator"),
+                &stacked,
+            ),
+            None
+        );
     }
 
     #[test]
