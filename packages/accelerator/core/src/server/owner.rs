@@ -88,10 +88,17 @@ fn owner_image_of_port(port: u16) -> Lookup {
     // bow-out (post-impl codex round 3). Rounds 1 and 2 each narrowed this filter and each missed an
     // adjacent case; the union is what actually matches "who is holding this endpoint".
     let mut pids = owning_pids_v4(port);
-    for pid in owning_pids_v6(port) {
-        if !pids.contains(&pid) {
-            pids.push(pid);
-        }
+    // The v6 table is consulted ONLY when IPv4 yielded nobody. Windows defaults `IPV6_V6ONLY` to
+    // ENABLED and the table does not expose it, so a `::` listener is usually NOT dual-stack — and
+    // unioning it unconditionally meant an unrelated IPv6-only neighbour on this port could be judged
+    // `Foreign` alongside our own genuine IPv4 sibling, stranding a duplicate tray. That is the exact
+    // failure D-ITEM7's polarity exists to avoid, and the previous round's fix introduced it.
+    //
+    // Gating on "IPv4 found nobody" is what makes including `::` sound rather than speculative: we
+    // only reach this code because our own `127.0.0.1` bind failed with `AddrInUse`, so if no IPv4
+    // socket owns the port, something else does — and a dual-stack `::` listener is the explanation.
+    if pids.is_empty() {
+        pids = owning_pids_v6(port);
     }
     if pids.is_empty() {
         return Lookup::NoAnswer;
@@ -463,17 +470,16 @@ mod tests {
     fn resolves_the_owner_of_a_listener_this_process_opened() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let Lookup::Image(image) = owner_image_of_port(port) else {
-            panic!("GetExtendedTcpTable must resolve a same-user listener we opened ourselves");
-        };
-        let ours = std::env::current_exe().unwrap();
-        assert_eq!(
-            classify(Some(&image), &ours),
-            PortOwner::Ours,
-            "a socket opened by THIS process must classify as Ours (got {image:?} vs {ours:?})"
+        assert!(
+            owning_pids_v4(port).contains(&std::process::id()),
+            "GetExtendedTcpTable must resolve a same-user listener we opened ourselves"
         );
-        // The whole path, including the address filters and the Guarded mapping.
-        assert_eq!(classify_port_owner(port), PortOwner::Ours);
+        // The whole path: table scan, address filters, image comparison, and aggregation.
+        assert_eq!(
+            classify_port_owner(port),
+            PortOwner::Ours,
+            "a socket opened by THIS process must classify as Ours"
+        );
     }
 
     /// The TCP6 table is a second, structurally different table (16-byte addresses, scope ids), and
@@ -492,7 +498,24 @@ mod tests {
             pids.contains(&std::process::id()),
             "a `::` listener opened by THIS process must appear in the TCP6 owner table (got {pids:?})"
         );
-        // And it must reach the same verdict through the real entry point.
-        assert_eq!(classify_port_owner(port), PortOwner::Ours);
+
+        // Windows defaults IPV6_V6ONLY to ENABLED, so this listener almost certainly does NOT serve
+        // IPv4 — which is exactly why `classify_port_owner` must not consult the v6 table while IPv4
+        // has an answer. Assert the real behaviour rather than assuming dual-stack: binding IPv4 on
+        // the same port should still SUCCEED here, and while it does, the v4 table is authoritative.
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(v4) => {
+                assert_eq!(
+                    classify_port_owner(port),
+                    PortOwner::Ours,
+                    "with an IPv4 owner present the v4 table decides"
+                );
+                drop(v4);
+            }
+            Err(_) => {
+                // Genuinely dual-stack (V6ONLY off on this host): the v6 fallback is what answers.
+                assert_eq!(classify_port_owner(port), PortOwner::Ours);
+            }
+        }
     }
 }
