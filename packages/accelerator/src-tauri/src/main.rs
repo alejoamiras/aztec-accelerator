@@ -301,8 +301,17 @@ fn spawn_http_server(
             // Windows (the crash-recovery task's PT1M trigger), so treating a transient lookup
             // failure as "stay resident" would strand duplicate tray processes.
             if addr_in_use && cfg!(target_os = "windows") {
-                let healthy = aztec_accelerator::server::healthy_aztec_on_port().await;
-                let owner = aztec_accelerator::server::classify_port_owner(59833);
+                // ONE connection answers both questions. Probing health and identifying the owner
+                // separately is a deterministic bypass, not a race: a one-shot listener can accept
+                // the health request, close its listening socket, answer healthy over the accepted
+                // socket, and leave the second lookup with nothing to find — which is `Unknown`, and
+                // `Unknown` exits (post-impl codex round 7). Blocking, so it runs off the async
+                // runtime's worker.
+                let (healthy, owner) = tokio::task::spawn_blocking(|| {
+                    aztec_accelerator::server::probe_and_identify(59833)
+                })
+                .await
+                .unwrap_or((false, aztec_accelerator::server::PortOwner::Unknown));
                 if aztec_accelerator::server::may_bow_out(healthy, owner) {
                     tracing::warn!(
                         ?owner,

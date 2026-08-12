@@ -24,7 +24,7 @@ pub use bind::bind_with_retry;
 mod probe;
 pub use probe::{healthy_aztec_on_port, healthy_aztec_version_on_port};
 mod owner;
-pub use owner::{classify_port_owner, may_bow_out, PortOwner};
+pub use owner::{may_bow_out, probe_and_identify, PortOwner};
 mod auth;
 mod host;
 mod prove;

@@ -86,98 +86,194 @@ pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
     healthy_aztec_answered && owner != PortOwner::Foreign
 }
 
-/// Resolve who owns `port`, by CONNECTING to it and asking the OS who owns that connection.
+/// Probe `/health` AND identify the owner over **one** connection (F-03 sink A).
 ///
-/// **Why a connection rather than the listener table.** Six successive review rounds each widened the
-/// "which listener rows count as owning this port" predicate — port-only, then loopback, then the
-/// `0.0.0.0` wildcard, then the IPv6 table for dual-stack `::`, then scan-failure vs. empty. Each
-/// widening was correct and each exposed an adjacent case, because "who is listening in a way that
-/// covers this address" is genuinely hard to enumerate: wildcards, address families, `IPV6_V6ONLY`,
-/// and several coexisting listeners all bear on it.
+/// **Why one connection is not an optimisation.** Doing them separately is a deterministic bypass,
+/// not a race: `main.rs` probes health first, so a one-shot listener can accept that request, close
+/// its listening socket, and answer healthy over the accepted socket. A second connection then finds
+/// nothing, yields `Unknown`, and `may_bow_out(true, Unknown)` exits — restoring the whole eviction
+/// hole. Two connections can be answered by two different processes; only one connection ties
+/// "answered healthy" to "is our image".
 ///
-/// A connection sidesteps every one of them. The OS has already done that routing by the time it
-/// accepts our connect, so the answer is a single row identified by an **exact port pair** — our
-/// ephemeral local port is unique, so no address predicate is needed at all. There is one owner, so
-/// there is nothing to aggregate.
+/// **Why a connection rather than the listener table.** Six review rounds each widened the "which
+/// listener rows count as owning this port" predicate — port-only, loopback, the `0.0.0.0` wildcard,
+/// the IPv6 table for dual-stack `::`, scan-failure vs. empty — and each widening exposed an adjacent
+/// case, because "who is listening in a way that covers this address" is hard to enumerate. The OS has
+/// already resolved all of it by the time it accepts, so the peer of a live connection is a single
+/// unambiguous row.
 ///
-/// It also closes a real bypass the listener scan had: a process could accept our health connection,
-/// close only its LISTENING socket, and answer over the accepted socket — after which the listener
-/// scan found nobody, returned `Unknown`, and the genuine app bowed out. A connection row survives
-/// for as long as the connection does, so closing the listener no longer hides the owner.
+/// Returns `(healthy, owner)`. Blocking, and Windows-only: the bow-out it serves is Windows-only.
 #[cfg(windows)]
-fn owner_image_of_port(port: u16) -> Lookup {
+pub fn probe_and_identify(port: u16) -> (bool, PortOwner) {
+    use std::io::{Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::time::Duration;
 
-    // A short timeout: this is loopback, and the caller is on the startup path.
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else {
-        // Nothing accepted — nobody owns it in any sense we care about.
-        return Lookup::NoAnswer;
-    };
-    let Ok(local) = stream.local_addr() else {
-        return Lookup::NoAnswer;
-    };
-    let ephemeral = local.port();
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+    const IO_TIMEOUT: Duration = Duration::from_secs(3);
+    /// The real body is a few hundred bytes; this bounds a peer that answers `200` and streams.
+    const MAX_BODY: usize = 64 * 1024;
 
-    // From the OS's side the peer's row is (local = our target port, remote = our ephemeral port).
-    // The pair is unique while the connection is open, which is why no address matching is needed —
-    // and the connection is held open across the lookup precisely so the row cannot vanish.
-    let pid = connection_peer_pid(port, ephemeral);
-    drop(stream);
-    match pid {
-        Some(pid) => image_of_pid(pid),
-        None => Lookup::NoAnswer,
+    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT) else {
+        return (false, PortOwner::Unknown);
+    };
+    let (Ok(local), Ok(peer)) = (stream.local_addr(), stream.peer_addr()) else {
+        return (false, PortOwner::Unknown);
+    };
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+
+    // Identify FIRST, while the connection is certainly live — before any request can prompt the peer
+    // to tear it down.
+    let owner = match connection_peer_pid(peer, local) {
+        Some(pid) => match image_of_pid(pid) {
+            Lookup::Image(image) => match std::env::current_exe() {
+                Ok(ours) => classify(Some(image.as_path()), &ours),
+                Err(_) => PortOwner::Unknown,
+            },
+            Lookup::Guarded => PortOwner::Foreign,
+            Lookup::NoAnswer => PortOwner::Unknown,
+        },
+        None => PortOwner::Unknown,
+    };
+
+    // Then ask the same peer, on the same stream, whether it is a healthy Aztec accelerator.
+    let request = format!(
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return (false, owner);
     }
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if raw.len() + n > MAX_BODY {
+                    return (false, owner); // over-cap: refuse to treat it as healthy
+                }
+                raw.extend_from_slice(&chunk[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+    (health_response_is_healthy(&raw), owner)
 }
 
-/// The PID owning the connection whose local port is `local_port` and whose remote port is
-/// `remote_port`, searching the IPv4 connection table and then the IPv6 one.
+/// Is this raw HTTP/1.1 response a `2xx` carrying a healthy-Aztec `/health` body?
 ///
-/// Matching is on the PORT PAIR alone. An ephemeral port is unique among live connections to this
-/// service, so addresses add nothing — and it is exactly the address reasoning that this design
-/// exists to delete. The v6 table is still consulted because a dual-stack listener's accepted
-/// connection appears there as IPv4-mapped.
+/// Pure, so the parse is table-tested on every platform even though only Windows produces the input.
+#[cfg(any(windows, test))]
+pub(crate) fn health_response_is_healthy(raw: &[u8]) -> bool {
+    let Some(split) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let (head, body) = raw.split_at(split);
+    let Ok(head) = std::str::from_utf8(head) else {
+        return false;
+    };
+    let Some(status) = head.lines().next() else {
+        return false;
+    };
+    // "HTTP/1.1 200 OK" — accept any 2xx, reject everything else, exactly as the reqwest probe does.
+    let is_2xx = status
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .is_some_and(|c| (200..300).contains(&c));
+    if !is_2xx {
+        return false;
+    }
+    let body = &body[4.min(body.len())..];
+    serde_json::from_slice::<serde_json::Value>(body)
+        .map(|v| super::probe::is_healthy_aztec_response(&v))
+        .unwrap_or(false)
+}
+
+/// The PID owning the connection whose local endpoint is `local` (the peer's side — i.e. our
+/// `peer_addr`) and whose remote endpoint is `remote` (our own `local_addr`).
+///
+/// Matches the **complete four-tuple**, not just the port pair. Port 59833 lies inside Windows's
+/// default ephemeral range and the same port may be bound on different explicit interfaces, so an
+/// unrelated connection can share the reversed port pair and win by table order (post-impl codex
+/// round 7). Duplicate exact matches are rejected rather than resolved by order.
 #[cfg(windows)]
-fn connection_peer_pid(local_port: u16, remote_port: u16) -> Option<u32> {
+fn connection_peer_pid(local: std::net::SocketAddr, remote: std::net::SocketAddr) -> Option<u32> {
+    use std::net::SocketAddr;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
         MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_CONNECTIONS,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
-    let want_local = local_port.to_be() as u32;
-    let want_remote = remote_port.to_be() as u32;
+    /// IPv4 address as the network-order `u32` the table stores.
+    fn v4(addr: &SocketAddr) -> Option<u32> {
+        match addr {
+            SocketAddr::V4(a) => Some(u32::from_ne_bytes(a.ip().octets())),
+            SocketAddr::V6(_) => None,
+        }
+    }
+    /// The 16 address bytes as the table stores them, mapping IPv4 to `::ffff:a.b.c.d` — which is how
+    /// a dual-stack listener's accepted connection appears in the TCP6 table.
+    fn v6(addr: &SocketAddr) -> [u8; 16] {
+        match addr {
+            SocketAddr::V6(a) => a.ip().octets(),
+            SocketAddr::V4(a) => a.ip().to_ipv6_mapped().octets(),
+        }
+    }
 
-    if let Some((words, capacity)) =
-        fetch_tcp_table(AF_INET as u32, TCP_TABLE_OWNER_PID_CONNECTIONS)
-    {
-        let bytes = words.as_ptr().cast::<u8>();
-        let header = std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>()
-            - std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-        let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-        if capacity >= std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
-            // SAFETY: `read_unaligned` imposes no alignment requirement, and the row count is
-            // bounds-checked against `capacity` before any row is read.
-            let table = unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCPTABLE_OWNER_PID>()) };
-            let count = table.dwNumEntries as usize;
-            if header + count.saturating_mul(row_size) <= capacity {
-                for i in 0..count {
-                    let row = unsafe {
-                        std::ptr::read_unaligned(
-                            bytes
-                                .add(header + i * row_size)
-                                .cast::<MIB_TCPROW_OWNER_PID>(),
-                        )
-                    };
-                    if row.dwLocalPort == want_local && row.dwRemotePort == want_remote {
-                        return Some(row.dwOwningPid);
+    let want_local_port = local.port().to_be() as u32;
+    let want_remote_port = remote.port().to_be() as u32;
+    let mut found: Option<u32> = None;
+
+    // IPv4 table.
+    if let (Some(want_local_addr), Some(want_remote_addr)) = (v4(&local), v4(&remote)) {
+        if let Some((words, capacity)) =
+            fetch_tcp_table(AF_INET as u32, TCP_TABLE_OWNER_PID_CONNECTIONS)
+        {
+            let bytes = words.as_ptr().cast::<u8>();
+            let header = std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>()
+                - std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+            let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+            if capacity >= std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
+                // SAFETY: `read_unaligned` imposes no alignment requirement, and the row count is
+                // bounds-checked against `capacity` before any row is read.
+                let table =
+                    unsafe { std::ptr::read_unaligned(bytes.cast::<MIB_TCPTABLE_OWNER_PID>()) };
+                let count = table.dwNumEntries as usize;
+                if header + count.saturating_mul(row_size) <= capacity {
+                    for i in 0..count {
+                        let row = unsafe {
+                            std::ptr::read_unaligned(
+                                bytes
+                                    .add(header + i * row_size)
+                                    .cast::<MIB_TCPROW_OWNER_PID>(),
+                            )
+                        };
+                        if row.dwLocalPort == want_local_port
+                            && row.dwRemotePort == want_remote_port
+                            && row.dwLocalAddr == want_local_addr
+                            && row.dwRemoteAddr == want_remote_addr
+                        {
+                            match found {
+                                // Two rows for one exact four-tuple is an answer we must not pick from.
+                                Some(seen) if seen != row.dwOwningPid => return None,
+                                _ => found = Some(row.dwOwningPid),
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    if found.is_some() {
+        return found;
+    }
 
+    // IPv6 table — where a dual-stack listener's accepted connection lands, IPv4-mapped.
+    let (want_local_addr, want_remote_addr) = (v6(&local), v6(&remote));
     let (words, capacity) = fetch_tcp_table(AF_INET6 as u32, TCP_TABLE_OWNER_PID_CONNECTIONS)?;
     let bytes = words.as_ptr().cast::<u8>();
     let header = std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>()
@@ -200,11 +296,18 @@ fn connection_peer_pid(local_port: u16, remote_port: u16) -> Option<u32> {
                     .cast::<MIB_TCP6ROW_OWNER_PID>(),
             )
         };
-        if row.dwLocalPort == want_local && row.dwRemotePort == want_remote {
-            return Some(row.dwOwningPid);
+        if row.dwLocalPort == want_local_port
+            && row.dwRemotePort == want_remote_port
+            && row.ucLocalAddr == want_local_addr
+            && row.ucRemoteAddr == want_remote_addr
+        {
+            match found {
+                Some(seen) if seen != row.dwOwningPid => return None,
+                _ => found = Some(row.dwOwningPid),
+            }
         }
     }
-    None
+    found
 }
 
 /// Fetch an extended TCP table for `family` and `class`, as `u32` words plus the valid byte length.
@@ -295,32 +398,16 @@ enum Lookup {
     Guarded,
 }
 
-/// Off Windows we do not look, so nobody is ever identified.
+/// Off Windows there is no bow-out to guard, so nobody is ever identified and health is left to the
+/// existing async probe. Present so the caller compiles everywhere without a `cfg` of its own.
 ///
-/// A stub rather than a `cfg` branch inside [`classify_port_owner`] so the DECISION path is identical
-/// on every platform: only the *lookup* is platform-specific, and `classify` is therefore compiled,
-/// reachable and exercised everywhere rather than being dead code off Windows.
+/// It still goes through [`classify`] with no owner rather than returning `Unknown` directly: that
+/// keeps the one piece of pure decision logic compiled, reachable and exercised on the platform where
+/// the whole test suite actually runs, instead of dead code off Windows.
 #[cfg(not(windows))]
-fn owner_image_of_port(_port: u16) -> Lookup {
-    Lookup::NoAnswer
-}
-
-/// Who owns [`super::PORT`]?
-///
-/// `Guarded` maps to [`PortOwner::Foreign`], which is the one place this deviates from "an
-/// unidentified owner is Unknown". `OpenProcess` access is DACL-controlled, so a same-user squatter
-/// can deny query access to ITSELF while holding the socket; treating that as Unknown would let it
-/// force the bow-out and keep the whole attack (post-impl codex). Refusing to be identified is not
-/// something our own build does, so it is judged as what it is.
-pub fn classify_port_owner(port: u16) -> PortOwner {
-    let Ok(ours) = std::env::current_exe() else {
-        return PortOwner::Unknown;
-    };
-    match owner_image_of_port(port) {
-        Lookup::Image(image) => classify(Some(image.as_path()), &ours),
-        Lookup::Guarded => PortOwner::Foreign,
-        Lookup::NoAnswer => PortOwner::Unknown,
-    }
+pub fn probe_and_identify(_port: u16) -> (bool, PortOwner) {
+    let ours = std::env::current_exe().unwrap_or_default();
+    (false, classify(None, &ours))
 }
 
 #[cfg(test)]
@@ -374,11 +461,48 @@ mod tests {
         assert!(!may_bow_out(false, PortOwner::Foreign));
     }
 
+    /// The raw-HTTP `/health` parse. Pure, so it is table-tested on every platform even though only
+    /// Windows produces the input — and it exists at all because health and identity must come from
+    /// ONE connection, which rules out the async client used elsewhere.
+    #[test]
+    fn health_response_parsing() {
+        let ok = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"status\":\"ok\",\"api_version\":1}";
+        assert!(health_response_is_healthy(ok));
+
+        // Any 2xx, since that is what the async probe accepts.
+        let created = b"HTTP/1.1 204 No Content\r\n\r\n{\"status\":\"ok\",\"api_version\":1}";
+        assert!(health_response_is_healthy(created));
+
+        // Non-2xx must never be trusted, however convincing the body.
+        let not_found = b"HTTP/1.1 404 Not Found\r\n\r\n{\"status\":\"ok\",\"api_version\":1}";
+        assert!(!health_response_is_healthy(not_found));
+
+        // A 200 from something that is not our contract.
+        let foreign = b"HTTP/1.1 200 OK\r\n\r\n{\"hello\":\"not the accelerator\"}";
+        assert!(!health_response_is_healthy(foreign));
+
+        // Wrong api_version is the case the shape check exists for.
+        let wrong_version = b"HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\",\"api_version\":2}";
+        assert!(!health_response_is_healthy(wrong_version));
+
+        // Truncated / headerless / empty inputs must not panic or pass.
+        assert!(!health_response_is_healthy(b"HTTP/1.1 200 OK"));
+        assert!(!health_response_is_healthy(b""));
+        assert!(!health_response_is_healthy(b"\r\n\r\n"));
+        assert!(!health_response_is_healthy(
+            b"HTTP/1.1 200 OK\r\n\r\nnot json"
+        ));
+        // A non-UTF-8 header block must be rejected rather than panicking.
+        assert!(!health_response_is_healthy(&[
+            0xff, 0xfe, b'\r', b'\n', b'\r', b'\n'
+        ]));
+    }
+
     /// Off Windows this must be inert — the bow-out it guards is Windows-only.
     #[cfg(not(windows))]
     #[test]
     fn non_windows_never_claims_to_know_the_owner() {
-        assert_eq!(classify_port_owner(59833), PortOwner::Unknown);
+        assert_eq!(probe_and_identify(59833), (false, PortOwner::Unknown));
     }
 
     /// Can we resolve a same-user socket's owner without elevation on a CI runner? This is the
@@ -390,16 +514,27 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_listener_this_process_opened_classifies_as_ours() {
+        use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        // Accept in the background so our probe connection completes.
+        // Accept and answer a healthy /health, HOLDING the accepted socket for the lifetime of the
+        // handler — dropping it immediately would tear the connection down mid-lookup.
         let accepter = std::thread::spawn(move || {
-            let _ = listener.accept();
-            // Hold the accepted socket briefly so the connection row is live during the lookup.
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            if let Ok((mut sock, _)) = listener.accept() {
+                let body = br#"{"status":"ok","api_version":1}"#;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(body);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         });
+        let (healthy, owner) = probe_and_identify(port);
+        assert!(healthy, "the peer answered a healthy /health body");
         assert_eq!(
-            classify_port_owner(port),
+            owner,
             PortOwner::Ours,
             "a socket opened by THIS process must classify as Ours"
         );
@@ -438,7 +573,7 @@ mod tests {
             .expect("child must report its port");
         let port: u16 = line.trim().parse().expect("child must print a port number");
 
-        let verdict = classify_port_owner(port);
+        let (_healthy, verdict) = probe_and_identify(port);
 
         let _ = child.kill();
         let _ = child.wait();
