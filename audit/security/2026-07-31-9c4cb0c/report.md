@@ -213,6 +213,18 @@ rather than buried under four unrelated diffs. Plan, decision ledger and lessons
   connection*: the OS has already resolved wildcards, address families and `IPV6_V6ONLY` by the time
   it accepts, so the answer is one row found by an exact port pair with no address predicate at all.
   Roughly 150 lines of parser and aggregation were deleted along with the bypass.
+- **NEW, and NOT fixed here — F-08 facet B's own fix has an unbounded buffer.** The stderr
+  containment shipped on 2026-08-06 pipes the child's stderr and truncates it to 500 characters, but
+  the truncation happens *after* `wait_with_output()`, which retains the entire stream until `bb`
+  exits — up to the 5-minute `PROVE_TIMEOUT`. So it bounds what is **logged**, not what is
+  **buffered**, and a noisy or wedged prover can consume unbounded memory on the proving hot path.
+  Found by the review loop for this pass (`core/src/bb.rs`, introduced by `e1814e6`).
+
+  Deliberately **not** fixed in this stack: it is outside the approved scope, it is pre-existing
+  rather than a regression introduced here, and the correct fix — draining stderr concurrently while
+  retaining only a fixed prefix, so the child also cannot block on a full pipe — changes process
+  handling on the single riskiest path in the application and deserves its own review rounds.
+
 - **F-08a: the OS-temp fallback is not swept.** `create_prove_tempdir` falls back to the OS temp dir on
   non-Windows when no data-local dir resolves; prefix-matching `prove-*` in a shared `/tmp` could
   delete a stranger's directory, so that residue is left deliberately.
