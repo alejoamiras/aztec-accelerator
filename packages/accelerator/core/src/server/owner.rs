@@ -76,7 +76,7 @@ pub fn may_bow_out(healthy_aztec_answered: bool, owner: PortOwner) -> bool {
 /// `None` — i.e. [`PortOwner::Unknown`] — on any doubt: no row, MORE than one row (an ambiguous
 /// answer must never be guessed into a verdict), a process we cannot open, or an unreadable path.
 #[cfg(windows)]
-pub fn owner_image_of_port(port: u16) -> Option<std::path::PathBuf> {
+fn owner_image_of_port(port: u16) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -163,21 +163,23 @@ pub fn owner_image_of_port(port: u16) -> Option<std::path::PathBuf> {
     )))
 }
 
-/// Who owns [`super::PORT`]? Always [`PortOwner::Unknown`] off Windows, where the bow-out this
-/// guards does not exist.
+/// Off Windows we do not look, so nobody is ever identified — which yields [`PortOwner::Unknown`],
+/// and the bow-out this guards is Windows-only anyway.
+///
+/// A stub rather than a `cfg` branch inside [`classify_port_owner`] so the DECISION path is identical
+/// on every platform: only the *lookup* is platform-specific, and `classify` is therefore compiled,
+/// reachable and exercised everywhere rather than being dead code off Windows.
+#[cfg(not(windows))]
+fn owner_image_of_port(_port: u16) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Who owns [`super::PORT`]?
 pub fn classify_port_owner(port: u16) -> PortOwner {
-    #[cfg(windows)]
-    {
-        let Ok(ours) = std::env::current_exe() else {
-            return PortOwner::Unknown;
-        };
-        return classify(owner_image_of_port(port).as_deref(), &ours);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = port;
-        PortOwner::Unknown
-    }
+    let Ok(ours) = std::env::current_exe() else {
+        return PortOwner::Unknown;
+    };
+    classify(owner_image_of_port(port).as_deref(), &ours)
 }
 
 #[cfg(test)]
