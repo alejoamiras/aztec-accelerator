@@ -55,7 +55,13 @@ runs:
       uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ~/.aztec/versions/${{ steps.detect.outputs.version }}
-        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}
+        # The `-minage7` salt is load-bearing, not decoration. The aztec version alone does NOT
+        # identify the tree: the installer resolves transitive dependencies unlocked, so the same
+        # version installed on two days can differ — which is how `snappy@7.4.0` got in. Once a broken
+        # tree is cached, the install step is skipped by its `cache-hit` guard and any fix applied
+        # THERE never runs; the cache just keeps serving the breakage. Bump this salt whenever the
+        # install recipe changes so the remedy is actually exercised.
+        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7
 
     - name: Install Aztec CLI
       if: inputs.skip_cli != 'true' && steps.cache-aztec.outputs.cache-hit != 'true'
