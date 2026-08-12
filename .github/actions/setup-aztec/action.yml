@@ -67,6 +67,37 @@ runs:
           | VERSION=${{ steps.detect.outputs.version }} bash
         ls -la ~/.aztec/versions/${{ steps.detect.outputs.version }}/bin/
 
+    # The installer can produce a tree whose `snappy` cannot resolve a platform binding, and the only
+    # symptom is `aztec start` dying with ERR_MODULE_NOT_FOUND ~10 minutes later, at the node-readiness
+    # timeout, with the real cause buried in a log dump. Verified deterministic on 5.0.1: two runs,
+    # fresh installs both times ("Cache not found for input keys: Linux-aztec-5.0.1"), identical
+    # failure. Detect it HERE, where the cause is obvious, and repair the one missing optional
+    # dependency rather than letting every PR spend ten minutes discovering it.
+    #
+    # Deliberately loud, not silent: if the repair does not take, this fails the step with the reason
+    # instead of handing the problem back to the E2E job.
+    - name: Verify the Aztec CLI can load its native dependencies
+      if: inputs.skip_cli != 'true'
+      shell: bash
+      run: |
+        AZTEC_DIR="$HOME/.aztec/versions/${{ steps.detect.outputs.version }}"
+        probe() { node -e 'import("snappy").then(()=>process.exit(0)).catch(e=>{console.error(String(e));process.exit(1)})' 2>&1; }
+        cd "$AZTEC_DIR"
+        if probe; then
+          echo "aztec's snappy binding loads"
+          exit 0
+        fi
+        echo "::warning::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding — repairing"
+        # Both the native binding for this runner and the wasm fallback the loader reaches for.
+        npm install --no-save --no-audit --no-fund \
+          @napi-rs/snappy-linux-x64-gnu @napi-rs/snappy-wasm32-wasi || true
+        if probe; then
+          echo "repaired"
+        else
+          echo "::error::aztec ${{ steps.detect.outputs.version }} cannot load snappy even after installing its bindings; the upstream install is broken and the E2E cannot run"
+          exit 1
+        fi
+
     - name: Update PATH
       if: inputs.skip_cli != 'true'
       shell: bash
