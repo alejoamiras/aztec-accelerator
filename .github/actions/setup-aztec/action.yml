@@ -87,7 +87,27 @@ runs:
           echo "aztec's snappy binding loads"
           exit 0
         fi
-        echo "::error::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding, so \`aztec start\` cannot run. This is an UPSTREAM packaging break, not a fault in this repository's code — the installer reports success while leaving snappy unable to resolve a platform binding (note its own 'packages have install scripts not yet covered by allowScripts' warning). Fix by pinning a version whose install is intact, or wait for upstream. Installing the bindings after the fact was tried and does NOT work."
+        echo "::warning::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding — installing the one its own package.json asks for"
+        # Install the EXACT version snappy declares, not `latest`. Installing latest resolves the
+        # module but then dies with `this.bridge.setLastError is not a function`, because the napi
+        # bridge only matches the wrapper it shipped with — a different failure that looks like the
+        # same one unless you read past the first line.
+        WANT=$(node -p "
+          const o = require('$AZTEC_DIR/node_modules/snappy/package.json').optionalDependencies || {};
+          const k = Object.keys(o).find(k => k.includes('linux-x64-gnu')) || Object.keys(o)[0];
+          k ? k + '@' + o[k] : ''
+        ")
+        if [ -z "$WANT" ]; then
+          echo "::error::snappy declares no optional bindings to install — the upstream tree is shaped differently than expected"
+          exit 1
+        fi
+        echo "installing $WANT"
+        npm install --no-save --no-audit --no-fund "$WANT"
+        if probe; then
+          echo "repaired with the declared binding version"
+          exit 0
+        fi
+        echo "::error::aztec ${{ steps.detect.outputs.version }} still cannot load snappy after installing its own declared binding ($WANT). This is an UPSTREAM packaging break, not a fault in this repository — the installer reports success while leaving snappy unusable. Pin an aztec version whose install is intact, or wait for upstream."
         exit 1
 
     - name: Update PATH
