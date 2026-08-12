@@ -41,7 +41,8 @@ reverting its fix and confirming that named test fails.
 | 7 | **F-03 sink A** | Windows bow-out requires the listener's owning process to be our image | Linux (logic) + **real Windows** |
 
 **Deferred, with argument:** F-07, F-10 (change consent UX — owner call), F-09 (owner-deferred: its
-fix reintroduces F-04's lockout shape), `SO_EXCLUSIVEADDRUSE` (§A-2 — needs a genuinely new crate).
+fix reintroduces F-04's lockout shape), F-11's `"proved"` phase-ordering (user-visible),
+`SO_EXCLUSIVEADDRUSE` (§A-2 — **not** a new-crate problem; deferred for restart-overlap availability).
 
 Items 6 and 7 together close F-03 entirely.
 
