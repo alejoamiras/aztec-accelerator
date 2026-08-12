@@ -495,7 +495,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
               aztecVersion,
               httpRetryUrl,
             );
-            return this.#decodeProof(res, start);
+            // `return await`, not a bare `return`: without the await the promise escapes this
+            // try/catch, so a rejected body read (over-cap, stalled, malformed — F-11) would never
+            // reach the fallback handling below and would surface to the dApp instead of degrading
+            // to WASM. The sibling call on the non-retry path already awaited; this one did not.
+            return await this.#decodeProof(res, start);
           } catch (retryErr) {
             if (retryErr instanceof HTTPError && retryErr.response.status === 403) {
               this.#onPhase?.("denied");
