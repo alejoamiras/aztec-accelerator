@@ -87,16 +87,8 @@ runs:
           echo "aztec's snappy binding loads"
           exit 0
         fi
-        echo "::warning::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding — repairing"
-        # Both the native binding for this runner and the wasm fallback the loader reaches for.
-        npm install --no-save --no-audit --no-fund \
-          @napi-rs/snappy-linux-x64-gnu @napi-rs/snappy-wasm32-wasi || true
-        if probe; then
-          echo "repaired"
-        else
-          echo "::error::aztec ${{ steps.detect.outputs.version }} cannot load snappy even after installing its bindings; the upstream install is broken and the E2E cannot run"
-          exit 1
-        fi
+        echo "::error::aztec ${{ steps.detect.outputs.version }} installed without a usable snappy binding, so \`aztec start\` cannot run. This is an UPSTREAM packaging break, not a fault in this repository's code — the installer reports success while leaving snappy unable to resolve a platform binding (note its own 'packages have install scripts not yet covered by allowScripts' warning). Fix by pinning a version whose install is intact, or wait for upstream. Installing the bindings after the fact was tried and does NOT work."
+        exit 1
 
     - name: Update PATH
       if: inputs.skip_cli != 'true'
