@@ -49,12 +49,6 @@ const PROVE_TIMEOUT_MS = ms("10 min");
  */
 const PROVE_BODY_TIMEOUT_MS = ms("60 sec");
 const PROVE_BODY_MAX_BYTES = 8 * 1024 * 1024;
-/**
- * Cap on the decoded proof, applied to the base64 STRING before `Buffer.from` allocates
- * (post-audit codex). A body that fits `PROVE_BODY_MAX_BYTES` still decodes to ~0.75× its size in a
- * fresh buffer, so bounding only the transfer leaves a second allocation unbounded.
- */
-const PROVE_DECODED_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Validate a configured `host` and return it, or throw (F-01, audit 2026-07-31).
@@ -714,8 +708,10 @@ export class AcceleratorTransport {
     if (typeof body !== "object" || body === null) return undefined;
     const proof = (body as { proof?: unknown }).proof;
     if (typeof proof !== "string") return undefined;
-    // Bound the DECODE too: a string that fits the transfer cap still allocates ~0.75× again.
-    if (proof.length > PROVE_DECODED_MAX_BYTES) return undefined;
+    // No separate decode cap: the base64 string is a substring of a body already bounded by
+    // `maxBytes`, so it cannot exceed it, and `Buffer.from` allocates ~0.75x of that. A second
+    // constant at the same value only looked like defence in depth (post-impl codex flagged it as
+    // dead policy) — the real bound is the body cap above.
     return proof;
   }
 }
