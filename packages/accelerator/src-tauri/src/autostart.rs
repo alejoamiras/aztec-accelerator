@@ -1238,35 +1238,58 @@ pub(crate) fn appimage_self(
 /// past. Mountpoints are octal-escaped by the kernel, so a path containing a space arrives as `\040`.
 #[cfg(target_os = "linux")]
 fn mount_fstype_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str> {
-    let mut found = None;
+    // (mount id, parent id, fstype) for every entry at this mountpoint.
+    let mut matches: Vec<(u64, u64, &'a str)> = Vec::new();
     for line in mountinfo.lines() {
         // A malformed or truncated line must be SKIPPED, never abort the scan — `?` here would make
         // one unparseable entry hide every mount after it.
         let Some((before, after)) = line.split_once(" - ") else {
             continue;
         };
-        let Some(raw_mp) = before.split_whitespace().nth(4) else {
+        let mut fields = before.split_whitespace();
+        let (Some(id), Some(parent)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Some(raw_mp) = fields.nth(2) else {
             continue;
         };
         if Path::new(&unescape_mountinfo(raw_mp)) != mountpoint {
             continue;
         }
-        // Keep looking rather than returning: mounts can be STACKED on one mountpoint, and mountinfo
-        // lists them in mount order, so the VISIBLE filesystem is the last matching entry. Returning
-        // the first would let a lower mount hidden under a later one decide the answer (post-impl
-        // codex). `?` here would be the same abort-the-whole-scan bug as above.
-        //
-        // "Last wins" is verified against a real stacked mount, not argued from the spec — most Linux
-        // hosts carry one at `/proc/sys/fs/binfmt_misc`:
-        //     27  52 0:33 / /proc/sys/fs/binfmt_misc … - autofs      systemd-1 …
-        //     116 27 0:45 / /proc/sys/fs/binfmt_misc … - binfmt_misc binfmt_misc …
-        // The later entry's PARENT id is the earlier entry's mount id (27) — it is stacked on top —
-        // and `stat -f` there reports `binfmt_misc`, device minor 45: the LAST entry.
+        let (Ok(id), Ok(parent)) = (id.parse::<u64>(), parent.parse::<u64>()) else {
+            continue;
+        };
         if let Some(fstype) = after.split_whitespace().next() {
-            found = Some(fstype);
+            matches.push((id, parent, fstype));
         }
     }
-    found
+
+    // Mounts can be STACKED on one mountpoint, and only the topmost is visible — so picking the
+    // wrong one reports the wrong filesystem, which for F-12 means the wrong provenance answer.
+    //
+    // The topmost is the entry that is NOT the parent of another entry here. `proc(5)` defines the
+    // stacking through the mount-id/parent-id relationship; **textual order is not specified**, so an
+    // earlier version of this that took "the last matching line" was relying on something the format
+    // does not promise (post-impl codex). Confirmed against a real stack that most Linux hosts carry
+    // at `/proc/sys/fs/binfmt_misc`:
+    //     mountID=27  parentID=52 fstype=autofs
+    //     mountID=116 parentID=27 fstype=binfmt_misc   <- parent is the other match; 116 is on top
+    // and `stat -f` there reports `binfmt_misc`. Both readings agreed on that sample, which is
+    // exactly why it could not settle the question on its own.
+    match matches.as_slice() {
+        [] => None,
+        [(_, _, fstype)] => Some(fstype),
+        many => {
+            let mut tops = many
+                .iter()
+                .filter(|(id, _, _)| !many.iter().any(|(_, parent, _)| parent == id));
+            // Fail closed on ambiguity: no trust is the safe answer for a provenance check.
+            match (tops.next(), tops.next()) {
+                (Some((_, _, fstype)), None) => Some(fstype),
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Decode the kernel's octal escaping of mountinfo path fields (space, tab, newline, backslash).
@@ -2025,30 +2048,53 @@ mod tests {
     /// Mounts can be STACKED on one mountpoint. mountinfo lists them in mount order, so the visible
     /// filesystem is the LAST matching entry — taking the first would let an attacker shadow a real
     /// `fuse.` mount with a later one (or, as here, be fooled by a hidden lower one).
+    /// The topmost mount is the one that is not another match's PARENT — `proc(5)` defines stacking
+    /// through the id/parent relationship, and says nothing about record order. So the rule must hold
+    /// in BOTH textual orders, which is what an order-based implementation fails.
+    ///
+    /// Note the parentage: the ext4 mount is stacked ON the fuse mount, so its parent is the fuse
+    /// mount's id (76) — not the fuse mount's own parent (47). An earlier version of this fixture had
+    /// that wrong and therefore described a stack that cannot occur (post-impl codex).
     #[cfg(target_os = "linux")]
     #[test]
-    fn stacked_mounts_resolve_to_the_topmost_visible_one() {
+    fn stacked_mounts_resolve_to_the_topmost_regardless_of_record_order() {
         use super::{appimage_self, mount_fstype_at};
         use std::path::Path;
-        let stacked = format!(
-            "{REAL_MOUNTINFO}\n\
-             99 47 0:71 / /tmp/.mount_AbC rw,relatime shared:500 - ext4 /dev/sdc1 rw"
-        );
-        assert_eq!(
-            mount_fstype_at(&stacked, Path::new("/tmp/.mount_AbC")),
-            Some("ext4"),
-            "the later (visible) mount wins"
-        );
-        // And the provenance decision follows it: the fuse mount is no longer what is mounted there.
-        assert_eq!(
-            appimage_self(
-                Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
-                Some("/tmp/.mount_AbC".into()),
-                Path::new("/tmp/.mount_AbC/usr/bin/AztecAccelerator"),
-                &stacked,
-            ),
-            None
-        );
+        const ON_TOP: &str =
+            "99 76 0:71 / /tmp/.mount_AbC rw,relatime shared:500 - ext4 /dev/sdc1 rw";
+
+        for (order, mountinfo) in [
+            ("topmost last", format!("{REAL_MOUNTINFO}\n{ON_TOP}")),
+            ("topmost first", format!("{ON_TOP}\n{REAL_MOUNTINFO}")),
+        ] {
+            assert_eq!(
+                mount_fstype_at(&mountinfo, Path::new("/tmp/.mount_AbC")),
+                Some("ext4"),
+                "the mount nothing else is stacked under wins ({order})"
+            );
+            // And provenance follows it: a fuse mount buried under an ext4 one is not what is there.
+            assert_eq!(
+                appimage_self(
+                    Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
+                    Some("/tmp/.mount_AbC".into()),
+                    Path::new("/tmp/.mount_AbC/usr/bin/AztecAccelerator"),
+                    &mountinfo,
+                ),
+                None,
+                "({order})"
+            );
+        }
+    }
+
+    /// A cycle or a stack with no identifiable top must fail closed — no trust is the safe answer
+    /// for a provenance check.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ambiguous_stacking_yields_no_answer() {
+        use super::mount_fstype_at;
+        use std::path::Path;
+        let ambiguous = "10 11 0:1 / /x rw - fuse.a a rw\n11 10 0:2 / /x rw - fuse.b b rw";
+        assert_eq!(mount_fstype_at(ambiguous, Path::new("/x")), None);
     }
 
     #[test]
