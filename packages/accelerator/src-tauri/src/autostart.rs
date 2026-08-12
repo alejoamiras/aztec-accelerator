@@ -1253,8 +1253,15 @@ fn mount_fstype_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str>
         }
         // Keep looking rather than returning: mounts can be STACKED on one mountpoint, and mountinfo
         // lists them in mount order, so the VISIBLE filesystem is the last matching entry. Returning
-        // the first would let a lower `fuse.` mount hidden under a later one still read as our
-        // AppImage (post-impl codex). `?` here would be the same abort-the-whole-scan bug as above.
+        // the first would let a lower mount hidden under a later one decide the answer (post-impl
+        // codex). `?` here would be the same abort-the-whole-scan bug as above.
+        //
+        // "Last wins" is verified against a real stacked mount, not argued from the spec — most Linux
+        // hosts carry one at `/proc/sys/fs/binfmt_misc`:
+        //     27  52 0:33 / /proc/sys/fs/binfmt_misc … - autofs      systemd-1 …
+        //     116 27 0:45 / /proc/sys/fs/binfmt_misc … - binfmt_misc binfmt_misc …
+        // The later entry's PARENT id is the earlier entry's mount id (27) — it is stacked on top —
+        // and `stat -f` there reports `binfmt_misc`, device minor 45: the LAST entry.
         if let Some(fstype) = after.split_whitespace().next() {
             found = Some(fstype);
         }
