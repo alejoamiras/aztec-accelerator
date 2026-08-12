@@ -1324,7 +1324,17 @@ fn unescape_mountinfo(s: &str) -> String {
 /// procfs is one where the AppImage runtime's own FUSE mount could not have come up either.
 #[cfg(target_os = "linux")]
 pub(crate) fn appimage_self_from_env(exe: &Path) -> Option<PathBuf> {
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    // Read bytes and decode LOSSILY rather than `read_to_string`. Linux pathnames are byte strings,
+    // not UTF-8, and mountinfo escapes only a few characters — so one unrelated mount with a
+    // non-UTF-8 path anywhere on the system would make the whole read fail, and an AppImage would
+    // then persist its ephemeral `/tmp/.mount_*` executable path into autostart (post-impl codex).
+    //
+    // Lossy is the right trade here rather than byte-wise parsing: a mount path we cannot decode
+    // cannot equal our own `$APPDIR` (which round-trips through `Path`/`OsString` as valid UTF-8 for
+    // any AppImage the runtime can actually mount), so replacement characters only ever affect
+    // entries that were never going to match — while every other line stays readable.
+    let raw = std::fs::read("/proc/self/mountinfo").unwrap_or_default();
+    let mountinfo = String::from_utf8_lossy(&raw);
     appimage_self(
         std::env::var_os("APPIMAGE"),
         std::env::var_os("APPDIR"),
@@ -2095,6 +2105,29 @@ mod tests {
         use std::path::Path;
         let ambiguous = "10 11 0:1 / /x rw - fuse.a a rw\n11 10 0:2 / /x rw - fuse.b b rw";
         assert_eq!(mount_fstype_at(ambiguous, Path::new("/x")), None);
+    }
+
+    /// One unrelated mount with a non-UTF-8 path must not hide every other entry. Pathnames on Linux
+    /// are byte strings, and mountinfo escapes only a few characters, so this is reachable in
+    /// practice — and the consequence would be an AppImage persisting its ephemeral mount path into
+    /// autostart, which is the very thing `appimage_self` exists to prevent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_mount_elsewhere_does_not_hide_our_mount() {
+        use super::mount_fstype_at;
+        use std::path::Path;
+        // 0xFF is never valid UTF-8; the production reader decodes lossily, so model that here.
+        let mut raw: Vec<u8> = b"50 47 0:60 / /mnt/".to_vec();
+        raw.push(0xff);
+        raw.extend_from_slice(b" rw,relatime shared:9 - ext4 /dev/sdd1 rw\n");
+        raw.extend_from_slice(REAL_MOUNTINFO.as_bytes());
+        let decoded = String::from_utf8_lossy(&raw);
+
+        assert_eq!(
+            mount_fstype_at(&decoded, Path::new("/tmp/.mount_AbC")),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage"),
+            "an undecodable neighbour must not cost us our own mount"
+        );
     }
 
     #[test]
