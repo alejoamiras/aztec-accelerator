@@ -292,3 +292,46 @@ pub fn remove_anchor(old: AnchorRef) {
         delete_by_serial(&serial);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The hardcoded-System32 preference on THIS resolver is the behaviour F-13 found missing on its
+    /// `schtasks_exe` sibling — but it had no test of its own either, so the property was only ever
+    /// asserted by a code comment. Both are now pinned. See the twin test
+    /// `poisoned_system_root_cannot_redirect_schtasks` in `crash_recovery.rs`.
+    ///
+    /// This whole module is `#[cfg(target_os = "windows")]`, so the test executes only on the
+    /// `windows-build` CI leg — which does run `cargo test` for this crate on `windows-latest`.
+    #[test]
+    #[serial_test::serial(windows_system_root)]
+    fn poisoned_system_root_cannot_redirect_certutil() {
+        let hardcoded = std::path::Path::new("C:\\Windows\\System32\\certutil.exe");
+        assert!(
+            hardcoded.is_file(),
+            "precondition: standard Windows install (else the env fallback is the correct answer)"
+        );
+
+        let prior_root = std::env::var_os("SystemRoot");
+        let prior_windir = std::env::var_os("windir");
+        std::env::set_var("SystemRoot", "C:\\Users\\Public\\evil");
+        std::env::set_var("windir", "C:\\Users\\Public\\evil");
+
+        let resolved = super::certutil_exe();
+
+        // Restore before asserting — an unwinding assertion must not leak the poisoned environment.
+        match prior_root {
+            Some(v) => std::env::set_var("SystemRoot", v),
+            None => std::env::remove_var("SystemRoot"),
+        }
+        match prior_windir {
+            Some(v) => std::env::set_var("windir", v),
+            None => std::env::remove_var("windir"),
+        }
+
+        assert_eq!(
+            resolved, hardcoded,
+            "a poisoned SystemRoot/windir redirected certutil.exe — the trust-store write is only as \
+             trustworthy as this path"
+        );
+    }
+}

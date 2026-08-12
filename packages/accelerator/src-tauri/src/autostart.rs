@@ -1182,11 +1182,39 @@ mod backend {
 /// for a genuine AppImage run our binary IS inside the mount, and for an inherited value it is not
 /// (`/usr/bin/AztecAccelerator`). Pure so the provenance rule is table-tested; both consumers —
 /// [`desired_path`] and `crash_recovery`'s recovery target — go through it so they cannot diverge.
+///
+/// **F-12 (audit 2026-07-31-9c4cb0c): containment alone is not provenance.** `starts_with` is
+/// satisfied by `APPDIR=/` for *every* absolute path, and on a machine where `/usr` is its own
+/// filesystem by `APPDIR=/usr` too — so an inherited or planted `APPDIR` could make us write an
+/// attacker-chosen `$APPIMAGE` into the autostart entry and the systemd recovery unit. `$APPDIR` must
+/// therefore be a **FUSE mountpoint**, which is what an AppImage mount actually is and what `/`,
+/// `/usr`, `$HOME` and `/opt` are not.
+///
+/// The discriminator is measured, not guessed. From a real mount of our own released 1.0.7 AppImage
+/// (see `implementations-plan/audit-ux-neutral-fixes/lessons/phase-0.md`):
+///
+/// ```text
+/// 76 47 0:68 / /…/.mount_Aztec-doOHJf ro,… - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage …
+/// 47  1 252:0 / /                     rw,… - ext4     /dev/mapper/…
+/// 54 47 7:0   / /snap/snapd/27406     ro,… - squashfs /dev/loop1
+/// ```
+///
+/// `mountinfo` is a parameter, not an ambient read, so the rule stays pure and table-tested.
+///
+/// **Residual, deliberately not closed**: `$APPIMAGE` itself is still not authenticated. mountinfo's
+/// source field is the **basename only** (`Aztec-…AppImage`, no directory), so it cannot be compared
+/// against a canonical absolute `$APPIMAGE` — that refutes the "bind mount source to `$APPIMAGE`"
+/// design an audit round proposed. Comparing basenames was considered and rejected: one sample cannot
+/// establish that the fuse subtype is *always* the AppImage basename, and a false negative silently
+/// drops us to `current_exe()`, which inside an AppImage points into a mount that vanishes at exit
+/// (D12). An attacker who both controls our environment and names their payload identically therefore
+/// still passes — and can already write `~/.config/autostart/*.desktop` directly, so gains nothing.
 #[cfg(target_os = "linux")]
 pub(crate) fn appimage_self(
     appimage: Option<std::ffi::OsString>,
     appdir: Option<std::ffi::OsString>,
     exe: &Path,
+    mountinfo: &str,
 ) -> Option<PathBuf> {
     let appimage = appimage.filter(|a| !a.is_empty())?;
     let appdir = PathBuf::from(appdir.filter(|d| !d.is_empty())?);
@@ -1194,16 +1222,77 @@ pub(crate) fn appimage_self(
     // relative or unnormalized APPDIR must not accidentally "contain" us.
     let exe_c = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
     let dir_c = appdir.canonicalize().unwrap_or(appdir);
-    exe_c.starts_with(&dir_c).then(|| PathBuf::from(appimage))
+    if !exe_c.starts_with(&dir_c) {
+        return None;
+    }
+    // F-12: and that containing directory must be a FUSE mount in its own right.
+    let fstype = mount_fstype_at(mountinfo, &dir_c)?;
+    fstype.starts_with("fuse.").then(|| PathBuf::from(appimage))
+}
+
+/// The filesystem type of the mount whose mountpoint is exactly `mountpoint`, from
+/// `/proc/self/mountinfo` content. `None` when no entry matches.
+///
+/// Line shape (`proc(5)`): `ID PARENT MAJ:MIN ROOT MOUNTPOINT OPTS [OPTIONAL…] - FSTYPE SOURCE SUPER`.
+/// The variable-length optional-fields run is why the separator `-` is located rather than indexed
+/// past. Mountpoints are octal-escaped by the kernel, so a path containing a space arrives as `\040`.
+#[cfg(target_os = "linux")]
+fn mount_fstype_at<'a>(mountinfo: &'a str, mountpoint: &Path) -> Option<&'a str> {
+    for line in mountinfo.lines() {
+        // A malformed or truncated line must be SKIPPED, never abort the scan — `?` here would make
+        // one unparseable entry hide every mount after it.
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let Some(raw_mp) = before.split_whitespace().nth(4) else {
+            continue;
+        };
+        if Path::new(&unescape_mountinfo(raw_mp)) != mountpoint {
+            continue;
+        }
+        return after.split_whitespace().next();
+    }
+    None
+}
+
+/// Decode the kernel's octal escaping of mountinfo path fields (space, tab, newline, backslash).
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let octal: String = chars.clone().take(3).collect();
+        match u8::from_str_radix(&octal, 8) {
+            Ok(byte) if octal.len() == 3 => {
+                out.push(byte as char);
+                chars.nth(2);
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Process-env form of [`appimage_self`] — the production reader.
+///
+/// An unreadable `/proc/self/mountinfo` yields no matching entry and therefore no trust (fail
+/// closed). That is safe in practice rather than merely strict: an environment without a readable
+/// procfs is one where the AppImage runtime's own FUSE mount could not have come up either.
 #[cfg(target_os = "linux")]
 pub(crate) fn appimage_self_from_env(exe: &Path) -> Option<PathBuf> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
     appimage_self(
         std::env::var_os("APPIMAGE"),
         std::env::var_os("APPDIR"),
         exe,
+        &mountinfo,
     )
 }
 
@@ -1784,6 +1873,24 @@ mod tests {
     // is not us.
     // r6 #1: $APPIMAGE/$APPDIR are inherited by children, so a natively-installed app launched
     // from inside another AppImage sees a FOREIGN pair. Ownership = our exe lives under APPDIR.
+    /// Real `/proc/self/mountinfo` lines, CAPTURED — not hand-written — by mounting our own released
+    /// `Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage` with `--appimage-mount` and reading procfs
+    /// while it was mounted. Method and full capture:
+    /// `implementations-plan/audit-ux-neutral-fixes/lessons/phase-0.md`.
+    ///
+    /// Inventing this fixture is precisely the mistake that shipped `CRYPT_E_NOT_FOUND` (a constant
+    /// real Windows never prints), so it is deliberately transcribed from a real machine. The mount
+    /// path was rewritten to `/tmp/.mount_AbC` — and ONLY that — to match the pre-existing cases
+    /// below; note that the real one was under `$TMPDIR`, not `/tmp`, because the AppImage runtime
+    /// honours it.
+    #[cfg(target_os = "linux")]
+    const REAL_MOUNTINFO: &str = "\
+47 1 252:0 / / rw,relatime shared:1 - ext4 /dev/mapper/ubuntu--vg-ubuntu--lv rw
+34 43 0:36 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec,relatime shared:20 - fusectl fusectl rw
+54 47 7:0 / /snap/snapd/27406 ro,nodev,relatime shared:91 - squashfs /dev/loop1 ro,errors=continue
+76 47 0:68 / /tmp/.mount_AbC ro,nosuid,nodev,relatime shared:417 - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage ro,user_id=1000,group_id=1000
+91 47 0:70 / /mnt/my\\040disk rw,relatime shared:99 - ext4 /dev/sdb1 rw";
+
     #[cfg(target_os = "linux")]
     #[test]
     fn appimage_trusted_only_when_our_exe_lives_under_appdir() {
@@ -1795,6 +1902,7 @@ mod tests {
                 Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
                 Some("/tmp/.mount_AbC".into()),
                 ours,
+                REAL_MOUNTINFO,
             ),
             Some(PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage"))
         );
@@ -1804,19 +1912,100 @@ mod tests {
                 Some("/home/u/Apps/SomeEditor.AppImage".into()),
                 Some("/tmp/.mount_Parent".into()),
                 Path::new("/usr/bin/AztecAccelerator"),
+                REAL_MOUNTINFO,
             ),
             None
         );
         // Missing or empty halves are never trusted.
-        assert_eq!(appimage_self(Some("/a.AppImage".into()), None, ours), None);
         assert_eq!(
-            appimage_self(Some("/a.AppImage".into()), Some("".into()), ours),
+            appimage_self(Some("/a.AppImage".into()), None, ours, REAL_MOUNTINFO),
             None
         );
         assert_eq!(
-            appimage_self(None, Some("/tmp/.mount_AbC".into()), ours),
+            appimage_self(
+                Some("/a.AppImage".into()),
+                Some("".into()),
+                ours,
+                REAL_MOUNTINFO
+            ),
             None
         );
+        assert_eq!(
+            appimage_self(None, Some("/tmp/.mount_AbC".into()), ours, REAL_MOUNTINFO),
+            None
+        );
+    }
+
+    /// F-12: `starts_with` containment is not provenance. Every case here PASSED the old rule.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_rejects_appdir_that_is_not_a_fuse_mount() {
+        use super::appimage_self;
+        use std::path::Path;
+        let payload = Some("/home/u/evil.AppImage".into());
+
+        // The finding as reported: `/` is a prefix of every absolute path, and it is an ext4 mount.
+        assert_eq!(
+            appimage_self(
+                payload.clone(),
+                Some("/".into()),
+                Path::new("/usr/bin/AztecAccelerator"),
+                REAL_MOUNTINFO,
+            ),
+            None,
+            "APPDIR=/ must not prove provenance"
+        );
+
+        // `/usr` on a machine where it is its OWN filesystem — the case a plain mountpoint test
+        // (`st_dev(dir) != st_dev(dir/..)`) would wrongly accept. It is ext4, not fuse.
+        assert_eq!(
+            appimage_self(
+                payload.clone(),
+                Some("/mnt/my disk".into()),
+                Path::new("/mnt/my disk/AztecAccelerator"),
+                REAL_MOUNTINFO,
+            ),
+            None,
+            "a real non-fuse filesystem must not prove provenance (and \\040 must decode)"
+        );
+
+        // A directory that is not a mountpoint at all has no mountinfo entry.
+        assert_eq!(
+            appimage_self(
+                payload.clone(),
+                Some("/home/u".into()),
+                Path::new("/home/u/AztecAccelerator"),
+                REAL_MOUNTINFO,
+            ),
+            None,
+            "a plain directory must not prove provenance"
+        );
+
+        // A squashfs snap mount is a real mount of a real image — still not an AppImage.
+        assert_eq!(
+            appimage_self(
+                payload,
+                Some("/snap/snapd/27406".into()),
+                Path::new("/snap/snapd/27406/AztecAccelerator"),
+                REAL_MOUNTINFO,
+            ),
+            None,
+            "squashfs is not fuse — a snap mount must not prove provenance"
+        );
+    }
+
+    /// One unparseable line must not hide the mounts after it (a `?` here would have).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_scan_skips_malformed_lines() {
+        use super::mount_fstype_at;
+        use std::path::Path;
+        let with_junk = format!("garbage with no separator\n{REAL_MOUNTINFO}");
+        assert_eq!(
+            mount_fstype_at(&with_junk, Path::new("/tmp/.mount_AbC")),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage")
+        );
+        assert_eq!(mount_fstype_at(REAL_MOUNTINFO, Path::new("/nope")), None);
     }
 
     #[test]
