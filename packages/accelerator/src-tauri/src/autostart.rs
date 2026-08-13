@@ -1389,10 +1389,22 @@ pub(crate) fn appimage_self_from_env(exe: &Path) -> Option<PathBuf> {
     let appdir = std::env::var_os("APPDIR");
     // Ask the kernel which mount `$APPDIR` really resolves to, so an overmounted ancestor cannot
     // make a buried entry look like the visible filesystem.
+    let appdir_present = appdir.as_ref().is_some_and(|d| !d.is_empty());
     let mnt_id = appdir
         .as_ref()
         .filter(|d| !d.is_empty())
         .and_then(|d| resolved_mount_id(Path::new(d)));
+    // Make the F-12 fallback OBSERVABLE. When `$APPDIR` is set but its mount id can't be resolved
+    // (unopenable dir, no readable `/proc/self/fdinfo`), `appimage_self` silently drops from the
+    // kernel-authoritative check to the weaker same-path parentage rule. That degradation is safe but
+    // invisible — and "the mount-id path never actually runs in production" was the one gap left in
+    // F-12's confidence. One debug line turns a silent fallback into something a log will show.
+    if appdir_present && mnt_id.is_none() {
+        tracing::debug!(
+            "APPDIR is set but its mount id could not be resolved; \
+             falling back to same-path mount inference for AppImage provenance"
+        );
+    }
     appimage_self(
         std::env::var_os("APPIMAGE"),
         appdir,
