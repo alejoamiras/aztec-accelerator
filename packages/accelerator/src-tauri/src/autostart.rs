@@ -1182,11 +1182,40 @@ mod backend {
 /// for a genuine AppImage run our binary IS inside the mount, and for an inherited value it is not
 /// (`/usr/bin/AztecAccelerator`). Pure so the provenance rule is table-tested; both consumers —
 /// [`desired_path`] and `crash_recovery`'s recovery target — go through it so they cannot diverge.
+///
+/// **F-12 (audit 2026-07-31-9c4cb0c): containment alone is not provenance.** `starts_with` is
+/// satisfied by `APPDIR=/` for *every* absolute path, and on a machine where `/usr` is its own
+/// filesystem by `APPDIR=/usr` too — so an inherited or planted `APPDIR` could make us write an
+/// attacker-chosen `$APPIMAGE` into the autostart entry and the systemd recovery unit. `$APPDIR` must
+/// therefore be a **FUSE mountpoint**, which is what an AppImage mount actually is and what `/`,
+/// `/usr`, `$HOME` and `/opt` are not.
+///
+/// The discriminator is measured, not guessed. From a real mount of our own released 1.0.7 AppImage
+/// (see `implementations-plan/audit-ux-neutral-fixes/lessons/phase-0.md`):
+///
+/// ```text
+/// 76 47 0:68 / /…/.mount_Aztec-doOHJf ro,… - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage …
+/// 47  1 252:0 / /                     rw,… - ext4     /dev/mapper/…
+/// 54 47 7:0   / /snap/snapd/27406     ro,… - squashfs /dev/loop1
+/// ```
+///
+/// `mountinfo` is a parameter, not an ambient read, so the rule stays pure and table-tested.
+///
+/// **Residual, deliberately not closed**: `$APPIMAGE` itself is still not authenticated. mountinfo's
+/// source field is the **basename only** (`Aztec-…AppImage`, no directory), so it cannot be compared
+/// against a canonical absolute `$APPIMAGE` — that refutes the "bind mount source to `$APPIMAGE`"
+/// design an audit round proposed. Comparing basenames was considered and rejected: one sample cannot
+/// establish that the fuse subtype is *always* the AppImage basename, and a false negative silently
+/// drops us to `current_exe()`, which inside an AppImage points into a mount that vanishes at exit
+/// (D12). An attacker who both controls our environment and names their payload identically therefore
+/// still passes — and can already write `~/.config/autostart/*.desktop` directly, so gains nothing.
 #[cfg(target_os = "linux")]
 pub(crate) fn appimage_self(
     appimage: Option<std::ffi::OsString>,
     appdir: Option<std::ffi::OsString>,
     exe: &Path,
+    mountinfo: &str,
+    resolved_mnt_id: Option<u64>,
 ) -> Option<PathBuf> {
     let appimage = appimage.filter(|a| !a.is_empty())?;
     let appdir = PathBuf::from(appdir.filter(|d| !d.is_empty())?);
@@ -1194,16 +1223,194 @@ pub(crate) fn appimage_self(
     // relative or unnormalized APPDIR must not accidentally "contain" us.
     let exe_c = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
     let dir_c = appdir.canonicalize().unwrap_or(appdir);
-    exe_c.starts_with(&dir_c).then(|| PathBuf::from(appimage))
+    if !exe_c.starts_with(&dir_c) {
+        return None;
+    }
+    // F-12: and that containing directory must be a FUSE mount in its own right.
+    let fstype = mount_fstype_at(mountinfo, &dir_c, resolved_mnt_id)?;
+    fstype.starts_with("fuse.").then(|| PathBuf::from(appimage))
+}
+
+/// The filesystem type of the mount whose mountpoint is exactly `mountpoint`, from
+/// `/proc/self/mountinfo` content. `None` when no entry matches.
+///
+/// Line shape (`proc(5)`): `ID PARENT MAJ:MIN ROOT MOUNTPOINT OPTS [OPTIONAL…] - FSTYPE SOURCE SUPER`.
+/// The variable-length optional-fields run is why the separator `-` is located rather than indexed
+/// past. Mountpoints are octal-escaped by the kernel, so a path containing a space arrives as `\040`.
+#[cfg(target_os = "linux")]
+fn mount_fstype_at<'a>(
+    mountinfo: &'a str,
+    mountpoint: &Path,
+    resolved_mnt_id: Option<u64>,
+) -> Option<&'a str> {
+    // When the kernel has told us WHICH mount the path resolves to, match on that id alone and never
+    // compare pathnames at all. The id came from opening `$APPDIR`, so the entry carrying it IS that
+    // mount by construction — re-deriving the same fact from a string is redundant, and worse, it
+    // makes the authoritative answer depend on the fragile half: mountpoints are byte strings, and a
+    // lossily-decoded non-UTF-8 mountpoint can never equal ours, so filtering by pathname FIRST would
+    // discard our own genuine mount before the id was ever consulted (post-impl codex round 6).
+    if let Some(id) = resolved_mnt_id {
+        for line in mountinfo.lines() {
+            let Some((before, after)) = line.split_once(" - ") else {
+                continue;
+            };
+            let Some(raw_id) = before.split_whitespace().next() else {
+                continue;
+            };
+            if raw_id.parse::<u64>() != Ok(id) {
+                continue;
+            }
+            return after.split_whitespace().next();
+        }
+        return None;
+    }
+
+    // (mount id, parent id, fstype) for every entry at this mountpoint.
+    let mut matches: Vec<(u64, u64, &'a str)> = Vec::new();
+    for line in mountinfo.lines() {
+        // A malformed or truncated line must be SKIPPED, never abort the scan — `?` here would make
+        // one unparseable entry hide every mount after it.
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let mut fields = before.split_whitespace();
+        let (Some(id), Some(parent)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let Some(raw_mp) = fields.nth(2) else {
+            continue;
+        };
+        if Path::new(&unescape_mountinfo(raw_mp)) != mountpoint {
+            continue;
+        }
+        let (Ok(id), Ok(parent)) = (id.parse::<u64>(), parent.parse::<u64>()) else {
+            continue;
+        };
+        if let Some(fstype) = after.split_whitespace().next() {
+            matches.push((id, parent, fstype));
+        }
+    }
+
+    // Mounts can be STACKED on one mountpoint, and only the topmost is visible — so picking the
+    // wrong one reports the wrong filesystem, which for F-12 means the wrong provenance answer.
+    //
+    // The topmost is the entry that is NOT the parent of another entry here. `proc(5)` defines the
+    // stacking through the mount-id/parent-id relationship; **textual order is not specified**, so an
+    // earlier version of this that took "the last matching line" was relying on something the format
+    // does not promise (post-impl codex). Confirmed against a real stack that most Linux hosts carry
+    // at `/proc/sys/fs/binfmt_misc`:
+    //     mountID=27  parentID=52 fstype=autofs
+    //     mountID=116 parentID=27 fstype=binfmt_misc   <- parent is the other match; 116 is on top
+    // and `stat -f` there reports `binfmt_misc`. Both readings agreed on that sample, which is
+    // exactly why it could not settle the question on its own.
+    // Fallback for environments that cannot supply a resolved mount id (unopenable `$APPDIR`, no
+    // readable fdinfo): pick the leaf among same-path mounts. Weaker — and it inherits the
+    // lossy-decode limitation above, so a non-UTF-8 mountpoint is not matched here. Recorded rather
+    // than fixed: reaching this path at all requires procfs readable enough for mountinfo but not for
+    // fdinfo, and the primary path above has no such dependency.
+    match matches.as_slice() {
+        [] => None,
+        [(_, _, fstype)] => Some(fstype),
+        many => {
+            let mut tops = many
+                .iter()
+                .filter(|(id, _, _)| !many.iter().any(|(_, parent, _)| parent == id));
+            // Fail closed on ambiguity: no trust is the safe answer for a provenance check.
+            match (tops.next(), tops.next()) {
+                (Some((_, _, fstype)), None) => Some(fstype),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// The kernel's mount id for whatever `path` actually resolves to, from `/proc/self/fdinfo`.
+///
+/// This is the ONLY way to know which mount a path reaches when mounts are stacked — reading
+/// mountinfo alone cannot see an overmounted ancestor. `None` when the path cannot be opened or the
+/// field is absent, in which case the caller falls back to same-path parentage.
+///
+/// Verified against a real system: an fd on `/tmp` reports `mnt_id: 39`, matching mountinfo's mount
+/// id 39 for the `tmpfs` mounted there.
+#[cfg(target_os = "linux")]
+fn resolved_mount_id(path: &Path) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+    let dir = std::fs::File::open(path).ok()?;
+    let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", dir.as_raw_fd())).ok()?;
+    fdinfo
+        .lines()
+        .find_map(|l| l.strip_prefix("mnt_id:"))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
+/// Decode the kernel's octal escaping of mountinfo path fields (space, tab, newline, backslash).
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let octal: String = chars.clone().take(3).collect();
+        match u8::from_str_radix(&octal, 8) {
+            Ok(byte) if octal.len() == 3 => {
+                out.push(byte as char);
+                chars.nth(2);
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Process-env form of [`appimage_self`] — the production reader.
+///
+/// An unreadable `/proc/self/mountinfo` yields no matching entry and therefore no trust (fail
+/// closed). That is safe in practice rather than merely strict: an environment without a readable
+/// procfs is one where the AppImage runtime's own FUSE mount could not have come up either.
 #[cfg(target_os = "linux")]
 pub(crate) fn appimage_self_from_env(exe: &Path) -> Option<PathBuf> {
+    // Read bytes and decode LOSSILY rather than `read_to_string`. Linux pathnames are byte strings,
+    // not UTF-8, and mountinfo escapes only a few characters — so one unrelated mount with a
+    // non-UTF-8 path anywhere on the system would make the whole read fail, and an AppImage would
+    // then persist its ephemeral `/tmp/.mount_*` executable path into autostart (post-impl codex).
+    //
+    // Lossy is the right trade here rather than byte-wise parsing: a mount path we cannot decode
+    // cannot equal our own `$APPDIR` (which round-trips through `Path`/`OsString` as valid UTF-8 for
+    // any AppImage the runtime can actually mount), so replacement characters only ever affect
+    // entries that were never going to match — while every other line stays readable.
+    let raw = std::fs::read("/proc/self/mountinfo").unwrap_or_default();
+    let mountinfo = String::from_utf8_lossy(&raw);
+    let appdir = std::env::var_os("APPDIR");
+    // Ask the kernel which mount `$APPDIR` really resolves to, so an overmounted ancestor cannot
+    // make a buried entry look like the visible filesystem.
+    let appdir_present = appdir.as_ref().is_some_and(|d| !d.is_empty());
+    let mnt_id = appdir
+        .as_ref()
+        .filter(|d| !d.is_empty())
+        .and_then(|d| resolved_mount_id(Path::new(d)));
+    // Make the F-12 fallback OBSERVABLE. When `$APPDIR` is set but its mount id can't be resolved
+    // (unopenable dir, no readable `/proc/self/fdinfo`), `appimage_self` silently drops from the
+    // kernel-authoritative check to the weaker same-path parentage rule. That degradation is safe but
+    // invisible — and "the mount-id path never actually runs in production" was the one gap left in
+    // F-12's confidence. One debug line turns a silent fallback into something a log will show.
+    if appdir_present && mnt_id.is_none() {
+        tracing::debug!(
+            "APPDIR is set but its mount id could not be resolved; \
+             falling back to same-path mount inference for AppImage provenance"
+        );
+    }
     appimage_self(
         std::env::var_os("APPIMAGE"),
-        std::env::var_os("APPDIR"),
+        appdir,
         exe,
+        &mountinfo,
+        mnt_id,
     )
 }
 
@@ -1784,6 +1991,24 @@ mod tests {
     // is not us.
     // r6 #1: $APPIMAGE/$APPDIR are inherited by children, so a natively-installed app launched
     // from inside another AppImage sees a FOREIGN pair. Ownership = our exe lives under APPDIR.
+    /// Real `/proc/self/mountinfo` lines, CAPTURED — not hand-written — by mounting our own released
+    /// `Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage` with `--appimage-mount` and reading procfs
+    /// while it was mounted. Method and full capture:
+    /// `implementations-plan/audit-ux-neutral-fixes/lessons/phase-0.md`.
+    ///
+    /// Inventing this fixture is precisely the mistake that shipped `CRYPT_E_NOT_FOUND` (a constant
+    /// real Windows never prints), so it is deliberately transcribed from a real machine. The mount
+    /// path was rewritten to `/tmp/.mount_AbC` — and ONLY that — to match the pre-existing cases
+    /// below; note that the real one was under `$TMPDIR`, not `/tmp`, because the AppImage runtime
+    /// honours it.
+    #[cfg(target_os = "linux")]
+    const REAL_MOUNTINFO: &str = "\
+47 1 252:0 / / rw,relatime shared:1 - ext4 /dev/mapper/ubuntu--vg-ubuntu--lv rw
+34 43 0:36 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec,relatime shared:20 - fusectl fusectl rw
+54 47 7:0 / /snap/snapd/27406 ro,nodev,relatime shared:91 - squashfs /dev/loop1 ro,errors=continue
+76 47 0:68 / /tmp/.mount_AbC ro,nosuid,nodev,relatime shared:417 - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage ro,user_id=1000,group_id=1000
+91 47 0:70 / /mnt/my\\040disk rw,relatime shared:99 - ext4 /dev/sdb1 rw";
+
     #[cfg(target_os = "linux")]
     #[test]
     fn appimage_trusted_only_when_our_exe_lives_under_appdir() {
@@ -1795,6 +2020,8 @@ mod tests {
                 Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
                 Some("/tmp/.mount_AbC".into()),
                 ours,
+                REAL_MOUNTINFO,
+                None,
             ),
             Some(PathBuf::from("/home/u/Apps/AztecAccelerator.AppImage"))
         );
@@ -1804,18 +2031,253 @@ mod tests {
                 Some("/home/u/Apps/SomeEditor.AppImage".into()),
                 Some("/tmp/.mount_Parent".into()),
                 Path::new("/usr/bin/AztecAccelerator"),
+                REAL_MOUNTINFO,
+                None,
             ),
             None
         );
         // Missing or empty halves are never trusted.
-        assert_eq!(appimage_self(Some("/a.AppImage".into()), None, ours), None);
         assert_eq!(
-            appimage_self(Some("/a.AppImage".into()), Some("".into()), ours),
+            appimage_self(Some("/a.AppImage".into()), None, ours, REAL_MOUNTINFO, None),
             None
         );
         assert_eq!(
-            appimage_self(None, Some("/tmp/.mount_AbC".into()), ours),
+            appimage_self(
+                Some("/a.AppImage".into()),
+                Some("".into()),
+                ours,
+                REAL_MOUNTINFO,
+                None,
+            ),
             None
+        );
+        assert_eq!(
+            appimage_self(
+                None,
+                Some("/tmp/.mount_AbC".into()),
+                ours,
+                REAL_MOUNTINFO,
+                None
+            ),
+            None
+        );
+    }
+
+    /// F-12: `starts_with` containment is not provenance. Every case here PASSED the old rule.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_rejects_appdir_that_is_not_a_fuse_mount() {
+        use super::appimage_self;
+        use std::path::Path;
+        let payload = Some("/home/u/evil.AppImage".into());
+
+        // The finding as reported: `/` is a prefix of every absolute path, and it is an ext4 mount.
+        assert_eq!(
+            appimage_self(
+                payload.clone(),
+                Some("/".into()),
+                Path::new("/usr/bin/AztecAccelerator"),
+                REAL_MOUNTINFO,
+                None,
+            ),
+            None,
+            "APPDIR=/ must not prove provenance"
+        );
+
+        // `/usr` on a machine where it is its OWN filesystem — the case a plain mountpoint test
+        // (`st_dev(dir) != st_dev(dir/..)`) would wrongly accept. It is ext4, not fuse.
+        assert_eq!(
+            appimage_self(
+                payload.clone(),
+                Some("/mnt/my disk".into()),
+                Path::new("/mnt/my disk/AztecAccelerator"),
+                REAL_MOUNTINFO,
+                None,
+            ),
+            None,
+            "a real non-fuse filesystem must not prove provenance (and \\040 must decode)"
+        );
+
+        // A directory that is not a mountpoint at all has no mountinfo entry.
+        assert_eq!(
+            appimage_self(
+                payload.clone(),
+                Some("/home/u".into()),
+                Path::new("/home/u/AztecAccelerator"),
+                REAL_MOUNTINFO,
+                None,
+            ),
+            None,
+            "a plain directory must not prove provenance"
+        );
+
+        // A squashfs snap mount is a real mount of a real image — still not an AppImage.
+        assert_eq!(
+            appimage_self(
+                payload,
+                Some("/snap/snapd/27406".into()),
+                Path::new("/snap/snapd/27406/AztecAccelerator"),
+                REAL_MOUNTINFO,
+                None,
+            ),
+            None,
+            "squashfs is not fuse — a snap mount must not prove provenance"
+        );
+    }
+
+    /// One unparseable line must not hide the mounts after it (a `?` here would have).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_scan_skips_malformed_lines() {
+        use super::mount_fstype_at;
+        use std::path::Path;
+        let with_junk = format!("garbage with no separator\n{REAL_MOUNTINFO}");
+        assert_eq!(
+            mount_fstype_at(&with_junk, Path::new("/tmp/.mount_AbC"), None),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage")
+        );
+        assert_eq!(
+            mount_fstype_at(REAL_MOUNTINFO, Path::new("/nope"), None),
+            None
+        );
+    }
+
+    /// Mounts can be STACKED on one mountpoint. mountinfo lists them in mount order, so the visible
+    /// filesystem is the LAST matching entry — taking the first would let an attacker shadow a real
+    /// `fuse.` mount with a later one (or, as here, be fooled by a hidden lower one).
+    /// The topmost mount is the one that is not another match's PARENT — `proc(5)` defines stacking
+    /// through the id/parent relationship, and says nothing about record order. So the rule must hold
+    /// in BOTH textual orders, which is what an order-based implementation fails.
+    ///
+    /// Note the parentage: the ext4 mount is stacked ON the fuse mount, so its parent is the fuse
+    /// mount's id (76) — not the fuse mount's own parent (47). An earlier version of this fixture had
+    /// that wrong and therefore described a stack that cannot occur (post-impl codex).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stacked_mounts_resolve_to_the_topmost_regardless_of_record_order() {
+        use super::{appimage_self, mount_fstype_at};
+        use std::path::Path;
+        const ON_TOP: &str =
+            "99 76 0:71 / /tmp/.mount_AbC rw,relatime shared:500 - ext4 /dev/sdc1 rw";
+
+        for (order, mountinfo) in [
+            ("topmost last", format!("{REAL_MOUNTINFO}\n{ON_TOP}")),
+            ("topmost first", format!("{ON_TOP}\n{REAL_MOUNTINFO}")),
+        ] {
+            assert_eq!(
+                mount_fstype_at(&mountinfo, Path::new("/tmp/.mount_AbC"), None),
+                Some("ext4"),
+                "the mount nothing else is stacked under wins ({order})"
+            );
+            // And provenance follows it: a fuse mount buried under an ext4 one is not what is there.
+            assert_eq!(
+                appimage_self(
+                    Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
+                    Some("/tmp/.mount_AbC".into()),
+                    Path::new("/tmp/.mount_AbC/usr/bin/AztecAccelerator"),
+                    &mountinfo,
+                    None,
+                ),
+                None,
+                "({order})"
+            );
+        }
+    }
+
+    /// When the kernel tells us which mount `$APPDIR` actually resolves to, that answer wins over
+    /// any inference from mountinfo alone.
+    ///
+    /// The parentage rule identifies the leaf among mounts at the SAME pathname, but a mount can
+    /// still be hidden by an overmounted ANCESTOR — resolution then reaches a different filesystem
+    /// than the leaf suggests, and no amount of same-path reasoning can see that (post-impl codex
+    /// round 5). The mount id from `/proc/self/fdinfo` is the fact that settles it; here it points at
+    /// the ext4 mount (99), so the buried fuse entry must NOT be reported.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_resolved_mount_id_overrides_same_path_inference() {
+        use super::{appimage_self, mount_fstype_at};
+        use std::path::Path;
+        let stacked = format!(
+            "{REAL_MOUNTINFO}\n\
+             99 76 0:71 / /tmp/.mount_AbC rw,relatime shared:500 - ext4 /dev/sdc1 rw"
+        );
+
+        assert_eq!(
+            mount_fstype_at(&stacked, Path::new("/tmp/.mount_AbC"), Some(76)),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage"),
+            "the kernel says the fuse mount is what resolves — trust it"
+        );
+        assert_eq!(
+            mount_fstype_at(&stacked, Path::new("/tmp/.mount_AbC"), Some(99)),
+            Some("ext4"),
+            "and when it says ext4, the buried fuse entry must not be reported"
+        );
+        // An id naming no entry is not an answer.
+        assert_eq!(
+            mount_fstype_at(&stacked, Path::new("/tmp/.mount_AbC"), Some(12345)),
+            None
+        );
+
+        // And the id must be consulted WITHOUT first filtering by pathname: the AppImage runtime
+        // creates its mount with `mkdtemp` under raw `$TMPDIR` bytes, so OUR OWN mountpoint can be
+        // non-UTF-8. Lossy decoding then changes that path, and a pathname filter would discard the
+        // genuine mount before the id was ever looked at (post-impl codex round 6).
+        let mut raw: Vec<u8> = b"76 47 0:68 / /tmp/.mount_".to_vec();
+        raw.push(0xff);
+        raw.extend_from_slice(
+            b" ro,nosuid,relatime shared:417 - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage x ro\n",
+        );
+        let undecodable = String::from_utf8_lossy(&raw);
+        assert_eq!(
+            mount_fstype_at(&undecodable, Path::new("/tmp/.mount_AbC"), Some(76)),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage"),
+            "a mountpoint we cannot decode must still resolve through its mount id"
+        );
+
+        // The provenance decision follows: with the ext4 mount resolving, this is not our AppImage.
+        assert_eq!(
+            appimage_self(
+                Some("/home/u/Apps/AztecAccelerator.AppImage".into()),
+                Some("/tmp/.mount_AbC".into()),
+                Path::new("/tmp/.mount_AbC/usr/bin/AztecAccelerator"),
+                &stacked,
+                Some(99),
+            ),
+            None
+        );
+    }
+
+    /// A cycle or a stack with no identifiable top must fail closed — no trust is the safe answer
+    /// for a provenance check.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ambiguous_stacking_yields_no_answer() {
+        use super::mount_fstype_at;
+        use std::path::Path;
+        let ambiguous = "10 11 0:1 / /x rw - fuse.a a rw\n11 10 0:2 / /x rw - fuse.b b rw";
+        assert_eq!(mount_fstype_at(ambiguous, Path::new("/x"), None), None);
+    }
+
+    /// One unrelated mount with a non-UTF-8 path must not hide every other entry. Pathnames on Linux
+    /// are byte strings, and mountinfo escapes only a few characters, so this is reachable in
+    /// practice — and the consequence would be an AppImage persisting its ephemeral mount path into
+    /// autostart, which is the very thing `appimage_self` exists to prevent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_mount_elsewhere_does_not_hide_our_mount() {
+        use super::mount_fstype_at;
+        use std::path::Path;
+        // 0xFF is never valid UTF-8; the production reader decodes lossily, so model that here.
+        let mut raw: Vec<u8> = b"50 47 0:60 / /mnt/".to_vec();
+        raw.push(0xff);
+        raw.extend_from_slice(b" rw,relatime shared:9 - ext4 /dev/sdd1 rw\n");
+        raw.extend_from_slice(REAL_MOUNTINFO.as_bytes());
+        let decoded = String::from_utf8_lossy(&raw);
+
+        assert_eq!(
+            mount_fstype_at(&decoded, Path::new("/tmp/.mount_AbC"), None),
+            Some("fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage"),
+            "an undecodable neighbour must not cost us our own mount"
         );
     }
 

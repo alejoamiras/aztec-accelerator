@@ -384,8 +384,23 @@ const TASK_NAME: &str = "Aztec Accelerator Crash Recovery";
 
 /// Absolute path to schtasks.exe — avoids a bare-name PATH lookup (same defense as the
 /// absolute System32 tar.exe in copy-bb.ts: a planted `schtasks` earlier on PATH can't win).
+///
+/// **Prefers the hardcoded `C:\Windows\System32\schtasks.exe`** when it exists, so a tainted
+/// `SystemRoot`/`windir` environment cannot redirect crash-recovery task management on a standard
+/// install. This mirrors `trust::windows::certutil_exe` exactly — F-13 of audit 2026-07-31-9c4cb0c was
+/// precisely that the hardening had been applied to one sibling and not the other, so the two are kept
+/// deliberately identical rather than abstracted: the shared shape is a *review* habit, and a helper
+/// spanning `trust` and `crash_recovery` would couple two unrelated modules for four lines.
+///
+/// Residual, inherited from the sibling: the env fallback remains for the rare non-standard Windows
+/// root where `C:\Windows` is not it. `GetSystemDirectoryW` is the complete fix and would need
+/// `windows-sys` promoted to a production dep of THIS crate (it is dev-only here; see Cargo.toml).
 #[cfg(target_os = "windows")]
 fn schtasks_exe() -> std::path::PathBuf {
+    let hardcoded = std::path::PathBuf::from("C:\\Windows\\System32\\schtasks.exe");
+    if hardcoded.is_file() {
+        return hardcoded;
+    }
     let system_root = std::env::var("SystemRoot")
         .or_else(|_| std::env::var("windir"))
         .unwrap_or_else(|_| "C:\\Windows".to_string());
@@ -919,5 +934,49 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn patch_plist_returns_none_for_invalid() {
         assert!(super::patch_plist_with_keepalive("not a plist").is_none());
+    }
+
+    /// F-13 (audit 2026-07-31-9c4cb0c): a tainted `SystemRoot`/`windir` must not redirect which
+    /// `schtasks.exe` we execute. Before the fix this resolver built its path purely from the
+    /// environment, while its `certutil_exe` sibling already preferred the hardcoded System32 path —
+    /// the finding was exactly that asymmetry.
+    ///
+    /// This test EXECUTES on real Windows: the `windows-build` CI job (`accelerator.yml`) runs
+    /// `cargo test` for this crate on `windows-latest`. That matters — the `NTE_NOT_FOUND` lesson is
+    /// that a wrong platform *value* is invisible to any amount of Linux-side purity.
+    #[test]
+    #[cfg(windows)]
+    #[serial_test::serial(windows_system_root)]
+    fn poisoned_system_root_cannot_redirect_schtasks() {
+        let hardcoded = std::path::Path::new("C:\\Windows\\System32\\schtasks.exe");
+        assert!(
+            hardcoded.is_file(),
+            "precondition: this asserts the STANDARD-install path; on a runner where \
+             C:\\Windows\\System32\\schtasks.exe is absent the resolver legitimately falls back to \
+             the environment and there is nothing to prove"
+        );
+
+        let prior_root = std::env::var_os("SystemRoot");
+        let prior_windir = std::env::var_os("windir");
+        std::env::set_var("SystemRoot", "C:\\Users\\Public\\evil");
+        std::env::set_var("windir", "C:\\Users\\Public\\evil");
+
+        let resolved = super::schtasks_exe();
+
+        // Restore BEFORE asserting: a failing assertion unwinds, and a leaked poisoned environment
+        // would contaminate every later test in this binary.
+        match prior_root {
+            Some(v) => std::env::set_var("SystemRoot", v),
+            None => std::env::remove_var("SystemRoot"),
+        }
+        match prior_windir {
+            Some(v) => std::env::set_var("windir", v),
+            None => std::env::remove_var("windir"),
+        }
+
+        assert_eq!(
+            resolved, hardcoded,
+            "a poisoned SystemRoot/windir redirected schtasks.exe — F-13 has regressed"
+        );
     }
 }
