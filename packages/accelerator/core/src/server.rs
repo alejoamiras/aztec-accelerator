@@ -266,6 +266,18 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
     // found by a codex review).
     tokio::spawn(async move {
         crate::versions::sweep_cache_on_start(&bundled).await;
+        // F-08a: same slot, same reason. A prove workspace holds the private witness and is deleted
+        // only by `TempDir`'s `Drop`, which a crash / Quit mid-proof / auto-update restart skips —
+        // so residue accumulates indefinitely. Reaping is safe HERE and nowhere earlier: winning the
+        // bind is what proves no other instance (desktop or headless — both reach proving through
+        // this same `start`) is mid-proof in that shared directory.
+        let reaped = crate::bb::reap_orphaned_prove_workspaces();
+        if reaped > 0 {
+            tracing::info!(
+                count = reaped,
+                "reaped abandoned prove workspaces at startup"
+            );
+        }
     });
     axum::serve(listener, app).await?;
     Ok(())
