@@ -214,3 +214,55 @@ Across three review rounds, **six** of my own factual or reasoning claims were w
 found a defect in the previous round's work — including one (E-5) where the error was not a missed fact
 but a bad argument I used to reject good advice. That is the same pattern the last two PRs recorded, and
 it is the substantive argument for keeping the fresh-context pass rather than only resuming reviewers.
+
+---
+
+# Implementation-time decisions (phases 0–5)
+
+## E-8 — Phase 0 refuted the F-12 design that revision 3 had adopted. **Experiment, not argument.**
+
+Two review rounds argued about F-12's mechanism, and revision 3 reversed revision 2 to adopt codex's
+"bind the mount source to canonical `$APPIMAGE`". Mounting our own released 1.0.7 AppImage and reading
+`/proc/self/mountinfo` settled it in about three minutes:
+
+```
+76 47 0:68 / /…/.mount_Aztec-doOHJf ro,… - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage \
+  Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage ro,user_id=1000,group_id=1000
+```
+
+The mount source is the **basename only**. There is no directory component to compare an absolute
+`$APPIMAGE` against, so that design cannot be built as specified.
+
+What the sample *does* support is better than either audited design: fstype is a clean discriminator
+(`fuse.*` for AppImages, `ext4` for `/`, `squashfs` for snaps), and it closes the split-`/usr` bypass
+that revision 2's two-`stat` mountpoint test left open. **Adopted.**
+
+This is the argument for Phase 0 existing. Two expensive review rounds could not settle what one cheap
+experiment did.
+
+## E-9 — the `AbortSignal` in scope for F-11 was not built. **Deliberate, recorded as a residual.**
+
+Revision 3 put "optional caller `AbortSignal`" in scope as additive and UX-neutral. It is neither, on
+inspection: `PrivateKernelProver.createChonkProof` is declared
+`(executionSteps: PrivateExecutionStep[]) => Promise<ChonkProofWithPublicInputs>`
+(`@aztec/stdlib/dest/interfaces/private_kernel_prover.d.ts:129`) — one parameter, no options bag. PXE
+calls through that interface, so a signal parameter on our override would be unreachable from the
+framework and dead API in this codebase.
+
+Building it would be speculative generality, which the plan's own Phase 5 instruction ("treat 'more
+machinery than the finding warrants' as a valid finding") tells us to reject. **Not built**, recorded
+in the report as a residual with this reason.
+
+## What the Windows legs actually proved
+
+The `NTE_NOT_FOUND` rule's whole point is that a platform *value* is invisible to Linux-side purity.
+Both halves were exercised for real:
+
+- **F-13's tests executed on real Windows.** `Windows Build Smoke` on PR #438 logs
+  `crash_recovery::tests::poisoned_system_root_cannot_redirect_schtasks ... ok` and
+  `trust::windows::tests::poisoned_system_root_cannot_redirect_certutil ... ok` — confirmed by name in
+  the job log, not inferred from a green check.
+- **F-03 sink A's FFI genuinely compiles** under `cargo check --target x86_64-pc-windows-gnu`,
+  verified with a deliberate canary error so it is provably not a skipped `cfg` block. Its runtime
+  behaviour is proved by a test that ships as the permanent regression test rather than as a
+  throwaway spike.
