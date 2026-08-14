@@ -23,6 +23,8 @@ mod bind;
 pub use bind::bind_with_retry;
 mod probe;
 pub use probe::{healthy_aztec_on_port, healthy_aztec_version_on_port};
+mod owner;
+pub use owner::{may_bow_out, probe_and_identify, PortOwner};
 mod auth;
 mod host;
 mod prove;
@@ -279,8 +281,58 @@ pub async fn start(state: AppState) -> Result<(), Box<dyn std::error::Error + Se
             );
         }
     });
+    // F-03 sink B: from here until the serving loop ends, THIS process owns `:59833`. That is an
+    // in-process fact no other process can forge, unlike the `/health` answer the floor tracker used
+    // to rely on alone. An RAII guard, not a store/store pair: clearing the flag AFTER the `.await`
+    // is skipped entirely if this future is dropped or aborted, or if the serve loop unwinds — and a
+    // stale `true` would let the version floor advance for a build whose server is gone
+    // (post-impl codex).
+    let _bind_owned = BindOwnedGuard::acquire();
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Set for exactly as long as this process is serving on [`PORT`] (F-03 sink B, audit
+/// 2026-07-31-9c4cb0c).
+static BIND_OWNED: AtomicBool = AtomicBool::new(false);
+
+/// Holds [`BIND_OWNED`] for its lifetime and clears it on `Drop` — including on cancellation, on a
+/// dropped future, and while unwinding.
+struct BindOwnedGuard;
+
+impl BindOwnedGuard {
+    fn acquire() -> Self {
+        BIND_OWNED.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for BindOwnedGuard {
+    fn drop(&mut self) {
+        BIND_OWNED.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Does THIS process currently own the `:59833` listener?
+///
+/// The anti-rollback floor tracker asked `/health` "did my server come up?" — but any local process
+/// can answer that, so the signal proved liveness of *something*, never of *us*. This is the
+/// non-forgeable half.
+pub fn we_own_the_bind() -> bool {
+    BIND_OWNED.load(Ordering::SeqCst)
+}
+
+/// Whether the monotonic version floor may be advanced this run (F-03 sink B).
+///
+/// Both conditions are load-bearing and neither replaces the other:
+/// - `we_own_bind` — non-forgeable, but proves only that we BOUND the port, not that we serve well;
+/// - `probed == Some(want)` — forgeable on its own, but it is the only evidence that the server
+///   actually answers, which is what stops a bound-but-wedged build from ratcheting the floor.
+///
+/// The audit recommended deleting the probe outright and keeping only an in-process signal. That
+/// would trade a refuted security issue for a real availability one, so both are kept and ANDed.
+pub fn should_commit_floor(we_own_bind: bool, probed: Option<&str>, want: &str) -> bool {
+    we_own_bind && probed == Some(want)
 }
 
 /// Build the router for the HTTP listener (port [`PORT`]). Thin shim over [`router_for_port`].

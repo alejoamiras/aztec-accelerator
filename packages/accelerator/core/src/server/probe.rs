@@ -48,7 +48,7 @@ async fn read_json_capped(mut resp: reqwest::Response) -> Option<serde_json::Val
 /// True iff a `/health` body looks like a healthy Aztec accelerator
 /// (`status=="ok"` and `api_version==1`). Pure (unit-tested) so the redundant-vs-foreign
 /// classification can't silently accept an arbitrary process answering on :59833.
-fn is_healthy_aztec_response(body: &serde_json::Value) -> bool {
+pub(crate) fn is_healthy_aztec_response(body: &serde_json::Value) -> bool {
     body.get("status").and_then(|s| s.as_str()) == Some("ok")
         && body.get("api_version").and_then(|v| v.as_u64()) == Some(1)
 }
