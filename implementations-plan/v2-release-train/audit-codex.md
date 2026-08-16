@@ -65,6 +65,18 @@ Round 1 (independent planning leg) full text: `plan-codex.md`.
 12. **Stable runs the expensive gate twice.** [ADOPTED — once, against held published bytes,
     D-C22]
 
-## Final fresh-context pass
+## Final fresh-context pass (session 01a00cef-d10b-7e01-85bb-9b81a80e02fe) — 7 findings, 2 BLOCKERs, RULING
 
-(to be appended when the verdict lands)
+RULING: REFUSED concurrence on the B4 HTTPS residual (UntrustedSkip = affirmative proof the app did not serve HTTPS; components != composed path). ACCEPTED — B4 rebuilt around non-interactive composed-path trust spikes with owner-escalation (D-C25).
+
+1. BLOCKER — manual trust ceremony breaks single-agent autonomy. [resolved by D-C25: spikes are non-interactive; genuine failure = STOP-and-surface, not a human step]
+2. BLOCKER — burned-stable 2.0.1 exceeds authorization; --latest=false still downloadable. [resolved by D-C26: stable gates as a DRAFT; fail=delete-draft+re-dispatch-2.0.0; publish only on pass]
+3. HIGH — F1 refused the brief-literal NSIS invocation. [resolved by D-C27: PREUNINSTALL invokes --prepare-uninstall; F-05 objection dissolved by B4 gate]
+4. HIGH — future-config guard repeats the enforcement-by-convention mistake (E-7/E-8). [resolved by D-C28: PersistCapability newtype]
+5. MED — peer gate tests --strict-peer-deps (opt-in), not default npm. [resolved by D-C29: test both; keep-deps unless default refuses]
+6. MED — promotion cross-system partial state (S3 flips before Latest re-badge). [resolved by D-C30: landing reads signed feed; notify after flip]
+7. LOW — cooldown drop-new is attacker-defeatable. [resolved: evict-oldest]
+
+Trims accepted: post-GA live prod drill CUT (staging rehearsal covers both sources); Linux PDEATHSIG CUT.
+
+VERDICT: 7 findings, all folded into rev 4. A narrow confirmation pass on rev 4 follows.

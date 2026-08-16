@@ -171,14 +171,64 @@ fix-forward-only recovery; full gates per RC; soak = repeated gate cycles ≥2h.
   poisoning path; and promote-only source:previous conflated release vs feed version
   (codex r2 #1 BLOCKER + #4, fable H2).
 
-## OPEN DISPUTE for the final fresh codex pass
+## Final fresh-context codex pass (rev 3 → rev 4): 7 findings, 2 BLOCKERs, 2 trims + a RULING
 
-- **B4 3-OS HTTPS proof (codex r2 #2)**: brief B4 says "packaged E2E … native bb proof over
-  HTTPS" on all 3 OSes AND pre-authorizes "remaining gaps documented as residuals with codex
-  concurrence". Rev 3 delivers: Linux full HTTPS browser proof; macOS mandatory keychain
-  spike (full proof if it lands); Windows residual with compensating evidence
-  (tls_handshake.rs on the OS runner, UntrustedSkip-logged gate assertion, HTTP-transport
-  native proof, manual pre-GA runbook item). Final codex is asked to CONCUR with this
-  residual package or the dispute goes to the owner before RC dispatch.
-- D-C3/D-C13/D-C24 peers evidence gate (criteria now include patch-ahead).
-- D-C8 PDEATHSIG caveat (fable would drop; kept documented).
+Session 01a00cef-d10b-7e01-85bb-9b81a80e02fe. All folded; codex was right on every point.
+
+- **RULING on the HTTPS dispute: codex REFUSED the residual — ACCEPTED.** UntrustedSkip is
+  affirmative proof the packaged app did not serve HTTPS, so the rev-3 package proved
+  components, not the composed path. **D-C25**: B4 restructured to non-interactive MANDATORY
+  trust spikes reaching the app's OWN store on all 3 OSes (Linux NSS; macOS login-keychain +
+  set-key-partition-list; Windows raw registry write to HKCU\...\SystemCertificates\Root\
+  Certificates\<thumbprint>, which bypasses the CryptoAPI prompt that froze CI) → full
+  composed browser proof (packed SDK → installed app → HTTPS → native bb, downgrade+WASM
+  disabled) per OS. Genuine spike failure ⇒ STOP-and-surface to owner before RC dispatch —
+  NOT a residual, NOT a manual ceremony. Resolves BLOCKER 1 (no human in the autonomous path).
+  Codex's stated evidence bar is now the literal gate assertion.
+- **D-C26 (BLOCKER 2):** stable gates as a GitHub **DRAFT** (no tag, non-public assets); pass
+  ⇒ publish draft (atomic tag creation); fail ⇒ delete draft + re-dispatch same 2.0.0. Keeps
+  failed bytes private (codex: `--latest=false` is still downloadable) and stays inside the
+  goal's 2.0.0-only authorization. A bad PUBLISHED 2.0.0 ⇒ 2.0.1 = STOP-and-surface (exceeds
+  authorization; the goal grants only rc.N + 2.0.0). E-11.
+- **D-C27 (finding 3):** B5 F1 flipped to brief-literal — PREUNINSTALL invokes
+  `--prepare-uninstall` (+ POSTUNINSTALL native fallback). The newer binding brief overrides
+  the F-05 precedent, and B4's installed-gate + NSIS harness dissolve F-05's untestability
+  objection. Cohort task 0: confirm PREUNINSTALL exists in the tauri-bundler 2.8.1 template;
+  absent ⇒ owner-deviation STOP. Reverses part of D-C21's "PREUNINSTALL refused".
+- **D-C28 (finding 4):** config future-schema protection type-bound via a `PersistCapability`
+  token minted only by a current/migratable load and required by EVERY save path — not
+  "convention that saves are rejected" (which repeated the E-7/E-8 enforcement mistake). E-10.
+- **D-C29 (finding 5):** peer evidence tests DEFAULT `npm install` (not just
+  `--strict-peer-deps`, which is opt-in and proves nothing about real consumers); keep-deps
+  unless DEFAULT npm refuses the duplicate. Revises D-C13/D-C24. Likely outcome: keep-deps.
+- **D-C30 (finding 6):** landing derives its download version from the SIGNED S3 FEED, not the
+  GitHub Latest badge, so a mark-Latest partial failure can't desync landing from the updater;
+  PushNotification fires immediately after the S3 flip. Supersedes D-C11's "/releases/latest
+  endpoint" (which was ambiguously the GitHub API).
+- **D-C31 (trims):** (a) post-GA LIVE prod rollback drill CUT — the staging-key rehearsal now
+  exercises BOTH candidate and previous sourcing without ever serving 1.0.7 to real users;
+  (b) Linux PDEATHSIG CUT (thread-scoped, redundant, two auditors converged — overrides D-C8).
+- **Cooldown eviction:** evict-oldest, not drop-new (finding 7 reverses fable L2 — drop-new
+  lets a flooder disable cooldown for others).
+
+## Error log (continued)
+
+- **E-10:** rev 3's "ALL saves rejected" for future configs was enforcement-by-convention —
+  the same class as E-7 (take_matching) and E-8 (config guard). A std `save()` stayed callable.
+  Caught by the final pass #4. Fixed by the PersistCapability newtype.
+- **E-11:** rev 3's burned-stable → 2.0.1 recovery silently exceeded the goal's authorization
+  (rc.N + 2.0.0 only) and relied on "`--latest=false` = invisible" which is false (still
+  downloadable). Caught by final-pass BLOCKER 2. Fixed by draft-gating.
+- **E-12:** rev 3's HTTPS residual tried to substitute component evidence for the composed
+  security path the brief mandates; UntrustedSkip actually proves the negative. Caught by the
+  final-pass RULING. Fixed by non-interactive composed-path spikes + owner escalation.
+- Meta-pattern across E-7/E-8/E-10: I repeatedly asserted an invariant as prose that the type
+  system didn't enforce. Rev 4 standing rule: **any "cannot happen" security invariant must be
+  type-bound (newtype/capability) with a compile-or-mutation proof, never a convention.**
+
+## Remaining EXECUTION-TIME verifications (not plan defects; owner-escalation paths defined)
+
+- B4 trust spikes landing non-interactively per OS (else STOP-and-surface before RC dispatch).
+- B5 PREUNINSTALL macro existing in the actual bundler template (else owner-deviation STOP).
+- D-C29 peer evidence outcome (default-npm behavior decides peers-vs-deps in-cohort).
+- D-C8 PDEATHSIG now CUT (dispute closed).
