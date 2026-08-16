@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::versions;
@@ -110,6 +110,88 @@ fn prove_tmp_parent() -> Option<PathBuf> {
     #[cfg(all(not(unix), not(windows)))]
     std::fs::create_dir_all(&base).ok()?;
     Some(base)
+}
+
+/// How long an abandoned prove workspace must sit untouched before the startup sweep removes it
+/// (F-08a, audit 2026-07-31-9c4cb0c).
+///
+/// **The bind win is the guard; this floor is a belt.** The sweep runs only in the instance that won
+/// `:59833` (see the call site in `server.rs`), and both binaries reach proving through that same
+/// bind, so a live workspace belongs to a process that by definition does not exist. The floor only
+/// covers the seam where [`crate::server::bind_with_retry`] waits out a predecessor for up to 5 s and
+/// could win the port while that predecessor is still finishing an in-flight proof.
+///
+/// 24 hours, not a tight bound derived from `PROVE_TIMEOUT`: the workspace is created *before* the
+/// timed region (`create_prove_tempdir` above) and read *after* it, so it outlives `PROVE_TIMEOUT` on
+/// both ends and a floor set at 300 s would delete live directories. Since the harm being fixed is
+/// residue accumulating over months, there is no value in reaping aggressively — a floor ~240× the
+/// longest possible proof puts the race out of reach instead of arguing it away.
+///
+/// A per-workspace advisory lock (`flock`/`LockFileEx`) held for the workspace's lifetime is the
+/// correct-by-construction alternative. Deliberately not built: it is disproportionate to a Med/Low
+/// disk-hygiene finding. It is the upgrade path if same-session reaping is ever needed.
+const PROVE_RESIDUE_FLOOR: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Remove abandoned prove workspaces left by a process that died before `TempDir`'s `Drop` could run
+/// — a crash, a Quit mid-proof, or an auto-update restart. Returns how many were removed.
+///
+/// Call ONLY after winning the `:59833` bind. Sweeps the private `prove-tmp` parent and nothing else:
+/// `create_prove_tempdir` falls back to the OS temp dir on non-Windows when no data-local dir
+/// resolves, and prefix-matching `prove-*` in a shared `/tmp` could delete a stranger's directory.
+/// That residue is deliberately left unreaped.
+pub fn reap_orphaned_prove_workspaces() -> usize {
+    let Some(parent) = prove_tmp_parent() else {
+        return 0;
+    };
+    reap_prove_dirs_older_than(&parent, PROVE_RESIDUE_FLOOR)
+}
+
+/// The sweep itself, with the parent and floor injected so it is testable without touching the real
+/// per-user directory.
+///
+/// Never follows symlinks (`symlink_metadata`), never recurses above `parent`, and matches only our
+/// own `prove-` prefix — so a symlink planted in `prove-tmp` cannot turn this into an arbitrary-delete
+/// primitive. A single unreadable or undeletable entry is logged and skipped, never fatal: this runs
+/// on the startup path and must not be able to stop the server coming up.
+fn reap_prove_dirs_older_than(parent: &Path, floor: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("prove-"))
+        {
+            continue;
+        }
+        // symlink_metadata, NOT metadata: a symlink here must be judged as a symlink (and skipped),
+        // never followed to its target's mtime and then removed.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let aged = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age >= floor);
+        if !aged {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!(dir = %path.display(), "reaped an abandoned prove workspace");
+            }
+            Err(e) => tracing::warn!(dir = %path.display(), "could not reap prove workspace: {e}"),
+        }
+    }
+    removed
 }
 
 /// Create the per-prove temp workspace under the per-user private base (see `prove_tmp_parent`).
@@ -512,5 +594,97 @@ mod tests {
             "uncached requested version must fail closed, got {result:?}"
         );
         assert!(result.unwrap_err().contains("integrity verification"));
+    }
+
+    // ── F-08a: witness residue (audit 2026-07-31-9c4cb0c) ──
+    //
+    // A prove workspace holds the private witness and is deleted only by `TempDir`'s `Drop`, which a
+    // crash / Quit mid-proof / auto-update restart skips. Nothing swept them at startup.
+
+    /// Backdate a directory's mtime so it reads as abandoned. Same technique as
+    /// `reap_stale_stages_spares_recently_active_stages` in `versions/downloader.rs`.
+    fn age(path: &Path, by: Duration) {
+        let when = std::time::SystemTime::now() - by;
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when)).unwrap();
+    }
+
+    #[test]
+    fn reaps_abandoned_workspaces_but_spares_a_live_one() {
+        let parent = tempfile::tempdir().unwrap();
+        let floor = Duration::from_secs(3600);
+
+        let abandoned = parent.path().join("prove-deadBEEF");
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::write(abandoned.join("ivc-inputs.msgpack"), b"witness").unwrap();
+        age(&abandoned, floor + Duration::from_secs(60));
+
+        // A workspace younger than the floor. This is the case that matters: the headless server
+        // shares this directory, and `bind_with_retry` can win the port from a predecessor that is
+        // still finishing a proof.
+        let live = parent.path().join("prove-liveFACE");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("ivc-inputs.msgpack"), b"in flight").unwrap();
+
+        assert_eq!(reap_prove_dirs_older_than(parent.path(), floor), 1);
+        assert!(!abandoned.exists(), "an abandoned workspace must be reaped");
+        assert!(
+            live.exists(),
+            "a workspace younger than the floor must be spared — this is the deletion of a LIVE \
+             witness workspace, i.e. a proof failing mid-flight for someone else"
+        );
+    }
+
+    #[test]
+    fn reap_ignores_everything_that_is_not_one_of_our_directories() {
+        let parent = tempfile::tempdir().unwrap();
+        let floor = Duration::from_secs(3600);
+        let old = floor + Duration::from_secs(60);
+
+        // Not our prefix — someone else's directory in the same parent.
+        let foreign = parent.path().join("someone-elses-dir");
+        std::fs::create_dir_all(&foreign).unwrap();
+        age(&foreign, old);
+
+        // Our prefix but a FILE, not a workspace.
+        let file = parent.path().join("prove-not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        age(&file, old);
+
+        assert_eq!(reap_prove_dirs_older_than(parent.path(), floor), 0);
+        assert!(foreign.exists(), "a non-matching name must be untouched");
+        assert!(file.exists(), "a plain file must not be removed");
+    }
+
+    /// A symlink must be judged AS a symlink and skipped — never followed to its target's mtime and
+    /// then removed. Otherwise the reaper is an arbitrary-delete primitive for anything that can
+    /// write into `prove-tmp`.
+    #[cfg(unix)]
+    #[test]
+    fn reap_does_not_follow_symlinks_out_of_the_parent() {
+        let parent = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let precious = elsewhere.path().join("precious");
+        std::fs::create_dir_all(&precious).unwrap();
+        std::fs::write(precious.join("keep-me"), b"important").unwrap();
+        let floor = Duration::from_secs(3600);
+        age(&precious, floor + Duration::from_secs(60));
+
+        let link = parent.path().join("prove-symlink");
+        std::os::unix::fs::symlink(&precious, &link).unwrap();
+
+        assert_eq!(reap_prove_dirs_older_than(parent.path(), floor), 0);
+        assert!(precious.exists(), "the symlink target must be untouched");
+        assert!(precious.join("keep-me").exists());
+    }
+
+    /// The sweep runs on the startup path; an unreadable parent must be a no-op, not a panic.
+    #[test]
+    fn reap_on_a_missing_parent_is_a_no_op() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("does-not-exist");
+        assert_eq!(
+            reap_prove_dirs_older_than(&missing, Duration::from_secs(1)),
+            0
+        );
     }
 }

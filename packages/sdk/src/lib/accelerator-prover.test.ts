@@ -881,6 +881,37 @@ describe("AcceleratorProver", () => {
       serSpy.mockRestore();
     });
 
+    test("an unreadable body on the HTTP retry degrades to WASM instead of reaching the dApp", async () => {
+      // F-11 + post-impl codex round 4: the retry path returned `#decodeProof(...)` WITHOUT
+      // awaiting it, so its rejection escaped the surrounding try/catch and never reached the
+      // fallback below — bounding the body would have converted a hang into a hard failure for the
+      // dApp rather than the WASM degradation the catch exists to provide. The sibling call on the
+      // non-retry path awaited; this one did not.
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      mockFetch({
+        "http://127.0.0.1:59833/health": () => healthyBody(),
+        "https://127.0.0.1:59834/health": () => healthyBody(),
+        "https://127.0.0.1:59834/prove": () => {
+          throw new TypeError("TLS handshake failed");
+        },
+        // The retry succeeds at the network layer, then returns a body past the 8 MiB cap.
+        "http://127.0.0.1:59833/prove": () => Response.json({ proof: "A".repeat(9 * 1024 * 1024) }),
+      });
+
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { allowInsecureDowngrade: true },
+      });
+      // Reaching the WASM prover at all is the assertion — its stub rejection is the marker. Before
+      // the fix this rejected with the /prove body error instead, never having tried WASM.
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test",
+      );
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
     test("allowInsecureDowngrade opts back into the HTTP retry", async () => {
       const serSpy = mockSerializer();
       const { fetchedUrls } = downgradeScenario();

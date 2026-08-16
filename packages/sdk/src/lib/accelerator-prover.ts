@@ -495,7 +495,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
               aztecVersion,
               httpRetryUrl,
             );
-            return this.#decodeProof(res, start);
+            // `return await`, not a bare `return`: without the await the promise escapes this
+            // try/catch, so a rejected body read (over-cap, stalled, malformed — F-11) would never
+            // reach the fallback handling below and would surface to the dApp instead of degrading
+            // to WASM. The sibling call on the non-retry path already awaited; this one did not.
+            return await this.#decodeProof(res, start);
           } catch (retryErr) {
             if (retryErr instanceof HTTPError && retryErr.response.status === 403) {
               this.#onPhase?.("denied");
@@ -562,9 +566,18 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     logger.info("Accelerator proof completed", { durationMs });
     this.#onPhase?.("proved", { durationMs });
 
-    const response = (await res.json()) as { proof: string };
+    // F-11 (audit 2026-07-31-9c4cb0c): read under a byte cap AND a body deadline. `res.json()` had
+    // neither — ky's timeout stops counting at headers, so a `200` followed by an endless body hung
+    // this promise forever and buffered without limit. An over-cap or stalled body now throws, which
+    // the caller already handles as a prove failure (and degrades to WASM).
+    const proof = await this.#transport.readProveBody(res);
+    if (proof === undefined) {
+      throw new Error(
+        "accelerator returned an unreadable /prove body (over size cap, stalled, or malformed)",
+      );
+    }
     this.#onPhase?.("receive");
-    const proofBuffer = Buffer.from(response.proof, "base64");
+    const proofBuffer = Buffer.from(proof, "base64");
     return ChonkProofWithPublicInputs.fromBuffer(proofBuffer);
   }
 

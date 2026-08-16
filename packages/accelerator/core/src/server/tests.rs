@@ -1,5 +1,44 @@
 use super::prove::{compute_threads, resolve_version};
 use super::*;
+
+// ── F-03 sink B (audit 2026-07-31-9c4cb0c) ──
+//
+// The floor tracker advanced the anti-rollback version floor on the strength of a `/health` answer.
+// Any local process can serve `{"status":"ok","api_version":1,"version":"<ours>"}`, so the signal
+// proved that SOMETHING was listening, never that our own server had come up.
+
+/// Both conditions are load-bearing, and neither substitutes for the other: bind ownership is
+/// non-forgeable but proves only that we bound the port; the probe is forgeable but is the only
+/// evidence the server actually serves — which is what stops a bound-but-wedged build ratcheting.
+#[test]
+fn floor_commits_only_when_we_own_the_bind_and_our_own_version_answered() {
+    // The fix: a forged probe from a squatter, while we do NOT own the bind, must not commit.
+    assert!(
+        !should_commit_floor(false, Some("1.2.3"), "1.2.3"),
+        "a forged /health answer must not advance the version floor"
+    );
+    // The pre-existing guard still holds: owning the bind is not enough on its own.
+    assert!(
+        !should_commit_floor(true, None, "1.2.3"),
+        "a bound-but-wedged server must not advance the floor"
+    );
+    assert!(
+        !should_commit_floor(true, Some("9.9.9"), "1.2.3"),
+        "another build's healthy server must not advance OUR floor"
+    );
+    // Only both together.
+    assert!(should_commit_floor(true, Some("1.2.3"), "1.2.3"));
+}
+
+/// The flag must describe the listener's lifetime, not merely its creation: a stale `true` after the
+/// serving loop returns would let the floor advance for a build whose server is gone.
+#[test]
+fn bind_ownership_is_false_before_any_server_has_started() {
+    assert!(
+        !we_own_the_bind(),
+        "nothing in this test process is serving :59833, so ownership must read false"
+    );
+}
 use axum::body::Body;
 use axum::http::Request;
 use serial_test::serial;
