@@ -114,9 +114,71 @@ fix-forward-only recovery; full gates per RC; soak = repeated gate cycles ≥2h.
   all (UntrustedSkip) — the "HTTPS proof on 3 OSes" claim was unimplementable as written.
   Caught by codex c-3, verified in code.
 
-## Disputes still open for the double audit
+## Double-audit round (rev 2 → rev 3): codex 12 (1 BLOCKER) + fresh-fable 19 (4 HIGH)
 
-- D-C3/D-C13 peers-vs-deps: evidence-gated; auditors asked to attack BOTH outcomes and the
-  criteria themselves.
-- D-C8 PDEATHSIG caveat (fable would drop it).
-- Main's original F6 minimalism dissent (outvoted; Job Object stands).
+- **D-C16 (fable H1, supersedes the rev-2 D-C4 resolution):** cooldown = **403 +
+  `authorization_cooldown` code**, not 429. The 429 rationale only held for the NEW SDK's
+  table; deployed old SDKs hard-throw on non-403/503, so 429 would break every existing dApp
+  on desktop auto-update. 403 keeps old SDKs on denied→WASM; new SDK keys off the body code
+  (no fresh `denied` phase). Standing rule extracted: **wire changes must stay 403/503-shaped
+  for the deployed fleet.**
+- **D-C17 (fable H4/M1):** PendingUpdate becomes a NEWTYPE (private inner; take_matching sole
+  extractor) — the compile-time claim is now real; + command-layer mismatch test. Mismatch
+  recovery = navigate the existing window (open_or_focus dedup makes close+re-show droppable).
+- **D-C18 (fable H3):** future-config protection moved to a lenient `{config_version}`
+  probe-parse BEFORE the fail-open full parse (v3 configs are by-policy unparseable by v2);
+  test fixture must be non-v2-parseable.
+- **D-C19 (fable H2-alt, adopted over codex's capture+polling):** previous-feed CAPTURE
+  DROPPED. Verified: accelerator-v1.0.7 ships latest.json as a release asset — every stable
+  does. Rollback = promote-only <older-version> using that release's own signed feed. Kills
+  codex-r2 BLOCKER #1 (version confusion: promote-only is single-version; feed_version ==
+  input enforced), #4 (staleness), and the H2 poisoning class. Stable asset gate = 17, RC 16.
+- **D-C20 (codex r2 #3 + fable M2/M3/M4/M5):** containment hardened — RAII Drop = group-kill
+  (client-disconnect drop covers grandchildren); reap/kill lock discipline (no pgid-reuse
+  kill); Windows assign+IsProcessInJob+fail-prove-if-unassigned (suspended-spawn REFUSED —
+  bb is our marker-verified sidecar; window documented); wiring tests through the REAL prove
+  spawn path on both OSes; call-site fns testable; **macOS crash-orphan explicitly a
+  residual** (bb exits naturally, F-08a reaps, PROVE_TIMEOUT bounds app-alive).
+- **D-C21 (codex r2 #5/#6 + fable M12):** NSIS ownership = exact canonicalized token compare
+  (Run value quoted-exe token; task XML <Command> unescaped), FindStr /L /C: only; harness
+  fixtures incl. spaces-in-path and $INSTDIR-deleted; template-ordering question resolved
+  in-cohort against tauri-bundler 2.8.1. Foreign detection ALSO skips shared certs/trust
+  removal.
+- **D-C22 (codex r2 #7/#8/#12 + fable M6/M7 + L1/L3):** append-only release policy
+  (--clobber banned, --latest=false pinned, contract-tested); burned-stable rule (failed
+  held regate ⇒ fix-forward X.Y.Z+1, never re-dispatch); single full 3-OS journey once
+  against held published bytes; staging-key rehearsal pre-GA + live 1.0.7→2.0.0 drill
+  post-GA; bump_source only on organic GA promote; mark-Latest re-badges the PROMOTED
+  release (rollback keeps landing/feed consistent).
+- **D-C23 (fable M8/M9/M10 + codex r2 #9/#11):** bounded restart-mid-proof L3 replaces the
+  dropped full-app automation (ledgered substitute); CA-trust-survives-upgrade assertion
+  added where seedable (brief-mandated; mac/win residual ledgered); nomenclature checklist
+  re-run against the RC tree as a signoff artifact attached to the codex release review;
+  exact npm version pinned for peer evidence + publish.
+- **D-C24 (fable M11):** peer criterion (d) patch-ahead host, predeclared verdict "hard
+  refusal is the contract" — ledgered before adoption; surprise ⇒ keep-deps.
+- **D-C15 note:** cooldown map eviction = drop-new at cap (fable L2).
+
+## Error log (continued)
+
+- **E-6:** rev 2's 429 cooldown would have broken every deployed dApp — I evaluated the wire
+  change only against the NEW SDK's table (fable H1).
+- **E-7:** rev 2 claimed a compile-time consent binding that a std `Option::take` trivially
+  bypasses; no named test failed on revert (fable H4).
+- **E-8:** rev 2's future-config guard could never fire (v3 is by-policy unparseable; load is
+  fail-open) and its named test would have passed against a strawman fixture (fable H3).
+- **E-9:** rev 2's previous-feed capture had no version pinning and a post-flip re-capture
+  poisoning path; and promote-only source:previous conflated release vs feed version
+  (codex r2 #1 BLOCKER + #4, fable H2).
+
+## OPEN DISPUTE for the final fresh codex pass
+
+- **B4 3-OS HTTPS proof (codex r2 #2)**: brief B4 says "packaged E2E … native bb proof over
+  HTTPS" on all 3 OSes AND pre-authorizes "remaining gaps documented as residuals with codex
+  concurrence". Rev 3 delivers: Linux full HTTPS browser proof; macOS mandatory keychain
+  spike (full proof if it lands); Windows residual with compensating evidence
+  (tls_handshake.rs on the OS runner, UntrustedSkip-logged gate assertion, HTTP-transport
+  native proof, manual pre-GA runbook item). Final codex is asked to CONCUR with this
+  residual package or the dispute goes to the owner before RC dispatch.
+- D-C3/D-C13/D-C24 peers evidence gate (criteria now include patch-ahead).
+- D-C8 PDEATHSIG caveat (fable would drop; kept documented).
