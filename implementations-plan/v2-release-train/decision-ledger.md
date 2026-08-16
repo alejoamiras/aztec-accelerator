@@ -232,3 +232,41 @@ Session 01a00cef-d10b-7e01-85bb-9b81a80e02fe. All folded; codex was right on eve
 - B5 PREUNINSTALL macro existing in the actual bundler template (else owner-deviation STOP).
 - D-C29 peer evidence outcome (default-npm behavior decides peers-vs-deps in-cohort).
 - D-C8 PDEATHSIG now CUT (dispute closed).
+
+## Rev-4 confirmation pass (rev 4 -> rev 5): B2/B3/B5/B7 PASS, 3 items corrected
+
+Session 01a00cef (resumed). Verdict: 3 items open, all now folded.
+
+- **D-C25 FAIL, corrected (E-13).** My rev-4 non-interactive trust-seeding routes were
+  technically unsound: macOS set-key-partition-list governs private-KEY ACLs not trust
+  settings (add-trusted-cert to the login keychain still prompts); Windows needs a serialized
+  store-element blob AND CurrentUser\Root protected-root filtering ignores raw registry roots.
+  So the macOS/Windows composed HTTPS proof is NOT autonomously automatable. Rev 5 reframes it
+  honestly: Linux composed proof is automated; macOS/Windows composed proof is a defined
+  STOP-and-surface OWNER DECISION before RC dispatch with three options (isolated e2e-trust
+  cargo feature seam / self-hosted pre-trusted runner / documented manual pre-GA gate). Fixed
+  the contradictory risk-register "no schedule slip" line. Does NOT block B2-B7 or the RC build.
+- **D-C26 nit:** draft release created with `--target <reviewed SHA>` so a delayed publish
+  can't resolve a moved default branch; contract-test tag-absent-before/after-draft and
+  tag-peels-to-SHA-after-publish.
+- **D-C28 nit:** PersistCapability is a private type with NO Default and NO public constructor.
+- **D-C30 nit:** landing treats the feed version as UNTRUSTED (strict SemVer parse; asset URLs
+  only against the canonical GitHub repo path; no feed field interpolated into a URL host).
+- PASS unchanged: D-C27 (PREUNINSTALL+fallback+macro-existence STOP), D-C29 (default-npm
+  decisive, keep-deps fallback), D-C31 + cooldown evict-oldest + both trims.
+
+## Error log (continued)
+
+- **E-13:** rev-4's macOS/Windows trust-seeding routes asserted a non-interactive bypass that
+  doesn't exist (conflated key-ACL with trust-setting auth on macOS; ignored protected-root
+  filtering on Windows). Caught by the confirmation pass. Fixed by reframing as an honest
+  owner-decision STOP point. Same meta-pattern as E-7/E-8/E-10 in a new guise: asserting a
+  mechanism works without verifying the OS actually permits it.
+
+## BLUEPRINT STATUS: COMPLETE (rev 5, confirmation-clean)
+
+Deep-tier protocol fully executed: recon (6 agents, 17 forks) -> 3 independent legs -> consolidation
+(7 decisions) -> contradiction-check (20 findings) -> double audit (31 findings) -> final fresh
+pass (7 findings/2 blockers/1 ruling) -> confirmation (3 nits). 5 revisions. 13 self-errors caught
+and logged. Cohorts B2/B3/B5/B7 audit-clean; B6/B4 carry defined owner-decision points reached
+only in the last cohorts. Implementation may begin at B2.

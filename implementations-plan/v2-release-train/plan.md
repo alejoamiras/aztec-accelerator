@@ -1,10 +1,14 @@
-# plan.md — v2-release-train (rev 4, post final-pass)
+# plan.md — v2-release-train (rev 5, confirmation-clean)
 
-Status: rev 4 — final fresh-context codex pass folded (7 findings, 2 BLOCKERs, + 2 trims;
-codex REFUSED the HTTPS residual — accepted, B4 restructured). No open disputes remain in the
-plan; two items are EXECUTION-TIME verifications with owner-escalation paths (B4 trust spikes;
-B5 PREUNINSTALL existence). Legs: `plan-main.md`, `plan-fable.md`, `plan-codex.md`. Binding:
-`brief.md` (D-R1..5), `recon.md` (F1–F17), `decision-ledger.md` (through D-C31 + E-1..E-12).
+Status: rev 5 — final-pass confirmation folded (B2/B3/B5/B7 PASS; D-C25 FAIL corrected —
+macOS/Windows composed HTTPS proof is now an honest STOP-and-surface owner decision, not a
+spike that pretends to work; D-C26/D-C30 nits folded: draft `--target <SHA>`, feed version as
+untrusted input; D-C28 `PersistCapability` has no `Default`/public ctor). BLUEPRINT COMPLETE.
+Remaining items are EXECUTION-TIME decisions/verifications with defined owner-escalation paths
+(B4 macOS/Windows HTTPS proof method; B5 PREUNINSTALL macro existence; B7 peers-vs-deps
+evidence) — none block starting implementation, all reached in the last-to-merge cohorts.
+Legs: `plan-main.md`, `plan-fable.md`, `plan-codex.md`. Binding: `brief.md` (D-R1..5),
+`recon.md` (F1–F17), `decision-ledger.md` (through D-C31 + E-1..E-12).
 
 ## Phase 0 answers (owner-ratified via brief)
 
@@ -166,7 +170,9 @@ are non-public until published — the key to BLOCKER-2 recovery staying inside 
 1. **RC publish**: create a PUBLIC prerelease `--latest=false`, 16 assets, immutable; failed
    ⇒ rc.N+1 (a new version — no burned-version problem).
 2. **Stable publish → DRAFT-gate → finalize (final-pass BLOCKER 2)**: the stable build uploads
-   to a **DRAFT release** (byte-identical assets, no tag, non-public). The 3-OS installed
+   to a **DRAFT release created with `--target <reviewed SHA>`** (byte-identical assets, no
+   tag, non-public; pinning the SHA prevents a delayed publish resolving a moved default
+   branch — final-pass D-C26 nit). The 3-OS installed
    gate + verify-published-assets run against the DRAFT's assets (the exact bytes that will
    ship). On PASS → **publish the draft** (atomic: creates the `accelerator-v2.0.0` tag +
    makes assets public, `--latest=false`), 17 assets (16 + latest.json). On FAIL → **delete
@@ -184,7 +190,12 @@ are non-public until published — the key to BLOCKER-2 recovery staying inside 
 4. **Landing derives the download version from the SIGNED S3 FEED** (`aztec-accelerator.dev/
    releases/latest.json`), NOT the GitHub Latest badge (final-pass #6): the feed is the single
    source of truth that `promote` flips, so a mark-Latest partial failure can never make
-   landing and the updater disagree. GitHub Latest becomes cosmetic.
+   landing and the updater disagree. GitHub Latest becomes cosmetic. **The feed's version
+   string is treated as UNTRUSTED input** (final-pass D-C30 nit): strict-SemVer-parse it
+   (reject anything else) and construct asset URLs ONLY against the canonical
+   `github.com/alejoamiras/aztec-accelerator` release path — never interpolate a feed field
+   into a URL host/path. (The feed is Ed25519-signed; landing doesn't verify the signature, so
+   it must not trust the payload's shape.)
 5. **Burned-stable rule (M7, revised)**: since stable gates as a DRAFT, a failed gate deletes
    the draft and re-dispatches the same 2.0.0 — nothing is burned in the common case. A burn
    only occurs if a stable release was already PUBLISHED (tag exists) and later found bad →
@@ -213,7 +224,8 @@ auth_probe graph dry-run.
 1. Config migration + **probe-parse version gate (H3), TYPE-BOUND (final-pass #4 — "ALL saves
    rejected" repeats the E-7/E-8 enforcement-by-convention mistake)**: stage 1 = lenient
    `{config_version: u32}` probe (unknown fields ignored); probe > CONFIG_VERSION ⇒ **load
-   returns NO `PersistCapability`** (a token minted only by a successful current-or-migratable
+   returns NO `PersistCapability`** (a private, non-forgeable token with NO `Default` and NO
+   public constructor — final-pass D-C28 nit — minted only by a successful current-or-migratable
    load); stage 2 = full parse with `safari_support`→`https_enabled` Value-pass migration (new
    key wins), CONFIG_VERSION=2 written. **Every save path (`save`, command-layer, authorization
    persist, startup-reset, direct helpers) takes `&PersistCapability` as a required arg** — a
@@ -226,30 +238,36 @@ auth_probe graph dry-run.
    removal). **Upgrade stage adds: CA trust still present after 1.0.7→2.0.0 where seedable**
    (M9 — brief-mandated; Linux now, macOS if spike; mac/win residual ledgered). Uninstall
    assertions scoped to app-owned stores.
-3. HTTPS proof matrix — **RESIDUAL REFUSED by the final pass; restructured to non-interactive
-   MANDATORY trust spikes that satisfy the full composed path, with owner-escalation on
-   genuine failure** (codex ruling: UntrustedSkip is affirmative proof the app did NOT serve
-   HTTPS; component evidence ≠ the composed security path). The bar codex will accept, per OS:
-   app CA present in ITS OWN production trust store (not distrusted) → app logs `Ready` → port
-   59834 serves TLS → a real browser with the packed SDK completes a native-bb proof with HTTP
-   downgrade AND WASM fallback DISABLED. Non-interactive routes to the app's own store:
-   - **Linux**: certutil into the user NSS store (already proven) → full composed proof.
-   - **macOS**: fresh login keychain + `security unlock-keychain` +
-     `security set-key-partition-list -S apple-tool:,apple: -k <pw>` +
-     `add-trusted-cert` into that login keychain (the store `trust/macos.rs:16-19` reads) → no
-     GUI prompt → full composed proof.
-   - **Windows**: raw registry write of the cert blob to
-     `HKCU\Software\Microsoft\SystemCertificates\Root\Certificates\<thumbprint>` — this
-     populates the SAME logical CurrentUser\Root the app queries (`trust/windows.rs:23`)
-     WITHOUT the CryptoAPI root-install prompt that froze CI (the freeze was on
-     `CertAddCertificateToStore`, not a registry write) → full composed proof.
-   These are TEST-HARNESS trust seeding (the app's own interactive install flow is a separate,
-   documented manual pre-GA checklist item — not on the autonomous path). **If a spike
-   genuinely fails after real effort (3-strikes rule), that OS's composed HTTPS proof is a
-   STOP-and-surface to the owner BEFORE RC dispatch** — not a silent residual and not a manual
-   ceremony baked into the autonomous run (resolves final-pass BLOCKER 1). The refused rev-3
-   compensating package (tls_handshake.rs + UntrustedSkip assertion) is retained only as
-   SUPPLEMENTARY evidence, never as a substitute for the composed proof.
+3. HTTPS proof matrix — **RESIDUAL REFUSED by the final pass; Linux automated, macOS/Windows
+   composed proof is an owner decision** (codex ruling: UntrustedSkip is affirmative proof the
+   app did NOT serve HTTPS; component evidence ≠ the composed security path). The evidence bar,
+   per OS: app CA present in ITS OWN production trust store (not distrusted) → app logs `Ready`
+   → port 59834 serves TLS → a real browser with the packed SDK completes a native-bb proof
+   with HTTP downgrade AND WASM fallback DISABLED. Trust-seeding reality per OS (final-pass
+   confirmation corrected my rev-4 claims — these routes mostly do NOT work; do not assert
+   otherwise):
+   - **Linux**: certutil into the user NSS store (proven, non-interactive) → **full composed
+     proof, AUTOMATED.** The app's own predicate reads NSS, so app-serves-HTTPS AND
+     browser-trusts hold together.
+   - **macOS**: **likely NOT automatable.** `set-key-partition-list` governs private-key ACLs,
+     not trust settings; `add-trusted-cert` into the login keychain still needs interactive
+     trust-setting auth. Trusting via the SYSTEM keychain (sudo, non-interactive) makes the
+     BROWSER trust the cert but the APP's own predicate (`trust/macos.rs:16-19`, login keychain)
+     still reads untrusted → `UntrustedSkip` → app won't serve HTTPS.
+   - **Windows**: **likely NOT automatable.** A raw DER registry write is insufficient (value
+     must be a serialized store-element blob) AND CurrentUser\Root applies protected-root
+     filtering that ignores roots not in its protected list — the interactive prompt is exactly
+     what adds to that list.
+   **Resolution — the macOS/Windows composed HTTPS proof is a STOP-and-surface OWNER DECISION
+   reached BEFORE RC dispatch** (final-pass FAIL on my rev-4 spike claims accepted). Three
+   options to put to the owner: (a) a clearly-isolated TEST-ONLY trust seam (behind a new
+   `e2e-trust` cargo feature, mirroring `--features webdriver`) that seeds trust for the E2E
+   while the PRODUCTION predicate stays unchanged and separately unit-tested — the composed
+   proof then covers serve + browser + native-bb over real TLS, with trust-seeding declared
+   test-only; (b) a self-hosted/pre-trusted runner; (c) accept a documented manual pre-GA
+   verification as the gate for those two OSes. Linux's full automated composed proof stands
+   regardless; tls_handshake.rs + UntrustedSkip evidence is SUPPLEMENTARY only. Surfaced with
+   these options before RC dispatch — does NOT block B2–B7 or the RC build.
 4. **Nomenclature checklist re-run against the RC tree** (M10/codex r2 #9):
    `nomenclature-signoff.md` artifact, every brief checklist item + evidence + result,
    attached to the codex release-readiness round.
@@ -292,8 +310,12 @@ releases/tags.
    suite per RC; 3-strikes → codex.
 2. Windows Job wiring silently dropped → IsProcessInJob wiring test through prove path in
    windows-build (M4), not just mechanism test.
-3. macOS keychain spike fails → predefined residual package + dispute already packaged for
-   codex concurrence; no schedule slip.
+3. macOS/Windows composed HTTPS proof not automatable (final-pass FAIL: the non-interactive
+   seeding routes mostly don't work) → this is a defined STOP-and-surface OWNER DECISION before
+   RC dispatch (3 options: test-only trust seam / self-hosted runner / manual pre-GA gate), NOT
+   a silent residual. Linux composed proof is automated and unaffected. It gates the RC's
+   HTTPS-proof sign-off, not the RC build — so B2–B7 and the RC itself are not blocked while
+   the owner decides.
 4. NSIS exact-token match vs real-world paths (spaces, 8.3, deleted $INSTDIR) → literal-mode
    FindStr, canonicalize-before-delete, harness fixtures for each, template-ordering resolved
    in-cohort.
