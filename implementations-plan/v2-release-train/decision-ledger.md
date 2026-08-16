@@ -60,9 +60,63 @@ fix-forward-only recovery; full gates per RC; soak = repeated gate cycles ≥2h.
   unrecognized responses. take_matching deletes the blind-take path (compile-time consent
   binding, fable).
 
-## Disputes (open for contradiction-check + audits)
+## Contradiction-check round (rev 1 → rev 2): 20 findings (codex 12, fable 8), dispositions
 
-- D-C2: codex dissent on unconditional autostart removal.
-- D-C3: peers-vs-deps awaiting fixture evidence; auditors asked to attack BOTH outcomes.
-- D-C4: codex dissent on cooldown response code.
-- Main's dissent on F6 scope (wanted Job-Object-free minimalism) — recorded, outvoted.
+- **D-C2 FLIPPED — ownership-aware uninstall removal (codex was right).** The "self-heal"
+  rationale was FALSE: autostart.rs:17-18/:1563 — Absent entries are NEVER resurrected
+  (verified in code). CLI uses #429 probes (Absent ⇒ success; foreign/unreadable ⇒ leave +
+  report); NSIS gates deletes on $INSTDIR match. E-1 in the error log below.
+- **D-C4 RESOLVED codex's way — new `AuthorizationCooldown` → 429 `authorization_cooldown`.**
+  D-C7's own table makes recognized 429 fall back to WASM, dissolving the "would surface"
+  objection, and OriginDenied would have emitted a false `denied` phase for a cached decision.
+  E-2 below.
+- **D-C8 (fable dissent, kept):** Linux PDEATHSIG retained with documented thread-scope caveat;
+  group-kill/Job Object primary. Fable would drop to residual; benefit judged worth one caveated
+  line.
+- **D-C9:** previous-latest.json captured + uploaded by the PUBLISH job (contents:write), from
+  the public CDN pre-flip; promote job stays id-token+read (codex c-4 + fable c-1 — rev-1's
+  shape was a permissions impossibility). Asset gates 16 RC / 18 stable (codex c-5).
+- **D-C10:** Total release immutability — RC delete-recreate removed (codex c-7); failed
+  publish ⇒ rc.N+1; partial-publish recovery = runbook additive-upload + promote-only hard
+  asset-URL pre-flight (fable c-4). Codex's `resume-existing` mode REJECTED (extra machinery).
+- **D-C11:** Stable flow = publish-with-hold → regate on published bytes → promote-only
+  (fable c-3 — rev-1's "full regate on stable" was unimplementable with in-run promote).
+  verify-live-feed/mark-Latest/bump-source move to the promotion path. promote:false = "hold";
+  drill = promote-only source:previous → restore (codex c-8). Landing switches to
+  /releases/latest endpoint (fable c-2; subsumes F16).
+- **D-C12:** B4 trust matrix corrected (codex c-3, VERIFIED: classify_launch_https →
+  UntrustedSkip): Linux = full HTTPS browser proof via the app's own NSS store; macOS =
+  keychain spike else residual; Windows = residual (widening the app trust predicate for
+  testability REFUSED). Fresh-install stage restored as its own gate stage (fable c-5 — rev-1
+  silently merged a brief deliverable). Full package removal in uninstall legs (codex c-12).
+  Uninstall assertions scoped to app-owned stores (fable c-6).
+- **D-C13:** F13 acceptance criteria predeclared (codex c-10): exact-host green + npm ls
+  singleton; conflicting-host ERESOLVE (npm version + --strict-peer-deps pinned); host-absent
+  is NOT a criterion (npm auto-installs peers). Any ambiguity ⇒ keep-deps.
+- **D-C14:** Future-schema configs protected at the SAVE path (read-only flag), not just load
+  (codex c-11). Version PRs lockstep all four manifests incl. core (codex c-9) + B6
+  declaration-equality gate.
+- **D-C15:** wdio real-timing guard spec dropped (fable c-8, flake-prone duplicate);
+  DEFAULT_GUARD_MS pinned by unit test instead.
+
+## Error log (my consolidation errors caught by auditors)
+
+- **E-1:** I asserted (and fable repeated) that a surviving copied install "self-heals" after
+  unconditional autostart removal — false; never-resurrect is a documented invariant. Caught by
+  codex c-1, verified in code.
+- **E-2:** I created a D-C4/D-C7 internal contradiction (rejected 429 for "would surface"
+  while making 429 a fallback code). Caught by codex c-2.
+- **E-3:** I gave promote-feed an asset-upload duty its own declared permissions forbid.
+  Caught by codex c-4 + fable c-1 independently.
+- **E-4:** I promised "full regate on the stable build" in a flow where promote happens in-run
+  before any external gate could run. Caught by fable c-3.
+- **E-5:** rev-1's B4 browser-trust matrix could not make the app serve HTTPS on mac/win at
+  all (UntrustedSkip) — the "HTTPS proof on 3 OSes" claim was unimplementable as written.
+  Caught by codex c-3, verified in code.
+
+## Disputes still open for the double audit
+
+- D-C3/D-C13 peers-vs-deps: evidence-gated; auditors asked to attack BOTH outcomes and the
+  criteria themselves.
+- D-C8 PDEATHSIG caveat (fable would drop it).
+- Main's original F6 minimalism dissent (outvoted; Job Object stands).

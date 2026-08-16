@@ -1,307 +1,243 @@
-# plan.md — v2-release-train (consolidated from 3 independent legs)
+# plan.md — v2-release-train (rev 2, post contradiction-check)
 
-Status: consolidated draft (rev 1) — awaiting contradiction-check + double audit.
-Legs: `plan-main.md` (main), fable leg (agent report, positions folded here), codex leg
-(`~/.cache/tmp/codex-3BWeA8Xi/response.md`, session `01a00cc4-0918-7603-94ed-12851a926021`).
-Binding constraints: `brief.md` (D-R1..D-R5), `recon.md` (F1–F17), `decision-ledger.md`.
+Status: rev 2 — all 20 contradiction-check findings folded (codex 12, fable 8; overlaps merged;
+every disposition ledgered). Awaiting double audit (codex + fresh fable), then final fresh codex.
+Legs: `plan-main.md`, `plan-fable.md`, `plan-codex.md`. Binding: `brief.md` (D-R1..5),
+`recon.md` (F1–F17), `decision-ledger.md`.
 
 ## Phase 0 answers (owner-ratified via brief)
 
-Success = DONE block of the goal. Quality bar: production. Validation layers: cargo/bun unit +
-integration, Playwright (mocked UI), WebDriverIO (real webview), NSIS harness, L3 `#[ignore]`
-per-OS integration, 3-OS installed-product gates, actionlint, full release pipeline. Untestable ⇒
-only if innocuous. Security-relevant fixes mutation-proved.
+Success = goal DONE block. Quality bar: production. Validation layers: cargo/bun unit +
+integration, Playwright (mocked UI), NSIS harness, L3 `#[ignore]` per-OS integration, 3-OS
+installed-product gates, actionlint + workflow-contract tests, full release pipeline. Untestable
+⇒ only if innocuous. Security-relevant fixes mutation-proved.
+
+## Verified constraints discovered post-rev-1 (contradiction round)
+
+- `autostart` reconciliation NEVER resurrects an Absent entry (autostart.rs:17-18, :1563) — the
+  rev-1 "self-heal" rationale was false.
+- `classify_launch_https` → `UntrustedSkip`: the app does NOT serve HTTPS unless its OWN trust
+  predicate passes (login keychain / CurrentUser\Root / NSS). Browser-side trust alone cannot
+  light the HTTPS listener on mac/win CI.
+- `gh release upload` requires `contents:write` — the promote job cannot attach assets.
+- npm ≥7 auto-installs missing peers — a host-absent fixture cannot decide F13.
 
 ## Architecture & Implementation (per cohort)
 
-Cohort order (all legs agree): **B2 → B3 → B5 → B7 → B6 → B4 → release**. Solo dev = sequential;
-merge one PR at a time on fresh main. B3+B5 both touch `main.rs` → expect rebase. F16 rides in B6.
-Each cohort: worktree `.claude/worktrees/<slug>`, branch `worktree-<slug>`, own mini-plan header in
-the PR body, gh-stack of 1–3 PRs.
+Order: **B2 → B3 → B5 → B7 → B6 → B4 → release** (all legs agree; F16 rides in B6; B3+B5 both
+touch main.rs → expect rebase). One worktree/branch/stack per cohort; merge one PR at a time on
+fresh main, single green run per context.
 
 ### B2 — consent hardening (`b2-consent-guard`)
 
-Files: `frontend-src/{bridge.js,authorize.js,update-prompt.js}`, `src-tauri/src/{commands.rs,
-main.rs,updater.rs}`, `core/src/{authorization.rs,server/auth.rs}`, `e2e/*`, `e2e-webdriver/*`.
-
-1. **Guard default-on** (all legs): `wireButton` guards unless `opts.guard === false`; export
-   `rearmClickGuard()`; native focus/pageshow rearm kept. onboarding/renewal/update inherit.
-   settings.js: DEFERRED (tray-initiated window; remote page cannot pop it under the cursor) —
-   backlog.
-2. **F7**: `wasActive` latch in `refreshPending()`; rearm exactly on false→true, before
+1. Guard default-on in `wireButton` (`opts.guard !== false`); export `rearmClickGuard()`;
+   native focus/pageshow rearm kept. settings.js deferred (tray-initiated; backlog).
+2. F7: `wasActive` latch in `refreshPending()`; rearm exactly on false→true before
    `setControlsEnabled`.
-3. **F8 version-echo, type-enforced** (fable's shape): update-prompt.js sends displayed version
-   with both actions; `PendingUpdate` gains `take_matching(&displayed) -> Option<VerifiedUpdate>`
-   and the unconditional `take()` path is DELETED (compile-time binding). Mismatch: pending
-   retained, `SECURITY:` log, close popup, immediately re-show with the current pending version
-   (user not stranded until next 12h poll).
-4. **F9 cooldown IN / fairness DEFER** (all legs): `DENY_COOLDOWN = 30s` const beside
-   `MAX_PENDING_ORIGINS`, `Duration` injectable for tests; per-CanonicalOrigin timestamps in
-   `PendingState`; recorded in `resolve`/`resolve_active` on Deny (covers click/timeout/close);
-   pruned on `request`; capped map. Check in `server/auth.rs` after the `is_approved`
-   early-return → **immediate `OriginDenied`** (main+fable; codex preferred 429 — rejected:
-   denial semantics must keep dApps on the WASM-fallback path, and 429 would surface a typed
-   error instead; ledger D-C4).
+3. F8 version-echo, type-enforced: `PendingUpdate::take_matching(&displayed)`; blind `take()`
+   deleted (compile-time binding). Mismatch: retain pending, `SECURITY:` log, close + re-show
+   with current pending version.
+4. F9 cooldown: **new `ProveError::AuthorizationCooldown` → 429 `authorization_cooldown`**
+   (D-C4 RESOLVED codex's way — D-C7 makes recognized 429 fall back to WASM, so nothing
+   surfaces to dApps, and we stop emitting a false `denied` phase for a cached decision).
+   `DENY_COOLDOWN = 30s` injectable const beside MAX_PENDING_ORIGINS; per-CanonicalOrigin
+   timestamps in PendingState; recorded in `resolve`/`resolve_active` on Deny (click/timeout/
+   close); pruned on `request`, capped map; checked in `server/auth.rs` after `is_approved`.
+   Fairness DEFERRED.
 
-Tests (decisive set): (1) Playwright guard spec parameterized over onboarding/renewal/update:
-`__CLICK_GUARD_MS__=200`, immediate click → no IPC recorded, post-wait click → fires [mutation:
-revert default-on]. (2) Playwright authorize rearm-on-promotion [mutation: remove latch/rearm].
-(3) Rust `take_matching` match/mismatch (+pending retained) unit [mutation: restore blind take —
-won't compile, which is the proof]. (4) Playwright update spec asserts respond payload carries
-the DOM version. (5) Rust `deny_cooldown_blocks_immediate_retry` +
-`cooldown_recorded_on_timeout_and_close` [mutation: revert auth.rs check]. (6) wdio auth-flow
-addition: real-webview click-within-700ms ignored. Frontend rebuild before every test loop.
+Tests: (1) Playwright guard spec (onboarding/renewal/update; `__CLICK_GUARD_MS__=200`;
+immediate→absent, waited→fires) [mut: revert default-on]. (2) Playwright authorize
+rearm-on-promotion [mut: remove latch]. (3) Rust take_matching match/mismatch+retained (blind
+take = compile error — the proof). (4) Playwright update spec: payload carries DOM version.
+(5) Rust `deny_cooldown_blocks_immediate_retry` + `cooldown_recorded_on_timeout_and_close` +
+wire-shape row for 429 authorization_cooldown [mut: revert auth.rs check]. (6) unit pin
+`DEFAULT_GUARD_MS == 700`. wdio real-timing spec DROPPED (flake-prone duplicate; fable c-8).
 
 ### B3 — bb containment (`b3-bb-containment`)
 
-Files: `core/src/bb.rs`, `core/Cargo.toml` (+`Win32_System_JobObjects`), `src-tauri/src/{main.rs,
-updater.rs,tray.rs}`, `core/src/server/tests.rs`.
+1. F4 cap-and-continue drain (≤64KiB retained, EOF-drained, total counted) concurrent with
+   `child.wait()` under injectable timeout (`prove_inner(timeout)`).
+2. F5 validate in `bb::prove`: empty / non-32-aligned / >64MiB proof → Err → ProveFailed.
+3. F6: Unix `process_group(0)` + registry + `terminate_inflight()` (group-SIGKILL; also in
+   timeout branch); Windows static Job Object `KILL_ON_JOB_CLOSE` (covers NSIS-handoff
+   `exit(0)` + crashes); explicit calls at tray-quit (kill, log, never block quit) and
+   `perform_update` pre-`install()` (unconfirmed reap → ABORT update). Linux PDEATHSIG kept
+   **with documented thread-scope caveat** (fires if the spawning thread dies; benign here —
+   group-kill/Job Object are primary; fable dissent ledgered D-C8). `renew_cert` refuse kept.
+4. Panic hook: sync append+`sync_all` to `log_dir()/panic.log`, best-effort tracing, chains
+   prior hook. Show Logs in prod menu.
 
-1. **F4 cap-and-continue** (all legs): manual drain replacing `wait_with_output` — async chunk
-   loop (downloader.rs:118-152 idiom) retaining ≤64KiB, draining to EOF, total counted; runs
-   concurrent with `child.wait()` under an **injectable timeout** (`prove_inner(timeout)`,
-   bind_with_retry_inner pattern).
-2. **F5 validate inside `bb::prove`** (all legs): reject empty, non-32-aligned, and **>64MiB**
-   (codex's bounded read) proof files → `Err` → existing `ProveFailed`. Wire contract untouched.
-3. **F6 — process group + Job Object + explicit terminate** (fable+codex majority over main's
-   kill-registry-only): Unix `cmd.process_group(0)`; registry (`Mutex<Option<pgid>>`) via RAII
-   guard (StatusGuard idiom), `bb::terminate_inflight()` SIGKILLs the group — also called in the
-   timeout branch (kills grandchildren `kill_on_drop` misses). Windows: one static Job Object
-   with `KILL_ON_JOB_CLOSE`; every bb child assigned → OS kills bb on ANY app exit incl. the
-   NSIS-handoff internal `exit(0)` and crashes; zero per-exit-site code. Explicit call sites:
-   tray quit (before `app.exit(0)`) and `perform_update` **before** `install()`/`restart()`
-   (explicit-before-no-return; on unconfirmed reap: ABORT the update — it can retry; quit never
-   blocks: kill, log `SECURITY:`, proceed). Linux extra: `pre_exec` PDEATHSIG(SIGKILL) one-liner
-   (crash-orphan closed where CI can prove it). macOS crash-orphan = residual (bb self-
-   terminates; F-08a reaps workspace). `renew_cert` refuse-pattern KEPT; coexistence documented
-   on `terminate_inflight`.
-4. **Panic hook**: installed after tracing init; synchronous append (open/write/`sync_all`) of
-   payload+location+timestamp to `log_dir()/panic.log`, best-effort `tracing::error!`, chains
-   previous hook. **Show Logs** in production menu (handler already ungated).
-
-Tests: (1) `stderr_spam_is_drained_and_capped` — 5MiB spam, prove OK, retained ≤64KiB [mutation:
-revert cap]. (2) proof validation triple (empty/33B/>cap → Err; 64B → Ok) [mutation: revert
-validation]. (3) unix `terminate_inflight_kills_group_including_grandchild` — fake bb spawns
-`sleep 300 &`; assert child+grandchild dead [mutation: drop process_group → grandchild survives].
-(4) windows cfg-gated `job_object_kills_on_handle_close` — VERIFY it executes in the
-windows-build job log before merge (repo lesson). (5) `prove_timeout_kills_and_reaps` (100ms
-injected). (6) updater helper unit: `pre_install_containment_confirms_or_aborts`. (7) panic sink
-unit (format+append+sync); hook-fires test via thread panic; release-profile subprocess test
-REFUSED (over-engineering; sink is innocuous beyond unit coverage). (8) tray prod-menu contains
-show_logs. All bb tests: fake-bb + `BB_BINARY_PATH` + default `#[serial]` bucket.
+Tests: stderr-spam bounded [mut: cap]; proof triple+oversize [mut: validation]; unix group-kill
+incl. grandchild [mut: drop process_group]; windows Job Object cfg-test **verified to execute
+in windows-build job log**; timeout kill (100ms injected); updater pre-install containment
+helper unit; panic sink unit + thread-panic hook test (release-profile subprocess REFUSED);
+tray prod-menu has show_logs. Fake-bb + BB_BINARY_PATH + default serial bucket.
 
 ### B5 — real uninstall (`b5-real-uninstall`)
 
-Files: `src-tauri/src/{main.rs,uninstall.rs(new)}`, `src-tauri/nsis/hooks.nsi` (+harness),
-`tests/prepare_uninstall.rs` (new), README, `docs/PLATFORM_SUPPORT.md`, `scripts/
-prepare-uninstall.{sh,ps1}` (thin locate-and-invoke wrappers).
+1. F1 hybrid (unchanged): `--prepare-uninstall` early-argv flag → `uninstall::prepare_uninstall()
+   -> Report`; updater.lock check first (live update → abort, exit 1); per-step status; exit 1
+   unless confirmed. NSIS POSTUNINSTALL native inline additions; PREUNINSTALL refused (F-05).
+2. **F2 FLIPPED → ownership-aware removal (D-C2 revised; codex was right, self-heal was
+   false)**: CLI removes autostart/recovery only when the stored entry targets THIS install
+   (reuse #429 probes; `Absent` ⇒ idempotent success; `points_elsewhere`/`Unreadable` ⇒ leave +
+   report "foreign entry left"). NSIS: `ReadRegStr` the Run value → delete only if it
+   references `$INSTDIR` (canonicalized); task delete gated on `schtasks /Query /XML` output
+   containing `$INSTDIR` (FindStr); StartupApproved value deleted only alongside its Run value.
+3. F3 scope unchanged: remove certs/, markers, breadcrumb; keep config.json/origins (README
+   security note + manual full-purge path), updater-state.json, locks. deb/DMG/AppImage
+   documented flows (+ thin `scripts/prepare-uninstall.{sh,ps1}` locate-and-invoke wrappers).
 
-1. **F1 hybrid, no new NSIS hook** (all legs): (a) `--prepare-uninstall` early-argv flag →
-   `uninstall::prepare_uninstall() -> Report`: check `updater.lock` (non-blocking; live update →
-   abort with message, exit 1); `autostart::set_enabled_at(None,false)` (removes entry +
-   disables crash recovery via OFF branch); `trust::remove_ca_trust()`; delete `certs/`, update
-   markers (only when no live txn), CA-TRUST-NOT-REMOVED.txt; per-step status lines; exit 1
-   unless all confirmed (–remove-ca-trust exit-code contract). (b) POSTUNINSTALL additions,
-   NSIS-native inline: verified `schtasks /Delete /F` (+`/Query` re-check), `DeleteRegValue`
-   Run + StartupApproved value, marker deletes — guards (`$UpdateMode`, `$EXEDIR != $INSTDIR`)
-   and CA breadcrumb preserved. PREUNINSTALL refused (ratified F-05).
-2. **F2 accept+document** (main+fable majority; codex dissent ledgered D-C2): unconditional
-   removal; a surviving copied install self-heals via startup_reconcile/#429 on next launch;
-   doc comment + README note. (Ownership-aware removal rejected as corner-case code with a
-   self-healing failure mode.)
-3. **F3 precise scope** (all legs): REMOVE certs/, markers, breadcrumb; KEEP config.json +
-   approved origins (user data; security note in README: full removal = delete
-   `~/.aztec-accelerator` — old approvals otherwise reapply on reinstall), updater-state.json
-   (anti-rollback floor), locks. deb/DMG/AppImage: documented flows invoking the flag BEFORE
-   deleting the app (ratified S6: no root postrm).
-
-Tests: (1) `tests/prepare_uninstall.rs` per-OS `#[ignore]` L3 (autostart_heal shape, throwaway
-HOME, `--test-threads=1`), invoking the REAL binary via `CARGO_BIN_EXE_AztecAccelerator`
-(establishes the missing argv-branch pattern): arm everything → run → all gone → run again →
-still gone [mutation: skip any callee → named assert fails]; wired into the 3-OS cert-trust
-legs. (2) NSIS harness extension: seed real Run value + StartupApproved + scheduled task →
-uninstall.exe → gone; update-mode run → preserved [mutation: drop inline deletes]. (3) CA-path
-regression lines stay green.
+Tests: (1) `tests/prepare_uninstall.rs` per-OS L3 via `CARGO_BIN_EXE_AztecAccelerator`: arm →
+run → gone → run again → still-gone [mut: skip any callee]; PLUS `foreign_entry_left_untouched`
+(seed entry pointing elsewhere → preserved + reported) [mut: drop ownership check]. (2) NSIS
+harness: ours-seeded → gone; foreign-seeded → preserved; update-mode → preserved [mut: drop
+inline deletes / drop $INSTDIR match]. (3) CA-path regression green.
 
 ### B7 — SDK contract (`b7-sdk-contract`)
 
-Files: `packages/sdk/{package.json,src/lib/{accelerator-prover.ts,accelerator-transport.ts,
-types.ts,errors.ts(new)},src/index.ts,src/lib/public-contract.test.ts,README.md,.claude skill,
-MIGRATION.md}`, `scripts/prepare-sdk-publish.ts` (new, replaces inline `node -e`),
-`.github/workflows/{sdk.yml,_publish-sdk.yml,promote-latest.yml}`, `packages/sdk/
-consumer-fixtures/{node-tsc,vite}` (committed).
+1. **F13 evidence-gated with PREDECLARED acceptance criteria (codex c-10)**: adopt exact-pinned
+   PEERS iff (a) exact-match host: install+typecheck+build green AND `npm ls` shows a SINGLETON
+   @aztec graph; (b) conflicting host (@aztec 5.0.0): loud `ERESOLVE` failure; (c) tarball
+   consumers stay green. Host-absent behavior is explicitly NOT a criterion (npm auto-installs
+   peers). Fail any → keep exact-pinned deps; decision + evidence ledgered in-cohort.
+2. F14 error contract (D-C7) + cooldown row: fallback = network, 403 auth-family (`denied`),
+   403 `version_not_allowed` (reason `version-mismatch`), 408, 413, **429 incl.
+   `authorization_cooldown` (NO `denied` phase — cached decision, not a new one)**, 503, 500
+   w/ recognized code, malformed-2xx. Typed `AcceleratorHttpError` = 400
+   invalid_version/invalid_origin + unrecognized. SKILL/README corrected; public-contract pins.
+3. appVersion/apiVersion surfaced; per-language constants; no codegen.
+4. F15: MIGRATION.md in `files`, attached to release; consumer job asserts presence in pack.
+5. `scripts/prepare-sdk-publish.ts` shared by publish + consumer job; fixtures (node-tsc, vite,
+   + the conflicting-host fixture) on Node 24; joins sdk-status.
+6. F17: publish-testnet chain after desktop promote; `latest` via promote-latest.yml;
+   dist-tag policy documented.
 
-1. **F13 — DISPUTED → evidence-gated position: exact-pinned PEERS** (codex) **iff the fixtures
-   prove it; else keep exact-pinned deps** (main+fable). Rationale for the lean: the
-   `X.Y.Z-revision.N` scheme MEANS "for Aztec X.Y.Z"; README already documents peer semantics;
-   loud ERESOLVE beats silent nested-dup wire mismatch; exact peers keep the frozen-axis
-   supply-chain story. Cohort task 1 = import audit (which @aztec/* are directly imported) +
-   both fixture variants green (host-provided exact match; host-absent → clear failure).
-   Decision committed in-cohort, ledgered. (D-C3)
-2. **F14 — one error class + refined fallback table** (consolidated): `AcceleratorHttpError
-   {status, serverCode?, cause}` exported from barrel. Contract: **fallback to WASM** = network,
-   403 auth-family (`denied` phase), 403 `version_not_allowed` (phase reason
-   `version-mismatch` — availability preserved, visibility via phase), 408, 413, 429, 503, 500
-   with RECOGNIZED code (`download_failed`/`prove_failed`), malformed-2xx. **Typed throw** =
-   400 `invalid_version`/`invalid_origin` (caller bugs must surface) + unrecognized
-   status/codes. (Refines the deliberate 503-only rule via the server's own code field — the
-   original "don't mask misconfig" rationale is preserved for UNRECOGNIZED responses.)
-   SKILL.md:145-153 corrected; README status→behavior table incl. all four 403 variants.
-3. `appVersion`/`apiVersion` optional fields on the available arm; `#classifyHealth` stops
-   discarding them; per-language constants centralized (TS `SUPPORTED_ACCELERATOR_API_VERSION`,
-   Rust already has its own); NO cross-language codegen.
-4. **F15**: `MIGRATION.md` added to `files`; publish attaches it as release asset + notes-file;
-   consumer job asserts it's in `npm pack` output.
-5. Tarball consumer CI job (sdk.yml → joins sdk-status): build → `prepare-sdk-publish.ts` (same
-   script publish uses — the job must test the SHIPPED shape) → `npm pack` → install tgz into
-   both fixtures → tsc/vite build. Node 24 (matches publish env; first and only Node pin in
-   test CI, deliberate).
-6. **F17**: publish via publish-testnet chain (e2e-gated) AFTER desktop promote; `latest` moved
-   only by explicit promote-latest.yml dispatch; `-revision.N` dist-tag policy documented in
-   runbook + promote-latest header ("`^` consumers never auto-receive revisions; `latest`
-   promotion is the distribution lever").
-
-Tests: error-table unit suite (each row one case; mocked ky) + `no_raw_ky_error_escapes`
-[mutation: revert wrap]; `version_not_allowed_falls_back_with_version_mismatch_reason`
-[mutation: revert reclassify]; health-parse carries app/api version; public-contract additions
-(exports, corrected claims, no-peer-lie); the consumer job itself [mutation: drop dist from
-files → job fails].
+Tests: error-table suite incl. authorization_cooldown row + `no_raw_ky_error_escapes` [mut:
+revert wrap]; version_not_allowed fallback-reason [mut: revert reclassify]; health-parse
+carries versions; public-contract additions; consumer job [mut: drop dist from files];
+peer-criteria fixtures (if adopted) [mut: unpin a peer → ERESOLVE fixture fails].
 
 ### B6 — publish/promote split + recovery (`b6-promote-split`)
 
-Files: `.github/workflows/release-accelerator.yml`, `.github/actions/promote-feed/action.yml`
-(new composite), `docs/RELEASE_RUNBOOK.md`, root `CLAUDE.md`, `packages/landing/src/main.ts`,
-`scripts/release-workflow-contract.test.ts` (new).
+1. D-C5 revised for permissions truth (codex c-4 / fable c-1): **publish job** (contents:write)
+   captures the current PUBLIC CDN feed pre-flip (curl, no AWS creds), verifies it with the
+   production verifier, uploads it as `previous-latest.json` release asset alongside
+   `latest.json` at `gh release create` time. **promote-feed job** stays `id-token:write +
+   contents:read`: downloads release assets, verifies, flips S3 + CloudFront. Asset-count
+   gates: **16 for RC, 18 for stable** (codex c-5).
+2. **Immutability everywhere (codex c-7)**: delete-recreate REMOVED for RCs too — any failed/
+   dirty publish → next `rc.N+1`; stable re-dispatch refuses if release exists. Partial-publish
+   recovery = runbook additive `gh release upload` procedure + promote-only's hard pre-flight
+   (every latest.json platform URL must resolve) (fable c-4; codex's resume-existing mode
+   rejected as extra machinery — ledgered).
+3. `promote-only` mode (freeze/fix-forward/re-point lever, same workflow per IAM argument):
+   inputs `version`, **`source: candidate|previous`** (codex c-8); pre-flight asset-URL
+   resolution; production-verifier check; flip; then **verify-live-feed + mark-GitHub-Latest +
+   bump-source run in this mode** (fable c-3: they belong to promotion, not publication).
+   `promote:false` renamed semantics: **hold** (pre-promotion), not "freeze"; runbook defines
+   incident freeze = hold + no promote-only dispatch.
+4. **Landing switches to the `/releases/latest` endpoint** (fable c-2; subsumes F16): Latest
+   badge is marked only post-promote, so landing is promotion-aligned for RC/soak/hold/normal
+   alike. Prerelease/draft list-filter dropped as dead code path.
+5. Declaration-equality gate (codex c-9): validate asserts tauri.conf + all three Cargo
+   versions == dispatch input.
+6. Runbook rewrite (real graph, hold/promote/re-point/fix-forward procedures, Layer-B floor
+   honesty, additive-upload recovery, manual trust-install pre-release checklist) + CLAUDE.md
+   refresh same PR.
 
-1. **F12 — split + recovery as a MODE of the same workflow** (codex's IAM argument adopted: the
-   OIDC role trust may be bound to this workflow's identity; a second top-level workflow risks
-   an avoidable IAM change we cannot verify from the repo): dispatch inputs gain
-   `mode: release|promote-only` + `promote: bool (default true)`.
-   - `release` mode: publish (:792-979, minus AWS) → `verify-published-assets` step (download,
-     count=17 incl. latest.json, sha256 vs build outputs) → **promote-feed job**
-     (`id-token:write + contents:read` ONLY; AWS secrets REMOVED from the release job):
-     captures current live feed → uploads it as `previous-latest.json` release asset
-     (first-transition gap closed; belt over fable's asset-source correction) → uploads new
-     latest.json + CloudFront invalidation. `verify-live-feed` needs promote-feed. **GitHub
-     "Latest" badge marked AFTER promote in a separate `contents:write` job** (publish always
-     creates `--latest=false`).
-   - `promote-only` mode (THE freeze/fix-forward/re-point lever): input version → asserts
-     stable semver + release exists → `gh release download --pattern latest.json` (or
-     `previous-latest.json` for re-point) → production-verifier check → same promote-feed
-     composite. Idempotent.
-   - Delete-recreate: RC dispatches keep clean-slate; **stable refuses if the release already
-     exists** (fail loud).
-   - Freeze = dispatch with `promote:false` (publish-without-promote). No repo-variable second
-     mechanism.
-2. **F16**: landing filters `draft`/`prerelease`.
-3. Runbook rewrite: real job graph; publish/promote/recovery procedures (fix-forward canonical;
-   re-point protects only not-yet-updated clients — Layer-B floor stated honestly);
-   delete-and-restore advice REMOVED; **manual trust-install pre-release checklist ADDED**
-   (closes trust_{macos,windows}.rs dangling reference); CLAUDE.md job-graph summary refreshed
-   same PR.
-
-Tests (codex's YAML-contract idea adopted — mutation-provable guards where I had "innocuous
-YAML"): `release-workflow-contract.test.ts` (tauri-identity.test.ts precedent) asserting: no
-AWS creds in the publish job; promote gated on is_prerelease==false && promote==true;
-verify-live-feed needs promote-feed; stable path has no release-delete; landing unit test
-`latest_download_ignores_rc_and_draft`; promote composite fixture test (wrong version/unsigned
-feed/missing asset → refuse); actionlint. Live validation: `auth_probe` dispatch (graph shape),
-the RC chain (publish path), post-release idempotent re-promote (the drill).
+Tests: `release-workflow-contract.test.ts` — no AWS creds in publish; promote gated
+prerelease-false; per-channel asset counts 16/18; no `gh release delete` anywhere; promote-only
+requires source; verify-live-feed/mark-Latest/bump-source wired to promotion [each mutation-
+provable by editing the YAML]. Landing unit `latest_endpoint_used`. Promote composite fixture
+test (wrong version/unsigned/missing-asset → refuse). actionlint. Live: auth_probe graph check;
+RC chain exercises publish; the post-release drill exercises promote-only both sources.
 
 ### B4 — shipped-product + migration gate (`b4-product-gate`) — LAST
 
-Files: `core/src/config.rs` (+tests), `.github/workflows/{_e2e-updater*.yml}` (extended into
-combined per-OS gates), updater-smoke scripts (seed/assert/uninstall stages),
-`packages/playground/e2e/installed-accelerator.spec.ts` (+runner), `e2e-gate.yml` (thin
-dispatcher for soak re-runs).
+1. Config migration (unchanged mechanics) **+ future-version save protection (codex c-11)**:
+   `config_version > CONFIG_VERSION` at load → in-memory read-only flag; ALL saves rejected
+   (surfaced as settings error + log) so a future schema is never clobbered by a v2 process.
+   Tests: migration trio + `future_config_never_persisted_over` [mut: drop flag].
+2. Per-OS combined gate, now TWO stages (fable c-5 restores the silently-merged deliverable):
+   **(a) fresh-install stage**: install candidate → first-run (v2 config seed) → /health →
+   native proof; **(b) upgrade stage**: wipe → install pinned 1.0.7 with seeded legacy profile
+   → update → assert state survived (origins, https_enabled via migration, speed, auto_update,
+   floor bumped, autostart entry) → packed-SDK browser proof → **full uninstall**: Windows real
+   uninstaller /S; macOS/Linux `--prepare-uninstall` THEN package removal (`rm -rf` .app /
+   AppImage, `sudo dpkg -r` for deb) (codex c-12) → assert binary gone + artifacts gone,
+   **scoped to app-owned stores** (fable c-6).
+3. **HTTPS proof matrix REVISED (codex c-3 verified — UntrustedSkip)**: the app serves HTTPS
+   only if ITS OWN trust predicate passes. Linux: certutil into user NSS (the app's own store)
+   → app serves HTTPS → full browser proof over `https://localhost:59834`. macOS: 1-day spike
+   on non-interactive login-keychain trust (fresh keychain + unlock + add-trusted-cert); works
+   → full proof; else → residual. Windows: CurrentUser\Root is interactive (empirical freeze)
+   and widening the app's trust predicate to LocalMachine for testability is REFUSED
+   (production security surface) → residual. Where residual: browser proof runs over HTTP,
+   TLS layer stays covered by existing `tls_handshake.rs` integration tests + Linux's full
+   HTTPS leg; upgrade-stage HTTPS assertions per-OS: config-file migration asserted everywhere,
+   listener-up asserted only where trust is seedable. Residuals documented in the audit report
+   with codex concurrence + the runbook manual checklist (B6).
+4. `e2e-gate.yml` thin dispatcher for soak loops.
 
-1. **Config migration FIRST** (fable+codex mechanics over main's serde-alias): raw
-   `serde_json::Value` pre-pass — `safari_support` → `https_enabled` only when the new key is
-   absent (new key wins); strip legacy key; bump `CONFIG_VERSION = 2` and **read** it (v1 →
-   migrate; v2 → as-is; **greater/malformed → best-effort read-only, never persisted over**);
-   preserve origins/speed/auto_update/auto_approve_localhost/onboarding_version. The two tests
-   pinning the old drop are REWRITTEN to pin the migration (deliberate owner-ratified
-   reversal). Smoke-seed `safari_support`/`https_enabled` drift reconciled.
-2. **F11 — extend the updater smokes into combined per-OS installed-product gates** (codex+
-   fable over main's separate legs): one job per OS = the real user journey: install pinned
-   **1.0.7** (port Windows' 4-point preflight to mac/linux) with a SEEDED legacy profile
-   (`safari_support:true`, ≥1 approved origin, speed≠default, auto_update, autostart enabled)
-   → update to candidate → assert state survived (version, https_enabled true via migration in
-   the REAL packaged binary, origins, floor bumped, /health, HTTPS port serving) → **packed-SDK
-   real-browser proof over HTTPS** (playground fixture consuming B7's tarball; asserts native
-   path, no WASM fallback) → quit → uninstall (Windows: real uninstaller /S; mac/linux:
-   `--prepare-uninstall`) → assert artifacts gone. `e2e-gate.yml` dispatches these for soak
-   loops.
-3. **F10 browser trust per-OS** (fable's matrix + codex's macOS ambition, timeboxed): Linux =
-   NSS certutil + Chromium (proven). Windows = import app CA into **LocalMachine\Root**
-   (proven in-repo pattern; Chromium trusts it; avoids the CurrentUser freeze). macOS =
-   **Firefox + profile-NSS certutil** (same mechanism the app's Linux trust walks; no
-   Keychain); spike codex's fresh-login-keychain route 1 day IF Firefox route fails; fallback
-   = `curl --cacert` HTTPS native-proof + documented residual. Residual on all OSes either
-   way: the app's OWN interactive trust dialogs (manual runbook checklist, codex-concurred).
+## Release execution (rev 2 — fable c-3 sequencing fix)
 
-Tests: migration unit trio [mutation: revert Value-pass] + `v2_and_future_configs_not_clobbered`;
-the three combined per-OS gates ARE the decisive E2E set (one assertion battery per OS, not a
-pyramid). Nomenclature sweep = checklist execution logged in release notes (recon: machinery
-already clean; no automation built).
-
-## Release execution
-
-1. Version PR: source → `2.0.0-rc.1` (tauri.conf + src-tauri/server Cargo.toml+locks; core
-   Cargo.toml cosmetic 2.0.0; README example refresh rides along).
-2. Dispatch `2.0.0-rc.1` (release mode): build → all gates (3-OS combined installed-product
-   incl. 1.0.7 upgrade + HTTPS proof + uninstall) → GitHub prerelease published; feed untouched
-   (landing now filters). PushNotification.
-3. Fix-forward through rc.N; EVERY RC gets the full gate suite.
-4. **Soak ≥2h** on the chosen RC: repeated `e2e-gate.yml` cycles (≥4 consecutive green spanning
-   ≥2h) while MIGRATION/release-notes/runbook finalization happens in parallel.
-5. Codex release-readiness review (fresh session) → clean round required.
-6. Version PR → `2.0.0`; dispatch stable (promote:true default): rebuild → full regate →
-   publish (+previous-latest capture, asset verify) → promote-feed → verify-live-feed →
-   GitHub-Latest marked. PushNotification.
-7. Recovery drill: `promote-only` re-promote of 2.0.0 (idempotent, zero feed change) — proves
-   the lever live; fixture tests already proved refusal paths.
-8. SDK: publish-testnet chain → `-revision.N` on npm → fresh-dir install+typecheck of the EXACT
+1. Version PR: **lockstep** `2.0.0-rc.1` across tauri.conf + src-tauri/server/core Cargo.toml
+   (+locks) (codex c-9); README example refresh rides along.
+2. Dispatch release (`2.0.0-rc.1`): build → publish (16 assets, immutable) → 3-OS gates
+   (fresh-install + upgrade stages). Gate failure → fix → `rc.N+1` (never delete). Push
+   notification at RC published.
+3. Soak ≥2h on the final RC: repeated `e2e-gate.yml` cycles (≥4 consecutive green spanning
+   ≥2h) while MIGRATION/notes/runbook finalize in parallel.
+4. Codex release-readiness review (fresh session) → clean round required.
+5. Version PR → `2.0.0` lockstep. **Dispatch stable with hold (`promote:false`)**: rebuild →
+   full regate → publish (18 assets incl. latest.json + previous-latest.json) →
+   verify-published-assets. The fleet is untouched.
+6. Run the 3-OS gate suite against the PUBLISHED stable assets (the real bytes, pre-promote —
+   this is the "full regate on the stable build" made mechanically true).
+7. **Promote**: dispatch `promote-only source:candidate version 2.0.0` (autonomous, D-R1) →
+   flip → verify-live-feed → mark GitHub Latest → bump-source PR. PushNotification.
+8. **Recovery drill (real, bounded)**: `promote-only source:previous` (feed → 1.0.7's manifest;
+   not-yet-updated clients unaffected, updated clients floor-protected) → verify →
+   `promote-only source:candidate` restore → verify. Total exposure: minutes; documented in
+   runbook as the rehearsed procedure.
+9. SDK: publish-testnet chain → `-revision.N` → fresh-dir install+typecheck of the exact
    registry version → promote-latest.yml → PushNotification.
-9. Post-release: fresh-install smokes (3 OS, public links); live-feed 1.0.7→2.0.0 update smokes
-   (dynamic-latest now resolves 2.0.0); bump-source auto-PR lands 2.0.1-rc.1.
-10. Close-out per brief §8 + post-v2 backlog (below).
+10. Post-release: fresh-install smokes (3 OS, public links); live-feed 1.0.7→2.0.0 update
+    smokes; close-out per brief §8 + post-v2 backlog.
 
-Rollback story (runbook-canonical): pre-promote failure is fleet-harmless (freeze =
-promote:false). Post-promote: `promote-only` re-points the feed to the prior stable's
-`previous-latest.json`/asset feed for not-yet-updated clients; already-updated clients are
-fix-forward-only (Layer-B monotonic floor — stated, no machinery pretends otherwise);
-crash-on-start N requires communicated manual reinstall. Never delete tags/releases.
+Rollback story: pre-promote failure is fleet-invisible (hold). Post-promote: promote-only
+source:previous stops further uptake; updated clients are fix-forward-only (Layer-B floor,
+stated); crash-on-start N ⇒ communicated manual reinstall; never delete tags/releases.
 
 ## Risk register
 
-1. 3-OS gate flake (installs, CDN, GH API) → built on proven smoke bones; bounded waits; retry
-   only infra-attributed failures (logged); full suite per new RC; 3-strikes → codex consult.
-2. Windows Job Object compiles-but-never-runs → cfg-gated test + verify execution in
-   windows-build job log before B3 merges.
-3. macOS browser-trust route unproven → Firefox-NSS first, keychain spike second, curl-cacert
-   fallback third; residual documented.
-4. Guard default-flip breaks an existing spec → full Playwright+wdio suites in cohort CI;
-   settings.js confirmed outside wireButton.
-5. Stable rebuild ≠ soaked RC artifacts (existing model) → same commit, full regate on the
-   stable build; provenance binding stays out of scope (backlog).
-6. Peers decision destabilizes consumers → evidence-gated in-cohort; fixtures prove both
-   configurations before commitment; revert path = keep-deps (one manifest diff).
+1. 3-OS gate flake → proven smoke bones, bounded waits, infra-attributed retries logged, full
+   suite per RC, 3-strikes → codex.
+2. Windows Job Object compiles-but-never-runs → verify execution in windows-build log pre-merge.
+3. macOS keychain spike fails → residual path predefined (HTTP proof + tls_handshake + Linux
+   HTTPS leg); no schedule slip.
+4. Guard default-flip breaks a spec → full Playwright suite in cohort CI; settings.js outside
+   wireButton (verified).
+5. Ownership-gated NSIS deletes leave residue on odd install layouts (8.3 paths, moved
+   installs) → canonicalize both sides ($EXEDIR pattern exists); foreign-left is REPORTED, and
+   the CLI path remains available; harness covers ours/foreign/update-mode.
+6. Peers criteria ambiguous in practice (ERESOLVE behavior varies by npm config) → fixtures pin
+   npm version + `--strict-peer-deps` explicitly; falls back to keep-deps on any ambiguity.
+7. Stable rebuild ≠ soaked RC artifacts → same commit, full regate on the PUBLISHED stable
+   bytes pre-promote (step 6 now mechanically real).
 
-## Post-v2 backlog (write to implementations-plan/index.md at close-out)
+## Post-v2 backlog
 
-n1-version default bump to 2.0.0 (+drop N1BinaryName override); peer-migration design round (if
-B7 lands keep-deps) or dep-consolidation follow-ups (if peers); settings.js guard; macOS/Windows
-interactive-trust automation research; aztec-stable cron dormancy; npm Trusted Publisher; SF
-provenance binding (tag↔shipped-version); Mainnet version-cache LRU; update-failure UI; tray
-error states; F-09 replay freshness; independent SDK semver debate.
+n1-version default → 2.0.0 (+drop N1BinaryName); peer-migration or dep-consolidation follow-up;
+settings.js guard; macOS/Windows interactive-trust automation research; aztec-stable cron
+dormancy; npm Trusted Publisher; provenance binding; Mainnet version-cache LRU; update-failure
+UI; tray error states; F-09; independent SDK semver.
 
-## Scope cuts (consolidated refusals)
+## Scope cuts
 
-B1/Authenticode; TUF/F-09; telemetry/diagnostic bundles; bb revocation/sandboxing/supervisor
-frameworks; queue fairness + aggregate budgeting + download singleflight; independent SDK
-semver; npm Trusted Publisher; TS↔Rust api_version codegen; PREUNINSTALL hook; ownership-checked
-uninstall (ledgered dissent); `--purge` flag / deleting user config; deb postrm; S3
-versioning/infra; multi-Node matrix; release-profile panic subprocess test; full
-app-restart-mid-proof automation; nomenclature sweep automation; new release channels;
-rewriting smoke scripts into a framework.
+B1/Authenticode; TUF/F-09; telemetry; bb revocation/sandboxing/supervisors; queue fairness;
+independent SDK semver; npm Trusted Publisher; api_version codegen; PREUNINSTALL hook; `--purge`;
+deb postrm; S3 versioning; multi-Node matrix; release-profile panic subprocess test; full
+restart-mid-proof automation; nomenclature automation; new channels; smoke-script framework
+rewrite; resume-existing release mode; widening the app trust predicate for testability.
