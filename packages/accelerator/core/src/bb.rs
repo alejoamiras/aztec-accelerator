@@ -705,6 +705,7 @@ mod containment {
         JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 
     /// A process-lifetime Job Object handle (stored as `isize` so it is `Send`/`Sync` in the static).
     /// Deliberately NEVER closed on the SUCCESS path: `KILL_ON_JOB_CLOSE` fires exactly when this process
@@ -787,9 +788,28 @@ mod containment {
         armed: bool,
     }
 
+    /// Synchronously destroy a bb we spawned but FAILED to contain, BEFORE releasing `GATE` (codex r4). If
+    /// we just returned Err, `kill_on_drop` would only *initiate* async direct-child termination — a
+    /// `begin_quiesce` waiting on `GATE` could then confirm the job empty and install while the uncontained
+    /// bb.exe is still dying (or has forked an uncontained descendant). So: `TerminateJobObject` (reaps
+    /// anything that DID make it into the job — the assign-succeeded-but-verify-failed case) AND
+    /// `TerminateProcess` + `WaitForSingleObject` on the direct handle (kills it even when assignment never
+    /// took, and WAITS so bb.exe is gone before an install can touch it).
+    fn contain_spawn_failure(job: HANDLE, raw: HANDLE) {
+        unsafe {
+            TerminateJobObject(job, 1);
+            TerminateProcess(raw, 1);
+            // Block until the direct child is gone (5s is a generous bound; a force-killed process exits
+            // near-instantly) so bb.exe cannot be held open when an install proceeds.
+            WaitForSingleObject(raw, 5000);
+        }
+    }
+
     /// Spawn bb and assign it to the job ATOMICALLY under `GATE` (codex r3 H2a — see [`GATE`]). Holding the
     /// lock across the (synchronous) spawn+assign is what makes `begin_quiesce` exclude or wait out an
-    /// in-flight spawn; the r2 before/after atomic checks could not close that race.
+    /// in-flight spawn; the r2 before/after atomic checks could not close that race. On ANY post-spawn
+    /// failure we destroy the bb synchronously before releasing `GATE` (codex r4 — see
+    /// [`contain_spawn_failure`]).
     pub(super) fn spawn_and_register(
         cmd: &mut tokio::process::Command,
     ) -> std::io::Result<(tokio::process::Child, Guard)> {
@@ -805,17 +825,23 @@ mod containment {
         }
         let child = super::spawn_capturing_stderr(cmd)?;
         // tokio's Child exposes the raw process handle on Windows.
-        let raw = child
-            .raw_handle()
-            .ok_or_else(|| std::io::Error::other("bb child has no OS handle after spawn"))?
-            as HANDLE;
+        let Some(raw) = child.raw_handle().map(|h| h as HANDLE) else {
+            // No handle to assign OR to terminate directly; kill_on_drop reaps the direct child on return.
+            unsafe { TerminateJobObject(job, 1) };
+            return Err(std::io::Error::other(
+                "bb child has no OS handle after spawn",
+            ));
+        };
         unsafe {
             if AssignProcessToJobObject(job, raw) == 0 {
-                return Err(std::io::Error::last_os_error());
+                let e = std::io::Error::last_os_error();
+                contain_spawn_failure(job, raw);
+                return Err(e);
             }
             // Fail-closed: prove must not proceed on a bb that is NOT actually contained (codex).
             let mut in_job: i32 = 0;
             if IsProcessInJob(raw, job, &mut in_job) == 0 || in_job == 0 {
+                contain_spawn_failure(job, raw);
                 return Err(std::io::Error::other(
                     "bb child is not in the Job Object after assignment",
                 ));
