@@ -562,6 +562,24 @@ fn main() {
         return;
     }
 
+    // `--prepare-uninstall`: the ownership-checked teardown the NSIS uninstaller runs (from the
+    // PREUNINSTALL hook, while this exe still exists) before the app is deleted — and the manual/scripted
+    // wrappers on other OSes. Removes autostart + crash-recovery + (only if THIS install owns the shared
+    // state) CA trust + certs. Runs before anything else so it never spins up a tray/server. Exits NON-ZERO
+    // if any attempted removal failed, so a scripted uninstall / NSIS hook can detect it; a deliberate
+    // "left, another install owns it" is success (exit 0).
+    if std::env::args().any(|a| a == "--prepare-uninstall") {
+        let outcome = aztec_accelerator::uninstall::prepare_uninstall();
+        for line in outcome.report_lines() {
+            println!("{line}");
+        }
+        if outcome.incomplete() {
+            eprintln!("error: uninstall cleanup was incomplete — see the lines above");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Install a default rustls CryptoProvider. Both aws-lc-rs (from tauri-plugin-updater)
     // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();

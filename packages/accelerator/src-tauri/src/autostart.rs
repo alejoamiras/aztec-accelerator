@@ -1423,9 +1423,17 @@ pub(crate) fn appimage_self_from_env(exe: &Path) -> Option<PathBuf> {
 /// - Windows: `current_exe()` VERBATIM — `canonicalize()` can yield an extended-length `\\?\`
 ///   path whose Run-value compatibility is unproven (D11); canonicalize only for comparison.
 pub fn desired_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let _ = app;
+    owned_reference_path()
+}
+
+/// The path this binary would store as its own autostart target — its identity, resolved WITHOUT an
+/// `AppHandle` (the `app` in [`desired_path`] was always unused: `let _ = app;` on every OS). B5's
+/// `--prepare-uninstall` CLI runs before Tauri starts, so it has no `AppHandle`; it uses this to ask
+/// [`read_stored_target`] whether the stored entry is OURS before removing any shared state.
+pub fn owned_reference_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
-        let _ = app;
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
         // r6 #1: only an $APPIMAGE we can PROVE is ours (our exe lives under $APPDIR) may be the
@@ -1438,7 +1446,6 @@ pub fn desired_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = app;
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))?;
         exe.canonicalize()
@@ -1446,7 +1453,6 @@ pub fn desired_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
     #[cfg(windows)]
     {
-        let _ = app;
         std::env::current_exe().map_err(|e| format!("cannot resolve executable path: {e}"))
     }
 }

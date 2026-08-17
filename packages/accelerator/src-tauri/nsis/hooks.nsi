@@ -85,6 +85,40 @@
   aztec_postinstall_done:
 !macroend
 
+; ── PREUNINSTALL (B5): hand the app itself the ownership-checked teardown, while it still exists ──
+;
+; PREUNINSTALL fires in the Uninstall Section BEFORE `Delete "$INSTDIR\${MAINBINARYNAME}.exe"` — verified
+; against tauri-bundler 2.10.1's installer.nsi (cohort-task-0) — so the exe is present and can run
+; `--prepare-uninstall`, which removes autostart + crash-recovery and, ONLY when THIS install owns the
+; shared `~/.aztec-accelerator` state (canonicalized #429 probe), the CA trust + certs. Doing it in the
+; app is what makes the ownership check robust (a copied second install is not stripped).
+;
+; SAME real-uninstall guard as POSTUNINSTALL — an INTERACTIVE UPGRADE (install-over: `$EXEDIR == $INSTDIR`,
+; canonicalized to 8.3; or `$UpdateMode`) must NOT tear down the autostart/trust the user still wants. The
+; native POSTUNINSTALL belt below is the fallback for when THIS invocation was skipped (broken install:
+; exe already gone) or exited non-zero (partial failure). `ExecWait` without an output var is fine: the
+; belt re-does the work idempotently regardless of this exit code.
+!macro NSIS_HOOK_PREUNINSTALL
+  Push $0
+  Push $1
+  ClearErrors
+  GetFullPathName /SHORT $0 "$EXEDIR"
+  ${If} ${Errors}
+    StrCpy $0 "$EXEDIR"
+  ${EndIf}
+  ClearErrors
+  GetFullPathName /SHORT $1 "$INSTDIR"
+  ${If} ${Errors}
+    StrCpy $1 "$INSTDIR"
+  ${EndIf}
+  ${If} $UpdateMode <> 1
+  ${AndIf} $0 != $1
+    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --prepare-uninstall'
+  ${EndIf}
+  Pop $1
+  Pop $0
+!macroend
+
 ; ── POSTUNINSTALL and F-05 (audit 2026-07-31): removal must not fail silently ──
 ;
 ; `ExecWait` WITHOUT an output variable discards the exit code, so a `certutil` that never ran (a
@@ -105,6 +139,12 @@
   Push $3
   Push $4
   Push $5
+  Push $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R5
   ; Normalize both to canonical short (8.3) form before comparing. `$INSTDIR` is restored from the
   ; installer's registry value while `$EXEDIR` is derived from the launched path, so one directory can
   ; be spelled two ways (casing, trailing slash, long vs short name). A purely textual mismatch would
@@ -157,7 +197,47 @@
     ${EndIf}
     ; Remove the generated cert material from the user profile.
     RMDir /r "$PROFILE\.aztec-accelerator\certs"
+
+    ; ── Belt (B5): remove OUR autostart Run value NATIVELY, in case the app's own `--prepare-uninstall`
+    ; (PREUNINSTALL) was skipped (broken install: exe already gone) or failed. Ownership-checked so a
+    ; COPIED second install sharing this user's Run key is never stripped: the stored value must resolve to
+    ; THIS install's exe (`$INSTDIR\${MAINBINARYNAME}.exe`), EXACT — a deceptive-prefix `…\Aztec-evil` must
+    ; miss. `--prepare-uninstall` normally already deleted it, so this is usually a no-op.
+    ReadRegStr $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
+    ${IfNot} $R0 == ""
+      ; Our owned format is a single QUOTED token, no trailing args (autostart writes exactly that). A
+      ; value that is unquoted, or quoted-with-args, is NOT our format → left as foreign (safe bias).
+      StrCpy $R1 $R0 1
+      StrCpy $R2 $R0 "" -1
+      ${If} $R1 == '"'
+      ${AndIf} $R2 == '"'
+        StrLen $R3 $R0
+        IntOp $R3 $R3 - 2
+        StrCpy $R0 $R0 $R3 1
+        ; Canonicalize both to 8.3 when the paths still resolve; fall back to a case-insensitive raw
+        ; compare (NSIS `==`) when the exe is already deleted at POSTUNINSTALL time.
+        ClearErrors
+        GetFullPathName /SHORT $R4 "$R0"
+        ${If} ${Errors}
+          StrCpy $R4 "$R0"
+        ${EndIf}
+        ClearErrors
+        GetFullPathName /SHORT $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
+        ${If} ${Errors}
+          StrCpy $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
+        ${EndIf}
+        ${If} $R4 == $R5
+          DeleteRegValue HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
   Pop $5
   Pop $4
   Pop $3
