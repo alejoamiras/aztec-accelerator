@@ -102,6 +102,17 @@ jobs:
           # The draft's own uploaded Linux installer (flatten/rename names it *Linux-x86_64.deb).
           gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
 
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
+
       - name: Install the .deb
         run: |
           DEB=$(find app-artifact -name '*.deb' | head -1)
@@ -217,6 +228,17 @@ jobs:
           mkdir -p app-artifact
           # The draft's own uploaded macOS arm64 DMG (flatten/rename names it *macOS-Apple-Silicon.dmg).
           gh release download "$TAG" --pattern '*macOS-Apple-Silicon.dmg' --dir app-artifact
+
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
 
       # Install to /Applications (a real installed copy), not run-from-DMG — the composed gate should exercise
       # the installed state (paths, autostart) the way a user gets it (codex harness review).
@@ -352,6 +374,17 @@ jobs:
           mkdir -p app-artifact
           gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
 
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
+
       - name: Install 1.0.7 + write a 1.0.7-shaped config
         run: |
           PREV_DEB=$(find prev -name '*.deb' | head -1)
@@ -424,6 +457,17 @@ jobs:
         run: |
           mkdir -p app-artifact
           gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
+
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
 
       - name: Install, prepare-uninstall, then remove the package
         run: |

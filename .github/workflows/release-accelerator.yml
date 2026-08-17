@@ -818,10 +818,12 @@ jobs:
     name: Create draft release
     needs: [validate, release-auth-preflight, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver, sign-update-feed]
     # codex F-review: require EXPLICIT success of every MANDATORY need (a bare `!contains(failure)` would let a
-    # SKIPPED smoke/webdriver/preflight still create a draft). The ONLY tolerated skip is `sign-update-feed`,
-    # which is skipped for prereleases (no feed) — accept success OR skipped for it alone.
+    # SKIPPED smoke/webdriver/preflight still create a draft). `always() && !cancelled()` is REQUIRED up front:
+    # without a status function GitHub implicitly ANDs `success()`, which would skip `release` the moment ANY
+    # need (e.g. sign-update-feed on an RC) is skipped — before the explicit checks run (codex F-review r2).
+    # The ONLY tolerated skip is `sign-update-feed`, and ONLY for a prerelease (no feed).
     if: >-
-      ${{ !inputs.auth_probe && inputs.mode == 'publish'
+      ${{ always() && !cancelled() && !inputs.auth_probe && inputs.mode == 'publish'
       && needs.validate.result == 'success'
       && needs.release-auth-preflight.result == 'success'
       && needs.build.result == 'success'
@@ -833,7 +835,8 @@ jobs:
       && needs.update-smoke-windows.result == 'success'
       && needs.update-smoke-windows-negative.result == 'success'
       && needs.e2e-webdriver.result == 'success'
-      && (needs.sign-update-feed.result == 'success' || needs.sign-update-feed.result == 'skipped') }}
+      && (needs.sign-update-feed.result == 'success'
+          || (needs.validate.outputs.is_prerelease == 'true' && needs.sign-update-feed.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
