@@ -153,6 +153,41 @@
   Pop $0
 !macroend
 
+; ── Count NON-OVERLAPPING occurrences of `${NEEDLE}` in `${HAY}` into `${OUT}` ──
+; `${OUT}` MUST NOT be $0-$5 (saved/restored here as scratch).
+!macro AztecStrCount OUT HAY NEEDLE
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  Push $5
+  StrCpy $0 `${HAY}`
+  StrCpy $1 `${NEEDLE}`
+  StrLen $2 $1
+  StrCpy $3 0
+  StrCpy $5 0
+  ${Do}
+    StrCpy $4 $0 $2 $3
+    ${If} $4 == ""
+      ${ExitDo}
+    ${EndIf}
+    ${If} $4 == $1
+      IntOp $5 $5 + 1
+      IntOp $3 $3 + $2 ; skip past the match (non-overlapping)
+    ${Else}
+      IntOp $3 $3 + 1
+    ${EndIf}
+  ${Loop}
+  StrCpy ${OUT} $5
+  Pop $5
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+!macroend
+
 ; ── Delete OUR crash-recovery scheduled task, ownership-checked against its own <Command> (codex (a)) ──
 ; The primary `--prepare-uninstall` normally removed it; this native belt covers the exe-gone / primary-
 ; skipped path. A scheduled task PERSISTS and fires every minute regardless of exe presence, so an
@@ -175,15 +210,28 @@
   Pop $R0 ; exit code
   Pop $R1 ; XML output
   ${If} $R0 == 0 ; require a SUCCESSFUL query — otherwise leave (task absent, or scheduler unreachable)
-    !insertmacro AztecStrContains $R2 $R1 "<Command>$INSTDIR\${MAINBINARYNAME}.exe</Command>"
+    ; Delete ONLY a COMPLETE definition (ends in </Task> — codex #4: truncation AFTER our element would
+    ; else match) with EXACTLY ONE action (a task can hold up to 32; a multi-action task is not the
+    ; single-command task we create → leave) whose one <Command> is EXACTLY ours.
+    !insertmacro AztecStrContains $R2 $R1 "</Task>"
+    !insertmacro AztecStrCount $R3 $R1 "<Command>"
+    !insertmacro AztecStrContains $R4 $R1 "<Command>$INSTDIR\${MAINBINARYNAME}.exe</Command>"
     ${If} $R2 == "1"
+    ${AndIf} $R3 == "1"
+    ${AndIf} $R4 == "1"
       ExecWait '"$SYSDIR\schtasks.exe" /Delete /F /TN "Aztec Accelerator Crash Recovery"'
-      ; Confirm gone (locale-independent — /Query exits non-zero when the task is absent).
+      ; Confirm. `/Query` exits 0 iff the task is STILL present; nsExec's exit is a STRING, so a real
+      ; numeric nonzero ("1") means absent (removed) but "error"/"timeout" mean the query could not RUN —
+      ; those must NOT be reported as removed (codex #7a).
       nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /Query /TN "Aztec Accelerator Crash Recovery"'
-      Pop $R3
-      Pop $R4
-      ${If} $R3 == 0
-        DetailPrint "aztec: crash-recovery task could NOT be removed"
+      Pop $R0
+      Pop $R1
+      ${If} $R0 == "0"
+        DetailPrint "aztec: crash-recovery task could NOT be removed (still present)"
+      ${ElseIf} $R0 == "error"
+        DetailPrint "aztec: crash-recovery task removal could not be confirmed (schtasks did not run)"
+      ${ElseIf} $R0 == "timeout"
+        DetailPrint "aztec: crash-recovery task removal could not be confirmed (schtasks timed out)"
       ${Else}
         DetailPrint "aztec: crash-recovery task removed"
       ${EndIf}
@@ -224,6 +272,7 @@
   Push $R5
   Push $R6
   Push $R7
+  Push $R8
   ; Normalize both to canonical short (8.3) form before comparing. `$INSTDIR` is restored from the
   ; installer's registry value while `$EXEDIR` is derived from the launched path, so one directory can
   ; be spelled two ways (casing, trailing slash, long vs short name). A purely textual mismatch would
@@ -248,38 +297,56 @@
     ; install still owns it. (The certutil below used to run UNCONDITIONALLY, undoing the primary's skip.)
     ;
     ; $R6 = foreign flag (1 ⇒ leave everything shared). $R7 = 1 iff OUR Run value is present (delete it).
-    ; foreign UNLESS the Run value is ABSENT, or is our single QUOTED token canonicalizing to
-    ; `$INSTDIR\${MAINBINARYNAME}.exe`. Unquoted / with-args / elsewhere ⇒ foreign (safe bias — leave).
-    StrCpy $R6 "0"
+    ; The value's PRESENCE is established by ENUMERATION, not `ReadRegStr $R0; $R0==""` — codex: ReadRegStr
+    ; also returns "" for a present-but-overlong value, so "" cannot distinguish ABSENT from
+    ; present-but-unreadable, and the latter (a foreign install's long path) must NOT read as absent.
+    ; foreign=1 by default; foreign=0 ONLY if the name is truly ABSENT, or present AND our single QUOTED
+    ; token canonicalizes to `$INSTDIR\${MAINBINARYNAME}.exe`.
+    StrCpy $R6 "0" ; assume absent (not foreign) until enumeration finds the name
     StrCpy $R7 "0"
-    ReadRegStr $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
-    ${IfNot} $R0 == ""
-      StrCpy $R6 "1" ; a present value is foreign until proven ours
-      StrCpy $R1 $R0 1
-      StrCpy $R2 $R0 "" -1
-      ${If} $R1 == '"'
-      ${AndIf} $R2 == '"'
-        StrLen $R3 $R0
-        IntOp $R3 $R3 - 2
-        StrCpy $R0 $R0 $R3 1
-        ; Canonicalize both to 8.3 when the paths still resolve; fall back to a case-insensitive raw
-        ; compare (NSIS `==`) when the exe is already deleted at POSTUNINSTALL time.
-        ClearErrors
-        GetFullPathName /SHORT $R4 "$R0"
-        ${If} ${Errors}
-          StrCpy $R4 "$R0"
-        ${EndIf}
-        ClearErrors
-        GetFullPathName /SHORT $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
-        ${If} ${Errors}
-          StrCpy $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
-        ${EndIf}
-        ${If} $R4 == $R5
-          StrCpy $R6 "0" ; resolves to us
-          StrCpy $R7 "1" ; and present → delete it below
-        ${EndIf}
+    StrCpy $R8 0
+    ${Do}
+      ClearErrors
+      EnumRegValue $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" $R8
+      ${If} ${Errors}
+      ${OrIf} $R0 == ""
+        ${ExitDo} ; no more values → name is absent → foreign stays 0
       ${EndIf}
-    ${EndIf}
+      ${If} $R0 == "Aztec Accelerator"
+        StrCpy $R6 "1" ; PRESENT → foreign until proven ours (covers present-but-empty/overlong)
+        ClearErrors
+        ReadRegStr $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
+        ${IfNot} ${Errors}
+        ${AndIf} $R0 != ""
+          StrCpy $R1 $R0 1
+          StrCpy $R2 $R0 "" -1
+          ${If} $R1 == '"'
+          ${AndIf} $R2 == '"'
+            StrLen $R3 $R0
+            IntOp $R3 $R3 - 2
+            StrCpy $R0 $R0 $R3 1
+            ; Canonicalize both to 8.3 when the paths still resolve; fall back to a case-insensitive raw
+            ; compare (NSIS `==`) when the exe is already deleted at POSTUNINSTALL time.
+            ClearErrors
+            GetFullPathName /SHORT $R4 "$R0"
+            ${If} ${Errors}
+              StrCpy $R4 "$R0"
+            ${EndIf}
+            ClearErrors
+            GetFullPathName /SHORT $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
+            ${If} ${Errors}
+              StrCpy $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
+            ${EndIf}
+            ${If} $R4 == $R5
+              StrCpy $R6 "0" ; resolves to us
+              StrCpy $R7 "1" ; and present → delete it below
+            ${EndIf}
+          ${EndIf}
+        ${EndIf}
+        ${ExitDo}
+      ${EndIf}
+      IntOp $R8 $R8 + 1
+    ${Loop}
 
     ${If} $R6 == "0"
       ; ── This install owns the shared state → remove it (trust anchor, certs, Run value, task) ──
@@ -326,6 +393,7 @@
       !insertmacro AztecDeleteOwnedRecoveryTask
     ${EndIf}
   ${EndIf}
+  Pop $R8
   Pop $R7
   Pop $R6
   Pop $R5

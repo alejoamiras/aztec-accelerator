@@ -205,6 +205,8 @@ check_parser ours 1
 check_parser foreign 0
 check_parser deceptive 0
 check_parser escaped 0
+check_parser multi 0
+check_parser truncated_after 0
 check_parser truncated 0
 check_parser empty 0
 rm -f "$results"
