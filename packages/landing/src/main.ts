@@ -1,3 +1,5 @@
+import { FEED_URL, feedVersionToTag } from "./feed";
+
 // ── Scroll reveals ──
 const observer = new IntersectionObserver(
   (entries) => {
@@ -54,18 +56,14 @@ function detectOs(): OsInfo {
   return { label: "Download", pattern: /^$/ };
 }
 
-// Fetch latest release for the specific platform — best effort, non-blocking
+// Resolve the live stable tag from the SIGNED S3 feed (single source of truth — B6), NOT a GitHub releases
+// list-scan (which had no prerelease filter). Best effort, non-blocking; the feed body is untrusted and
+// validated in `feedVersionToTag`.
 async function fetchLatestAcceleratorTag(): Promise<string | null> {
   try {
-    const res = await fetch(`https://api.github.com/repos/${REPO}/releases`, {
-      signal: AbortSignal.timeout(3000),
-    });
+    const res = await fetch(FEED_URL, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return null;
-    const releases = (await res.json()) as { tag_name: string; assets: unknown[] }[];
-    const accel = releases.find(
-      (r) => r.tag_name.startsWith("accelerator-") && r.assets.length > 0,
-    );
-    return accel?.tag_name ?? null;
+    return feedVersionToTag(await res.json());
   } catch {
     return null;
   }
