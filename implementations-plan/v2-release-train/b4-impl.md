@@ -67,35 +67,40 @@ Updater/promote semver comparisons (real semver); version fields (tauri.conf.jso
 / NSIS / CFBundleVersion / deb/AppImage); identity-guard/marker/scheduled-task names; docs/landing/runbook/
 README version strings; confirm SDK `x-aztec-version` isn't coupled to app major.
 
-## Item 1 — IN PROGRESS (WIP commit): what's done + the exact remaining threading
+## Item 1 — DONE (config migration + type-bound persist gate + cross-process write lock)
 
-**DONE + compiling (core crate, `cargo check --lib --tests` green):**
-- `config.rs`: `CONFIG_VERSION = 2`; `PersistCapability` (`#[derive(Debug, Clone)]`, private `_seal: ()`,
-  `#[cfg(test)] pub(crate) fn for_test()`); `LoadedConfig`; two-stage `load_with_cap[_from]` (lenient
-  `{config_version}` probe → future⇒`cap:None`; else raw-`Value` parse → `migrate_value` → deserialize →
-  stamp v2 → mint cap); `migrate_value` (`safari_support`→`https_enabled`, new key wins, drop legacy key);
-  `load`/`load_from` delegate to `load_with_cap_from(...).config` (read-only, consistent migration); `save`,
-  `save_to`, `lock_mutate_save`, `lock_mutate_save_to` all take `&PersistCapability`.
-- `server.rs`: `HeadlessState.persist_cap: Option<config::PersistCapability>` (+ `None` in `Default` and
-  `headless()`).
-- `server/auth.rs`: approved-origin persist gated on `state.persist_cap` (skip+warn read-only when `None`).
+Commits on `worktree-b4-product-gate`: `95d94af` (migration + capability + full caller threading through
+core / src-tauri / server) → `933f70d` (fail-closed load + save-time re-check) → `42f6615` (cross-process
+write lock + fresh-probe preflight + object-probe) → `adbdd5d` (duplicate-key fail-closed) → `eac7de8`
+(end-of-input fail-closed). 263 core tests, clippy, `x86_64-pc-windows-gnu` cross-check, and full `bun run
+test` all green.
 
-**REMAINING (src-tauri + server binary + tests — mechanical, compile-guided):**
-1. **`ConfigState` bundle (low-ripple):** make `ConfigState = Arc<ConfigStore>` where
-   `struct ConfigStore { lock: RwLock<AcceleratorConfig>, cap: Option<config::PersistCapability> }` with
-   `impl Deref<Target = RwLock<..>>` → existing `config_state.read()/.write()` stay unchanged (deref
-   coercion). `mutate_config` gates on `config.cap.as_ref()` (skip+propagate when `None`).
-2. `main.rs:648`: `let loaded = config::load_with_cap(); let config_state = Arc::new(ConfigStore { lock:
-   RwLock::new(loaded.config), cap: loaded.cap });`. Set `HeadlessState.persist_cap = config_state.cap.clone()`
-   where the AppState is built (share the one minted cap).
-3. `main.rs:216` `reset_https_enabled(state)`: thread `state.persist_cap` into `lock_mutate_save` (skip when
-   `None`).
-4. **Server binary** (`packages/accelerator/server/src`): its own config load → `load_with_cap` →
-   `ConfigStore` + `HeadlessState.persist_cap`.
-5. Tests: `src-tauri` + `server/tests.rs` save/mutate sites use `PersistCapability::for_test()` (or a
-   `load_with_cap_from` on a temp path). Add the migration trio + `future_config_never_persisted_over`
-   (fixture `config_version:999`, NOT v2-parseable) + per-save-path cap-required mutation + v2-untouched.
-6. Validate: `cargo test` (core + src-tauri) + `bun run test`; mutation-prove; codex loop → PR → merge.
+**Shape:** `CONFIG_VERSION = 2`; two-stage `load_with_cap[_from]` mints a non-forgeable `PersistCapability`
+ONLY on a fresh install or a fully-read, object-probed (`<= 2`), migrated+deserialized config — every
+uncertainty fails closed (`cap: None`, read-only). Every save path requires `&PersistCapability` (compile
+gate). `save_to` re-checks the on-disk version right before the rename, under a cross-process **exclusive
+advisory lock** (`config.json.lock`, `flock`/`LockFileEx`, no new crate) held across stage→recheck→rename, so
+the recheck→rename is atomic w.r.t. any other v2+ writer. `lock_mutate_save_to` commits to the in-memory lock
+only after a successful save (no divergence). Trust-mutating commands preflight persistence (startup cap AND a
+fresh on-disk re-probe) before any cert/trust side effect. `probe_config_version` is a streaming map visitor
+requiring a JSON object, rejecting duplicate `config_version`, and enforcing end-of-input.
+
+**Codex loop (session `01a00f45`, 6 rounds, converged):** R1 found fail-open probing + unbound/stale caps →
+fail-closed load + save re-check. R2: still fail-open on unreadable destination + memory divergence →
+fail-closed `version_is_overwritable` + clone-before-commit. R3 arbitrated the cross-process lock as
+load-bearing (app is not single-instance; descheduling + inode/pathname race + shared-temp) → added the lock +
+fresh-probe. R4: duplicate-key last-wins fail-open → streaming visitor. R5: `deserialize_map` didn't enforce
+end-of-input → `de.end()`; **and conceded the concurrent trust-side-effect race as an acceptable documented
+residual** (no non-loopback exploit; a dialog-spanning cross-process lock would be materially worse). R6:
+confirm clean. Every security-relevant guard mutation-proved (revert → named test fails → restore).
+
+**Documented, codex-accepted residuals** (NOT blockers): (a) the already-shipped 1.0.7 has no version gate, so
+a downgrade to it can overwrite v2 (cannot retrofit a released binary; the gate protects v2.0.0+→future); (b)
+additive fields don't bump `CONFIG_VERSION`, so a same-version older build re-defaults a newer additive field
+(reset via serde default, not corruption); (c) the concurrent trust-side-effect race — a trust op (install/
+remove a loopback-name-constrained CA) may not be reflected in a config a concurrently-running future build
+owns. It cannot overwrite that config (the locked save refuses); it is availability-only, surfaced to the UI,
+and reconciled on next enable/launch.
 
 ## Sequencing
 1. Item 1 (config migration) — implement core-first, thread callers, mutation tests, codex loop → PR → merge.
