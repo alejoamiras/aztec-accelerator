@@ -293,11 +293,14 @@ only in the last cohorts. Implementation may begin at B2.
     My earlier framing ("peers are strictly worse") was itself an overclaim; codex is right that peers carry
     a real advantage this ledger must record:
     - **Deps (chosen):** install SUCCEEDS on a version-skewed host and the SDK binds to its own vetted
-      @aztec — but the skew is DEFERRED, not removed. The WASM-fallback path proves the host's (e.g. 5.0.0)
-      execution steps with the SDK's (5.0.1) bb-prover/stdlib, so a cross-version serialization/proof
-      incompatibility can surface LATER, at runtime. (The accelerator path is protected: the SDK advertises
-      its own @aztec version at the `/health` handshake and a mismatch degrades via `version-mismatch`; the
-      exposed surface is the local WASM path.)
+      @aztec — but the skew is DEFERRED, not removed. The SDK proves the host's (e.g. 5.0.0) execution steps
+      with its own (5.0.1) stdlib serializer + bb-prover, so a cross-version serialization/proof
+      incompatibility can surface LATER, at runtime, on BOTH proving paths. (Correcting a round-3 error codex
+      caught: `version-mismatch` does NOT protect the accelerator path from this. The `/health` /
+      `x-aztec-version` handshake advertises the SDK's OWN pinned version against the accelerator's bb cache —
+      it gates SDK↔accelerator, not host↔SDK, and never sees the host dApp's version. A modern multi-version
+      accelerator simply downloads the SDK's version (`needsDownload`) and proves with it, so native bb-5.0.1
+      processes 5.0.0 host steps exactly as the WASM path does.)
     - **Peers (rejected):** would convert that latent skew into an IMMEDIATE, actionable `npm install`
       ERESOLVE — but block install on ANY skew, including benign ones, for a drop-in SDK whose selling point
       is "just installs, falls back to WASM".

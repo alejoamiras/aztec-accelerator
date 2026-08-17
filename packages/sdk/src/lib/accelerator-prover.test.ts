@@ -329,6 +329,9 @@ describe("AcceleratorProver", () => {
         ["403 authorization_cancelled", 403, "authorization_cancelled", "denied", null],
         ["403 version_not_allowed", 403, "version_not_allowed", "version-mismatch", "denied"],
         ["403 authorization_cooldown", 403, "authorization_cooldown", null, "denied"],
+        // The by-status nuance the docs promise: an UNRECOGNISED 403 code still degrades (catch-all →
+        // denied), it does NOT throw. Guards against a future "tighten 403 to known codes only" regression.
+        ["403 unrecognised code → denied", 403, "some_future_denial_code", "denied", null],
         ["503 service_unavailable", 503, "service_unavailable", null, null],
         ["408 body_read_timeout", 408, "body_read_timeout", null, null],
         ["413 payload_too_large", 413, "payload_too_large", null, null],

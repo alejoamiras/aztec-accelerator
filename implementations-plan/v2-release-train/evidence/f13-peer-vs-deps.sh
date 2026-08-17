@@ -17,8 +17,9 @@
 # let the install succeed with the SDK bound to its own vetted @aztec (a duplicate graph is the only cost,
 # and only when versions differ — an exact-match host dedupes to a singleton, which
 # scripts/sdk-tarball-consumer.sh gates on the real tarball). The honest trade-off: KEEP DEPS prioritises
-# installability + graceful degradation but DEFERS a cross-version incompatibility to the runtime WASM path;
-# peers would fail fast at install but block on ANY skew. Owner choice — see the F13 ledger entry.
+# installability + graceful degradation but DEFERS a cross-version incompatibility to runtime — on BOTH the
+# native-accelerator and WASM proving paths (the SDK↔accelerator version handshake is blind to the host
+# dApp's version). Peers would fail fast at install but block on ANY skew. Owner choice — see the F13 ledger.
 set -euo pipefail   # -e so a failed mktemp/pack aborts instead of running against an empty $W
 export TMPDIR="${TMPDIR:-$HOME/.cache/tmp}/f13-peer-vs-deps"   # real disk, not tmpfs
 mkdir -p "$TMPDIR"
