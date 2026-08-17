@@ -468,14 +468,17 @@ export async function deployTestAccount(
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
   const proveTracker = createProveTracker();
-  state.prover?.setOnPhase(
-    onPhase
-      ? (phase, data) => {
-          if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
-          onPhase(phase, data);
-        }
-      : null,
-  );
+  // B4 packaged-E2E witness: expose the raw phase trail on `window` so the composed-proof spec can assert the
+  // accelerated path was USED (a `receive` phase, and NO `fallback`). The network `/prove`-header witness
+  // proves native bb RAN, but proof decode can still fall back to WASM afterward (accelerator-prover.ts), so
+  // the phase trail is the complementary check. Reset per deploy; harmless in prod (an unused window field).
+  const phaseSink = window as typeof window & { __ACCEL_PHASES__?: AcceleratorPhase[] };
+  phaseSink.__ACCEL_PHASES__ = [];
+  state.prover?.setOnPhase((phase, data) => {
+    phaseSink.__ACCEL_PHASES__?.push(phase);
+    if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
+    onPhase?.(phase, data);
+  });
 
   const interval = setInterval(() => {
     onTick(Date.now() - totalStart);

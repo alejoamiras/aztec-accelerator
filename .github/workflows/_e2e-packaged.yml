@@ -64,6 +64,11 @@ jobs:
           sudo apt-get install -y xvfb stalonetray dbus-x11 libnss3-tools
           Xvfb :99 -screen 0 1280x1024x24 >/tmp/xvfb.log 2>&1 &
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          # Let Xvfb come up, then start a system-tray host so the app's tray icon has somewhere to attach
+          # (the app is a tray app — without a host it can fail to finish bring-up). Same recipe as the
+          # WebDriver E2E leg. DISPLAY is set inline here because $GITHUB_ENV only applies to LATER steps.
+          sleep 2
+          DISPLAY=:99 stalonetray >/tmp/stalonetray.log 2>&1 &
 
       - name: Download installer artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -121,10 +126,11 @@ jobs:
           cat /tmp/accel.log 2>/dev/null || true
           exit 1
 
-      # TODO(b4 follow-up): swap the playground's workspace SDK for the PACKED tarball (npm pack → install)
-      # so the proof exercises the published artifact. The composed HTTPS+trust+native-proof path is
-      # protocol-identical either way, and the tarball is separately resolve/typecheck-verified by
-      # scripts/sdk-tarball-consumer.sh (B7), so the first cut proves the composed path on the workspace SDK.
+      # Point the playground at the PACKED SDK tarball (not the workspace source), so the composed proof
+      # exercises the PUBLISHED artifact — the brief's "packed SDK" requirement (codex harness review).
+      - name: Pack the SDK + install the tarball into the playground
+        run: bash .github/scripts/packaged-e2e-swap-sdk.sh
+
       - name: Run packaged-E2E (composed proof)
         env:
           AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
@@ -159,7 +165,9 @@ jobs:
         with:
           skip_cli: ${{ inputs.aztec_node_url != 'http://localhost:8080' }}
 
-      - uses: ./.github/actions/playwright-cache
+      # The playwright-cache action is Linux-only (GNU `timeout`), so install the browser directly on macOS.
+      - name: Install Playwright browser
+        run: bunx playwright install chromium
 
       - uses: ./.github/actions/start-services
         with:
@@ -171,7 +179,9 @@ jobs:
           name: ${{ inputs.macos_app_artifact }}
           path: app-artifact
 
-      - name: Mount DMG + resolve the app binary
+      # Install to /Applications (a real installed copy), not run-from-DMG — the composed gate should exercise
+      # the installed state (paths, autostart) the way a user gets it (codex harness review).
+      - name: Install the .app to /Applications
         run: |
           DMG=$(find app-artifact -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then
@@ -180,12 +190,16 @@ jobs:
             exit 1
           fi
           hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator
-          BIN=$(find /Volumes/AztecAccelerator -name AztecAccelerator -path '*/MacOS/*' | head -1)
-          test -n "$BIN" || { echo "::error::app binary not found in DMG"; find /Volumes/AztecAccelerator -type f; exit 1; }
+          APP=$(find /Volumes/AztecAccelerator -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP" || { echo "::error::.app not found in DMG"; find /Volumes/AztecAccelerator -type f; exit 1; }
+          cp -R "$APP" /Applications/
+          hdiutil detach /Volumes/AztecAccelerator || true
+          BIN=$(find /Applications -maxdepth 3 -name AztecAccelerator -path '*/MacOS/*' | head -1)
+          test -n "$BIN" || { echo "::error::installed app binary not found under /Applications"; exit 1; }
           echo "APP_BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Generate certs (headless bootstrap)
-        run: "$APP_BIN --generate-certs-only"
+        run: '"$APP_BIN" --generate-certs-only'
 
       # macOS: the app's LAUNCH gates on trust (unlike Linux), so seed the System keychain BEFORE launch.
       # `security add-trusted-cert -d` writes the admin/System domain (GH runners have passwordless sudo);
@@ -220,6 +234,9 @@ jobs:
           echo "::error::App did not serve HTTPS within 90s"
           cat /tmp/accel.log 2>/dev/null || true
           exit 1
+
+      - name: Pack the SDK + install the tarball into the playground
+        run: bash .github/scripts/packaged-e2e-swap-sdk.sh
 
       - name: Run packaged-E2E (composed proof)
         env:

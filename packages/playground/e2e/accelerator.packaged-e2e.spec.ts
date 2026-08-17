@@ -6,7 +6,8 @@
  * disabled. The CI harness (see `.github/workflows`) installs the app, runs
  * `AztecAccelerator --generate-certs-only`, seeds the generated CA into the OS/browser trust store
  * out-of-band (Linux: user NSS via certutil; macOS: sudo System keychain), writes a config with
- * `https_enabled:true` + this origin pre-approved, and launches the app so it serves TLS on :59834.
+ * `https_enabled:true` + `auto_approve_localhost:true` (auto-approves the localhost page's Origin, so no
+ * /prove auth popup is needed), and launches the app so it serves TLS on :59834.
  *
  * The DECISIVE witness of "native bb over HTTPS" (not a silent WASM/HTTP shortcut): a
  * `200 https://127.0.0.1:59834/prove` carrying an `x-prove-duration-ms` response header. The server
@@ -78,6 +79,24 @@ test("native bb proof over HTTPS via the installed desktop app", async ({ browse
       `Saw /prove hits: ${JSON.stringify(proveHits)}. An empty list means the proof never reached ` +
       `the app over HTTPS (silent WASM fallback or a failed TLS handshake against the seeded CA).`,
   ).toBeTruthy();
+
+  // Complement the network witness with the raw phase trail (exposed by `deployTestAccount` on
+  // `window.__ACCEL_PHASES__`): the header proves native bb RAN, but the SDK can still fall back to WASM
+  // when DECODING the response — so require a `receive` phase (the native proof was consumed) and NO
+  // `fallback`/`denied` (codex harness review).
+  const phases = await page.evaluate(
+    () => (window as Window & { __ACCEL_PHASES__?: string[] }).__ACCEL_PHASES__ ?? [],
+  );
+  expect(
+    phases,
+    `phase trail must show a consumed native proof; saw ${JSON.stringify(phases)}`,
+  ).toContain("receive");
+  expect(phases, `unexpected WASM fallback in trail: ${JSON.stringify(phases)}`).not.toContain(
+    "fallback",
+  );
+  expect(phases, `unexpected auth denial in trail: ${JSON.stringify(phases)}`).not.toContain(
+    "denied",
+  );
 
   await page.close();
 });
