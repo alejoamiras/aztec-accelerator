@@ -1,0 +1,142 @@
+name: _Packaged E2E (reusable)
+
+# B4 items 2-3: the COMPOSED proof gate. A real browser (Playwright's Chromium) loads the playground
+# (built against the SDK) and drives the INSTALLED desktop app to a native `bb` proof over HTTPS, with
+# HTTP-downgrade + WASM-fallback disabled. The decisive assertion lives in the spec
+# (`packages/playground/e2e/accelerator.packaged-e2e.spec.ts`): a 200 https://127.0.0.1:59834/prove carrying
+# `x-prove-duration-ms` (the server emits it only after a real bb::prove).
+#
+# Trust is seeded OUT-OF-BAND (the app's own enable_https install is interactive; see b4-impl.md): here on
+# Linux via `certutil` into the user NSS DB that Chromium reads. The app serves HTTPS trust-decoupled on Linux
+# (main.rs), so the seed is purely for the browser fetch.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to checkout
+        required: false
+        type: string
+        default: ""
+      app_artifact:
+        description: Name of the uploaded Linux installer artifact (contains the .deb)
+        required: false
+        type: string
+        default: accelerator-linux-x86_64
+      aztec_node_url:
+        description: Aztec node URL (skips local CLI install when not localhost)
+        required: false
+        type: string
+        default: "http://localhost:8080"
+
+jobs:
+  packaged-e2e-linux:
+    name: Packaged E2E (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: ./.github/actions/setup-aztec
+        with:
+          skip_cli: ${{ inputs.aztec_node_url != 'http://localhost:8080' }}
+
+      # Restore the headless-shell browser from the cache warmed on main (flaky CDN otherwise).
+      - uses: ./.github/actions/playwright-cache
+
+      - uses: ./.github/actions/start-services
+        with:
+          aztec_node_url: ${{ inputs.aztec_node_url }}
+
+      # The packaged app is a system-tray GUI (GTK/WebKit). On a headless runner it needs a virtual display,
+      # a tray host, and a dbus session — same recipe as the WebDriver E2E leg. libnss3-tools gives us
+      # `certutil` for the browser-trust seed.
+      - name: Virtual display + tray + trust tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb stalonetray dbus-x11 libnss3-tools
+          Xvfb :99 -screen 0 1280x1024x24 >/tmp/xvfb.log 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: app-artifact
+
+      - name: Install the .deb
+        run: |
+          DEB=$(find app-artifact -name '*.deb' | head -1)
+          if [ -z "$DEB" ]; then
+            echo "::error::No .deb found in artifact '${{ inputs.app_artifact }}'"
+            ls -laR app-artifact
+            exit 1
+          fi
+          echo "Installing $DEB"
+          # apt-get resolves the .deb's own GTK/WebKit runtime deps (dpkg -i would not).
+          sudo apt-get install -y "./$DEB"
+
+      # ── Bootstrap: generate the app's real CA headlessly (no interactive trust install), then seed it
+      #    into the browser's NSS store out-of-band. See --generate-certs-only in src-tauri/main.rs. ──
+      - name: Generate certs (headless bootstrap)
+        run: AztecAccelerator --generate-certs-only
+
+      - name: Seed CA into user NSS (browser trust)
+        run: |
+          CA="$HOME/.aztec-accelerator/certs/ca.pem"
+          test -f "$CA" || { echo "::error::$CA not generated"; exit 1; }
+          mkdir -p "$HOME/.pki/nssdb"
+          certutil -N --empty-password -d "sql:$HOME/.pki/nssdb" 2>/dev/null || true
+          certutil -A -t "C,," -n aztec-accel-e2e-ca -d "sql:$HOME/.pki/nssdb" -i "$CA"
+          certutil -L -d "sql:$HOME/.pki/nssdb"
+
+      - name: Write config (HTTPS on, localhost auto-approved)
+        run: |
+          mkdir -p "$HOME/.aztec-accelerator"
+          # auto_approve_localhost:true auto-approves the localhost:5173 page (no /prove auth popup needed —
+          # the headless GUI has no popup surface). config_version:2 matches the v2 schema (B4 item 1).
+          printf '%s' '{"config_version":2,"https_enabled":true,"auto_approve_localhost":true}' \
+            > "$HOME/.aztec-accelerator/config.json"
+
+      - name: Launch the installed app + wait for HTTPS
+        run: |
+          dbus-launch AztecAccelerator >/tmp/accel.log 2>&1 &
+          echo "ACCEL_PID=$!" >> "$GITHUB_ENV"
+          # -k here only proves the app is SERVING TLS; the real trust check is the browser's fetch in the spec.
+          for i in $(seq 1 45); do
+            if curl -ksf https://127.0.0.1:59834/health >/dev/null 2>&1; then
+              echo "App serving HTTPS on :59834 (attempt $i)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::App did not serve HTTPS within 90s"
+          cat /tmp/accel.log 2>/dev/null || true
+          exit 1
+
+      # TODO(b4 follow-up): swap the playground's workspace SDK for the PACKED tarball (npm pack → install)
+      # so the proof exercises the published artifact. The composed HTTPS+trust+native-proof path is
+      # protocol-identical either way, and the tarball is separately resolve/typecheck-verified by
+      # scripts/sdk-tarball-consumer.sh (B7), so the first cut proves the composed path on the workspace SDK.
+      - name: Run packaged-E2E (composed proof)
+        env:
+          AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
+        run: bun run --cwd packages/playground test:e2e:packaged
+
+      - name: Upload app log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-e2e-linux-logs
+          path: |
+            /tmp/accel.log
+            /tmp/xvfb.log
+            /tmp/aztec-node.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: kill "$ACCEL_PID" 2>/dev/null || true
