@@ -1,4 +1,4 @@
-import { invoke, showErrorHint, wireButton } from "./bridge.js";
+import { invoke, rearmClickGuard, showErrorHint, wireButton } from "./bridge.js";
 
 const params = new URLSearchParams(window.location.search);
 // SEC-06: the opaque request id the server issued for this popup — the ONLY value we trust from the URL.
@@ -15,6 +15,7 @@ let badgeShownFor = null; // origin we've already rendered the verified badge fo
 let decided = false; // latched ONLY after respond_auth SUCCEEDS — then the window is closing
 let responding = false; // a respond_auth call is in flight — don't let the poll fight the button state
 let poll = null; // active setTimeout id (self-scheduling; never overlaps)
+let wasActive = false; // B2 (F7): prior `info.active`, so we re-arm the guard exactly on the false→true edge
 
 // Never render the query-param origin as authoritative: show a placeholder + disabled controls until the
 // server answers.
@@ -63,6 +64,17 @@ async function refreshPending() {
   serverOrigin = info.origin;
   originEl.textContent = info.origin;
   renderVerifiedBadge(info.origin);
+  // B2 (F7): re-arm the click-steal guard on the queued→active EDGE — the instant this popup's controls
+  // become actionable — not merely on a native focus event (which may have fired a poll-interval ago, or
+  // not at all when set_focus() doesn't dispatch a JS focus event on this platform). Without this, a queued
+  // popup promoted under the cursor (or under a click already travelling toward where Allow lights up) could
+  // be actioned with no guard window. Arm BEFORE enabling the controls so the window is open the moment they
+  // are clickable. The latch makes this the false→true transition only, so a steady `active:true` across
+  // subsequent 1 s polls does not perpetually push the arm-time forward and defeat the guard.
+  if (info.active && !wasActive) {
+    rearmClickGuard();
+  }
+  wasActive = info.active;
   // Only the ACTIVE popup is actionable (the server enforces this too via resolve_active; this merely
   // reflects it so a queued popup's controls are visibly disabled until it is promoted).
   setControlsEnabled(info.active);

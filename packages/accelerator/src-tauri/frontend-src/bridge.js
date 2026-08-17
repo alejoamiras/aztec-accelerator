@@ -12,10 +12,15 @@ import { invoke } from "@tauri-apps/api/core";
 
 export { invoke };
 
-// C9 (A / D9): click-steal guard. A button wired with `guard: true` ignores activation for GUARD_MS after
-// the window last gained focus — reset on EVERY native focus/show, not just first paint — so a popup
-// popped under the cursor (or promoted into the active slot) can't catch a click meant for another window.
-// Gating at click ENTRY also covers keyboard Enter/Space (which dispatch a click event).
+// C9 (A / D9) + B2: click-steal guard. Every consequential button ignores activation for GUARD_MS after
+// the window last became actionable — reset on EVERY native focus/show, AND (for the queued auth popup)
+// explicitly re-armed by the page the moment it is promoted into the active slot (see authorize.js) — so a
+// popup popped under the cursor, or promoted while a click is already travelling, can't catch a click meant
+// for another window. Gating at click ENTRY also covers keyboard Enter/Space (which dispatch a click event).
+//
+// B2 (F-10): the guard is now DEFAULT-ON. `wireButton` applies it unless a caller passes `guard: false`,
+// so onboarding / renewal / update-prompt inherit the same anti-click-steal defense the authorize popup
+// always had — a control can no longer be wired unguarded by omission.
 const DEFAULT_GUARD_MS = 700;
 function guardMs() {
   // Overridable ONLY for tests (Playwright mock sets it to 0). Production never sets this global, so the
@@ -28,15 +33,19 @@ function now() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 let inputArmedAt = now();
-function rearmInputGuard() {
+/**
+ * Re-arm the click-steal guard (restart the GUARD_MS window). Fires automatically on every native
+ * focus/pageshow; also exported so a page can arm it at the exact moment its controls BECOME actionable
+ * (the queued→active promotion in authorize.js), rather than relying solely on a native focus event that
+ * may not fire — or may have fired a full poll-interval earlier — when the button lights up.
+ */
+export function rearmClickGuard() {
   inputArmedAt = now();
 }
 if (typeof window !== "undefined") {
-  window.addEventListener("focus", rearmInputGuard);
-  window.addEventListener("pageshow", rearmInputGuard);
+  window.addEventListener("focus", rearmClickGuard);
+  window.addEventListener("pageshow", rearmClickGuard);
 }
-// Internal-only since the authorize "Remember" checkbox (its one external consumer) was removed:
-// every remaining consequential control is a button wired through `wireButton({guard:true})` below.
 function isClickGuardActive() {
   return now() - inputArmedAt < guardMs();
 }
@@ -98,14 +107,16 @@ export function wireToggle(id, handler) {
  * @param {object} opts
  * @param {string} [opts.disableAlso] — ID of another button to disable during operation
  * @param {string} [opts.loadingText] — text to show while loading (restores original on error)
- * @param {boolean} [opts.guard] — apply the click-steal guard (ignore activation within GUARD_MS of focus)
+ * @param {boolean} [opts.guard] — click-steal guard; DEFAULT-ON (B2). Pass `guard: false` ONLY for a
+ *   non-consequential control that is provably unreachable as a click-steal target.
  * @param {() => Promise<void>} opts.onClick — async handler
  */
 export function wireButton(id, opts) {
   const btn = document.getElementById(id);
   btn.addEventListener("click", async () => {
-    // C9 (A): ignore a click that lands within the guard window after focus (click-steal defense).
-    if (opts.guard && isClickGuardActive()) return;
+    // C9 (A) + B2: ignore a click that lands within the guard window after the control became
+    // actionable (click-steal defense). Default-on: guarded unless the caller explicitly opts out.
+    if (opts.guard !== false && isClickGuardActive()) return;
     btn.disabled = true;
     const originalText = btn.textContent;
     if (opts.loadingText) btn.textContent = opts.loadingText;
