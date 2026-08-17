@@ -1061,19 +1061,35 @@ jobs:
             || { echo "::error::no release $RELEASE_TAG to promote"; exit 1; }
           echo "$META" | jq -e '.isDraft == false'      >/dev/null || { echo "::error::$RELEASE_TAG is a DRAFT — not promotable"; exit 1; }
           echo "$META" | jq -e '.isPrerelease == false' >/dev/null || { echo "::error::$RELEASE_TAG is flagged prerelease — not promotable"; exit 1; }
-          # 3. Full asset completeness — never promote a half-uploaded release. Assert the EXACT count (16
-          #    build assets + latest.json = 17) AND every category by name: installers, the macOS .app.tar.gz
-          #    updaters, the headless server tarballs, and the feed. (codex: count alone omitted headless.)
-          NAMES=$(echo "$META" | jq -r '.assets[].name')
-          COUNT=$(printf '%s\n' "$NAMES" | grep -c . || true)
-          [ "$COUNT" = "17" ] || { echo "::error::$RELEASE_TAG has $COUNT assets, expected exactly 17"; exit 1; }
-          printf '%s\n' "$NAMES" | grep -qx "latest.json" || { echo "::error::$RELEASE_TAG missing latest.json"; exit 1; }
-          need() { printf '%s\n' "$NAMES" | grep -q -- "$1" || { echo "::error::$RELEASE_TAG missing an asset matching: $1"; exit 1; }; }
-          for pat in macOS-Apple-Silicon.dmg macOS-Intel.dmg Linux-x86_64.deb Linux-x86_64.AppImage \
-                     Windows-x86_64-setup.exe Windows-x86_64-setup.nsis.zip \
-                     macOS-Apple-Silicon.app.tar.gz macOS-Intel.app.tar.gz accelerator-server-; do
-            need "$pat"
-          done
+          # 3. EXACT asset set — never promote a half-uploaded or tampered release. Compare the SORTED asset
+          #    names to the complete version-expanded 17-name set: the SAME 16 build names the flatten step
+          #    asserts on publish (keep in sync — release-contract.test.ts guards the two lists match) +
+          #    latest.json. (codex: count+category could be satisfied by one headless tarball + padding while
+          #    other platform tarballs/checksums are absent.)
+          GOT=$(echo "$META" | jq -r '.assets[].name' | LC_ALL=C sort)
+          EXPECTED=$(printf '%s\n' \
+            "Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.dmg" \
+            "Aztec-Accelerator-${VERSION}-macOS-Intel.dmg" \
+            "Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz" \
+            "Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz" \
+            "Aztec-Accelerator-${VERSION}-Linux-x86_64.deb" \
+            "Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage" \
+            "Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.exe" \
+            "Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip" \
+            "accelerator-server-${VERSION}-macos-arm64.tar.gz" \
+            "accelerator-server-${VERSION}-macos-arm64.tar.gz.sha256" \
+            "accelerator-server-${VERSION}-macos-x86_64.tar.gz" \
+            "accelerator-server-${VERSION}-macos-x86_64.tar.gz.sha256" \
+            "accelerator-server-${VERSION}-linux-x86_64.tar.gz" \
+            "accelerator-server-${VERSION}-linux-x86_64.tar.gz.sha256" \
+            "accelerator-server-${VERSION}-linux-arm64.tar.gz" \
+            "accelerator-server-${VERSION}-linux-arm64.tar.gz.sha256" \
+            "latest.json" | LC_ALL=C sort)
+          if [ "$GOT" != "$EXPECTED" ]; then
+            echo "::error::$RELEASE_TAG asset set != the expected 17 for $VERSION"
+            diff <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$GOT") || true
+            exit 1
+          fi
           # 4. Download the release's OWN latest.json, assert feed version == dispatched, run the PRODUCTION
           #    verifier. These are the exact bytes the flip uploads.
           gh release download "$RELEASE_TAG" -p latest.json --dir feed
@@ -1082,22 +1098,30 @@ jobs:
           bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
           cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- \
             verify --feed feed/latest.json --pubkey pubkey.b64
-          # 5. The verifier accepts ANY non-empty signed platform map, so bind the feed to THIS release: it
-          #    must carry EXACTLY the 4 supported platform keys, and each URL must be a CANONICAL $RELEASE_TAG
-          #    download URL that resolves 200 (a valid signature binds whatever URL was signed — not that it
-          #    targets this tag). (codex: signature validity + HEAD 200 alone don't prove the right target.)
+          # 5. The verifier accepts ANY non-empty signed platform map, so bind the feed to THIS release:
+          #    EXACTLY the 4 supported platform keys, each mapped to its EXACT expected artifact URL for this
+          #    tag (codex: prefix + HTTP 200 don't stop darwin-aarch64 pointing at the Intel tarball), then
+          #    confirm each resolves 200. Filenames mirror the sign-update-feed job's hardcoded URLs.
           jq -e '(.platforms | keys | sort) == ["darwin-aarch64","darwin-x86_64","linux-x86_64","windows-x86_64"]' feed/latest.json >/dev/null \
             || { echo "::error::feed platform keys are not exactly the 4 supported platforms"; exit 1; }
-          CANON="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/"
+          BASE="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}"
+          assert_url() {  # <platform-key> <exact-filename>
+            got=$(jq -r --arg k "$1" '.platforms[$k].url // empty' feed/latest.json)
+            [ "$got" = "${BASE}/$2" ] || { echo "::error::feed $1 url is '$got', expected '${BASE}/$2'"; exit 1; }
+          }
+          assert_url darwin-aarch64 "Aztec-Accelerator-${VERSION}-macOS-Apple-Silicon.app.tar.gz"
+          assert_url darwin-x86_64  "Aztec-Accelerator-${VERSION}-macOS-Intel.app.tar.gz"
+          assert_url linux-x86_64   "Aztec-Accelerator-${VERSION}-Linux-x86_64.AppImage"
+          assert_url windows-x86_64 "Aztec-Accelerator-${VERSION}-Windows-x86_64-setup.nsis.zip"
           while read -r u; do
-            case "$u" in
-              "$CANON"*) : ;;
-              *) echo "::error::feed platform URL is not a canonical $RELEASE_TAG download URL: $u"; exit 1 ;;
-            esac
             code=$(curl -fsIL --max-time 30 -o /dev/null -w '%{http_code}' "$u" 2>/dev/null || echo ERR)
             [ "$code" = "200" ] || { echo "::error::feed payload URL not reachable ($code): $u"; exit 1; }
           done < <(jq -r '.platforms[].url' feed/latest.json)
-          echo "✅ pre-flight OK: $RELEASE_TAG is a published stable $VERSION — 17 assets, exactly-4 canonical platform URLs, feed signature valid"
+          # Residual (codex, accepted for B6): the 4 payloads are NOT re-downloaded for a byte-compare. The
+          # SIGNED feed binds each payload's size and clients minisign-verify before applying, so a
+          # corrupted/wrong same-size payload fails CLOSED on the client; the only residual is availability,
+          # bounded by the 200 checks above. B4's packaged-E2E-on-draft exercises the real installers.
+          echo "✅ pre-flight OK: $RELEASE_TAG is a published stable $VERSION — exact 17-asset set, exact per-platform URLs, feed signature valid"
 
       - name: DRY RUN — pre-flight only, feed NOT written
         if: ${{ inputs.dry_run }}

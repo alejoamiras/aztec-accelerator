@@ -56,11 +56,53 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).toContain(".isPrerelease == false");
     expect(WF).toContain("verify --feed feed/latest.json"); // production Ed25519 verifier over the feed
     expect(WF).toContain("!= dispatched"); // feed version == dispatched version guard
-    expect(WF).toContain("expected exactly 17"); // full asset-set completeness (not just installers)
-    // The verifier accepts any non-empty signed map, so bind the feed to THIS release: exact 4 platform
-    // keys + every URL a canonical $RELEASE_TAG download URL.
+    // EXACT 17-name asset set (not count+category — which padding could game).
+    expect(WF).toContain("asset set != the expected 17");
+    // `VER` is the literal bash `${VERSION}` placeholder the workflow uses; template-interpolating it below
+    // reproduces the exact asset names without a plain-string `${...}` (which biome's noTemplateCurlyInString
+    // would flag). The single suppressed line is the only place the literal placeholder appears.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal bash ${VERSION} placeholder
+    const VER = "${VERSION}";
+    // Drift guard: ALL 16 build-asset names must appear in BOTH the flatten (publish) list AND the promote
+    // list — so the two authoritative lists can't silently diverge (codex r3: sample all 16, not 2).
+    for (const name of [
+      `Aztec-Accelerator-${VER}-macOS-Apple-Silicon.dmg`,
+      `Aztec-Accelerator-${VER}-macOS-Intel.dmg`,
+      `Aztec-Accelerator-${VER}-macOS-Apple-Silicon.app.tar.gz`,
+      `Aztec-Accelerator-${VER}-macOS-Intel.app.tar.gz`,
+      `Aztec-Accelerator-${VER}-Linux-x86_64.deb`,
+      `Aztec-Accelerator-${VER}-Linux-x86_64.AppImage`,
+      `Aztec-Accelerator-${VER}-Windows-x86_64-setup.exe`,
+      `Aztec-Accelerator-${VER}-Windows-x86_64-setup.nsis.zip`,
+      `accelerator-server-${VER}-macos-arm64.tar.gz`,
+      `accelerator-server-${VER}-macos-arm64.tar.gz.sha256`,
+      `accelerator-server-${VER}-macos-x86_64.tar.gz`,
+      `accelerator-server-${VER}-macos-x86_64.tar.gz.sha256`,
+      `accelerator-server-${VER}-linux-x86_64.tar.gz`,
+      `accelerator-server-${VER}-linux-x86_64.tar.gz.sha256`,
+      `accelerator-server-${VER}-linux-arm64.tar.gz`,
+      `accelerator-server-${VER}-linux-arm64.tar.gz.sha256`,
+    ]) {
+      expect(
+        WF.split(name).length - 1,
+        `${name} must be in both the flatten + promote asset lists`,
+      ).toBeGreaterThanOrEqual(2);
+    }
+    // The verifier accepts any non-empty signed map, so bind the feed to THIS release: exact 4 platform keys
+    // AND each platform's EXACT artifact URL (not just a canonical prefix — codex: darwin-aarch64 could
+    // otherwise point at the Intel tarball). Assert ALL FOUR key→filename mappings (whitespace-flexible).
     expect(WF).toContain('["darwin-aarch64","darwin-x86_64","linux-x86_64","windows-x86_64"]');
-    expect(WF).toContain("is not a canonical $RELEASE_TAG download URL");
+    for (const [key, file] of [
+      ["darwin-aarch64", `Aztec-Accelerator-${VER}-macOS-Apple-Silicon.app.tar.gz`],
+      ["darwin-x86_64", `Aztec-Accelerator-${VER}-macOS-Intel.app.tar.gz`],
+      ["linux-x86_64", `Aztec-Accelerator-${VER}-Linux-x86_64.AppImage`],
+      ["windows-x86_64", `Aztec-Accelerator-${VER}-Windows-x86_64-setup.nsis.zip`],
+    ]) {
+      const esc = file.replace(/[.$^{}()|[\]\\]/g, "\\$&");
+      expect(WF, `${key} must be bound to ${file}`).toMatch(
+        new RegExp(`assert_url ${key}\\s+"${esc}"`),
+      );
+    }
   });
 
   test("dry_run flips nothing — the S3 write is gated on !dry_run", () => {
