@@ -119,6 +119,83 @@
   Pop $0
 !macroend
 
+; ── Pure substring test: sets `${OUT}` = "1" iff `${HAY}` contains `${NEEDLE}`, else "0" ──
+; Self-contained (no StrFunc un-/normal-context ritual). NSIS `==` is case-insensitive, which is correct
+; for Windows paths and the fixed `<Command>` tag. This is the parser codex's two-layer strategy exercises
+; under Wine with captured-XML fixtures (the live schtasks query is Windows-CI-only).
+; `${OUT}` MUST NOT be $0-$4 — those are saved/restored here as scratch and would clobber the result.
+!macro AztecStrContains OUT HAY NEEDLE
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  StrCpy $0 `${HAY}`
+  StrCpy $1 `${NEEDLE}`
+  StrLen $2 $1
+  StrCpy $3 0
+  StrCpy ${OUT} "0"
+  ${Do}
+    StrCpy $4 $0 $2 $3 ; window of NEEDLE's length at offset $3
+    ${If} $4 == "" ; ran off the end without matching
+      ${ExitDo}
+    ${EndIf}
+    ${If} $4 == $1
+      StrCpy ${OUT} "1"
+      ${ExitDo}
+    ${EndIf}
+    IntOp $3 $3 + 1
+  ${Loop}
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+!macroend
+
+; ── Delete OUR crash-recovery scheduled task, ownership-checked against its own <Command> (codex (a)) ──
+; The primary `--prepare-uninstall` normally removed it; this native belt covers the exe-gone / primary-
+; skipped path. A scheduled task PERSISTS and fires every minute regardless of exe presence, so an
+; ownership-checked delete is load-bearing (not benign). Safe bias = LEAVE on any uncertainty (wrongly
+; deleting a copied install's task strips ITS recovery).
+;
+; Ownership by CONSTRUCTION rather than decode: `crash_recovery::task_xml` writes `<Command>` +
+; xml_escape(exe) + `</Command>`, so we search the queried XML for the exact element THIS install would
+; produce — `<Command>$INSTDIR\${MAINBINARYNAME}.exe</Command>`. Full-element match defeats deceptive
+; prefixes; a different path, different escaping, or malformed/tampered XML simply won't match → we LEAVE.
+; (Real install dirs carry no XML-special chars; an exotic one that does won't match → safe-leave.)
+!macro AztecDeleteOwnedRecoveryTask
+  Push $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  ; nsExec::ExecToStack captures stdout (bounded at NSIS_MAX_STRLEN); absolute schtasks, never PATH.
+  nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /Query /TN "Aztec Accelerator Crash Recovery" /XML'
+  Pop $R0 ; exit code
+  Pop $R1 ; XML output
+  ${If} $R0 == 0 ; require a SUCCESSFUL query — otherwise leave (task absent, or scheduler unreachable)
+    !insertmacro AztecStrContains $R2 $R1 "<Command>$INSTDIR\${MAINBINARYNAME}.exe</Command>"
+    ${If} $R2 == "1"
+      ExecWait '"$SYSDIR\schtasks.exe" /Delete /F /TN "Aztec Accelerator Crash Recovery"'
+      ; Confirm gone (locale-independent — /Query exits non-zero when the task is absent).
+      nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /Query /TN "Aztec Accelerator Crash Recovery"'
+      Pop $R3
+      Pop $R4
+      ${If} $R3 == 0
+        DetailPrint "aztec: crash-recovery task could NOT be removed"
+      ${Else}
+        DetailPrint "aztec: crash-recovery task removed"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+!macroend
+
 ; ── POSTUNINSTALL and F-05 (audit 2026-07-31): removal must not fail silently ──
 ;
 ; `ExecWait` WITHOUT an output variable discards the exit code, so a `certutil` that never ran (a
@@ -145,6 +222,8 @@
   Push $R3
   Push $R4
   Push $R5
+  Push $R6
+  Push $R7
   ; Normalize both to canonical short (8.3) form before comparing. `$INSTDIR` is restored from the
   ; installer's registry value while `$EXEDIR` is derived from the launched path, so one directory can
   ; be spelled two ways (casing, trailing slash, long vs short name). A purely textual mismatch would
@@ -162,51 +241,20 @@
   ${EndIf}
   ${If} $UpdateMode <> 1
   ${AndIf} $0 != $1
-    ; A warning from a previous uninstall must not outlive it.
-    Delete "$PROFILE\.aztec-accelerator\CA-TRUST-NOT-REMOVED.txt"
-    ; Absolute System32 certutil ($SYSDIR) — never a PATH lookup.
-    ExecWait '"$SYSDIR\certutil.exe" -user -delstore Root "Aztec Accelerator Local CA"' $2
-    ; Then confirm, instead of trusting the delete's own word for it.
-    StrCpy $4 ""
-    ${If} $2 == "error"
-      StrCpy $4 "certutil.exe could not be launched, so the certificate was never removed."
-    ${Else}
-      ExecWait '"$SYSDIR\certutil.exe" -user -store Root "Aztec Accelerator Local CA"' $3
-      ${If} $3 == "error"
-        StrCpy $4 "certutil.exe could not be launched, so removal could not be confirmed."
-      ${ElseIf} $3 = 0
-        StrCpy $4 "the certificate is still present in the store (certutil -delstore exited $2)."
-      ${EndIf}
-    ${EndIf}
-    ${If} $4 != ""
-      DetailPrint "aztec: the local CA was NOT removed from your trust store — $4"
-      ClearErrors
-      FileOpen $5 "$PROFILE\.aztec-accelerator\CA-TRUST-NOT-REMOVED.txt" w
-      ${IfNot} ${Errors}
-        FileWrite $5 "Aztec Accelerator could not remove its local certificate authority.$\r$\n$\r$\n"
-        FileWrite $5 "Reason: $4$\r$\n$\r$\n"
-        FileWrite $5 "The certificate 'Aztec Accelerator Local CA' may still be trusted by this$\r$\n"
-        FileWrite $5 "account. To remove it by hand: press Win+R, run certmgr.msc, open$\r$\n"
-        FileWrite $5 "'Trusted Root Certification Authorities' > 'Certificates', find$\r$\n"
-        FileWrite $5 "'Aztec Accelerator Local CA' and delete it.$\r$\n$\r$\n"
-        FileWrite $5 "(That CA's private key was generated per-signature and never written to disk,$\r$\n"
-        FileWrite $5 "and it is name-constrained to loopback addresses, so it cannot be used to$\r$\n"
-        FileWrite $5 "issue certificates for real websites.)$\r$\n"
-        FileClose $5
-      ${EndIf}
-    ${EndIf}
-    ; Remove the generated cert material from the user profile.
-    RMDir /r "$PROFILE\.aztec-accelerator\certs"
-
-    ; ── Belt (B5): remove OUR autostart Run value NATIVELY, in case the app's own `--prepare-uninstall`
-    ; (PREUNINSTALL) was skipped (broken install: exe already gone) or failed. Ownership-checked so a
-    ; COPIED second install sharing this user's Run key is never stripped: the stored value must resolve to
-    ; THIS install's exe (`$INSTDIR\${MAINBINARYNAME}.exe`), EXACT — a deceptive-prefix `…\Aztec-evil` must
-    ; miss. `--prepare-uninstall` normally already deleted it, so this is usually a no-op.
+    ; ── Ownership (B5, codex): compute FOREIGN natively from the autostart Run value and gate ALL shared
+    ; removal (certutil + certs + Run value) on it. The primary `--prepare-uninstall` (PREUNINSTALL) already
+    ; ran the canonicalized #429 check while the exe was alive; this repeats it natively for the exe-gone
+    ; fallback, and — critically — stops POSTUNINSTALL from deleting the SHARED CA when a COPIED second
+    ; install still owns it. (The certutil below used to run UNCONDITIONALLY, undoing the primary's skip.)
+    ;
+    ; $R6 = foreign flag (1 ⇒ leave everything shared). $R7 = 1 iff OUR Run value is present (delete it).
+    ; foreign UNLESS the Run value is ABSENT, or is our single QUOTED token canonicalizing to
+    ; `$INSTDIR\${MAINBINARYNAME}.exe`. Unquoted / with-args / elsewhere ⇒ foreign (safe bias — leave).
+    StrCpy $R6 "0"
+    StrCpy $R7 "0"
     ReadRegStr $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
     ${IfNot} $R0 == ""
-      ; Our owned format is a single QUOTED token, no trailing args (autostart writes exactly that). A
-      ; value that is unquoted, or quoted-with-args, is NOT our format → left as foreign (safe bias).
+      StrCpy $R6 "1" ; a present value is foreign until proven ours
       StrCpy $R1 $R0 1
       StrCpy $R2 $R0 "" -1
       ${If} $R1 == '"'
@@ -227,11 +275,59 @@
           StrCpy $R5 "$INSTDIR\${MAINBINARYNAME}.exe"
         ${EndIf}
         ${If} $R4 == $R5
-          DeleteRegValue HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
+          StrCpy $R6 "0" ; resolves to us
+          StrCpy $R7 "1" ; and present → delete it below
         ${EndIf}
       ${EndIf}
     ${EndIf}
+
+    ${If} $R6 == "0"
+      ; ── This install owns the shared state → remove it (trust anchor, certs, Run value, task) ──
+      ; A warning from a previous uninstall must not outlive it.
+      Delete "$PROFILE\.aztec-accelerator\CA-TRUST-NOT-REMOVED.txt"
+      ; Absolute System32 certutil ($SYSDIR) — never a PATH lookup.
+      ExecWait '"$SYSDIR\certutil.exe" -user -delstore Root "Aztec Accelerator Local CA"' $2
+      ; Then confirm, instead of trusting the delete's own word for it.
+      StrCpy $4 ""
+      ${If} $2 == "error"
+        StrCpy $4 "certutil.exe could not be launched, so the certificate was never removed."
+      ${Else}
+        ExecWait '"$SYSDIR\certutil.exe" -user -store Root "Aztec Accelerator Local CA"' $3
+        ${If} $3 == "error"
+          StrCpy $4 "certutil.exe could not be launched, so removal could not be confirmed."
+        ${ElseIf} $3 = 0
+          StrCpy $4 "the certificate is still present in the store (certutil -delstore exited $2)."
+        ${EndIf}
+      ${EndIf}
+      ${If} $4 != ""
+        DetailPrint "aztec: the local CA was NOT removed from your trust store — $4"
+        ClearErrors
+        FileOpen $5 "$PROFILE\.aztec-accelerator\CA-TRUST-NOT-REMOVED.txt" w
+        ${IfNot} ${Errors}
+          FileWrite $5 "Aztec Accelerator could not remove its local certificate authority.$\r$\n$\r$\n"
+          FileWrite $5 "Reason: $4$\r$\n$\r$\n"
+          FileWrite $5 "The certificate 'Aztec Accelerator Local CA' may still be trusted by this$\r$\n"
+          FileWrite $5 "account. To remove it by hand: press Win+R, run certmgr.msc, open$\r$\n"
+          FileWrite $5 "'Trusted Root Certification Authorities' > 'Certificates', find$\r$\n"
+          FileWrite $5 "'Aztec Accelerator Local CA' and delete it.$\r$\n$\r$\n"
+          FileWrite $5 "(That CA's private key was generated per-signature and never written to disk,$\r$\n"
+          FileWrite $5 "and it is name-constrained to loopback addresses, so it cannot be used to$\r$\n"
+          FileWrite $5 "issue certificates for real websites.)$\r$\n"
+          FileClose $5
+        ${EndIf}
+      ${EndIf}
+      ; Remove the generated cert material from the user profile.
+      RMDir /r "$PROFILE\.aztec-accelerator\certs"
+      ; Remove OUR autostart Run value (present + ours) — usually already gone via --prepare-uninstall.
+      ${If} $R7 == "1"
+        DeleteRegValue HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "Aztec Accelerator"
+      ${EndIf}
+      ; Remove OUR crash-recovery scheduled task (ownership-checked against its own <Command>).
+      !insertmacro AztecDeleteOwnedRecoveryTask
+    ${EndIf}
   ${EndIf}
+  Pop $R7
+  Pop $R6
   Pop $R5
   Pop $R4
   Pop $R3

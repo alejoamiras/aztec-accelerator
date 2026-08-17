@@ -36,6 +36,9 @@ SilentInstall silent
 Section "Install"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; The stand-in app exe, so PREUNINSTALL's `ExecWait "$INSTDIR\AztecAccelerator.exe" --prepare-uninstall`
+  ; has a real target to invoke (compiled first by the runner). It records that it ran.
+  File "AztecAccelerator.exe"
   ; Mirrors the Tauri template: POSTINSTALL fires as the LAST act of Section Install
   ; (installer.nsi:709-711 in tauri-bundler 2.8.1, !ifmacrodef-guarded).
   !insertmacro NSIS_HOOK_POSTINSTALL
