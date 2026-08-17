@@ -251,6 +251,32 @@ Researched structure (`tag`:636, `sign-update-feed`:692, `release`:807):
 - This is release-integrity-critical surgery (tag anchor, signed feed, append-only no-delete rule) — do a
   dedicated codex consult on the F wiring diff before merging.
 
+**F — codex-VETTED plan (session `01a00fb3`, `response-2.md`). Write fresh — release-pipeline surgery, no local
+validation (first proof is a real release dispatch):**
+1. **`release` creates a DRAFT** with `gh release create "$TAG" --draft --latest=false --target "$GITHUB_SHA"`
+   (`--target` is REQUIRED — without it GitHub tags the latest default-branch state at publish, not the
+   dispatched SHA; a finalize checkout check alone can't catch that). Then ASSERT the draft's
+   `targetCommitish == github.sha`. DROP `--verify-tag` here (no tag exists yet). `release` KEEPS its deps
+   incl. `sign-update-feed` (stable) so the signed `latest.json` is a gated draft asset, and ADD
+   `release-auth-preflight` directly (it was only transitively via `tag`).
+2. **Immutable asset manifest** (closes the biggest risk — draft assets are MUTABLE between gate and publish):
+   `release` generates a SHA-256 manifest of every uploaded asset BEFORE/at upload; the gate verifies
+   downloads against it; `finalize` re-checks the live draft asset digests (GitHub's REST release API exposes
+   them) against the manifest immediately before publishing. Tested bytes == published bytes.
+3. **`packaged-e2e-on-draft`** `needs:[release]`: `gh release download "$TAG"` the draft's OWN assets, verify
+   vs the manifest, run `_e2e-packaged.yml` (add a `source: release-asset` + `release_tag` input, or a wrapper)
+   — 3-OS composed + upgrade + uninstall.
+4. **KEEP `tag` (do NOT retire) — MOVE it after the gate:** `needs:[packaged-e2e-on-draft]`; retains the
+   proven `tag == github.sha` check (`:653`) + pushes the tag only after the gate.
+5. **`finalize`** `needs:[tag]`: re-check asset digests vs the manifest, then `gh release edit "$TAG"
+   --draft=false --verify-tag --latest=false` (the tag now exists, so `--verify-tag` works). Its `if:` MUST
+   permit the expected RC skip of `sign-update-feed` (`always() && !failure()`-style, not a bare needs-success).
+6. **Failed-draft cleanup** ("reruns overwrite it" is FALSE — the existing-release guard + `gh release create`
+   FAIL on a stale draft): on entry, resume the same draft OR delete it ONLY after asserting `isDraft==true`
+   AND no remote tag (drafts are mutable/deletable pre-publish; published releases stay append-only).
+7. RC (`is_prerelease`) publishes as a prerelease via the same draft→gate→finalize, never promoted.
+   promote-only stays fully decoupled (rejects drafts/prereleases, requires the published asset set).
+
 **G. Codex harness review — DONE + FOLDED** (session `01a00fb3` / `codex-DNGjdn6U`, `response-1.md`; commit
 `a1d8930`). codex confirmed the trust/bootstrap design viable + these sound: the `/prove`-header network
 witness (necessary), `auto_approve_localhost` (canonicalizes `localhost` regardless of port — no
