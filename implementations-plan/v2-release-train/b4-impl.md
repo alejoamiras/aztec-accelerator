@@ -40,27 +40,72 @@ mutate chokepoint `config::lock_mutate_save`. Callers go through those:
 
 **Windows-cfg note:** none here (pure core). Validate: `cargo test` in core + `bun run test`.
 
-## Item 2 — per-OS combined gate (fresh-install; upgrade→proof→FULL uninstall)
-`release-accelerator.yml:392-445` smoke stops at `/health`. B4 extends the packaged-app E2E to: packed SDK
-→ real browser → INSTALLED desktop → native bb proof over HTTPS, on all 3 OSes; a stateful
-`latest-stable(1.0.7)→2.0.0` upgrade preserving origins/config/autostart/HTTPS/CA-trust (CA-trust-present
-assertion where seedable — Linux now; mac/win residual ledgered); + B5's FULL uninstall (incl. package
-removal) in the same matrix, assertions scoped to app-owned stores. **This is the draft-gate slot B6
-deferred** — the packaged-E2E runs against the DRAFT's assets (download from the draft → install → prove),
-which B6's release job creates; on PASS the draft is finalized.
+## Items 2–3 — GROUNDED DESIGN (recon: Explore map 2026-08-17, cited below)
 
-## Item 3 — HTTPS proof matrix + OWNER DECISION (surface BEFORE RC dispatch; does NOT block the RC build)
-Evidence bar per OS: app CA present in its OWN production trust store (not distrusted) → app logs `Ready` →
-:59834 serves TLS → a real browser with the packed SDK completes a native-bb proof, HTTP-downgrade AND
-WASM-fallback DISABLED.
-- **Linux**: full composed proof AUTOMATED (certutil → user NSS; the app's predicate reads NSS).
-- **macOS / Windows**: composed proof likely NOT non-interactively automatable (macOS `add-trusted-cert`
-  needs interactive trust-setting auth + the app reads the LOGIN keychain; Windows CurrentUser\Root
-  protected-root filtering ignores non-interactive raw writes). **STOP-and-surface OWNER DECISION**, three
-  options: (a) a TEST-ONLY trust seam behind a new `e2e-trust` cargo feature (production predicate unchanged
-  + separately unit-tested); (b) a self-hosted/pre-trusted runner; (c) documented manual pre-GA verification
-  for those two OSes. Linux automated proof stands regardless; `tls_handshake.rs`/`UntrustedSkip` is
-  supplementary only.
+**Evidence bar (per OS):** the app's own generated CA is trusted in that OS's real store → the app's launch
+gate passes (`is_ca_trusted`, `trust/mod.rs:186`, = `any_installed` over ≥1 store) so it serves TLS on
+`:59834` → a REAL browser loading the PACKED SDK completes a native `bb` proof over HTTPS, with HTTP-downgrade
+disabled — and the accelerated path is POSITIVELY asserted (not merely "no error").
+
+### The two non-obvious constraints the recon surfaced
+1. **No WASM-disable flag exists.** The accelerator is a by-design always-degrading optimization: under strict
+   `httpsOnly`, a failed HTTPS `/prove` falls straight to WASM (never plaintext) rather than throwing
+   (`accelerator-prover.ts:350`,`457`,`519`,`664`). So a silent WASM fallback would pass a naive gate GREEN.
+   **The harness MUST positively assert the accelerated path** — via the `onPhase` callbacks
+   (`detect→serialize→transmit→proving→proved`) or the server's `x-prove-duration-ms` response header
+   (`accelerator-prover.ts:554`). Force HTTPS-only with `AZTEC_ACCELERATOR_HTTPS_ONLY=1` +
+   `allowInsecureDowngrade=false` (no `http://` URL is ever constructed, probe or `/prove` retry).
+2. **Chicken-and-egg trust bootstrap.** The app SKIPS HTTPS until its CA is trusted (`LaunchHttpsGate::
+   UntrustedSkip`, `main.rs:81`), but the app's own trust-INSTALL is the interactive path (hangs headless).
+   So the harness bootstraps out-of-band: launch once so the app generates `~/.aztec-accelerator/certs/ca.pem`
+   (cert GEN is non-interactive; only the STORE WRITE prompts) → seed that CA into the OS store out-of-band →
+   relaunch → the read-only predicate now passes → HTTPS serves. The same seeded store makes the browser
+   trust the fetch (Chromium reads NSS on Linux / the OS store on mac+win).
+
+### OWNER DECISION — RESOLVED by recon: all 3 OSes automate out-of-band; NO production trust-seam needed
+The predicate is a pure READ on every OS (`security verify-cert` / `certutil -store <serial>` / `certutil -V`,
+`trust/{macos:62,windows:147,linux:307}`). Only the WRITE prompts. Each OS has a non-interactive seeding lever
+that satisfies BOTH the app predicate and the browser:
+- **Linux**: `certutil -A -t C,, -d sql:~/.pki/nssdb` (exactly `install_ca_trust`'s own store; Chromium reads
+  it). Fully proven headless already (`tests/trust_linux.rs`).
+- **Windows**: PowerShell **`Import-Certificate -CertStoreLocation Cert:\CurrentUser\Root`** — the in-repo
+  documented CI lever (`trust/windows.rs:15`); raises NO dialog (only raw `certutil -addstore Root` /
+  `X509Store.Add` do). Predicate matches by serial in `Root`.
+- **macOS** (the one unproven leg): **`sudo security add-trusted-cert -d -r trustRoot -k
+  /Library/Keychains/System.keychain ca.pem`** — GH `macos-latest` has passwordless sudo; the predicate
+  `security verify-cert -l -L` reads the default search list (incl. System keychain); Playwright/Chromium on
+  macOS uses the Security framework, so it trusts it too. Repo currently seeds mac trust only via the manual
+  runbook — this SYSTEM-domain CI seed is the new, to-be-proven bit.
+
+⇒ **Decision (pending codex design review + owner PushNotification): (a) seed trust out-of-band per-OS in CI
+(certutil / Import-Certificate / sudo system-domain), NO production code change, all 3 OSes AUTOMATED.**
+Rejected: the `e2e-trust` cargo-feature trust-seam (adds a bypass to security-critical prod code for no gain
+now that out-of-band seeding works) and the self-hosted runner (infra spend, owner-only). If the macOS
+system-domain seed proves flaky on GH runners, the fallback for macOS ONLY is documented manual pre-GA
+verification (Linux+Windows stay automated regardless).
+
+### Item 2 — the combined gate (build Linux leg FIRST as the reference, then replicate mac/win)
+A new `packaged-e2e-on-draft` job. The packed-SDK→installed-app→HTTPS-proof flow is GREENFIELD — the
+ingredients exist SEPARATELY and none combine HTTPS+trust+proof: the real-proof harness
+(`packages/sdk/e2e/proving.test.ts`, but over HTTP against the SERVER crate), the `npm pack` step
+(`sdk.yml`), and the installed-app launch (`_e2e-webdriver.yml`). Compose them:
+1. Download the per-OS installer artifact (`accelerator-<platform>`; `.dmg`/`.deb`/`.AppImage`/`-setup.exe`) —
+   `release-accelerator.yml:301` publishes them; the `smoke` job (`:416`) is the download/mount template.
+2. Install it; launch once to generate the CA; seed trust out-of-band (per-OS lever above); relaunch.
+3. `npm pack` the SDK; a tiny browser harness page imports the PACKED tarball, points at `:59834` HTTPS with
+   `AZTEC_ACCELERATOR_HTTPS_ONLY=1`, runs a real proof, and asserts the accelerated path via `onPhase` /
+   `x-prove-duration-ms`.
+4. **Stateful `1.0.7→2.0.0` upgrade** leg: install 1.0.7, set origins/config/HTTPS, upgrade in place, assert
+   preservation + the config MIGRATION (item-1's `safari_support→https_enabled`, `config_version` bump) +
+   CA-trust survives; **+ B5 FULL uninstall** (package removal) asserting app-owned stores are cleaned.
+
+### Item 3 — wiring into B6's deferred draft-gate slot
+Per `release-accelerator.yml:18` ("stable DRAFT-gate — draft → packaged-E2E-on-draft → finalize — lands in
+B4") + `:1123`. Two options (pick in codex review): (a) add `packaged-e2e-on-draft` to `tag.needs` (`:638`)
+alongside `smoke`, mirroring the existing gates (simplest; keeps the transitive `needs: e2e-webdriver`
+invariant, `:136`); or (b) the literal draft model — `release` creates `--draft`, the new job `needs:
+[release]` downloads the draft's OWN assets, a `finalize` job (`gh release edit --draft=false`) `needs` it.
+Prefer (b) only if "prove the real published assets" is worth the extra release-graph complexity; else (a).
 
 ## Nomenclature checklist (root plan owns; verify ALL before RC)
 Updater/promote semver comparisons (real semver); version fields (tauri.conf.json / Cargo.toml / package.json
