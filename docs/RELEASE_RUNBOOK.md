@@ -19,20 +19,37 @@ This repo ships **two independently releasable artifacts**, and most releases to
 
 ## Cutting a Release
 
-### 1. Trigger the release workflow
+B6: **publish and promote are two separate dispatches.** A `publish` run builds, gates, and publishes the
+GitHub release (with its signed `latest.json` asset) but does NOT touch the live auto-updater feed. A
+separate `promote-only` run flips the S3 `latest.json` feed to that version — the only step that changes
+what installed clients auto-update to. `promote-only` is also the rollback lever (see Rollback Procedure).
+
+### 1. Publish (build + gate + publish — NO feed flip)
 
 ```bash
-gh workflow run release-accelerator.yml -f version=X.Y.Z
+gh workflow run release-accelerator.yml -f version=X.Y.Z            # mode=publish is the default
 ```
 
-The workflow pipeline:
-1. **Validate** — check semver format, output version strings
-2. **E2E WebDriver gate** — build with `--features webdriver`, run 9 WebDriver tests (macOS, release mode)
-3. **Create tag** — push `accelerator-vX.Y.Z` (only after E2E passes)
-4. **Build** — 3 platforms: macOS ARM, macOS Intel, Linux x86_64
-5. **Post-build smoke** — mount macOS DMG, launch signed app, poll `/health`
-6. **Release** — create GitHub Release, validate signatures, upload `latest.json` to S3
-7. **Bump** — auto-create PR for next RC version
+Publish pipeline: **validate → e2e-webdriver gate → build (3 Tauri + 4 headless) → smoke → tag →
+sign-update-feed (stable only) → release**. A prerelease (`X.Y.Z-rc.N`) publishes as a public GitHub
+prerelease (`--latest=false`, no feed). A stable publishes the release + attaches the signed `latest.json`
+as a release asset, but the LIVE feed is unchanged until you promote. Failed gates never reach `release`.
+
+### 2. Promote (flip the live feed)
+
+After verifying the published stable (and, for a GA, soaking the RC), flip the feed:
+
+```bash
+# Rehearse first — the whole pre-flight, no write, zero prod effect:
+gh workflow run release-accelerator.yml -f version=X.Y.Z -f mode=promote-only -f dry_run=true
+# Organic GA: flip the feed AND open the source version-bump PR:
+gh workflow run release-accelerator.yml -f version=X.Y.Z -f mode=promote-only -f bump_source=true
+```
+
+`promote` re-verifies the published release from scratch (exists, non-draft, non-prerelease stable; full
+installer + `latest.json` asset set; production Ed25519 verifier over the release's OWN `latest.json`; feed
+version == dispatched; every payload URL resolves) BEFORE uploading those exact bytes to S3 + invalidating
+CloudFront. `verify-live-feed` then confirms the public CDN actually serves the new version.
 
 ### 2. Post-release verification
 
@@ -86,33 +103,35 @@ gh workflow run publish-testnet.yml -f skip_sdk_publish=true
 
 ## Rollback Procedure
 
-If a release is bad (crashes on startup, broken updater, security issue):
+B6 is **append-only**: NEVER delete a published release or tag, and never hand-upload a feed. Rollback is a
+FEED operation — you move the live `latest.json` back to a previous good version with a `promote-only`
+dispatch (the same job that promoted forward). This stops NEW auto-update uptake and moves the landing
+download back (landing reads the feed); already-updated clients are not downgraded.
 
-### 1. Remove the GitHub Release
-
-```bash
-gh release delete accelerator-vX.Y.Z --yes
-git push --delete origin accelerator-vX.Y.Z
-```
-
-### 2. Revert `latest.json` to the previous version
+### 1. Roll the feed back to the last good version
 
 ```bash
-# Find the previous good version
-curl https://aztec-accelerator.dev/releases/latest.json
-
-# Re-upload the previous version's latest.json
-# Option A: re-run the previous release workflow
-# Option B: manually upload
-aws s3 cp previous-latest.json s3://BUCKET/landing/releases/latest.json \
-  --content-type application/json --cache-control "max-age=300"
-aws cloudfront create-invalidation --distribution-id DIST_ID --paths "/releases/latest.json"
+# Rehearse first — pre-flight only, no write:
+gh workflow run release-accelerator.yml -f version=<PREV_GOOD> -f mode=promote-only -f dry_run=true
+# Then roll back for real. bump_source STAYS false — a rollback must NOT bump the source version:
+gh workflow run release-accelerator.yml -f version=<PREV_GOOD> -f mode=promote-only
 ```
+
+`promote` re-verifies `<PREV_GOOD>`'s published release + signed feed before flipping, so you can only roll
+back to a version that still has an intact, verifiable release (which append-only guarantees still exists).
+`verify-live-feed` confirms the CDN serves `<PREV_GOOD>`.
+
+### 2. Fix forward (never re-cut the bad version)
+
+The bad `X.Y.Z` release stays on GitHub (append-only). Ship the fix as the NEXT version `X.Y.(Z+1)` through
+the normal publish → promote flow. Do NOT delete the bad release/tag and do NOT re-publish `X.Y.Z` — the
+publish step fails loud on a colliding tag. (Re-cutting the SAME version is a STOP-and-surface event, not an
+autonomous step.)
 
 ### 3. Communicate
 
-- Post in relevant Aztec channels that the release was reverted
-- File a GitHub issue documenting what went wrong
+- Post in relevant Aztec channels that the feed was rolled back to `<PREV_GOOD>`.
+- File a GitHub issue documenting what went wrong; land the fix as `X.Y.(Z+1)`.
 
 ## User Diagnostics
 
