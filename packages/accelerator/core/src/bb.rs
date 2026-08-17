@@ -696,8 +696,9 @@ mod containment {
 #[cfg(windows)]
 mod containment {
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
         JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
@@ -719,6 +720,12 @@ mod containment {
     /// → the update aborts over it, fail-safe), and once quiescing is set no new bb is spawned. Replaces the
     /// r2 atomic, whose check/assign could not be made atomic without this lock.
     static GATE: Mutex<bool> = Mutex::new(false);
+
+    /// Set when a spawn-cleanup could NOT confirm the child dead (codex r5). It poisons
+    /// `terminate_and_confirm`, so updates ABORT rather than install over a possibly-live uncontained bb —
+    /// until the process restarts (which recreates the job fresh, clearing this). Never cleared in-process;
+    /// fail-closed.
+    static POISONED: AtomicBool = AtomicBool::new(false);
 
     fn job_handle() -> HANDLE {
         let raw = *JOB.get_or_init(|| unsafe {
@@ -795,14 +802,25 @@ mod containment {
     /// anything that DID make it into the job — the assign-succeeded-but-verify-failed case) AND
     /// `TerminateProcess` + `WaitForSingleObject` on the direct handle (kills it even when assignment never
     /// took, and WAITS so bb.exe is gone before an install can touch it).
-    fn contain_spawn_failure(job: HANDLE, raw: HANDLE) {
+    ///
+    /// Returns `true` ONLY when the wait actually SIGNALED the child dead. codex r5: ignoring the wait
+    /// result was fail-open — a `WAIT_TIMEOUT`/`WAIT_FAILED` (or a failed `TerminateProcess`, which then
+    /// times out the wait) would release `GATE` with the child un-confirmed. A `false` return MUST poison.
+    pub(super) fn contain_spawn_failure(job: HANDLE, raw: HANDLE) -> bool {
         unsafe {
             TerminateJobObject(job, 1);
             TerminateProcess(raw, 1);
-            // Block until the direct child is gone (5s is a generous bound; a force-killed process exits
-            // near-instantly) so bb.exe cannot be held open when an install proceeds.
-            WaitForSingleObject(raw, 5000);
+            // 5s is a generous bound; a force-killed process signals near-instantly. Only WAIT_OBJECT_0 is a
+            // confirmed exit — WAIT_TIMEOUT / WAIT_FAILED are NOT.
+            WaitForSingleObject(raw, 5000) == WAIT_OBJECT_0
         }
+    }
+
+    /// Test-only accessor for the process-lifetime job handle (so a Windows unit test can drive
+    /// [`contain_spawn_failure`] against a real child).
+    #[cfg(test)]
+    pub(super) fn job_handle_for_test() -> HANDLE {
+        job_handle()
     }
 
     /// Spawn bb and assign it to the job ATOMICALLY under `GATE` (codex r3 H2a — see [`GATE`]). Holding the
@@ -826,8 +844,10 @@ mod containment {
         let child = super::spawn_capturing_stderr(cmd)?;
         // tokio's Child exposes the raw process handle on Windows.
         let Some(raw) = child.raw_handle().map(|h| h as HANDLE) else {
-            // No handle to assign OR to terminate directly; kill_on_drop reaps the direct child on return.
+            // No handle to assign OR to terminate directly; kill_on_drop reaps the direct child async and
+            // UNCONFIRMED, so poison installs until restart (codex r5).
             unsafe { TerminateJobObject(job, 1) };
+            POISONED.store(true, Ordering::SeqCst);
             return Err(std::io::Error::other(
                 "bb child has no OS handle after spawn",
             ));
@@ -835,13 +855,17 @@ mod containment {
         unsafe {
             if AssignProcessToJobObject(job, raw) == 0 {
                 let e = std::io::Error::last_os_error();
-                contain_spawn_failure(job, raw);
+                if !contain_spawn_failure(job, raw) {
+                    POISONED.store(true, Ordering::SeqCst);
+                }
                 return Err(e);
             }
             // Fail-closed: prove must not proceed on a bb that is NOT actually contained (codex).
             let mut in_job: i32 = 0;
             if IsProcessInJob(raw, job, &mut in_job) == 0 || in_job == 0 {
-                contain_spawn_failure(job, raw);
+                if !contain_spawn_failure(job, raw) {
+                    POISONED.store(true, Ordering::SeqCst);
+                }
                 return Err(std::io::Error::other(
                     "bb child is not in the Job Object after assignment",
                 ));
@@ -885,6 +909,13 @@ mod containment {
     /// until the job is empty before installing — else NSIS could touch files a still-dying bb holds
     /// (codex H2). Returns Err if the job still has processes after `timeout`.
     pub async fn terminate_and_confirm(timeout: std::time::Duration) -> Result<(), String> {
+        // codex r5: if an earlier spawn-cleanup could not confirm a bb dead, we may have a live uncontained
+        // bb.exe that is NOT in this job — refuse to install over it until the app restarts.
+        if POISONED.load(Ordering::SeqCst) {
+            return Err(
+                "a previously spawned bb could not be confirmed terminated; refusing to install until the accelerator restarts".to_string(),
+            );
+        }
         let job = job_handle();
         if job.is_null() {
             return Ok(());
@@ -1594,6 +1625,29 @@ mod tests {
         assert!(
             dead,
             "finish() must SIGKILL the group, reaping the orphaned grandchild"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn contain_spawn_failure_confirms_the_direct_child_is_dead() {
+        // The Windows spawn-failure cleanup (codex r4/r5): `TerminateProcess` + `WaitForSingleObject` must
+        // actually kill AND confirm the direct child dead — a `false` return is what poisons installs.
+        // cargo-check can't validate the wait semantics, so this runs in the Windows CI job. Spawn a
+        // long-lived child NOT assigned to the job (as an assignment failure would leave it) and assert the
+        // helper reports a CONFIRMED exit.
+        let mut cmd = tokio::process::Command::new("ping");
+        cmd.args(["-n", "30", "127.0.0.1"]);
+        cmd.stdout(std::process::Stdio::null());
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn ping");
+        let handle = child
+            .raw_handle()
+            .expect("child has a raw handle on Windows");
+        let job = super::containment::job_handle_for_test();
+        assert!(
+            super::containment::contain_spawn_failure(job, handle as _),
+            "contain_spawn_failure must TerminateProcess + confirm the direct child dead"
         );
     }
 }
