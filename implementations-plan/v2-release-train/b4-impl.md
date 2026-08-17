@@ -215,11 +215,21 @@ predicate must pass (macOS gates on trust).
 **D. Windows leg — BLOCKED on the owner decision** (LocalMachine\Root predicate extension vs manual gate). Do
 NOT build until resolved.
 
-**E. Upgrade + uninstall legs.** Install `1.0.7`, set origins/config, upgrade to `2.0.0` in place, assert the
-config migration (item-1: `safari_support→https_enabled`, `config_version`→2) + origins/autostart/HTTPS survive
-+ CA-trust survives; then B5 FULL uninstall asserts app-owned stores cleaned. NOTE the 1.0.7 passive-generation
-gap (bootstrap its certs the same way) and that product-uninstall does NOT remove the harness's System/LM seed
-(the harness cleans its own).
+**E. Upgrade + uninstall legs.** Reuse the updater-smoke's N−1 pattern: `gh release download <1.0.7-tag>
+--pattern <glob> --dir n1` (see `_e2e-updater-linux.yml`; guards no-op when N−1==N). Then:
+- **Upgrade/migration leg:** install 1.0.7 → **write a 1.0.7-shaped config** (`{"safari_support":true,
+  "approved_origins":["http://localhost:5173"]}`, NO `config_version`/`https_enabled`) → upgrade to 2.0.0
+  (in-place `.deb` install, OR extend the existing AppImage auto-update updater-smoke) → launch 2.0.0 → assert
+  the on-disk `config.json` migrated: `https_enabled:true` (from `safari_support`), `config_version:2`, origins
+  preserved. This proves item-1's migration on a REAL upgrade (not just the unit test). DESIGN CHOICE (codex):
+  a NEW leg in `_e2e-packaged.yml` vs. bolting the config-migration asserts onto the existing updater-smoke —
+  the updater-smoke already does 1.0.7→N over AppImage; a `.deb` in-place upgrade is closer to the config-file
+  survival story. Pick in the F/harness codex consult.
+- **Uninstall leg:** `AztecAccelerator --prepare-uninstall` (B5) then assert app-owned stores cleaned
+  (config dir, autostart, the app's OWN login/`-user` CA anchor). Product uninstall does NOT remove the
+  harness's out-of-band System/LM seed — the harness cleans that itself (already done in the macOS leg's
+  cleanup). NOTE the 1.0.7 passive-generation gap (its certs need the same bootstrap if the leg wants HTTPS
+  pre-upgrade).
 
 **F. Wiring (`release-accelerator.yml`) — the biggest + riskiest piece; codex-consult the wiring before writing.**
 Researched structure (`tag`:636, `sign-update-feed`:692, `release`:807):
