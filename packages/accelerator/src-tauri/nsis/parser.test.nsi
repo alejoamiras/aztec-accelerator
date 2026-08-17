@@ -36,6 +36,14 @@ SilentInstall silent
   ${If} $6 == "1"
     StrCpy $R0 "0"
   ${EndIf}
+  !insertmacro AztecStrContains $6 `${XML}` "<SendEmail"
+  ${If} $6 == "1"
+    StrCpy $R0 "0"
+  ${EndIf}
+  !insertmacro AztecStrContains $6 `${XML}` "<ShowMessage"
+  ${If} $6 == "1"
+    StrCpy $R0 "0"
+  ${EndIf}
   !insertmacro AztecStrContains $6 `${XML}` "${EXPECT}"
   ${IfNot} $6 == "1"
     StrCpy $R0 "0"
@@ -55,8 +63,10 @@ Section "Install"
   !insertmacro DECIDE "escaped" "<Task><Actions><Exec><Command>C:\A &amp; B\AztecAccelerator.exe</Command></Exec></Actions></Task>"
   ; multi-action: two <Exec> ⇒ 0
   !insertmacro DECIDE "multi" "<Task><Actions><Exec><Command>C:\Install\AztecAccelerator.exe</Command></Exec><Exec><Command>x</Command></Exec></Actions></Task>"
-  ; other action type alongside ours ⇒ 0 (codex r2 #2)
-  !insertmacro DECIDE "other_action" "<Task><Actions><Exec><Command>C:\Install\AztecAccelerator.exe</Command></Exec><ComHandler><ClassId>x</ClassId></ComHandler></Actions></Task>"
+  ; other action types alongside ours ⇒ 0 (codex #2: all of ComHandler/SendEmail/ShowMessage)
+  !insertmacro DECIDE "other_comhandler" "<Task><Actions><Exec><Command>C:\Install\AztecAccelerator.exe</Command></Exec><ComHandler><ClassId>x</ClassId></ComHandler></Actions></Task>"
+  !insertmacro DECIDE "other_sendemail" "<Task><Actions><Exec><Command>C:\Install\AztecAccelerator.exe</Command></Exec><SendEmail><Server>x</Server></SendEmail></Actions></Task>"
+  !insertmacro DECIDE "other_showmessage" "<Task><Actions><Exec><Command>C:\Install\AztecAccelerator.exe</Command></Exec><ShowMessage><Title>x</Title></ShowMessage></Actions></Task>"
   ; truncated AFTER our element (no </Task>) ⇒ 0
   !insertmacro DECIDE "truncated_after" "<Task><Actions><Exec><Command>C:\Install\AztecAccelerator.exe</Command></Exec>"
   ; truncated BEFORE the element closes ⇒ 0
