@@ -40,6 +40,20 @@ describe("public contract (F-05 doc-sync guard)", () => {
     expect(read("../../.claude/skills/aztec-accelerator/SKILL.md")).toContain("`denied`");
   });
 
+  test("README + SKILL document the B7 surface (typed error, version-mismatch) and NOT peer-deps", () => {
+    const readme = read("../../README.md");
+    const skill = read("../../.claude/skills/aztec-accelerator/SKILL.md");
+    // The typed error + the new phase must be documented in BOTH (F14 doc-sync).
+    for (const doc of [readme, skill]) {
+      expect(doc).toContain("AcceleratorHttpError");
+      expect(doc).toContain("version-mismatch");
+    }
+    // F13 verdict is KEEP DEPS — the docs must NOT claim peer-dependency semantics the manifest doesn't
+    // have (they used to say "Peer dependency: @aztec/...").
+    expect(readme).not.toContain("Peer dependency");
+    expect(skill).not.toContain("Peer dependency");
+  });
+
   test("MIGRATION references AcceleratorProtocol + the typed error, and SHIPS in the tarball (F15)", () => {
     const migration = read("../../MIGRATION.md");
     expect(migration).toContain("AcceleratorProtocol");

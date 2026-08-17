@@ -79,8 +79,22 @@ echo "--- npm ls @aztec/stdlib (exact host) ---"
 EXACT_COUNT="$(count_stdlib "$EXACT")"
 echo "exact host @aztec/stdlib install locations: $EXACT_COUNT"
 
-echo "--- typecheck the consumer against the PACKED dist (resolves exports + types) ---"
-( cd "$EXACT" && npx --yes typescript@5.9 tsc --noEmit -p tsconfig.json )
+echo "--- typecheck the consumer against the PACKED dist (resolves the 'types' condition) ---"
+# `--package=` is required: `typescript` ships both `tsc` and `tsserver`, so `npx typescript` cannot pick a
+# binary ("could not determine executable to run"). (codex B7 #1)
+( cd "$EXACT" && npx --yes --package=typescript@5.9 tsc --noEmit -p tsconfig.json )
+
+echo "--- RUNTIME import: resolve + load the packed dist 'default' export (types-check can't — codex #2) ---"
+cat > "$EXACT/runtime-check.mjs" <<'MJS'
+import { AcceleratorProver, AcceleratorHttpError, ACCELERATOR_API_VERSION } from "@alejoamiras/aztec-accelerator";
+if (typeof AcceleratorProver !== "function") throw new Error("AcceleratorProver missing from dist");
+if (typeof AcceleratorHttpError !== "function") throw new Error("AcceleratorHttpError missing from dist");
+if (typeof ACCELERATOR_API_VERSION !== "number") throw new Error("ACCELERATOR_API_VERSION missing from dist");
+// The typed error must actually be `instanceof Error` (extends Error), or `catch` narrowing breaks.
+if (!(new AcceleratorHttpError(400, "invalid_version") instanceof Error)) throw new Error("AcceleratorHttpError is not an Error");
+console.log("runtime import OK: dist exports resolve and load");
+MJS
+( cd "$EXACT" && node runtime-check.mjs )
 
 echo "=== conflicting host (5.0.0): recorded for the F13 ledger (informational) ==="
 CONFLICT="$WORK/conflict-host"

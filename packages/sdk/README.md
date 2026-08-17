@@ -17,7 +17,7 @@ bun add @alejoamiras/aztec-accelerator
 
 > The bare install resolves npm `latest`, which tracks the last **stable** Aztec line. For the current **Aztec 5.0** line (`5.0.0-rc.x`), install the `testnet` dist-tag: `npm install @alejoamiras/aztec-accelerator@testnet`.
 
-Peer dependency: your project must already have `@aztec/aztec.js` (or the individual `@aztec/stdlib`, `@aztec/bb-prover` packages) installed.
+The SDK ships its `@aztec/*` packages as exact-pinned **dependencies** (not peer dependencies), so it installs standalone. When your project already depends on the same exact `@aztec` version — the normal case for an Aztec dApp — npm/Bun dedupe them to a single `@aztec` graph.
 
 ## Quick Start
 
@@ -134,7 +134,7 @@ type AcceleratorProtocol = "http" | "https";
 ```typescript
 type AcceleratorPhase =
   | "detect" | "serialize" | "transmit" | "proving"
-  | "proved" | "receive" | "fallback" | "downloading" | "denied";
+  | "proved" | "receive" | "fallback" | "downloading" | "denied" | "version-mismatch";
 ```
 
 ### `AcceleratorPhaseData`
@@ -158,7 +158,17 @@ interface AcceleratorPhaseData {
 
 If the accelerator is unreachable at step 1, the SDK emits a `"fallback"` phase and proves via WASM instead — no error, no user action required.
 
-If the user denies your site at step 3 (or authorization times out), the SDK emits `"denied"` → `"fallback"` and falls back to WASM automatically. Use the `onPhase` callback to show a hint like "Approve in the Accelerator app for faster proving".
+If the user denies your site at step 3 (or authorization times out), the SDK emits `"denied"` → `"fallback"` and falls back to WASM automatically. Use the `onPhase` callback to show a hint like "Approve in the Accelerator app for faster proving". If the accelerator refuses this SDK's Aztec version (`403 version_not_allowed`), you get `"version-mismatch"` → `"fallback"` instead.
+
+**When proving throws.** The accelerator is an optimisation, so recognised failures — a denial, a version mismatch, an authorization cooldown, and capacity/transient errors (408/413/429/503, and `500 download_failed`/`prove_failed`) — all degrade to WASM silently. What DOES throw is a caller **misconfiguration**: a `400 invalid_version`/`invalid_origin`, or any unrecognised status/code, surfaces as a typed [`AcceleratorHttpError`](https://github.com/alejoamiras/aztec-accelerator) (`.status`, `.code`) instead of being masked as "slow but working". Catch it if you integrate against a specific accelerator version:
+
+```ts
+import { AcceleratorHttpError } from "@alejoamiras/aztec-accelerator";
+try { await prover.createChonkProof(steps); }
+catch (e) { if (e instanceof AcceleratorHttpError) { /* e.status, e.code */ } }
+```
+
+`checkAcceleratorStatus()` additionally surfaces the accelerator's `appVersion` and `apiVersion` on an available result.
 
 ## Configuration
 
@@ -280,6 +290,7 @@ const prover = new AcceleratorProver({
 | `receive` | Deserializing proof from response |
 | `fallback` | Accelerator unavailable, falling back to WASM |
 | `denied` | User denied this site access to the accelerator (403) — falling back to WASM |
+| `version-mismatch` | Accelerator refused this SDK's Aztec version (403) — falling back to WASM |
 
 ## Browser Compatibility
 

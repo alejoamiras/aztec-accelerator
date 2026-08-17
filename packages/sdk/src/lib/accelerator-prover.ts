@@ -231,8 +231,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       const data = body as {
         aztec_version?: string;
         available_versions?: string[];
-        version?: string;
-        api_version?: number;
+        version?: unknown;
+        api_version?: unknown;
       };
 
       // q7e3-F-05: the version-policy decision is a pure function — a reachable, recognized /health
@@ -261,8 +261,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     data: {
       aztec_version?: string;
       available_versions?: string[];
-      version?: string;
-      api_version?: number;
+      version?: unknown;
+      api_version?: unknown;
     },
     protocol: AcceleratorProtocol,
     sdkAztecVersion: string | undefined,
@@ -270,8 +270,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     const acceleratorVersion = data.aztec_version;
     const availableVersions = data.available_versions;
     // B7: surface the accelerator APP version + the negotiated api_version (were parsed then discarded).
-    const appVersion = data.version;
-    const apiVersion = data.api_version;
+    // The body is untrusted wire data, so NARROW at runtime (codex #6: `{version: 42}` must not leak a
+    // number through the `appVersion?: string` contract).
+    const appVersion = typeof data.version === "string" ? data.version : undefined;
+    const apiVersion = typeof data.api_version === "number" ? data.api_version : undefined;
 
     // New multi-version protocol: the SDK's version just needs to be in the cached set.
     if (availableVersions) {

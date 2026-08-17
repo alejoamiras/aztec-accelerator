@@ -105,7 +105,13 @@ try {
 }
 ```
 
-If you never inspected the raw thrown error, nothing changes — recognised failures still fall back silently.
+**Behaviour change (was: always degrade).** Previously EVERY `/prove` HTTP error — including the HTTP
+downgrade-retry path — fell back to WASM. Now a `400 invalid_version` / `invalid_origin`, or any
+unrecognised status/code, throws `AcceleratorHttpError` on BOTH the primary and the retry path. A dApp that
+relied on the old always-degrade behaviour to swallow a misconfiguration (e.g. with
+`allowInsecureDowngrade`) will now see the error surface — intentionally, so a real integration bug isn't
+hidden. Recognised transient/denial/version/capacity failures still degrade silently. Wrap
+`createChonkProof` if you prefer to force-degrade regardless.
 
 ### New `"version-mismatch"` phase
 
@@ -114,5 +120,7 @@ SDK's Aztec version (`403 version_not_allowed`). The proof still degrades to WAS
 
 ### `AcceleratorStatus` gains `appVersion` / `apiVersion`
 
-The `available: true` status now also carries the accelerator app's own `appVersion` and the negotiated
-`apiVersion` (both optional — the origin-tiered minimal `/health` may withhold them). Additive; no break.
+The `available: true` status now also carries the accelerator app's own `appVersion` (the desktop/headless
+build) and the negotiated `apiVersion`. `apiVersion` is present whenever the accelerator is available (a
+recognised `/health` must carry it). `appVersion` is optional — the origin-tiered MINIMAL `/health` served
+to an unapproved cross-origin withholds it. Additive; no break.

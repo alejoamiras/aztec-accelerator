@@ -283,3 +283,12 @@ only in the last cohorts. Implementation may begin at B2.
   NOT stop a mismatched host's nested dup — it buys nothing over the exact-pinned deps that already
   vetted-once-frozen-forever the resolution (bunfig `minimumReleaseAge` + frozen lockfile). No manifest
   change; the `dependencies` stay exact-pinned. The `--strict-peer-deps` runs remain informational only.
+  - **codex B7 #3 dispute (peers favoured) — considered, verdict HELD.** codex argues the cross-package
+    Aztec types + a conflicting host's nested duplicate favour peers. But the DECISIVE, plan-ratified test
+    (D-C29) is DEFAULT `npm install`, and there `peerDependencies` do NOT reject a conflicting host — npm
+    ≥7 auto-installs the peer and, on a version conflict, NESTS a duplicate with a warning, exactly as it
+    does for a normal dependency. Peers only differ under `--strict-peer-deps` (which ERRORS), and that is
+    opt-in and unrepresentative of real consumers (the reason D-C29 de-scoped it). So under the resolver a
+    real dApp uses, peers change neither the exact-host singleton nor the conflicting-host dup — they add a
+    manifest surface for no behavioural gain. The exact-host singleton is the GATE; the conflicting host is
+    logged (informational) because default npm's nesting there is expected and identical for deps or peers.
