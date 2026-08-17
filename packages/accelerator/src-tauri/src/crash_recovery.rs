@@ -111,8 +111,11 @@ pub fn recovery_ownership(reference: &std::path::Path) -> RecoveryOwnership {
         .output()
     {
         Ok(o) if o.status.success() => o.stdout,
-        // Only the RECOGNIZED not-found code (1) proves absence; any other nonzero (access denied,
-        // scheduler failure) is NOT "no task" — fail closed and leave it (codex r2 #4).
+        // Only the RECOGNIZED not-found code (1) is treated as absence; any other nonzero (access denied,
+        // scheduler failure) is NOT "no task" — fail closed and leave it (codex r2 #4). Accepted residual
+        // (codex r3, scope-ratified): schtasks does not contract its exit codes, so a code-1 returned for
+        // some non-not-found reason would misclassify — but for the crash-recovery task in the USER'S OWN
+        // Task Scheduler tree that is not a realistic case, and a COM ITaskService probe is disproportionate.
         Ok(o) if o.status.code() == Some(1) => return RecoveryOwnership::Absent,
         Ok(_) => return RecoveryOwnership::Foreign,
         Err(_) => return RecoveryOwnership::Foreign, // couldn't query ⇒ fail-closed
@@ -574,14 +577,17 @@ fn disable_impl() -> bool {
         let _ = std::process::Command::new(schtasks_exe())
             .args(["/Delete", "/F", "/TN", TASK_NAME])
             .output();
-        let still_present = std::process::Command::new(schtasks_exe())
+        // Confirm removal ONLY on the recognized not-found result (exit code 1). codex r3 #3: mapping
+        // EVERY nonzero to "gone" was fail-open — an access-denied / scheduler-error /Query (some other
+        // nonzero) would falsely confirm removal to the updater. Success (0) = still present; a spawn
+        // failure or any non-1 code = UNCONFIRMED → keep retrying, ultimately report false, never a false
+        // success. (Aligned with `recovery_ownership`'s exit-code policy.)
+        let confirmed_gone = std::process::Command::new(schtasks_exe())
             .args(["/Query", "/TN", TASK_NAME])
             .output()
-            .map(|o| o.status.success())
-            // If /Query itself can't run, don't claim the task is gone — assume it may persist
-            // so we keep retrying and ultimately report failure rather than a false success.
-            .unwrap_or(true);
-        if !still_present {
+            .map(|o| o.status.code() == Some(1))
+            .unwrap_or(false);
+        if confirmed_gone {
             tracing::info!("Task Scheduler crash-recovery task removed (or absent)");
             return true;
         }

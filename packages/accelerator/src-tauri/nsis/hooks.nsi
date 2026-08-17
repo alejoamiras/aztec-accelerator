@@ -338,7 +338,11 @@
       EnumRegValue $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" $R8
       ${If} ${Errors}
       ${OrIf} $R0 == ""
-        ${ExitDo} ; enumerated to the end without our name → absent (the Run key is always present)
+        ; Enumerated to the end without our name → absent. Accepted residual (codex r3, scope-ratified):
+        ; `${Errors}` cannot separate end-of-enumeration from an access/registry failure, but enumerating
+        ; the SHORT value NAMES of the CURRENT USER's own Run key does not realistically fail — a native
+        ; RegQueryValueEx probe is disproportionate NSIS complexity here.
+        ${ExitDo}
       ${EndIf}
       ${If} $R0 == "Aztec Accelerator"
         StrCpy $R6 "1" ; PRESENT → foreign until proven ours (covers present-but-empty/overlong)
