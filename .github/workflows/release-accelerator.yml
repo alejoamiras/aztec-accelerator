@@ -915,10 +915,12 @@ jobs:
           echo "Uploading ${#FILES[@]} files:"
           printf '  %s\n' "${FILES[@]}"
 
-          # Delete existing release if present (clean slate)
+          # B6 append-only: NEVER delete a published release (immutability + the goal's no-delete rule). A
+          # tag that already exists means a re-cut of a shipped version — fail loud and bump instead
+          # (fix-forward). Draft cleanup on a failed stable gate is separate and isDraft-guarded.
           if gh release view "$RELEASE_TAG" &>/dev/null; then
-            echo "Release $RELEASE_TAG already exists, deleting..."
-            gh release delete "$RELEASE_TAG" --yes
+            echo "::error::release $RELEASE_TAG already exists — append-only; bump the version (fix-forward)"
+            exit 1
           fi
 
           echo "Creating release $RELEASE_TAG..."
@@ -993,11 +995,13 @@ jobs:
               --latest=false \
               "${FILES[@]}"
           else
+            # B6: the SIGNED S3 feed is the source of truth (landing + updater read it), NOT the GitHub
+            # "Latest" badge — so stable is created --latest=false too; `promote` flips the feed separately.
             gh release create "$RELEASE_TAG" \
               --title "Aztec Accelerator $VERSION" \
               --notes-file /tmp/release-notes.md \
               --verify-tag \
-              --latest \
+              --latest=false \
               "${FILES[@]}"
           fi
 
@@ -1056,7 +1060,7 @@ jobs:
           done
           # 4. Download the release's OWN latest.json, assert its feed version == the dispatched version, and
           #    run the PRODUCTION verifier over it. These are the exact bytes the flip will upload.
-          gh release download "$RELEASE_TAG" -p latest.json --dir feed --clobber
+          gh release download "$RELEASE_TAG" -p latest.json --dir feed
           FEED_VERSION=$(jq -r '.version // empty' feed/latest.json)
           [ "$FEED_VERSION" = "$VERSION" ] || { echo "::error::release latest.json version ($FEED_VERSION) != dispatched ($VERSION)"; exit 1; }
           bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
