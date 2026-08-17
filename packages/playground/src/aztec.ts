@@ -189,8 +189,19 @@ async function bustStaleCrsCacheOnce(log: LogFn): Promise<void> {
  * Shared by both embedded and external wallet paths.
  */
 export async function initializeNode(log: LogFn): Promise<void> {
-  log("Creating AcceleratorProver...");
-  state.prover = new AcceleratorProver();
+  // B4 packaged-E2E harness: `?httpsOnly=true` forces the prover to HTTPS-only with NO HTTP downgrade, so
+  // when the harness serves this page against the INSTALLED desktop app a green proof positively exercises
+  // the browser⇄app TLS path (the seeded CA trust) — never a silent HTTP or WASM shortcut. Absent the param,
+  // real users keep the normal dual HTTP/HTTPS probe. Paired with `?forceProofs=true` so proving actually runs.
+  const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
+  log(
+    httpsOnly
+      ? "Creating AcceleratorProver (HTTPS-only, packaged-E2E)..."
+      : "Creating AcceleratorProver...",
+  );
+  state.prover = httpsOnly
+    ? new AcceleratorProver({ accelerator: { httpsOnly: true, allowInsecureDowngrade: false } })
+    : new AcceleratorProver();
 
   log("Connecting to Aztec node...");
   state.node = createAztecNodeClient(AZTEC_NODE_URL);

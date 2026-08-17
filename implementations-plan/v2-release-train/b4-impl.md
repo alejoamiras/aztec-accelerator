@@ -152,29 +152,25 @@ The recon's "all 3 OSes automate out-of-band" was too optimistic. Codex (read-on
 ## Harness build recipe (EXECUTE NEXT — grounded, zero re-research needed)
 Branch `worktree-b4-e2e` (off `db8a373`). Landed: `--generate-certs-only` (`289181e`). Build order:
 
-**A. Browser proof harness (reusable core) — a tiny Vite app, port `sdk/e2e/proving.test.ts` + `e2e-helpers.ts`
-into the browser.** New dir (proposed `packages/accelerator/e2e-packaged/`): `index.html` + `main.ts` +
-`vite.config.ts` (nodePolyfills `["buffer","path"]` + `Buffer:true`; COOP `same-origin` + COEP
-`credentialless`; `optimizeDeps.exclude` the noir wasm; `build.target:"esnext"`) + a `package.json` that deps
-the **PACKED** `@alejoamiras/aztec-accelerator` tarball (via `npm pack` in CI) + `@aztec/wallets`, etc. `main.ts`:
-```ts
-const phases:{p:string,d?:number}[]=[];
-const prover=new AcceleratorProver({ simulator:new WASMSimulator(),
-  accelerator:{ httpsOnly:true, allowInsecureDowngrade:false },   // BOTH flags via opts (codex: env unreliable)
-  onPhase:(p,data)=>phases.push({p,d:data?.durationMs}) });
-const node=createAztecNodeClient(NODE_URL);                        // NODE_URL injected (sandbox/testnet)
-const wallet=await EmbeddedWallet.create(node,{ ephemeral:true, pxe:{proverEnabled:true,proverOrOptions:prover} });
-const fpc=await getContractInstanceFromInstantiationParams(SponsoredFPCContract.artifact,{salt:new Fr(0)});
-await wallet.registerContract(fpc,SponsoredFPCContract.artifact);
-// then deploySchnorrAccount(wallet, new SponsoredFeePaymentMethod(fpc.address)) — the proving tx
-(window as any).__RESULT={ ok:true, phases };                     // Playwright reads this
-```
-Serve the page from **localhost** (Chrome 142+ LNA gates public→loopback; localhost is same-address-space,
-exempt — the SDK skill's gotcha). **Positive assertion (Playwright):** `phases` contains `proving`→`proved`,
-does NOT contain `fallback`/`denied`, the `proved` entry has a numeric `durationMs` (server-reported), AND a
-Playwright-intercepted `200 https://127.0.0.1:59834/prove` carrying `x-prove-duration-ms` (`server/prove.rs:347`
-adds it only after a real `bb::prove`). Tolerate a leading `downloading` phase (first-proof bb fetch — or
-pre-warm the bb cache). Do NOT set `ignoreHTTPSErrors` (that would defeat the trust proof).
+**A. Browser proof harness — REUSE THE PLAYGROUND (decided; NOT a greenfield Vite app).** The playground
+(`packages/playground`) already is a browser dApp that proves via `AcceleratorProver` + `EmbeddedWallet`,
+with `onPhase` tracking, a `?forceProofs=true` param, and the hard browser-bundling already solved
+(`bbWorkerPlugin` redirecting bb.js/kv-store web-workers, nodePolyfills, COOP/COEP, pinned `@aztec` 5.0.1, CRS
+cache-busting). A greenfield app would re-solve all of that + drift. So the harness = a SMALL playground
+extension + a new Playwright project + the CI job.
+- **DONE:** `aztec.ts:initializeNode` now honours **`?httpsOnly=true`** → `new AcceleratorProver({ accelerator:
+  { httpsOnly:true, allowInsecureDowngrade:false } })` (both flags via opts, codex: env unreliable); default
+  keeps the dual-probe for real users. Typechecks. The proving tx already exists: `deployTestAccount`
+  (`createSchnorrAccount → getDeployMethod → sendWithRetry`) with `onPhase` + a `proveTracker` that captures
+  `proved.durationMs`.
+- **NEXT (A2):** a Playwright project `packaged-e2e` + spec that loads the playground from **localhost**
+  (Chrome 142+ LNA exempts localhost) with `?forceProofs=true&httpsOnly=true`, drives deploy-account, waits for
+  the success result, and — the decisive witness — **intercepts a `200 https://127.0.0.1:59834/prove` carrying
+  `x-prove-duration-ms`** (`server/prove.rs:347` adds it ONLY after a real `bb::prove`; WASM/HTTP emit no such
+  request, so this alone discriminates native-over-HTTPS from a silent fallback). Corroborate with the
+  deploy-success UI. Do NOT set `ignoreHTTPSErrors` (defeats the trust proof). Tolerate a `downloading` phase
+  (first-proof bb fetch — or pre-warm the bb cache). If codex's harness review wants the explicit `onPhase`
+  no-`fallback` sequence too, add a `window.__ACCEL_PHASES__` export in `deployTestAccount`.
 
 **B. Linux CI leg (reference — fully automated).** Job `needs:[build]` on `ubuntu`: install `libnss3-tools`
 (+ `libfuse2t64` if AppImage, else prefer `.deb`); download `accelerator-linux-x86_64`; install; run
