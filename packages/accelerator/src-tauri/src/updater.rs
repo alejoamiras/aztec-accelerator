@@ -432,6 +432,24 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         }
     }
 
+    // B3 (F6): CONFIRM the in-flight bb tree is dead BEFORE installing. On Windows install() spawns NSIS
+    // then process::exit's, so bb must be gone before the installer touches files; kill/TerminateJobObject
+    // are asynchronous, so we WAIT and ABORT the update if bb can't be confirmed dead (codex H2 / the
+    // ratified "unconfirmed reap ⇒ abort update"). Placed after the download and before the marker
+    // transaction below, so an abort is a clean `return` (only the updater lock is held — no marker or
+    // recovery state to unwind).
+    //
+    // codex r2 H2a: `begin_quiesce()` FIRST, and hold it across confirm + install. It makes every new
+    // `prove` fail to register, so — set under the same lock the terminator takes the pgid under (Unix) /
+    // re-checked after job assignment (Windows) — no bb can start in the window between "confirmed dead" and
+    // "installed". `_quiesce` drops on every abort `return` below, re-opening proving; a SUCCESSFUL install
+    // exits/restarts the process, so it never needs to.
+    let _quiesce = crate::bb::begin_quiesce();
+    if let Err(e) = crate::bb::terminate_and_confirm(std::time::Duration::from_secs(5)).await {
+        tracing::error!(error = %e, "Aborting update install: could not confirm the in-flight bb was terminated");
+        return;
+    }
+
     // ── Windows: the update-window critical section (piece-2 plan §4) ──
     // autostart.lock spans intent-read → disarm → marker+handoff create, and NOTHING else: the
     // held lock freezes owned intent mutations, which is what keeps the snapshot honest inside it

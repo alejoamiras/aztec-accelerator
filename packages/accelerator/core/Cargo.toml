@@ -56,7 +56,16 @@ windows-sys = { version = "0.61", features = [
   # a /health answer any local process can forge. A FEATURE on the crate above, not a new crate.
   "Win32_NetworkManagement_IpHelper",
   "Win32_Networking_WinSock",
+  # B3 (F6): a Job Object with KILL_ON_JOB_CLOSE, so an in-flight bb (and every process it spawns) is
+  # killed by the OS when this process exits — quit, restart, auto-update, or crash. A FEATURE, no new
+  # crate.
+  "Win32_System_JobObjects",
 ] }
+
+# B3 (F6): kill(2) the in-flight bb PROCESS GROUP on Unix (SIGKILL the whole tree, not just the direct
+# child). std exposes no killpg; libc is the ubiquitous, well-audited binding. Unix-only.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

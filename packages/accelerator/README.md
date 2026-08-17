@@ -317,12 +317,15 @@ When the SDK requests a version that isn't cached, the accelerator downloads it 
 
 ### Logs
 
-The accelerator writes daily-rotating logs. Open the log directory from the tray menu (**Show Logs**) or find them at:
+The accelerator writes daily-rotating logs. Open the log directory from the tray menu (**Show Logs**, available in every build) or find them at:
 
 | Platform | Path |
 |----------|------|
 | macOS | `~/Library/Application Support/aztec-accelerator/logs/` |
 | Linux | `~/.local/share/aztec-accelerator/logs/` |
+| Windows | `%LOCALAPPDATA%\aztec-accelerator\logs\` |
+
+A crash additionally appends a one-line record (timestamp, location, message) to `panic.log` in that same directory — written synchronously so it survives even an immediate abort.
 
 ### Port Conflicts
 
@@ -350,7 +353,7 @@ cargo install tauri-cli
 # Copy bb binary for sidecar (reads version from @aztec/bb.js)
 bun run --filter accelerator prebuild
 
-# Run in development mode (debug build — includes Versions + Show Logs in menu)
+# Run in development mode (debug build — the menu additionally shows the Versions submenu + status item)
 cd packages/accelerator/src-tauri
 cargo tauri dev
 

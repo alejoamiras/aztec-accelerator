@@ -30,6 +30,30 @@ fn is_dev_mode() -> bool {
     cfg!(debug_assertions)
 }
 
+/// B3 (observability): append one panic record to `path`, SYNCHRONOUSLY (create + append + flush). This
+/// is the guaranteed on-disk record, independent of the async `non_blocking` tracing layer whose flush
+/// may not run before `abort`. Extracted from the panic hook so the format/write is unit-testable (the
+/// hook installation itself can't be — it ends in abort). Errors are swallowed: a panic handler must
+/// never itself panic, and there is nothing better to do if the log write fails mid-crash.
+fn write_panic_record(path: &Path, location: &str, payload: &str) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[{secs}] PANIC at {location}: {payload}");
+        // sync_all (fsync), not just flush: a `File` has no userspace buffer to flush, and we need the
+        // record on the physical filesystem before the process aborts (codex) — flush would not guarantee
+        // that.
+        let _ = f.sync_all();
+    }
+}
+
 /// Open a path or URL in the platform's default handler.
 fn open_in_browser(target: &impl AsRef<Path>) {
     let path = target.as_ref();
@@ -571,6 +595,32 @@ fn main() {
 
     tracing::info!(log_dir = %log_path.display(), "Logging initialized");
 
+    // B3 (observability): persist panics to disk. The tray app runs without a console, so the default
+    // hook's stderr output is lost, and `panic = "abort"` (release profile) means there is no unwind.
+    // The tracing file layer above is `non_blocking`, whose background worker is NOT guaranteed a
+    // scheduling slot to flush before the process aborts — so we ALSO write the panic SYNCHRONOUSLY to
+    // `panic.log` (the guaranteed record), then best-effort log through tracing and chain the previous
+    // hook (which prints the backtrace to stderr).
+    {
+        let panic_log = log_path.join("panic.log");
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown".to_string());
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            write_panic_record(&panic_log, &location, &payload);
+            tracing::error!(%location, payload = %payload, "PANIC");
+            previous(info);
+        }));
+    }
+
     let dev_mode = is_dev_mode();
     if dev_mode {
         tracing::info!("Developer mode enabled");
@@ -779,6 +829,14 @@ fn main() {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if should_prevent_exit(code) {
                     api.prevent_exit();
+                } else {
+                    // B3 (F6): the app IS exiting (explicit tray quit → app.exit(0), or the auto-updater's
+                    // app.restart()) — both fire ExitRequested here, so this ONE choke point reaps the
+                    // in-flight bb TREE before we go. `kill_on_drop` only reaps the direct child on an
+                    // in-process future-drop, never on process exit and never grandchildren. (Windows also
+                    // reaps via the Job Object's KILL_ON_JOB_CLOSE when the process handle closes, which
+                    // additionally covers the updater's internal `process::exit` on the NSIS handoff.)
+                    aztec_accelerator::bb::terminate_inflight();
                 }
             }
         });
@@ -804,6 +862,29 @@ mod tests {
     fn exit_allowed_for_restart() {
         // code=Some(i32::MAX) is sent by app.restart() during auto-update
         assert!(!should_prevent_exit(Some(i32::MAX)));
+    }
+
+    #[test]
+    fn write_panic_record_appends_location_and_payload() {
+        // B3 (observability): the synchronous panic writer must APPEND (not overwrite) a legible record
+        // carrying the location + payload — the guaranteed on-disk crash trail. Neutering the write makes
+        // the file empty and fails this.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panic.log");
+        write_panic_record(&path, "src/foo.rs:10:5", "boom");
+        write_panic_record(&path, "src/bar.rs:2:1", "kaboom");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("src/foo.rs:10:5"),
+            "missing first location: {contents}"
+        );
+        assert!(contents.contains("boom"), "missing first payload");
+        assert!(
+            contents.contains("src/bar.rs:2:1"),
+            "second record must APPEND, not overwrite"
+        );
+        assert!(contents.contains("kaboom"));
+        assert_eq!(contents.lines().count(), 2, "one line per panic");
     }
 
     // q7e3-F-01 characterization (test-FIRST): the launch HTTPS gate's four outcomes + the

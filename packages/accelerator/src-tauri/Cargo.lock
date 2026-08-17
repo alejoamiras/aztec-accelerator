@@ -12,6 +12,7 @@ dependencies = [
  "flate2",
  "hex",
  "http",
+ "libc",
  "minisign-verify",
  "parking_lot",
  "reqwest 0.12.28",

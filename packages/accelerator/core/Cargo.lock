@@ -14,6 +14,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http",
+ "libc",
  "minisign-verify",
  "parking_lot",
  "reqwest",
