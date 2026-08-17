@@ -432,6 +432,18 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         }
     }
 
+    // B3 (F6): CONFIRM the in-flight bb tree is dead BEFORE installing. On Windows install() spawns NSIS
+    // then process::exit's, so bb must be gone before the installer touches files; kill/TerminateJobObject
+    // are asynchronous, so we WAIT and ABORT the update if bb can't be confirmed dead (codex H2 / the
+    // ratified "unconfirmed reap ⇒ abort update"). Placed after the download and before the marker
+    // transaction below, so an abort is a clean `return` (only the updater lock is held — no marker or
+    // recovery state to unwind). A prove squeezing into the ~ms before install() is still reaped by the
+    // ExitRequested catch-all (Unix) / Job Object KILL_ON_JOB_CLOSE (Windows) at the restart/exit.
+    if let Err(e) = crate::bb::terminate_and_confirm(std::time::Duration::from_secs(5)).await {
+        tracing::error!(error = %e, "Aborting update install: could not confirm the in-flight bb was terminated");
+        return;
+    }
+
     // ── Windows: the update-window critical section (piece-2 plan §4) ──
     // autostart.lock spans intent-read → disarm → marker+handoff create, and NOTHING else: the
     // held lock freezes owned intent mutations, which is what keeps the snapshot honest inside it
@@ -554,13 +566,6 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         drop(section_lock); // dropped BEFORE install(): NSIS runs outside any lock we hold.
         (paths, guard)
     };
-
-    // B3 (F6): kill any in-flight bb TREE BEFORE install(). On Windows install() hands off to NSIS and
-    // exits the process, bypassing the ExitRequested catch-all in main.rs — so this is the point at which
-    // bb must die before the installer touches files. On macOS/Linux the app.restart() below also reaps
-    // it via that catch-all, but killing here first means the install never runs alongside a live prover
-    // holding the (about-to-be-replaced) workspace/binary.
-    crate::bb::terminate_inflight();
 
     match update.install(bytes) {
         Ok(()) => {

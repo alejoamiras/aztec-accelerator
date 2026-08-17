@@ -47,7 +47,10 @@ fn write_panic_record(path: &Path, location: &str, payload: &str) {
         .open(path)
     {
         let _ = writeln!(f, "[{secs}] PANIC at {location}: {payload}");
-        let _ = f.flush();
+        // sync_all (fsync), not just flush: a `File` has no userspace buffer to flush, and we need the
+        // record on the physical filesystem before the process aborts (codex) — flush would not guarantee
+        // that.
+        let _ = f.sync_all();
     }
 }
 

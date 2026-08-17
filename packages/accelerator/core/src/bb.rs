@@ -353,33 +353,44 @@ async fn prove_with_timeout(
     // cancellation/timeout (via this guard's Drop) — reaps the whole bb tree, not just the direct child.
     // Fail-closed: if the child can't be contained (Windows Job Object assign failure), don't prove.
     let guard = containment::Guard::register(&child)?;
-    // B3 (F4): take the piped stderr and drain it CAP-and-CONTINUE, concurrently with waiting for exit.
-    // `wait_with_output()` used to buffer ALL of stderr into memory for up to the timeout; draining with
-    // a retain cap bounds the allocation while still emptying the pipe so bb never blocks writing to it.
+    // B3 (F4): drain stderr CAP-and-CONTINUE in a CONCURRENT TASK so the pipe never fills (bb would block
+    // writing) — and, importantly, so `child.wait()` (which does NOT depend on stderr EOF) can clear the
+    // containment registration the instant bb exits rather than after the drain. Without that split, a
+    // grandchild that inherits and holds the stderr pipe would keep the drain — and thus the now-stale
+    // pgid — alive for the whole timeout (codex M4). `wait_with_output()` also buffered ALL of stderr in
+    // memory up to the timeout; the retain cap bounds that.
     let stderr_pipe = child
         .stderr
         .take()
         .expect("spawn_capturing_stderr pipes stderr");
-    let waited = tokio::time::timeout(timeout, async {
-        let (drained, status) =
-            tokio::join!(drain_capped(stderr_pipe, STDERR_RETAIN_CAP), child.wait());
-        status.map(|s| (s, drained.0, drained.1))
-    })
-    .await;
+    let mut drain_handle = tokio::spawn(drain_capped(stderr_pipe, STDERR_RETAIN_CAP));
 
-    let (status, stderr_retained, stderr_total) = match waited {
-        Ok(Ok(triple)) => triple,
-        // On these paths bb may still be running; returning drops `guard`, whose Drop SIGKILLs the tree
-        // (and `kill_on_drop` reaps the direct child).
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        // bb may still be running on these paths; returning drops `guard`, whose Drop reaps the whole tree
+        // (Unix: SIGKILLs the group; Windows: TerminateJobObject), and `kill_on_drop` reaps the direct
+        // child.
         Ok(Err(e)) => return Err(Box::new(e)),
         Err(_) => {
             tracing::error!("bb prove timed out after {:?}", timeout);
             return Err("bb prove timed out after 5 minutes".into());
         }
     };
-    // bb has EXITED (we hold its status). Clear the containment registration so neither the guard's drop
-    // nor a racing `terminate_inflight` signals a now-reaped pgid.
+    // bb has EXITED (reaped by child.wait()). Clear the containment registration IMMEDIATELY — before the
+    // stderr drain necessarily finishes — so the pgid can't go stale while a lingering pipe-holder keeps
+    // draining. This keeps the guard-drop/`terminate_inflight` stale-pgid window at a few instructions.
     guard.finish();
+
+    // Collect the concurrently-drained stderr, bounded: now that bb is gone, a grandchild still holding
+    // the pipe open must not hang us. Abort the drain on timeout so it doesn't leak.
+    let (stderr_retained, stderr_total) =
+        match tokio::time::timeout(Duration::from_secs(2), &mut drain_handle).await {
+            Ok(Ok(pair)) => pair,
+            _ => {
+                drain_handle.abort();
+                (Vec::new(), 0)
+            }
+        };
 
     let stderr = String::from_utf8_lossy(&stderr_retained);
     if !stderr.is_empty() {
@@ -399,17 +410,27 @@ async fn prove_with_timeout(
 
     // B3 (F5): validate the proof output before trusting it. Exit-code success was the ONLY gate, so an
     // empty or truncated `proof` file produced a "successful" response (a 0-byte proof → a 4-byte
-    // header-only body; a non-32-aligned file → silently floor-divided). Validate the size on disk
-    // BEFORE reading (the read is otherwise unbounded); the file is in our own temp dir and bb has
-    // exited, so the on-disk length equals what we then read.
+    // header-only body; a non-32-aligned file → silently floor-divided). Read through a capped reader in a
+    // SINGLE open (no metadata-then-read TOCTOU — codex M5): at most MAX_PROOF_BYTES+1 bytes, so an
+    // oversized file reads as MAX+1 and is rejected. Then validate the ACTUAL bytes read.
     let proof_path = output_dir.join("proof");
-    let proof_len = std::fs::metadata(&proof_path)?.len();
-    validate_proof_len(proof_len)?;
-    let raw_proof = std::fs::read(&proof_path)?;
+    let raw_proof = read_capped(&proof_path, MAX_PROOF_BYTES)?;
+    validate_proof_len(raw_proof.len() as u64)?;
 
     tracing::debug!(proof_bytes = raw_proof.len(), "bb prove completed");
 
     Ok(prepend_field_count_header(&raw_proof))
+}
+
+/// B3 (F5): read `path` in ONE open, at most `cap`+1 bytes (no metadata/read TOCTOU). Reading `cap`+1
+/// lets [`validate_proof_len`] distinguish "exactly `cap`" (accept) from "over `cap`" (reject).
+fn read_capped(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?
+        .take(cap + 1)
+        .read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// B3 (F5): a bb proof file must be non-empty, within [`MAX_PROOF_BYTES`], and a whole number of 32-byte
@@ -469,7 +490,7 @@ where
 ///
 /// [`configure`]: containment::configure
 /// [`terminate_inflight`]: containment::terminate_inflight
-pub use containment::terminate_inflight;
+pub use containment::{terminate_and_confirm, terminate_inflight};
 
 #[cfg(unix)]
 mod containment {
@@ -531,8 +552,8 @@ mod containment {
         }
     }
 
-    /// SIGKILL the in-flight bb tree, if any. Called from the app's quit / pre-update paths so a
-    /// quit/restart/update cannot strand a running bb and its children.
+    /// SIGKILL the in-flight bb tree, if any. Fire-and-forget — for the QUIT path, which must never
+    /// block. (The pre-update path uses [`terminate_and_confirm`] instead.)
     pub fn terminate_inflight() {
         let mut g = ACTIVE_PGID.lock().unwrap();
         if let Some(pgid) = g.take() {
@@ -541,23 +562,50 @@ mod containment {
             }
         }
     }
+
+    /// SIGKILL the in-flight bb tree and WAIT (bounded) until the group is actually gone, so the pre-update
+    /// caller can ABORT the install if bb can't be confirmed dead (codex H2: `kill` reaps asynchronously;
+    /// installing over a still-live prover risks file/lock conflicts). `Ok(())` if nothing was in flight.
+    pub async fn terminate_and_confirm(timeout: std::time::Duration) -> Result<(), String> {
+        let pgid = ACTIVE_PGID.lock().unwrap().take();
+        let Some(pgid) = pgid else {
+            return Ok(());
+        };
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            // `kill(-pgid, 0)` → -1/ESRCH once the whole group is gone AND reaped. bb is reaped by the
+            // concurrent prove's `child.wait()`; grandchildren are reaped by init after reparenting.
+            if unsafe { libc::kill(-pgid, 0) } == -1 {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("bb process group {pgid} still alive after SIGKILL"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
 }
 
 #[cfg(windows)]
 mod containment {
     use std::ffi::c_void;
     use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
     /// A process-lifetime Job Object handle (stored as `isize` so it is `Send`/`Sync` in the static).
-    /// Deliberately NEVER closed: `KILL_ON_JOB_CLOSE` fires exactly when this process exits and the OS
-    /// closes the last handle, so every bb assigned to the job — and every process bb spawned — is
-    /// killed on quit/restart/update/crash, with no per-exit-site code. 0 means creation failed.
+    /// Deliberately NEVER closed on the SUCCESS path: `KILL_ON_JOB_CLOSE` fires exactly when this process
+    /// exits and the OS closes the last handle, so every bb in the job — and every process bb spawned —
+    /// is killed on quit/restart/update/crash. 0 means creation FAILED (fail-closed: register() errors).
     static JOB: OnceLock<isize> = OnceLock::new();
 
     fn job_handle() -> HANDLE {
@@ -568,23 +616,53 @@ mod containment {
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
+            // Codex H3: a DISCARDED return here would leave the job WITHOUT kill-on-close — assignment and
+            // IsProcessInJob would still succeed while exit/crash containment was silently OFF. Fail
+            // closed: on failure close the handle and cache 0, so every register() errors rather than
+            // running an uncontained bb.
+            if SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 &info as *const _ as *const c_void,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
+            ) == 0
+            {
+                CloseHandle(job);
+                return 0;
+            }
             job as isize
         });
         raw as HANDLE
     }
 
+    /// Active process count in the job — 0 once every bb + descendant is gone.
+    fn active_processes(job: HANDLE) -> u32 {
+        let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                &mut acct as *mut _ as *mut c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            0
+        } else {
+            acct.ActiveProcesses
+        }
+    }
+
     /// No spawn-time configuration on Windows — the child is added to the job AFTER it exists.
     pub(super) fn configure(_cmd: &mut tokio::process::Command) {}
 
-    /// On Windows the Job Object (KILL_ON_JOB_CLOSE) reaps the tree when the app exits, so the guard
-    /// carries no per-drop kill; `kill_on_drop` still reaps the direct child on a future-drop.
-    pub(super) struct Guard;
+    /// Armed on register; on ABNORMAL drop (cancellation / timeout / panic — `finish` NOT called) it
+    /// `TerminateJobObject`s the tree NOW rather than leaving grandchildren alive in the still-open job
+    /// until the process exits (codex H1). Serialized proving means the job holds only this one bb.
+    pub(super) struct Guard {
+        armed: bool,
+    }
 
     impl Guard {
         pub(super) fn register(child: &tokio::process::Child) -> std::io::Result<Self> {
@@ -609,20 +687,60 @@ mod containment {
                     ));
                 }
             }
-            Ok(Guard)
+            Ok(Guard { armed: true })
         }
 
-        pub(super) fn finish(self) {}
+        pub(super) fn finish(mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if self.armed {
+                let job = job_handle();
+                if !job.is_null() {
+                    unsafe {
+                        TerminateJobObject(job, 1);
+                    }
+                }
+            }
+        }
     }
 
     /// Kill every process currently in the job (only ever one bb, since proving is serialized). The job
-    /// itself persists for the next prove.
+    /// itself persists for the next prove. Fire-and-forget — for the QUIT path.
     pub fn terminate_inflight() {
         let job = job_handle();
         if !job.is_null() {
             unsafe {
                 TerminateJobObject(job, 1);
             }
+        }
+    }
+
+    /// `TerminateJobObject` is ASYNCHRONOUS (like `TerminateProcess`), so the pre-update path must WAIT
+    /// until the job is empty before installing — else NSIS could touch files a still-dying bb holds
+    /// (codex H2). Returns Err if the job still has processes after `timeout`.
+    pub async fn terminate_and_confirm(timeout: std::time::Duration) -> Result<(), String> {
+        let job = job_handle();
+        if job.is_null() {
+            return Ok(());
+        }
+        unsafe {
+            TerminateJobObject(job, 1);
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if active_processes(job) == 0 {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    "bb Job Object still has active processes after TerminateJobObject".to_string(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 }
@@ -638,6 +756,9 @@ mod containment {
         pub(super) fn finish(self) {}
     }
     pub fn terminate_inflight() {}
+    pub async fn terminate_and_confirm(_timeout: std::time::Duration) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Prepend a 4-byte big-endian uint32 field count header.
@@ -1172,5 +1293,57 @@ mod tests {
             dead,
             "the grandchild must be killed with the group by terminate_inflight"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn terminate_and_confirm_kills_the_tree_and_confirms_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let script = format!(
+            "{FIND_OUTDIR}\nsleep 300 & echo $! > \"{}\"\nwait",
+            pidfile.display()
+        );
+        let _env = install_fake_bb(dir.path(), &script);
+        let prove_task = tokio::spawn(async { prove(b"witness", None, None).await });
+
+        let mut gpid = None;
+        for _ in 0..250 {
+            if let Ok(s) = std::fs::read_to_string(&pidfile) {
+                if let Ok(p) = s.trim().parse::<i32>() {
+                    gpid = Some(p);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let gpid = gpid.expect("fake bb should have spawned a grandchild");
+
+        // Kill + WAIT for confirmation. bb is reaped by the concurrent prove task's `child.wait()`, so the
+        // group empties and this returns Ok well within the bound. A broken confirm (never sees the group
+        // gone) would return Err after the timeout.
+        let result = terminate_and_confirm(Duration::from_secs(3)).await;
+        prove_task.abort();
+        assert!(
+            result.is_ok(),
+            "terminate_and_confirm must confirm the kill, got {result:?}"
+        );
+        assert_eq!(
+            unsafe { libc::kill(gpid, 0) },
+            -1,
+            "the grandchild must be dead once terminate_and_confirm returns Ok"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn terminate_and_confirm_is_ok_when_nothing_is_running() {
+        // No prove in flight → nothing to kill → immediate Ok (the updater must not abort a legitimate
+        // update just because no proof happened to be running).
+        assert!(terminate_and_confirm(Duration::from_millis(50))
+            .await
+            .is_ok());
     }
 }
