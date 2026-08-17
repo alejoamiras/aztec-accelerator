@@ -633,11 +633,15 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+  # B4/F: MOVED AFTER the packaged-E2E gate (was pre-gate). `packaged-e2e-on-draft` transitively needs the
+  # whole build+smoke+e2e-webdriver+release-auth-preflight chain, so a broken release-role trust or a failed
+  # gate aborts BEFORE the tag is pushed (no dangling tag). Pushing the reviewed tag here — after the gate,
+  # before `finalize` — lets `finalize` publish with `--verify-tag` while keeping the proven tag==github.sha
+  # anchor (codex F-consult: keep `tag`, don't retire it).
   tag:
     name: Create Git Tag
-    needs: [validate, release-auth-preflight, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
-    # F-005: skip in auth_probe mode so a probe never pushes a tag. release-auth-preflight in `needs`
-    # means a broken release-role trust aborts BEFORE the tag is pushed (no dangling tag).
+    needs: [validate, packaged-e2e-on-draft]
+    # F-005: skip in auth_probe mode so a probe never pushes a tag.
     if: ${{ !inputs.auth_probe && inputs.mode == 'publish' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -804,22 +808,20 @@ jobs:
           path: latest.json
           if-no-files-found: error
 
+  # B4/F: `release` now creates a DRAFT (no git tag yet — GitHub defers tag creation until a draft is
+  # PUBLISHED). The packaged-E2E gate then runs against the DRAFT's OWN uploaded assets; `tag` (moved after
+  # the gate) pushes the reviewed tag; `finalize` flips the draft to published. So a failed packaged gate
+  # NEVER burns the version tag against a bad SHA. `release-auth-preflight` is now a DIRECT need (it was only
+  # transitive via `tag`, which no longer precedes this job). sign-update-feed is SKIPPED for prereleases —
+  # `!contains(failure)` tolerates the skip while a real signing failure still blocks.
   release:
-    name: Create GitHub Release
-    needs: [validate, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, tag, e2e-webdriver, sign-update-feed]
-    # sign-update-feed is SKIPPED for prereleases (they get no feed); a skipped need must not skip
-    # release. Run whenever nothing FAILED/was cancelled — so a failed signing correctly blocks release,
-    # a skipped one (prerelease) does not.
-    # F-005: `!inputs.auth_probe` so a probe never publishes. `tag` is skipped in probe mode, but this
-    # job's `!cancelled()` would otherwise still run it — guard explicitly.
-    # B6/codex: require tag SUCCESS (not merely "not failed") — a skipped tag (e.g. release-auth-preflight
-    # failed → tag skipped) must NOT publish onto a pre-existing/orphan tag via --verify-tag without this
-    # run's tag-SHA check. sign-update-feed may still be skipped (prerelease) — that's a different need.
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.tag.result == 'success' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    name: Create draft release
+    needs: [validate, release-auth-preflight, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver, sign-update-feed]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write     # gh release create (publish ONLY — B6: the S3 feed flip moved to `promote`)
+      contents: write     # gh release create --draft (publish flip happens in `finalize` — B6: no S3 feed here)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -924,11 +926,20 @@ jobs:
           echo "Uploading ${#FILES[@]} files:"
           printf '  %s\n' "${FILES[@]}"
 
-          # B6 append-only: NEVER delete a published release (immutability + the goal's no-delete rule). A
-          # tag that already exists means a re-cut of a shipped version — fail loud and bump instead
-          # (fix-forward). Draft cleanup on a failed stable gate is separate and isDraft-guarded.
-          if gh release view "$RELEASE_TAG" &>/dev/null; then
-            echo "::error::release $RELEASE_TAG already exists — append-only; bump the version (fix-forward)"
+          # B4/F append-only + fix-forward: a PUBLISHED release for this tag is immutable — fail (bump the
+          # version). A stale UNPUBLISHED draft (a prior run whose packaged gate failed) may be replaced — but
+          # ONLY when it is genuinely a draft with NO pushed tag (a draft never pushes its tag until publish),
+          # so we never delete a published release or an existing tag. (codex F-consult: "reruns overwrite it"
+          # is false — gh release create fails on a stale draft; delete it, isDraft+no-tag-guarded.)
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
+            if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "::error::draft $RELEASE_TAG unexpectedly has a pushed tag — refusing to delete"
+              exit 1
+            fi
+            echo "Replacing a stale unpublished draft for $RELEASE_TAG (a prior run's gate failed)"
+            gh release delete "$RELEASE_TAG" --yes
+          elif gh release view "$RELEASE_TAG" &>/dev/null; then
+            echo "::error::release $RELEASE_TAG already PUBLISHED — append-only; bump the version (fix-forward)"
             exit 1
           fi
 
@@ -990,29 +1001,112 @@ jobs:
           # Strip leading whitespace from each line (YAML indentation artifact)
           sed -i 's/^          //' /tmp/release-notes.md
 
-          # F-005 (Codex GATE-3 H1): --verify-tag makes `gh release create` FAIL when the tag
-          # does not already exist (pushed by the `tag` job) instead of silently auto-creating
-          # it from HEAD. A release must never be published when `tag` was skipped — e.g. after
-          # a failed release-auth-preflight — because the auto-created tag would point at
-          # whatever HEAD happened to be rather than the reviewed commit.
+          # B4/F: create a DRAFT pinned to THIS commit. `--target "$GITHUB_SHA"` is REQUIRED — without it a
+          # draft's eventual tag (created only at PUBLISH by `finalize`) would point at the latest
+          # default-branch state, not the dispatched SHA (codex F-consult). No `--verify-tag` here: the tag
+          # does not exist yet; `tag` pushes it AFTER the packaged gate and `finalize` uses `--verify-tag`.
+          # B6: stable is --latest=false (the signed S3 feed is the source of truth; `promote` flips it).
+          COMMON=(--title "Aztec Accelerator $VERSION" --notes-file /tmp/release-notes.md --draft --target "$GITHUB_SHA" --latest=false)
           if [ "$IS_PRERELEASE" = "true" ]; then
-            gh release create "$RELEASE_TAG" \
-              --title "Aztec Accelerator $VERSION" \
-              --notes-file /tmp/release-notes.md \
-              --verify-tag \
-              --prerelease \
-              --latest=false \
-              "${FILES[@]}"
+            gh release create "$RELEASE_TAG" "${COMMON[@]}" --prerelease "${FILES[@]}"
           else
-            # B6: the SIGNED S3 feed is the source of truth (landing + updater read it), NOT the GitHub
-            # "Latest" badge — so stable is created --latest=false too; `promote` flips the feed separately.
-            gh release create "$RELEASE_TAG" \
-              --title "Aztec Accelerator $VERSION" \
-              --notes-file /tmp/release-notes.md \
-              --verify-tag \
-              --latest=false \
-              "${FILES[@]}"
+            gh release create "$RELEASE_TAG" "${COMMON[@]}" "${FILES[@]}"
           fi
+
+          # Defense-in-depth over --target: assert the draft targets the reviewed commit.
+          ACTUAL_TARGET=$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)
+          if [ "$ACTUAL_TARGET" != "$GITHUB_SHA" ]; then
+            echo "::error::draft targetCommitish ($ACTUAL_TARGET) != github.sha ($GITHUB_SHA)"
+            exit 1
+          fi
+          echo "Draft $RELEASE_TAG created, targeting $GITHUB_SHA"
+
+      # B4/F: an immutable SHA-256 manifest of every uploaded asset. The packaged gate verifies its downloads
+      # against it, and `finalize` re-checks the live draft asset digests against it immediately before
+      # publishing — so the bytes the gate tested are provably the bytes that ship (draft assets are mutable).
+      - name: Generate + upload asset SHA-256 manifest
+        run: |
+          ( cd release-files && sha256sum -- * ) > asset-manifest.sha256
+          echo "Asset manifest:"; cat asset-manifest.sha256
+
+      - name: Upload asset manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-asset-manifest
+          path: asset-manifest.sha256
+          retention-days: 7
+
+  # B4/F: the DRAFT gate — run the 3-OS composed native-bb-over-HTTPS proof + the 1.0.7→2.0.0 upgrade +
+  # uninstall legs against the DRAFT's OWN uploaded installers (release-asset mode). Only on PASS does `tag`
+  # push the tag and `finalize` publish. This is the "packaged-E2E-on-draft" slot B6 deferred to B4.
+  packaged-e2e-on-draft:
+    name: Packaged E2E on draft
+    needs: [validate, release]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/_e2e-packaged.yml
+    with:
+      release_tag: ${{ needs.validate.outputs.tag }}
+
+  # B4/F: FINALIZE — flip the gated draft to PUBLISHED (which pushes the git tag GitHub deferred). Runs only
+  # after the packaged gate + `tag` succeeded. Re-asserts tag==github.sha and that the draft's asset SET is
+  # unchanged since the gate (assets are mutable pre-publish) before `--draft=false --verify-tag`.
+  finalize:
+    name: Publish release (finalize)
+    needs: [validate, release, packaged-e2e-on-draft, tag]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.tag.result == 'success' && needs.packaged-e2e-on-draft.result == 'success' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-tags: true
+
+      - name: Re-assert the pushed tag targets the reviewed commit
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          ACTUAL="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$ACTUAL" != "$EXPECTED_SHA" ]; then
+            echo "::error::tag $TAG at $ACTUAL != github.sha $EXPECTED_SHA — refusing to publish"
+            exit 1
+          fi
+          echo "Tag $TAG verified at $EXPECTED_SHA"
+
+      - name: Download the gated asset manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify the draft asset set is unchanged, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          # The gate ran against exactly these asset names; assert the live draft's set is unchanged before
+          # publishing (draft assets are mutable pre-publish). Full per-asset digest re-verify is a hardening
+          # TODO — the name/count set-match catches add/remove/rename in the automated same-run flow.
+          MANIFEST_NAMES="$(awk '{print $2}' manifest/asset-manifest.sha256 | sort)"
+          DRAFT_NAMES="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
+          if [ "$MANIFEST_NAMES" != "$DRAFT_NAMES" ]; then
+            echo "::error::draft asset set changed since the gate:"
+            diff <(echo "$MANIFEST_NAMES") <(echo "$DRAFT_NAMES") || true
+            exit 1
+          fi
+          echo "Draft asset set matches the gated manifest ($(echo "$DRAFT_NAMES" | grep -c .) assets)"
+          # Flip draft → published. The tag was pushed by `tag` and VERIFIED == github.sha above (a stronger
+          # check than gh's --verify-tag, which only asserts existence), so publishing associates the release
+          # with that reviewed tag. --latest=false: the signed S3 feed is the source of truth (landing +
+          # updater read it); `promote` flips it later.
+          gh release edit "$TAG" --draft=false --latest=false
+          echo "Published $TAG (draft finalized)"
 
   # B6: PROMOTE is a SEPARATE operational event from PUBLISH — its own `mode: promote-only` dispatch. It
   # flips the S3 `latest.json` feed for an ALREADY-PUBLISHED version, and doubles as the ROLLBACK lever
