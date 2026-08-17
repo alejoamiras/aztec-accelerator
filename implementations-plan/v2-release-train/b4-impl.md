@@ -67,6 +67,36 @@ Updater/promote semver comparisons (real semver); version fields (tauri.conf.jso
 / NSIS / CFBundleVersion / deb/AppImage); identity-guard/marker/scheduled-task names; docs/landing/runbook/
 README version strings; confirm SDK `x-aztec-version` isn't coupled to app major.
 
+## Item 1 — IN PROGRESS (WIP commit): what's done + the exact remaining threading
+
+**DONE + compiling (core crate, `cargo check --lib --tests` green):**
+- `config.rs`: `CONFIG_VERSION = 2`; `PersistCapability` (`#[derive(Debug, Clone)]`, private `_seal: ()`,
+  `#[cfg(test)] pub(crate) fn for_test()`); `LoadedConfig`; two-stage `load_with_cap[_from]` (lenient
+  `{config_version}` probe → future⇒`cap:None`; else raw-`Value` parse → `migrate_value` → deserialize →
+  stamp v2 → mint cap); `migrate_value` (`safari_support`→`https_enabled`, new key wins, drop legacy key);
+  `load`/`load_from` delegate to `load_with_cap_from(...).config` (read-only, consistent migration); `save`,
+  `save_to`, `lock_mutate_save`, `lock_mutate_save_to` all take `&PersistCapability`.
+- `server.rs`: `HeadlessState.persist_cap: Option<config::PersistCapability>` (+ `None` in `Default` and
+  `headless()`).
+- `server/auth.rs`: approved-origin persist gated on `state.persist_cap` (skip+warn read-only when `None`).
+
+**REMAINING (src-tauri + server binary + tests — mechanical, compile-guided):**
+1. **`ConfigState` bundle (low-ripple):** make `ConfigState = Arc<ConfigStore>` where
+   `struct ConfigStore { lock: RwLock<AcceleratorConfig>, cap: Option<config::PersistCapability> }` with
+   `impl Deref<Target = RwLock<..>>` → existing `config_state.read()/.write()` stay unchanged (deref
+   coercion). `mutate_config` gates on `config.cap.as_ref()` (skip+propagate when `None`).
+2. `main.rs:648`: `let loaded = config::load_with_cap(); let config_state = Arc::new(ConfigStore { lock:
+   RwLock::new(loaded.config), cap: loaded.cap });`. Set `HeadlessState.persist_cap = config_state.cap.clone()`
+   where the AppState is built (share the one minted cap).
+3. `main.rs:216` `reset_https_enabled(state)`: thread `state.persist_cap` into `lock_mutate_save` (skip when
+   `None`).
+4. **Server binary** (`packages/accelerator/server/src`): its own config load → `load_with_cap` →
+   `ConfigStore` + `HeadlessState.persist_cap`.
+5. Tests: `src-tauri` + `server/tests.rs` save/mutate sites use `PersistCapability::for_test()` (or a
+   `load_with_cap_from` on a temp path). Add the migration trio + `future_config_never_persisted_over`
+   (fixture `config_version:999`, NOT v2-parseable) + per-save-path cap-required mutation + v2-untouched.
+6. Validate: `cargo test` (core + src-tauri) + `bun run test`; mutation-prove; codex loop → PR → merge.
+
 ## Sequencing
 1. Item 1 (config migration) — implement core-first, thread callers, mutation tests, codex loop → PR → merge.
 2. Item 2+3 packaged-E2E infra (the bulk) — wire into B6's draft-gate slot; Linux composed proof automated;
