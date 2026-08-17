@@ -298,14 +298,20 @@ describe("NSIS uninstall hook — an upgrade must not wipe trust", () => {
   test("both directories are canonicalized before they are compared", async () => {
     // Comparing $EXEDIR to $INSTDIR raw would let one directory spelled two ways (casing, trailing
     // slash, 8.3 short name) read as "different" — i.e. as a real uninstall — and wipe the anchor.
+    // B5 adds a second guarded site: NSIS_HOOK_PREUNINSTALL runs `--prepare-uninstall` behind the SAME
+    // real-uninstall guard, so BOTH macros canonicalize $EXEDIR then $INSTDIR — the dirs come in
+    // [EXEDIR, INSTDIR] pairs, one per guarded site.
     const nsi = await read(HOOKS);
-    const normalized = [
-      ...nsi.matchAll(/GetFullPathName\s+\/SHORT\s+\$\d\s+"\$(EXEDIR|INSTDIR)"/g),
-    ];
+    const dirs = [...nsi.matchAll(/GetFullPathName\s+\/SHORT\s+\$\d\s+"\$(EXEDIR|INSTDIR)"/g)].map(
+      (m) => m[1],
+    );
     expect(
-      normalized.map((m) => m[1]).sort(),
-      "both $EXEDIR and $INSTDIR must be canonicalized",
-    ).toEqual(["EXEDIR", "INSTDIR"]);
+      dirs.length >= 2 && dirs.length % 2 === 0,
+      "every guarded site must canonicalize a full EXEDIR/INSTDIR pair",
+    ).toBe(true);
+    for (let i = 0; i < dirs.length; i += 2) {
+      expect([dirs[i], dirs[i + 1]]).toEqual(["EXEDIR", "INSTDIR"]);
+    }
     // Raw $EXEDIR/$INSTDIR must never be the operands of the guard comparison itself.
     expect(nsi).not.toMatch(/\$\{AndIf\}\s*"?\$EXEDIR/);
   });
