@@ -153,8 +153,11 @@ The SDK is designed to be fail-safe:
 - **Version mismatch**: modern accelerators auto-download the right bb version
 
 The cases that THROW are: corrupted execution steps, simulator unavailability, and — new in the typed
-error surface — a caller **misconfiguration** (`400 invalid_version`/`invalid_origin`) or an unrecognised
-status/code, surfaced as a typed `AcceleratorHttpError` (`.status`, `.code`) rather than masked as WASM.
+error surface — a caller **misconfiguration** (`400 invalid_version`/`invalid_origin`), a `500` with an
+**unrecognised** code, or any other unexpected HTTP status, surfaced as a typed `AcceleratorHttpError`
+(`.status`, `.code`) rather than masked as WASM. The degrade set is matched by status: **every** `403`
+(denial/version/cooldown) and **every** `408`/`413`/`429`/`503` falls back regardless of its `code`, so an
+unknown `403`/`503` code degrades — it does not throw.
 
 ## Vite configuration (browser bundling)
 

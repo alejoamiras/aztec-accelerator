@@ -3,9 +3,10 @@
 # and prove two things nothing else in the repo checks:
 #   1. the packed `dist` exports/types actually RESOLVE + typecheck (the playground uses `workspace:*`, i.e.
 #      the source `exports`, so a broken publish rewrite / missing dist would ship undetected);
-#   2. the F13 peer evidence: default npm's own `@aztec/stdlib` graph for an EXACT-version host is a
-#      SINGLETON (so exact-pinned deps already deliver "one @aztec graph" — adding peerDependencies buys
-#      nothing), and a CONFLICTING-version host is recorded for the ledger.
+#   2. the F13 deps-vs-peers decision: default npm's `@aztec/stdlib` graph for an EXACT-version host is a
+#      SINGLETON (exact-pinned deps already deliver "one @aztec graph"), and a CONFLICTING-version host is
+#      recorded. Peers are not better here — on a skew they ERESOLVE-fail the install; reproducible evidence
+#      lives in implementations-plan/v2-release-train/evidence/f13-peer-vs-deps.sh + the F13 ledger entry.
 #
 #   scripts/sdk-tarball-consumer.sh <absolute-path-to-tarball>
 set -euo pipefail
@@ -105,8 +106,8 @@ echo "--- npm ls @aztec/stdlib (conflict host) ---"
 echo "conflict host @aztec/stdlib install locations: $(count_stdlib "$CONFLICT")"
 
 # The decisive gate: the exact host — the supported case — MUST resolve to a single @aztec/stdlib. The
-# conflict host is diagnostic only (default npm may nest a duplicate; that is exactly why the SDK keeps
-# exact-pinned deps rather than peers — see the F13 ledger entry).
+# conflict host is diagnostic only: default npm nests a duplicate here (deps degrade gracefully), whereas
+# peers would ERESOLVE-fail the install — see the F13 ledger entry + evidence/f13-peer-vs-deps.sh.
 if [ "$EXACT_COUNT" != "1" ]; then
   echo "::error::exact-host resolved $EXACT_COUNT copies of @aztec/stdlib; expected a singleton graph" >&2
   exit 1

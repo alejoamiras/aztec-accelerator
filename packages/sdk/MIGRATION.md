@@ -87,11 +87,13 @@ The new `AcceleratorProtocol` type (`"http" | "https"`) is exported for convenie
 ### Prove errors now degrade to WASM or throw a TYPED error — never a raw `ky` error
 
 The accelerator is an optimisation, so `createChonkProof` **falls back to WASM** for every recognised
-transient/denial/capacity/version condition (403 denial, `version_not_allowed`, `authorization_cooldown`,
-408, 413, 429, 503, and 500 `download_failed`/`prove_failed`). What used to leak a raw `ky` `HTTPError` to
-your dApp — a caller **misconfiguration** (`400 invalid_version` / `invalid_origin`) or an unrecognised
-status/code — now throws a typed [`AcceleratorHttpError`] (exported from the barrel) with `.status` and
-`.code`, so a real integration bug is surfaced instead of masked as "slow but working":
+transient/denial/capacity/version condition. The degrade set is matched by status, not exhaustively by
+code: **every** `403` (a denial, `version_not_allowed`, or `authorization_cooldown`) and **every** `408` /
+`413` / `429` / `503` falls back regardless of its `code`, plus `500` with `download_failed`/`prove_failed`.
+What used to leak a raw `ky` `HTTPError` to your dApp — a caller **misconfiguration**
+(`400 invalid_version` / `invalid_origin`), a `500` with an **unrecognised** code, or any other unexpected
+status — now throws a typed [`AcceleratorHttpError`] (exported from the barrel) with `.status` and `.code`,
+so a real integration bug is surfaced instead of masked as "slow but working":
 
 ```ts
 import { AcceleratorHttpError } from "@alejoamiras/aztec-accelerator";
@@ -106,12 +108,13 @@ try {
 ```
 
 **Behaviour change (was: always degrade).** Previously EVERY `/prove` HTTP error — including the HTTP
-downgrade-retry path — fell back to WASM. Now a `400 invalid_version` / `invalid_origin`, or any
-unrecognised status/code, throws `AcceleratorHttpError` on BOTH the primary and the retry path. A dApp that
-relied on the old always-degrade behaviour to swallow a misconfiguration (e.g. with
-`allowInsecureDowngrade`) will now see the error surface — intentionally, so a real integration bug isn't
-hidden. Recognised transient/denial/version/capacity failures still degrade silently. Wrap
-`createChonkProof` if you prefer to force-degrade regardless.
+downgrade-retry path — fell back to WASM. Now a `400` (`invalid_version`/`invalid_origin`), a `500` with an
+unrecognised code, or any other unexpected status throws `AcceleratorHttpError` on BOTH the primary and the
+retry path. (Every `403` and every `408`/`413`/`429`/`503` still degrades regardless of code — the throw
+set is only misconfiguration + genuinely unexpected responses.) A dApp that relied on the old always-degrade
+behaviour to swallow a misconfiguration (e.g. with `allowInsecureDowngrade`) will now see the error
+surface — intentionally, so a real integration bug isn't hidden. Wrap `createChonkProof` if you prefer to
+force-degrade regardless.
 
 ### New `"version-mismatch"` phase
 

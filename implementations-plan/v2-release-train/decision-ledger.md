@@ -275,20 +275,27 @@ only in the last cohorts. Implementation may begin at B2.
 
 - **D-C29 OUTCOME (F13) — VERDICT: KEEP DEPS (no `peerDependencies`).** Predeclared bar (D-C13/D-C29):
   default `npm install` is the decisive test; the exact-host (5.0.1) must yield a SINGLETON `@aztec/stdlib`
-  graph, and a conflicting/patch-ahead host must not silently produce a working nested dup that peers would
-  have prevented. Evidence is produced live by the new `tarball-consumer` CI job
-  (`scripts/sdk-tarball-consumer.sh`): it packs the real tarball and installs it with default npm into an
-  exact-host (asserted singleton — the gate) and a conflicting-host (5.0.0, recorded). Since default npm
-  (≥7) auto-installs peers, declaring `@aztec/*` as peers would NOT change the exact-host graph and would
-  NOT stop a mismatched host's nested dup — it buys nothing over the exact-pinned deps that already
-  vetted-once-frozen-forever the resolution (bunfig `minimumReleaseAge` + frozen lockfile). No manifest
-  change; the `dependencies` stay exact-pinned. The `--strict-peer-deps` runs remain informational only.
-  - **codex B7 #3 dispute (peers favoured) — considered, verdict HELD.** codex argues the cross-package
-    Aztec types + a conflicting host's nested duplicate favour peers. But the DECISIVE, plan-ratified test
-    (D-C29) is DEFAULT `npm install`, and there `peerDependencies` do NOT reject a conflicting host — npm
-    ≥7 auto-installs the peer and, on a version conflict, NESTS a duplicate with a warning, exactly as it
-    does for a normal dependency. Peers only differ under `--strict-peer-deps` (which ERRORS), and that is
-    opt-in and unrepresentative of real consumers (the reason D-C29 de-scoped it). So under the resolver a
-    real dApp uses, peers change neither the exact-host singleton nor the conflicting-host dup — they add a
-    manifest surface for no behavioural gain. The exact-host singleton is the GATE; the conflicting host is
-    logged (informational) because default npm's nesting there is expected and identical for deps or peers.
+  graph, and a version-skewed host must not be silently mis-resolved. Two independent empirical checks
+  settle it:
+  1. **Exact-host singleton (the shipped gate).** `scripts/sdk-tarball-consumer.sh` (the `tarball-consumer`
+     CI job) packs the REAL tarball and installs it with default npm into an exact-host (5.0.1), asserting a
+     single `@aztec/stdlib`. Exact-pinned deps already deliver "one @aztec graph" for the normal case, so
+     peers could not improve on it.
+  2. **Conflict-host: deps degrade gracefully, peers HARD-FAIL.** `implementations-plan/v2-release-train/`
+     `evidence/f13-peer-vs-deps.sh` (package/version-agnostic; captured 2026-08-17, npm 10) installs a
+     package wanting a newer exact version than the host pins, declared once as a dep and once as a peer:
+     default `npm install` SUCCEEDS for the dep (the dependent gets its own nested copy — 2 in the tree, and
+     it binds to its correct version) and FAILS with **ERESOLVE** for the peer — on the DEFAULT resolver,
+     not only `--strict-peer-deps`, because a direct/root peer conflict has no valid at-or-above placement
+     (npm RFC 25). For a drop-in SDK that must "just install and fall back to WASM", peers converting a
+     consumer/@aztec skew into a blocked `npm install` is strictly worse than deps letting it install with
+     the SDK bound to its vetted version. No manifest change; `dependencies` stay exact-pinned
+     (`minimumReleaseAge` + frozen lockfile keep the resolution vetted-once-frozen-forever).
+  - **codex B7 #3 (peers favoured) — codex was RIGHT on the mechanic; verdict still HELD, for the corrected
+    reason.** My first rebuttal claimed peers "nest a duplicate exactly like a dep" under default npm — that
+    is FALSE (check #2 shows ERESOLVE, as codex argued from RFC 25). But the corrected fact REINFORCES
+    KEEP DEPS instead of favouring peers: peers would block install on ANY version skew, whereas deps
+    succeed with the SDK on its exact vetted @aztec (a duplicate graph is the only cost, and only off the
+    exact-match host — which check #1 proves dedupes to a singleton). Cross-package Aztec type identity is a
+    real concern only when a host actually shares the graph, i.e. the exact-match case, where deps and peers
+    are identical. Recorded as a self-error corrected by review.
