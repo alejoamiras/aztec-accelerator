@@ -640,9 +640,15 @@ jobs:
   # anchor (codex F-consult: keep `tag`, don't retire it).
   tag:
     name: Create Git Tag
-    needs: [validate, packaged-e2e-on-draft]
-    # F-005: skip in auth_probe mode so a probe never pushes a tag.
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' }}
+    needs: [validate, release, packaged-e2e-on-draft]
+    # F-005: skip in auth_probe mode so a probe never pushes a tag. always()+!cancelled()+explicit .result
+    # gating (NOT implicit success(), which the RC's skipped sign-update-feed would poison — codex F-review).
+    # `release` is a DIRECT need with its own success gate, so a future packaged-condition edit can never
+    # weaken the tag's prerequisites.
+    if: >-
+      ${{ always() && !cancelled() && !inputs.auth_probe && inputs.mode == 'publish'
+      && needs.validate.result == 'success' && needs.release.result == 'success'
+      && needs.packaged-e2e-on-draft.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1069,7 +1075,14 @@ jobs:
   packaged-e2e-on-draft:
     name: Packaged E2E on draft
     needs: [validate, release]
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' }}
+    # RC safety (codex F-review): `release` runs via always() to tolerate the skipped RC sign-update-feed,
+    # but that skip poisons a DESCENDANT's IMPLICIT success() — so this gate (and tag/finalize) MUST carry
+    # their own status function or GitHub silently skips them (it did: the first RC to reach here drafted but
+    # never published). always()+!cancelled() only lifts the hidden scheduler veto; the explicit .result
+    # checks stay the authorization policy.
+    if: >-
+      ${{ always() && !cancelled() && !inputs.auth_probe && inputs.mode == 'publish'
+      && needs.validate.result == 'success' && needs.release.result == 'success' }}
     permissions:
       contents: read
     uses: ./.github/workflows/_e2e-packaged.yml
@@ -1086,10 +1099,12 @@ jobs:
   finalize:
     name: Publish release (finalize)
     needs: [validate, release, packaged-e2e-on-draft, tag]
-    # codex F-review: EXPLICIT success of ALL needs (none of these skip in publish mode; a skip must not
-    # publish an ungated draft).
+    # codex F-review: EXPLICIT success of ALL needs. always()+!cancelled() up front so the RC's skipped
+    # sign-update-feed can't poison this job's implicit success() and silently skip the publish (it did,
+    # pre-fix: the first RC to reach here drafted but never finalized). The explicit .result==success chain
+    # stays the authorization policy — a skipped OR failed gate/tag can NEVER publish an ungated draft.
     if: >-
-      ${{ !inputs.auth_probe && inputs.mode == 'publish'
+      ${{ always() && !cancelled() && !inputs.auth_probe && inputs.mode == 'publish'
       && needs.validate.result == 'success'
       && needs.release.result == 'success'
       && needs.packaged-e2e-on-draft.result == 'success'

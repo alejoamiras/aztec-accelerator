@@ -168,4 +168,27 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
       );
     }
   });
+
+  test("prerelease publish DAG is scheduled (own status fn) yet still can't publish an ungated draft", () => {
+    // The RC's skipped `sign-update-feed` poisoned the IMPLICIT success() of the packaged gate / tag /
+    // finalize (transitive via `release`'s always()), so the first RC to reach them drafted but never
+    // published. Each MUST carry its own status function (always()+!cancelled()) so GitHub schedules it,
+    // while the explicit `.result == 'success'` chain stays the authorization policy.
+    // [mut: drop `always()` from any of the three → the RC silently skips publish again; drop a
+    //  `.result == 'success'` guard → an ungated/failed gate could publish]
+    for (const [job, needResult] of [
+      ["Packaged E2E on draft", "needs.release.result == 'success'"],
+      ["Create Git Tag", "needs.packaged-e2e-on-draft.result == 'success'"],
+      ["Publish release (finalize)", "needs.tag.result == 'success'"],
+    ] as const) {
+      const esc = job.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const escNeed = needResult.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      expect(WF, `${job}: carries its own always()+!cancelled() status function`).toMatch(
+        new RegExp(`${esc}[\\s\\S]{0,700}?always\\(\\) && !cancelled\\(\\)`),
+      );
+      expect(WF, `${job}: keeps its explicit .result authorization gate`).toMatch(
+        new RegExp(`${esc}[\\s\\S]{0,900}?${escNeed}`),
+      );
+    }
+  });
 });
