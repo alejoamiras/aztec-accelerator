@@ -14,12 +14,18 @@ const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.met
 describe("public contract (F-05 doc-sync guard)", () => {
   test("barrel exports the runtime + type surface", () => {
     expect(typeof sdk.AcceleratorProver).toBe("function");
+    // B7: the typed error + the api-version constant are runtime values on the barrel.
+    expect(typeof sdk.AcceleratorHttpError).toBe("function");
+    expect(sdk.ACCELERATOR_API_VERSION).toBe(1);
     // Typed consts force the type-only barrel exports to resolve — dropping one from the barrel
     // (how AcceleratorProtocol went missing) becomes a `tsc --noEmit` compile error right here.
     const protocol: AcceleratorProtocol = "https";
     const phase: AcceleratorPhase = "proving";
+    // B7: pins the new `version-mismatch` phase into the barrel's type surface.
+    const versionPhase: AcceleratorPhase = "version-mismatch";
     expect(protocol).toBe("https");
     expect(phase).toBe("proving");
+    expect(versionPhase).toBe("version-mismatch");
   });
 
   test("README documents the discriminated union, not the obsolete flat interface", () => {
@@ -34,7 +40,12 @@ describe("public contract (F-05 doc-sync guard)", () => {
     expect(read("../../.claude/skills/aztec-accelerator/SKILL.md")).toContain("`denied`");
   });
 
-  test("MIGRATION references AcceleratorProtocol (now delivered by the barrel)", () => {
-    expect(read("../../MIGRATION.md")).toContain("AcceleratorProtocol");
+  test("MIGRATION references AcceleratorProtocol + the typed error, and SHIPS in the tarball (F15)", () => {
+    const migration = read("../../MIGRATION.md");
+    expect(migration).toContain("AcceleratorProtocol");
+    expect(migration).toContain("AcceleratorHttpError");
+    // F15: MIGRATION.md must be in `files` — otherwise npm never packs it and consumers never see it.
+    const pkg = JSON.parse(read("../../package.json"));
+    expect(pkg.files).toContain("MIGRATION.md");
   });
 });

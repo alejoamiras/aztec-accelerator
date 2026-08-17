@@ -1,7 +1,8 @@
 import ky from "ky";
 import ms from "ms";
-// q7e3-F-02: import shared types from the neutral module, not back from the prover (kills the 2-way edge).
 import type { AcceleratorProtocol, AcceleratorStatus } from "./types.js";
+// q7e3-F-02: import shared types from the neutral module, not back from the prover (kills the 2-way edge).
+import { ACCELERATOR_API_VERSION } from "./types.js";
 
 /** How long a probed {@link AcceleratorStatus} stays fresh before a re-probe. */
 const STATUS_CACHE_TTL_MS = 10_000;
@@ -159,7 +160,7 @@ export type ProtocolTransition =
 export function isRecognizedHealthBody(body: unknown): boolean {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
   const b = body as Record<string, unknown>;
-  return b.status === "ok" && b.api_version === 1;
+  return b.status === "ok" && b.api_version === ACCELERATOR_API_VERSION;
 }
 
 /**

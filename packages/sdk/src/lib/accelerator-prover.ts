@@ -5,6 +5,7 @@ import { ChonkProofWithPublicInputs } from "@aztec/stdlib/proofs";
 import { HTTPError } from "ky";
 import sdkPkg from "../../package.json" with { type: "json" };
 import { AcceleratorTransport, isRecognizedHealthBody } from "./accelerator-transport.js";
+import { AcceleratorHttpError, parseServerError } from "./errors.js";
 import { logger } from "./logger.js";
 // q7e3-F-02: published types now live in ./types.ts (a neutral module); index.ts re-exports them.
 import type {
@@ -227,7 +228,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           gen,
         );
       }
-      const data = body as { aztec_version?: string; available_versions?: string[] };
+      const data = body as {
+        aztec_version?: string;
+        available_versions?: string[];
+        version?: string;
+        api_version?: number;
+      };
 
       // q7e3-F-05: the version-policy decision is a pure function — a reachable, recognized /health
       // always pins the winning protocol (`set`); only the available/needsDownload/mismatch shape varies.
@@ -252,12 +258,20 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    * those) — so the policy is isolated and unit-testable. Behavior-identical to the prior inline branches.
    */
   #classifyHealth(
-    data: { aztec_version?: string; available_versions?: string[] },
+    data: {
+      aztec_version?: string;
+      available_versions?: string[];
+      version?: string;
+      api_version?: number;
+    },
     protocol: AcceleratorProtocol,
     sdkAztecVersion: string | undefined,
   ): AcceleratorStatus {
     const acceleratorVersion = data.aztec_version;
     const availableVersions = data.available_versions;
+    // B7: surface the accelerator APP version + the negotiated api_version (were parsed then discarded).
+    const appVersion = data.version;
+    const apiVersion = data.api_version;
 
     // New multi-version protocol: the SDK's version just needs to be in the cached set.
     if (availableVersions) {
@@ -274,6 +288,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         acceleratorVersion,
         availableVersions,
         sdkAztecVersion,
+        appVersion,
+        apiVersion,
         protocol,
       };
     }
@@ -298,7 +314,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       };
     }
 
-    return { available: true, needsDownload: false, acceleratorVersion, sdkAztecVersion, protocol };
+    return {
+      available: true,
+      needsDownload: false,
+      acceleratorVersion,
+      sdkAztecVersion,
+      appVersion,
+      apiVersion,
+      protocol,
+    };
   }
 
   async createChonkProof(
@@ -396,38 +420,6 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     try {
       res = await this.#transport.postProve(new Uint8Array(msgpack), aztecVersion, attemptUrl);
     } catch (err) {
-      // 403: user denied this site, or authorization timed out — fall back to WASM
-      if (err instanceof HTTPError && err.response.status === 403) {
-        // ky 2.x pre-parses the error body into err.data (response body is already consumed).
-        const body =
-          err.data && typeof err.data === "object"
-            ? (err.data as { error?: string; message?: string })
-            : undefined;
-        logger.warn("Accelerator denied this origin, falling back to WASM", {
-          error: body?.error,
-          message: body?.message,
-        });
-        this.#onPhase?.("denied");
-        return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
-      }
-      // 503: the accelerator cannot serve this proof right now — it is shutting down, or the cached
-      // bb for this version is being evicted. Degrade rather than fail: the accelerator is an
-      // optimisation, and this file's own rule is to fall back to WASM rather than fail the dApp.
-      //
-      // Without this a 503 fell through to `throw err` below, because the network-failure branch is
-      // gated on `!(err instanceof HTTPError)` and an HTTP 503 is one. That made "quit the app
-      // mid-proof" a hard transaction failure, and the accelerator's version-eviction path would have
-      // added a second way to hit it.
-      //
-      // Deliberately 503 only, not all 5xx: a blanket rule would silently mask genuine
-      // misconfiguration (an oversize payload, say) as "slow but working".
-      if (err instanceof HTTPError && err.response.status === 503) {
-        logger.warn("Accelerator is unavailable (503), falling back to WASM");
-        return this.#fallbackToWasm(
-          executionSteps,
-          "Local proof completed while the accelerator was unavailable",
-        );
-      }
       // Network-level failure: no HTTP response at all (TLS handshake/cert failure, connection
       // refused, timeout). The HTTPS listener/trust may have changed since /health pinned it.
       if (!(err instanceof HTTPError)) {
@@ -501,24 +493,19 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             // to WASM. The sibling call on the non-retry path already awaited; this one did not.
             return await this.#decodeProof(res, start);
           } catch (retryErr) {
-            if (retryErr instanceof HTTPError && retryErr.response.status === 403) {
-              this.#onPhase?.("denied");
-              return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
-            }
-            if (retryErr instanceof HTTPError && retryErr.response.status === 503) {
-              logger.warn("Accelerator is unavailable (503) on retry, falling back to WASM");
+            // A network-level retry failure (no HTTP response) still degrades to WASM; an HTTP error the
+            // accelerator returned goes through the SAME F14 classifier as the primary path — so a
+            // misconfiguration surfaced only on the HTTP retry is not silently masked either.
+            if (!(retryErr instanceof HTTPError)) {
+              logger.warn("HTTP retry failed at the network layer, falling back to WASM", {
+                error: String(retryErr),
+              });
               return this.#fallbackToWasm(
                 executionSteps,
-                "Local proof completed while the accelerator was unavailable",
+                "Local proof completed after transport failure",
               );
             }
-            logger.warn("HTTP retry also failed, falling back to WASM", {
-              error: String(retryErr),
-            });
-            return this.#fallbackToWasm(
-              executionSteps,
-              "Local proof completed after transport failure",
-            );
+            return this.#fallbackOrThrowHttp(retryErr, executionSteps);
           }
         }
         // Strict httpsOnly (never retry plaintext), OR the attempt was already HTTP (nothing better to
@@ -532,7 +519,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           "Local proof completed after transport failure",
         );
       }
-      throw err;
+      // `err` is an HTTPError the accelerator returned — F14: recognised conditions degrade to WASM, a
+      // caller misconfiguration / unrecognised status throws a typed `AcceleratorHttpError` (never a raw
+      // `ky` error, which is not part of the SDK's public surface).
+      return this.#fallbackOrThrowHttp(err, executionSteps);
     }
 
     // Decode OUTSIDE the transport try/catch — a decode failure is not a transport failure and must
@@ -596,6 +586,72 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     logger.info(logLabel, { durationMs });
     this.#onPhase?.("proved", { durationMs });
     return proof;
+  }
+
+  /**
+   * B7 (F14): classify an HTTP error the accelerator returned from `/prove` and either degrade to WASM or
+   * throw {@link AcceleratorHttpError}. The accelerator is an optimisation, so EVERY recognised
+   * denial / version / cooldown / capacity / transient condition falls back to local proving. Only a
+   * caller MISCONFIGURATION (`400 invalid_version` / `invalid_origin`) or an UNRECOGNISED status/code
+   * throws — masking those as "slow but working" WASM would hide a real integration bug.
+   *
+   * The server sends its error body as `text/plain` carrying a JSON string, so the stable `code` is
+   * recovered via {@link parseServerError} (a JSON content-type gives an object; both are handled).
+   */
+  async #fallbackOrThrowHttp(
+    err: HTTPError,
+    executionSteps: PrivateExecutionStep[],
+  ): Promise<ChonkProofWithPublicInputs> {
+    const status = err.response.status;
+    const { code, message } = parseServerError(err.data);
+
+    if (status === 403) {
+      // The accelerator refused this SDK's Aztec version — distinct from a user/origin denial, and worth
+      // its own phase so the UI can say "update the accelerator" rather than "you denied it".
+      if (code === "version_not_allowed") {
+        logger.warn("Accelerator refused this SDK's Aztec version, falling back to WASM", { code });
+        this.#onPhase?.("version-mismatch");
+        return this.#fallbackToWasm(
+          executionSteps,
+          "Local proof completed after an accelerator version mismatch",
+        );
+      }
+      // A recent denial is still in cooldown (B2 F9). This is NOT a fresh prompt, so do NOT re-emit the
+      // "denied" phase — just degrade quietly.
+      if (code === "authorization_cooldown") {
+        logger.warn("Accelerator is in an authorization cooldown, falling back to WASM", { code });
+        return this.#fallbackToWasm(
+          executionSteps,
+          "Local proof completed during an authorization cooldown",
+        );
+      }
+      // origin_denied / authorization_timeout / authorization_cancelled / a bare "denied" / no code.
+      logger.warn("Accelerator denied this origin, falling back to WASM", { code, message });
+      this.#onPhase?.("denied");
+      return this.#fallbackToWasm(executionSteps, "Local proof completed after denial");
+    }
+
+    // Transient/capacity conditions the accelerator itself signalled — degrade rather than fail the dApp.
+    // 503 (shutting down / version-evicting), 408 (body_read_timeout), 413 (payload_too_large),
+    // 429 (too_many_requests / prove_queue_full), and 500 with a RECOGNISED code (download_failed /
+    // prove_failed). A 500 with an unknown code falls through to the throw — an unrecognised server fault.
+    if (
+      status === 503 ||
+      status === 408 ||
+      status === 413 ||
+      status === 429 ||
+      (status === 500 && (code === "download_failed" || code === "prove_failed"))
+    ) {
+      logger.warn("Accelerator could not serve this proof, falling back to WASM", { status, code });
+      return this.#fallbackToWasm(
+        executionSteps,
+        "Local proof completed while the accelerator was unavailable",
+      );
+    }
+
+    // 400 invalid_version / invalid_origin (the SDK is misconfigured for this accelerator), or ANY other
+    // status/code the SDK does not recognise. Surface it typed — never mask a misconfiguration as WASM.
+    throw new AcceleratorHttpError(status, code, message);
   }
 
   /**

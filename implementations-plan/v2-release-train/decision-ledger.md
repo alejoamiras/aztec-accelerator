@@ -270,3 +270,16 @@ Deep-tier protocol fully executed: recon (6 agents, 17 forks) -> 3 independent l
 pass (7 findings/2 blockers/1 ruling) -> confirmation (3 nits). 5 revisions. 13 self-errors caught
 and logged. Cohorts B2/B3/B5/B7 audit-clean; B6/B4 carry defined owner-decision points reached
 only in the last cohorts. Implementation may begin at B2.
+
+## B7 outcomes (in-cohort)
+
+- **D-C29 OUTCOME (F13) — VERDICT: KEEP DEPS (no `peerDependencies`).** Predeclared bar (D-C13/D-C29):
+  default `npm install` is the decisive test; the exact-host (5.0.1) must yield a SINGLETON `@aztec/stdlib`
+  graph, and a conflicting/patch-ahead host must not silently produce a working nested dup that peers would
+  have prevented. Evidence is produced live by the new `tarball-consumer` CI job
+  (`scripts/sdk-tarball-consumer.sh`): it packs the real tarball and installs it with default npm into an
+  exact-host (asserted singleton — the gate) and a conflicting-host (5.0.0, recorded). Since default npm
+  (≥7) auto-installs peers, declaring `@aztec/*` as peers would NOT change the exact-host graph and would
+  NOT stop a mismatched host's nested dup — it buys nothing over the exact-pinned deps that already
+  vetted-once-frozen-forever the resolution (bunfig `minimumReleaseAge` + frozen lockfile). No manifest
+  change; the `dependencies` stay exact-pinned. The `--strict-peer-deps` runs remain informational only.

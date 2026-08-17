@@ -1,0 +1,55 @@
+// B7 (F14): the SDK's ONE typed error. The accelerator is an optimisation, so the prover degrades to
+// WASM for every RECOGNISED transient/denial/version/capacity condition (see the fallback table in
+// `accelerator-prover.ts`). What must NOT be masked is a caller MISCONFIGURATION — a `400 invalid_version`
+// / `invalid_origin`, or any status/code the SDK does not recognise: silently falling back there would
+// hide a real integration bug behind "slow but working". Those, and only those, reach the dApp as this
+// typed error instead of a raw `ky` `HTTPError` (which is not part of the SDK's public surface).
+
+/**
+ * Thrown by {@link AcceleratorProver} proving when the accelerator returns an HTTP error that indicates a
+ * MISCONFIGURATION rather than a transient/denial/capacity condition — i.e. a `400 invalid_version` /
+ * `invalid_origin`, or any unrecognised status/code. Recognised conditions degrade to WASM and never throw.
+ */
+export class AcceleratorHttpError extends Error {
+  /** HTTP status the accelerator returned. */
+  readonly status: number;
+  /** The stable server error code (e.g. `invalid_version`), when the body carried one. */
+  readonly code?: string;
+
+  constructor(status: number, code?: string, serverMessage?: string) {
+    super(
+      serverMessage ??
+        `The Aztec Accelerator rejected the request with HTTP ${status}${
+          code ? ` (${code})` : ""
+        }. This usually means the SDK is misconfigured for this accelerator.`,
+    );
+    this.name = "AcceleratorHttpError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * Recover the server's stable error `code` (and human `message`) from a `ky` `HTTPError`'s pre-parsed
+ * body. The accelerator returns its error body as `text/plain` carrying a JSON string (pinned by the Rust
+ * test `prove_error_responses_stay_text_plain`), so `ky` sets `err.data` to a STRING — the code must be
+ * `JSON.parse`d out of it. (A JSON content-type would instead give an object; both shapes are handled so
+ * tests using `Response.json(...)` and production `text/plain` agree.)
+ */
+export function parseServerError(data: unknown): { code?: string; message?: string } {
+  let obj: { error?: unknown; message?: unknown } | undefined;
+  if (typeof data === "string") {
+    try {
+      obj = JSON.parse(data);
+    } catch {
+      return {};
+    }
+  } else if (data && typeof data === "object") {
+    obj = data as { error?: unknown; message?: unknown };
+  }
+  if (!obj) return {};
+  return {
+    code: typeof obj.error === "string" ? obj.error : undefined,
+    message: typeof obj.message === "string" ? obj.message : undefined,
+  };
+}

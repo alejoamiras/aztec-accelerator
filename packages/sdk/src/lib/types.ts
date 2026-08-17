@@ -4,6 +4,14 @@ import type { CircuitSimulator } from "@aztec/simulator/client";
 // `accelerator-prover.ts` hotspot. `index.ts` re-exports them unchanged; `accelerator-transport.ts`
 // imports them here instead of back-importing from the prover — killing the former 2-way edge.
 
+/**
+ * The `/health` + `/prove` API version this SDK speaks. Bumped in lockstep with the server's own
+ * `api_version` when the wire contract changes incompatibly. Kept as a named constant (B7) rather than the
+ * `1` literal that was inlined at every check — a per-language constant that documents the negotiated
+ * version and gives one place to bump.
+ */
+export const ACCELERATOR_API_VERSION = 1;
+
 /** Sub-phases emitted during proof generation for UI animation. */
 export type AcceleratorPhase =
   | "detect"
@@ -14,7 +22,11 @@ export type AcceleratorPhase =
   | "receive"
   | "fallback"
   | "downloading"
-  | "denied";
+  | "denied"
+  // B7 (F14): the accelerator refused this SDK's Aztec version (`403 version_not_allowed`). Distinct from
+  // `"denied"` (a user/origin denial) — the proof still degrades to WASM, but the cause is a version
+  // gap the UI should surface differently.
+  | "version-mismatch";
 
 /** Data payload for the `"proved"` phase — carries the actual proving duration. */
 export interface AcceleratorPhaseData {
@@ -85,6 +97,17 @@ export type AcceleratorStatus =
       availableVersions?: string[];
       /** The Aztec version this SDK expects (from its `@aztec/stdlib` dependency). */
       sdkAztecVersion?: string;
+      /**
+       * The accelerator app's own version from `/health` (`version`) — the desktop/headless build, NOT the
+       * Aztec version. Surfaced (B7) for diagnostics/telemetry; `undefined` when the origin-tiered minimal
+       * `/health` withheld it (unapproved cross-origin).
+       */
+      appVersion?: string;
+      /**
+       * The accelerator's `/health` `api_version`. The SDK only treats an endpoint as available when this
+       * equals {@link ACCELERATOR_API_VERSION}; it is surfaced here for diagnostics.
+       */
+      apiVersion?: number;
       /** Which protocol reached the accelerator. */
       protocol: AcceleratorProtocol;
     }
