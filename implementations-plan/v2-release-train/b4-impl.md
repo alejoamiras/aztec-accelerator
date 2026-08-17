@@ -175,14 +175,37 @@ extension + a new Playwright project + the CI job.
   Note for B: `bun run dev` serves HTTP on :5173, so the HTTP page fetching `https://:59834` is an UPGRADE (fine,
   not mixed-content) and same-address-space as loopback (LNA-exempt). Pre-warm or allow a `downloading` phase.
 
-**B. Linux CI leg (reference — fully automated).** Job `needs:[build]` on `ubuntu`: install `libnss3-tools`
-(+ `libfuse2t64` if AppImage, else prefer `.deb`); download `accelerator-linux-x86_64`; install; run
-`AztecAccelerator --generate-certs-only`; `certutil -A -t C,, -n <content-hash-nick> -d sql:~/.pki/nssdb -i
-ca.pem` (the app's own store; PRESERVE the content-hash nickname `install_ca_trust` uses); write
-`~/.aztec-accelerator/config.json` with `https_enabled:true` + the harness origin in `approved_origins` (else
-the `/prove` auth popup blocks); launch the app (serves HTTPS — Linux launch is trust-decoupled, `main.rs:126`);
-set up an Aztec node (reuse `_e2e.yml`'s node setup); `npm pack` the SDK; `vite build` + `playwright test` the
-harness page. On green → the composed proof passed.
+**B. Linux CI leg (reference — fully automated) — a new reusable `_e2e-packaged.yml`.** Concrete structure
+(grounded in `_e2e-app.yml` + `_e2e-webdriver.yml` + `release-accelerator.yml:smoke`):
+- `runs-on: ubuntu-latest`, `timeout-minutes: 55`. `workflow_call` inputs: `ref`, `app_artifact`
+  (default `accelerator-linux-x86_64`), `aztec_node_url` (default `http://localhost:8080`).
+- Steps: `checkout` → `./.github/actions/setup-aztec` (`skip_cli` per node url) → `./.github/actions/
+  playwright-cache` → `./.github/actions/start-services` (the sandbox node). Then:
+- **GUI-app-on-headless-Linux needs a virtual display + tray** (from `_e2e-webdriver.yml`): `sudo apt-get
+  install -y xvfb stalonetray dbus-x11 libnss3-tools`; `Xvfb :99 -screen 0 1280x1024x24 &`; `echo
+  "DISPLAY=:99" >> $GITHUB_ENV`; start `stalonetray` + a dbus session (the app is a system-tray app). Prefer
+  the **`.deb`** (`sudo apt-get install -y ./artifact/*.deb` pulls its GTK deps) over the AppImage (needs
+  `libfuse2t64`).
+- **Bootstrap + seed:** `AztecAccelerator --generate-certs-only` (writes `~/.aztec-accelerator/certs/ca.pem`)
+  → seed the browser store: `certutil -A -t C,, -n aztec-accel-e2e-ca -d sql:$HOME/.pki/nssdb -i
+  ~/.aztec-accelerator/certs/ca.pem` (create the DB first if absent, `certutil -N --empty-password`). On Linux
+  the APP serves HTTPS trust-decoupled (`main.rs:126`), so this NSS seed is purely for the BROWSER.
+- **Config:** write `~/.aztec-accelerator/config.json` = `{"config_version":2,"https_enabled":true,
+  "auto_approve_localhost":true}` — `auto_approve_localhost:true` auto-approves the `localhost:5173` page so no
+  `/prove` auth popup is needed (simpler than listing the origin; the headless GUI has no popup surface anyway).
+- **Launch + wait:** `AztecAccelerator >/tmp/accel.log 2>&1 &`; poll `https://127.0.0.1:59834/health` (curl
+  `-k` for the poll only — the app's own health, not the trust proof).
+- **Packed SDK:** `npm pack` the SDK → install the tarball into the playground (override `workspace:*` for this
+  run, e.g. a `bun add ./aztec-accelerator-*.tgz` in a throwaway step or a `resolutions`/`overrides` swap) so
+  the proof exercises the PUBLISHED artifact, not workspace source (brief requirement). Then `bun run --cwd
+  packages/playground test:e2e:packaged` with `AZTEC_NODE_URL` set. Playwright auto-starts the Vite dev server
+  (`webServer` in the config) on :5173.
+- **EMPIRICAL UNCERTAINTIES to validate on the FIRST real CI run** (codex flagged; can't verify locally):
+  (1) does Playwright's bundled Chromium read `~/.pki/nssdb` so the seeded CA is trusted for the
+  `https://:59834` fetch? If not, the fallback is a custom `NSS`/`SSL_CERT` env or a Chromium policy — NOT
+  `ignoreHTTPSErrors` (that voids the trust proof). (2) does the tray app come up + serve HTTPS under Xvfb?
+  (3) first-proof bb download latency (the `downloading` phase) vs the 15-min test timeout — pre-warm the bb
+  cache dir if needed.
 
 **C. macOS leg.** Same, but seed via `sudo security add-trusted-cert -d -r trustRoot -k
 /Library/Keychains/System.keychain ca.pem` (bound with a timeout; on failure fall to the manual-gate residual);
