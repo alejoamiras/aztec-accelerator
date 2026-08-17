@@ -36,8 +36,13 @@ test("update now calls respond_update_prompt", async ({ page }) => {
 
   const calls = await callsFor(page, "respond_update_prompt");
   expect(calls.length).toBe(1);
-  // "Keep me updated automatically" checkbox defaults to checked
-  expect(calls[0].args).toEqual({ action: "update", autoUpdate: true });
+  // "Keep me updated automatically" checkbox defaults to checked. B2 (F8): the displayed version is
+  // echoed so the backend can bind the install to what the user saw.
+  expect(calls[0].args).toEqual({
+    action: "update",
+    autoUpdate: true,
+    displayedVersion: "1.1.0",
+  });
 });
 
 test("remind me later calls respond_update_prompt", async ({ page }) => {
@@ -48,7 +53,11 @@ test("remind me later calls respond_update_prompt", async ({ page }) => {
   const calls = await callsFor(page, "respond_update_prompt");
   expect(calls.length).toBe(1);
   // "later" always sends autoUpdate: false (hardcoded, not from checkbox)
-  expect(calls[0].args).toEqual({ action: "later", autoUpdate: false });
+  expect(calls[0].args).toEqual({
+    action: "later",
+    autoUpdate: false,
+    displayedVersion: "1.1.0",
+  });
 });
 
 test("update now shows loading text", async ({ page }) => {
@@ -77,7 +86,23 @@ test("uncheck auto-update sends autoUpdate false on Update Now", async ({ page }
   await page.getByRole("button", { name: "Update Now" }).click();
 
   const calls = await callsFor(page, "respond_update_prompt");
-  expect(calls[0].args).toEqual({ action: "update", autoUpdate: false });
+  expect(calls[0].args).toEqual({
+    action: "update",
+    autoUpdate: false,
+    displayedVersion: "1.1.0",
+  });
+});
+
+// B2 (F8): the payload echoes the version the prompt is DISPLAYING (from the URL param), which the
+// backend binds the install to. Reverting update-prompt.js to omit displayedVersion fails this.
+test("Update Now echoes the displayed version for consent binding", async ({ page }) => {
+  await page.goto("/update-prompt.html?current=2.0.0&version=2.4.1");
+
+  await page.getByRole("button", { name: "Update Now" }).click();
+
+  const calls = await callsFor(page, "respond_update_prompt");
+  expect(calls.length).toBe(1);
+  expect(calls[0].args.displayedVersion).toBe("2.4.1");
 });
 
 test("missing version params shows unknown", async ({ page }) => {

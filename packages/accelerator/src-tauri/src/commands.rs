@@ -27,11 +27,88 @@ pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
 /// state including auth_manager, config, and show_auth_popup — not a bare Default.
 pub type SharedAppState = Arc<crate::server::AppState>;
 
-/// Holds a pending, already-VERIFIED update so `respond_update_prompt` can use it directly instead of
-/// re-checking the network. Storing a `VerifiedUpdate` (not a raw plugin `Update`) means the prompt
-/// path physically cannot install anything that has not cleared both F-004 layers. Managed as Tauri
-/// state.
-pub type PendingUpdate = Arc<parking_lot::Mutex<Option<crate::updater::VerifiedUpdate>>>;
+/// Anything held pending in a [`PendingUpdateSlot`] must expose its version string, so the slot can
+/// bind consumption to the version the user actually saw (B2 / F8).
+pub trait PendingVersion {
+    fn version_string(&self) -> String;
+}
+
+impl PendingVersion for crate::updater::VerifiedUpdate {
+    fn version_string(&self) -> String {
+        self.version().to_string()
+    }
+}
+
+/// Outcome of [`PendingUpdateSlot::take_matching`].
+pub enum TakeMatching<T> {
+    /// The displayed version equalled the pending one; the item is CONSUMED and returned.
+    Match(T),
+    /// A different version is pending than the one displayed — the item is RETAINED. Carries the
+    /// pending version string so the caller can re-prompt for what would actually install.
+    Mismatch(String),
+    /// Nothing is pending (expired/cleared).
+    Empty,
+}
+
+/// Holds a pending, already-VERIFIED update so `respond_update_prompt` can install it directly instead
+/// of re-checking the network.
+///
+/// B2 (F8 — consent binding): the inner slot is PRIVATE and the ONLY extractor is [`take_matching`],
+/// which consumes the item ONLY IF the caller passes the version string the prompt is currently
+/// displaying. There is no unconditional `take`. So the update prompt physically cannot install a
+/// version the user did not consent to: a background re-check that swaps the pending update to a newer
+/// build (`set`) cannot be actioned by a click on the stale prompt — the mismatch is refused and the
+/// window re-points to the real version. Storing a `VerifiedUpdate` (not a raw plugin `Update`)
+/// additionally means nothing that failed either F-004 layer can ever be installed.
+///
+/// Generic over the payload purely so the consent logic is unit-testable with a dummy `PendingVersion`
+/// (`VerifiedUpdate` itself has a private, network-gated constructor). Managed as Tauri state via the
+/// [`PendingUpdate`] alias.
+///
+/// [`take_matching`]: PendingUpdateSlot::take_matching
+pub struct PendingUpdateSlot<T> {
+    inner: parking_lot::Mutex<Option<T>>,
+}
+
+impl<T> Default for PendingUpdateSlot<T> {
+    fn default() -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(None),
+        }
+    }
+}
+
+impl<T: PendingVersion> PendingUpdateSlot<T> {
+    /// Store a freshly-verified item, replacing any prior pending one.
+    pub fn set(&self, item: T) {
+        *self.inner.lock() = Some(item);
+    }
+
+    /// The pending version (for a re-prompt / diagnostics), without consuming.
+    pub fn pending_version(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .as_ref()
+            .map(PendingVersion::version_string)
+    }
+
+    /// B2 (F8): consume the pending item ONLY IF its version equals `displayed`. On mismatch the item
+    /// is left in place and [`TakeMatching::Mismatch`] is returned — the consent-binding choke point.
+    /// Both sides are compared as the canonical version STRING the prompt rendered from its URL param.
+    pub fn take_matching(&self, displayed: &str) -> TakeMatching<T> {
+        let mut guard = self.inner.lock();
+        match guard.as_ref().map(PendingVersion::version_string) {
+            Some(v) if v == displayed => {
+                TakeMatching::Match(guard.take().expect("slot was Some in the arm above"))
+            }
+            Some(v) => TakeMatching::Mismatch(v),
+            None => TakeMatching::Empty,
+        }
+    }
+}
+
+/// The managed pending-update slot: a [`PendingUpdateSlot`] of network-verified updates.
+pub type PendingUpdate = PendingUpdateSlot<crate::updater::VerifiedUpdate>;
 
 #[tauri::command]
 pub fn get_config(
@@ -715,6 +792,9 @@ pub fn respond_update_prompt(
     pending: tauri::State<'_, PendingUpdate>,
     action: String,
     auto_update: bool,
+    // B2 (F8): the version string the prompt is CURRENTLY displaying (from its URL param). The install
+    // proceeds only if this still equals the pending update's version — see `PendingUpdate::take_matching`.
+    displayed_version: String,
 ) -> Result<(), String> {
     require_label(window.label(), UPDATE_PROMPT_LABEL)?;
     match action.as_str() {
@@ -728,14 +808,15 @@ pub fn respond_update_prompt(
                 mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update))?;
             }
 
-            // Take the stored Update object — no redundant network re-check
-            let update = pending.lock().take();
-            match update {
-                Some(update) => {
+            // B2 (F8): consume the stored update ONLY IF it is still the version the user is looking at.
+            // No unconditional take — a background re-check that swapped the pending update since this
+            // prompt rendered cannot be installed on the stale click.
+            match pending.take_matching(&displayed_version) {
+                TakeMatching::Match(update) => {
                     tracing::info!(
                         version = %update.version(),
                         auto_update,
-                        "User clicked Update Now, downloading stored update"
+                        "User clicked Update Now, downloading the displayed update"
                     );
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -744,7 +825,21 @@ pub fn respond_update_prompt(
                         close_update_prompt(&handle);
                     });
                 }
-                None => {
+                TakeMatching::Mismatch(pending_version) => {
+                    // The pending update was swapped (e.g. a 12h background re-check found a newer signed
+                    // build) AFTER this prompt rendered `displayed_version`. Refuse to install what the
+                    // user did NOT see; retain the pending update and re-point THIS window at the real
+                    // version so they re-consent to what would actually install (F-014 class: bind the
+                    // decision to the display). Navigating the existing window — rather than close +
+                    // re-show — avoids the open_or_focus dedup dropping a synchronous re-show.
+                    tracing::warn!(
+                        displayed = %displayed_version,
+                        pending = %pending_version,
+                        "SECURITY: update-prompt version mismatch — refusing the stale-displayed install; re-prompting for the pending version"
+                    );
+                    renavigate_update_prompt(&app, &pending_version);
+                }
+                TakeMatching::Empty => {
                     tracing::warn!("No pending update found — may have expired. Closing prompt.");
                     close_update_prompt(&app);
                 }
@@ -759,6 +854,29 @@ pub fn respond_update_prompt(
         }
     }
     Ok(())
+}
+
+/// B2 (F8): re-point the open update prompt at `version` by rewriting only its query string (preserving
+/// the platform-specific `tauri://`/`http://tauri.localhost` scheme + path from the live window URL, so
+/// we never hardcode it). Reloading re-renders the version AND fires `pageshow`, which re-arms the
+/// click-steal guard for the fresh decision.
+fn renavigate_update_prompt(app: &tauri::AppHandle, version: &str) {
+    let Some(window) = app.get_webview_window("update-prompt") else {
+        return;
+    };
+    let Ok(mut url) = window.url() else {
+        return;
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    url.set_query(Some(&format!(
+        "current={}&version={}",
+        urlencoding::encode(current),
+        urlencoding::encode(version)
+    )));
+    if let Err(e) = window.navigate(url) {
+        tracing::warn!(error = %e, "Failed to re-point the update prompt after a version mismatch; closing it");
+        close_update_prompt(app);
+    }
 }
 
 fn close_update_prompt(app: &tauri::AppHandle) {
@@ -812,5 +930,52 @@ mod tests {
         assert!(sanitize_window_label("x")
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    }
+
+    // ── B2 (F8): update-consent version binding ──
+    use super::{PendingUpdateSlot, PendingVersion, TakeMatching};
+
+    /// A dummy stand-in for `VerifiedUpdate` (whose only constructor is network-gated) so the
+    /// consent-binding logic is unit-testable in isolation.
+    struct Dummy(&'static str);
+    impl PendingVersion for Dummy {
+        fn version_string(&self) -> String {
+            self.0.to_string()
+        }
+    }
+
+    #[test]
+    fn take_matching_consumes_only_on_version_match_and_retains_on_mismatch() {
+        let slot = PendingUpdateSlot::<Dummy>::default();
+
+        // Empty slot → Empty, nothing to leak.
+        assert!(matches!(slot.take_matching("2.0.0"), TakeMatching::Empty));
+
+        slot.set(Dummy("2.0.0"));
+
+        // Mismatch (the version was swapped since the prompt rendered "1.9.9"): the update is REFUSED
+        // and RETAINED. This is the security property — reverting the `v == displayed` guard so it
+        // consumes unconditionally makes `pending_version()` below return None and fails this test.
+        match slot.take_matching("1.9.9") {
+            TakeMatching::Mismatch(v) => assert_eq!(v, "2.0.0"),
+            _ => panic!("a version mismatch must not consume the pending update"),
+        }
+        assert_eq!(
+            slot.pending_version().as_deref(),
+            Some("2.0.0"),
+            "a mismatched take must leave the update in place"
+        );
+
+        // Exact match → consumed exactly once.
+        assert!(matches!(
+            slot.take_matching("2.0.0"),
+            TakeMatching::Match(_)
+        ));
+        assert_eq!(
+            slot.pending_version(),
+            None,
+            "a matched take must consume the update"
+        );
+        assert!(matches!(slot.take_matching("2.0.0"), TakeMatching::Empty));
     }
 }
