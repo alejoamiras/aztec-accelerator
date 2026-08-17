@@ -87,10 +87,13 @@ pub fn build_tray_menu(
     let github = MenuItemBuilder::with_id("open_github", "GitHub").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
+    // B3 (observability): "Show Logs" is now in EVERY build's menu — it is the only in-app path to a
+    // user's own logs (its handler `open_in_browser(&log_dir())` was never dev-gated), which matters for
+    // field diagnostics on a released build. The status item + Versions submenu stay dev-only.
+    let show_logs = MenuItemBuilder::with_id("show_logs", "Show Logs").build(app)?;
 
     if dev_mode {
         let versions_submenu = build_versions_submenu(app, bundled_version)?;
-        let show_logs = MenuItemBuilder::with_id("show_logs", "Show Logs").build(app)?;
         Ok(MenuBuilder::new(app)
             .items(&[
                 status,
@@ -108,7 +111,14 @@ pub fn build_tray_menu(
         // The status MenuItem still exists and is updated by on_status — this is
         // intentional because on_status also sets the tray tooltip, which IS visible.
         Ok(MenuBuilder::new(app)
-            .items(&[&settings, &separator, &version_text, &github, &quit])
+            .items(&[
+                &show_logs,
+                &settings,
+                &separator,
+                &version_text,
+                &github,
+                &quit,
+            ])
             .build()?)
     }
 }
