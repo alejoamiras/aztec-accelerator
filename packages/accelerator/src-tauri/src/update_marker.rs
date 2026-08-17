@@ -535,6 +535,14 @@ pub fn post_create_failure_cleanup(
 /// `default-run` define the build side; `tauri-identity.test.ts` pins all three together).
 pub const MAIN_BINARY_EXE: &str = "AztecAccelerator.exe";
 
+/// The pre-2.0 executable file name. The 1.x line shipped as `aztec-accelerator.exe`; 2.0 renamed the
+/// cargo `[[bin]]` to `MAIN_BINARY_EXE`. Tauri's NSIS updater does an unchecked
+/// `Delete $OldMainBinaryName` that races the exiting old process on a rename-crossing update; when it
+/// loses, this file survives in the install dir and — since autostart heal only repairs a `Broken`
+/// target, never a healthy-but-elsewhere one — a stale autostart entry could relaunch 1.x. We prune it
+/// on the new exe's startup. Kept beside `MAIN_BINARY_EXE` so the pair stays one source of truth.
+pub const LEGACY_MAIN_BINARY_EXE: &str = "aztec-accelerator.exe";
+
 /// The NSIS install-dir default component (`%LOCALAPPDATA%\<productName>`). Pinned by the
 /// identity test against tauri.conf.json's productName.
 pub const PRODUCT_DIR_NAME: &str = "Aztec Accelerator";
@@ -557,6 +565,34 @@ pub fn expected_install_path_from(
         _ => local_app_data?.join(PRODUCT_DIR_NAME),
     };
     Some(dir.join(MAIN_BINARY_EXE))
+}
+
+/// Pure selection for the legacy-exe prune (the effect lives in `updater.rs`). Given our running exe and
+/// the authoritative NSIS install destination (from `expected_install_path_from`, both already
+/// canonicalized by the caller), return the legacy sibling to delete, or `None` when pruning is unsafe.
+///
+/// Prune ONLY when we are the OFFICIALLY-INSTALLED main binary: a portable/copied `MAIN_BINARY_EXE` next
+/// to a user's own `aztec-accelerator.exe` must never delete it. All guards must hold:
+/// - our canonical path == the canonical install destination (proves official install, not a stray copy);
+/// - our basename is exactly `MAIN_BINARY_EXE` (case-insensitive) — never prune while we ARE the legacy name;
+/// - the candidate is CONSTRUCTED as `<install parent>/LEGACY_MAIN_BINARY_EXE` (never discovered/scanned);
+/// - the candidate is not our own path.
+pub fn legacy_cleanup_candidate(
+    current_exe: &std::path::Path,
+    install_destination: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if current_exe != install_destination {
+        return None;
+    }
+    let name = current_exe.file_name()?.to_str()?;
+    if !name.eq_ignore_ascii_case(MAIN_BINARY_EXE) {
+        return None;
+    }
+    let candidate = install_destination.parent()?.join(LEGACY_MAIN_BINARY_EXE);
+    if candidate == current_exe {
+        return None;
+    }
+    Some(candidate)
 }
 
 #[cfg(test)]
@@ -590,6 +626,32 @@ mod tests {
         );
         assert_eq!(expected_install_path_from(None, None), None);
         assert_eq!(expected_install_path_from(Some(String::new()), None), None);
+    }
+
+    // The legacy-exe prune is filesystem-destructive, so its selection predicate is guard-heavy: only an
+    // official-install main binary may delete its legacy sibling, and only the constructed sibling path.
+    #[test]
+    fn legacy_cleanup_candidate_guards() {
+        use super::{legacy_cleanup_candidate, LEGACY_MAIN_BINARY_EXE, MAIN_BINARY_EXE};
+        use std::path::Path;
+        let dir = Path::new(r"C:\Users\u\AppData\Local\Aztec Accelerator");
+        let install = dir.join(MAIN_BINARY_EXE);
+        let legacy = dir.join(LEGACY_MAIN_BINARY_EXE);
+
+        // Official install (our canonical path == the canonical NSIS destination): prune the CONSTRUCTED
+        // sibling — never a discovered/scanned name.
+        assert_eq!(
+            legacy_cleanup_candidate(&install, &install),
+            Some(legacy.clone())
+        );
+
+        // Copied/portable exe (or any path ≠ the official destination): never prune — the neighbouring
+        // `aztec-accelerator.exe` could be a user's own unrelated file.
+        let portable = Path::new(r"D:\portable").join(MAIN_BINARY_EXE);
+        assert_eq!(legacy_cleanup_candidate(&portable, &install), None);
+
+        // Running AS the legacy basename (defensive — never target ourselves through this path).
+        assert_eq!(legacy_cleanup_candidate(&legacy, &legacy), None);
     }
 
     use super::*;

@@ -687,6 +687,98 @@ fn canonicalize_expected(p: std::path::PathBuf) -> std::path::PathBuf {
     p
 }
 
+/// Delete a resolved legacy exe with a bounded retry. The old process may still hold a handle for a beat
+/// after the update relaunches us, so a single `remove_file` can lose the race (exactly the flaw in
+/// Tauri's installer delete this backstops). Retry ~5s (25 × 200ms, matching the predecessor/server
+/// tolerances elsewhere); `NotFound` is success; on exhaustion log and keep running — the next startup
+/// retries, and we NEVER rewrite autostart here. Compiled under `test` too so the effect is unit-testable
+/// off-Windows.
+#[cfg(any(target_os = "windows", test))]
+fn prune_legacy_file(legacy: &std::path::Path) {
+    match std::fs::symlink_metadata(legacy) {
+        Ok(md) if md.is_dir() => return, // only ever a file/symlink — never a directory
+        Ok(_) => {}
+        Err(_) => return, // absent ⇒ nothing to do
+    }
+    for attempt in 1..=25u32 {
+        match std::fs::remove_file(legacy) {
+            Ok(()) => {
+                tracing::info!("pruned surviving legacy exe after rename-update");
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if attempt == 25 => {
+                tracing::error!(
+                    "could not prune legacy exe after 25 attempts (retry next startup): {e}"
+                );
+                return;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
+}
+
+/// Backstop for Tauri's racy NSIS `Delete $OldMainBinaryName` on a rename-crossing update
+/// (1.x `aztec-accelerator.exe` → 2.0 `AztecAccelerator.exe`). Runs on every startup of the
+/// OFFICIALLY-INSTALLED app, AFTER the update-marker reconcile and BEFORE the autostart heal — a deleted
+/// legacy target makes any stale autostart pointer `Broken`, which the existing heal then repairs. No-op
+/// unless our canonical path is the canonical NSIS destination (see `legacy_cleanup_candidate`), so a
+/// portable/copied binary can never delete a user's unrelated `aztec-accelerator.exe`.
+#[cfg(target_os = "windows")]
+pub fn cleanup_legacy_binary_after_rename() {
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    let dest = match nsis_install_destination() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!("legacy-exe prune skipped (no install destination): {e}");
+            return;
+        }
+    };
+    let current_c = canonicalize_expected(current);
+    let dest_c = canonicalize_expected(dest);
+    if let Some(legacy) = crate::update_marker::legacy_cleanup_candidate(&current_c, &dest_c) {
+        prune_legacy_file(&legacy);
+    }
+}
+
+#[cfg(test)]
+mod legacy_prune_tests {
+    use super::prune_legacy_file;
+
+    #[test]
+    fn prune_removes_only_the_target_is_idempotent_and_spares_directories() {
+        let dir = std::env::temp_dir().join(format!("aa-legacy-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("aztec-accelerator.exe");
+        let keep = dir.join("AztecAccelerator.exe");
+        std::fs::write(&legacy, b"old").unwrap();
+        std::fs::write(&keep, b"new").unwrap();
+
+        // Deletes the exact target, leaves the similarly-named current exe untouched.
+        prune_legacy_file(&legacy);
+        assert!(!legacy.exists(), "legacy exe should be pruned");
+        assert!(keep.exists(), "the current exe must never be pruned");
+
+        // Idempotent when already absent.
+        prune_legacy_file(&legacy);
+        assert!(!legacy.exists());
+
+        // Never removes a directory sitting at the path.
+        let as_dir = dir.join("some.dir");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        prune_legacy_file(&as_dir);
+        assert!(
+            as_dir.is_dir(),
+            "a directory at the path must be left alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// q7e3-F-10: structural guard for the Windows crash-recovery disarm→rearm invariant — *every* path
 /// that leaves the app running (or restarts it) must end with recovery re-armed. Previously enforced by
 /// a `// must rearm` comment at each of three exit sites. `Drop` re-arms automatically on the

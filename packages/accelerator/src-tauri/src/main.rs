@@ -735,6 +735,13 @@ fn main() {
             // this launch: "no process heals, no process rearms while a marker is live".
             {
                 if aztec_accelerator::autostart::startup_reconcile() {
+                    // Backstop Tauri's racy NSIS OldMainBinaryName delete: prune a surviving legacy exe
+                    // BEFORE the heal, so a stale autostart pointer becomes Broken and heal_if_broken
+                    // repairs it. Official install only; skipped under webdriver (E2E must not mutate the
+                    // runner's filesystem/login items).
+                    #[cfg(all(windows, not(feature = "webdriver")))]
+                    aztec_accelerator::updater::cleanup_legacy_binary_after_rename();
+
                     // The heal now runs on Windows too — the marker above is what piece 1 gated
                     // it on. Webdriver builds still skip the unattended heal (S1: E2E must not
                     // mutate a runner's real login items; the command path stays live for L7).
