@@ -189,8 +189,19 @@ async function bustStaleCrsCacheOnce(log: LogFn): Promise<void> {
  * Shared by both embedded and external wallet paths.
  */
 export async function initializeNode(log: LogFn): Promise<void> {
-  log("Creating AcceleratorProver...");
-  state.prover = new AcceleratorProver();
+  // B4 packaged-E2E harness: `?httpsOnly=true` forces the prover to HTTPS-only with NO HTTP downgrade, so
+  // when the harness serves this page against the INSTALLED desktop app a green proof positively exercises
+  // the browser⇄app TLS path (the seeded CA trust) — never a silent HTTP or WASM shortcut. Absent the param,
+  // real users keep the normal dual HTTP/HTTPS probe. Paired with `?forceProofs=true` so proving actually runs.
+  const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
+  log(
+    httpsOnly
+      ? "Creating AcceleratorProver (HTTPS-only, packaged-E2E)..."
+      : "Creating AcceleratorProver...",
+  );
+  state.prover = httpsOnly
+    ? new AcceleratorProver({ accelerator: { httpsOnly: true, allowInsecureDowngrade: false } })
+    : new AcceleratorProver();
 
   log("Connecting to Aztec node...");
   state.node = createAztecNodeClient(AZTEC_NODE_URL);
@@ -457,14 +468,17 @@ export async function deployTestAccount(
   const steps: StepTiming[] = [];
   const totalStart = Date.now();
   const proveTracker = createProveTracker();
-  state.prover?.setOnPhase(
-    onPhase
-      ? (phase, data) => {
-          if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
-          onPhase(phase, data);
-        }
-      : null,
-  );
+  // B4 packaged-E2E witness: expose the raw phase trail on `window` so the composed-proof spec can assert the
+  // accelerated path was USED (a `receive` phase, and NO `fallback`). The network `/prove`-header witness
+  // proves native bb RAN, but proof decode can still fall back to WASM afterward (accelerator-prover.ts), so
+  // the phase trail is the complementary check. Reset per deploy; harmless in prod (an unused window field).
+  const phaseSink = window as typeof window & { __ACCEL_PHASES__?: AcceleratorPhase[] };
+  phaseSink.__ACCEL_PHASES__ = [];
+  state.prover?.setOnPhase((phase, data) => {
+    phaseSink.__ACCEL_PHASES__?.push(phase);
+    if (phase === "proved" && data?.durationMs) proveTracker.set(data.durationMs);
+    onPhase?.(phase, data);
+  });
 
   const interval = setInterval(() => {
     onTick(Date.now() - totalStart);

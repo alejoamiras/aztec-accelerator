@@ -1,0 +1,487 @@
+name: _Packaged E2E (reusable)
+
+# B4 items 2-3: the COMPOSED proof gate. A real browser (Playwright's Chromium) loads the playground
+# (built against the SDK) and drives the INSTALLED desktop app to a native `bb` proof over HTTPS, with
+# HTTP-downgrade + WASM-fallback disabled. The decisive assertion lives in the spec
+# (`packages/playground/e2e/accelerator.packaged-e2e.spec.ts`): a 200 https://127.0.0.1:59834/prove carrying
+# `x-prove-duration-ms` (the server emits it only after a real bb::prove).
+#
+# Trust is seeded OUT-OF-BAND (the app's own enable_https install is interactive; see b4-impl.md): here on
+# Linux via `certutil` into the user NSS DB that Chromium reads. The app serves HTTPS trust-decoupled on Linux
+# (main.rs), so the seed is purely for the browser fetch.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to checkout
+        required: false
+        type: string
+        default: ""
+      app_artifact:
+        description: Name of the uploaded Linux installer artifact (contains the .deb)
+        required: false
+        type: string
+        default: accelerator-linux-x86_64
+      macos_app_artifact:
+        description: Name of the uploaded macOS arm64 installer artifact (contains the .dmg)
+        required: false
+        type: string
+        default: accelerator-macos-arm64
+      aztec_node_url:
+        description: Aztec node URL (skips local CLI install when not localhost)
+        required: false
+        type: string
+        default: "http://localhost:8080"
+      prev_stable_tag:
+        description: The N-1 stable release tag for the 1.0.7→2.0.0 upgrade leg (its .deb is downloaded)
+        required: false
+        type: string
+        default: accelerator-v1.0.7
+      release_tag:
+        description: >-
+          When set, download the app installers from THIS release's OWN assets (the draft-gate: prove the
+          real uploaded bytes) via `gh release download` instead of the run's build artifacts. Empty ⇒
+          build-artifact mode (PR gate / standalone).
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  packaged-e2e-linux:
+    name: Packaged E2E (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read # `gh release download` in release-asset mode
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: ./.github/actions/setup-aztec
+        with:
+          skip_cli: ${{ inputs.aztec_node_url != 'http://localhost:8080' }}
+
+      # Restore the headless-shell browser from the cache warmed on main (flaky CDN otherwise).
+      - uses: ./.github/actions/playwright-cache
+
+      - uses: ./.github/actions/start-services
+        with:
+          aztec_node_url: ${{ inputs.aztec_node_url }}
+
+      # The packaged app is a system-tray GUI (GTK/WebKit). On a headless runner it needs a virtual display,
+      # a tray host, and a dbus session — same recipe as the WebDriver E2E leg. libnss3-tools gives us
+      # `certutil` for the browser-trust seed.
+      - name: Virtual display + tray + trust tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb stalonetray dbus-x11 libnss3-tools
+          Xvfb :99 -screen 0 1280x1024x24 >/tmp/xvfb.log 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          # Let Xvfb come up, then start a system-tray host so the app's tray icon has somewhere to attach
+          # (the app is a tray app — without a host it can fail to finish bring-up). Same recipe as the
+          # WebDriver E2E leg. DISPLAY is set inline here because $GITHUB_ENV only applies to LATER steps.
+          sleep 2
+          DISPLAY=:99 stalonetray >/tmp/stalonetray.log 2>&1 &
+
+      - name: Download installer artifact (build-artifact mode)
+        if: inputs.release_tag == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: app-artifact
+
+      - name: Download installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          # The draft's own uploaded Linux installer (flatten/rename names it *Linux-x86_64.deb).
+          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
+
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
+
+      - name: Install the .deb
+        run: |
+          DEB=$(find app-artifact -name '*.deb' | head -1)
+          if [ -z "$DEB" ]; then
+            echo "::error::No .deb found in artifact '${{ inputs.app_artifact }}'"
+            ls -laR app-artifact
+            exit 1
+          fi
+          echo "Installing $DEB"
+          # apt-get resolves the .deb's own GTK/WebKit runtime deps (dpkg -i would not).
+          sudo apt-get install -y "./$DEB"
+
+      # ── Bootstrap: generate the app's real CA headlessly (no interactive trust install), then seed it
+      #    into the browser's NSS store out-of-band. See --generate-certs-only in src-tauri/main.rs. ──
+      - name: Generate certs (headless bootstrap)
+        run: AztecAccelerator --generate-certs-only
+
+      - name: Seed CA into user NSS (browser trust)
+        run: |
+          CA="$HOME/.aztec-accelerator/certs/ca.pem"
+          test -f "$CA" || { echo "::error::$CA not generated"; exit 1; }
+          mkdir -p "$HOME/.pki/nssdb"
+          certutil -N --empty-password -d "sql:$HOME/.pki/nssdb" 2>/dev/null || true
+          certutil -A -t "C,," -n aztec-accel-e2e-ca -d "sql:$HOME/.pki/nssdb" -i "$CA"
+          certutil -L -d "sql:$HOME/.pki/nssdb"
+
+      - name: Write config (HTTPS on, localhost auto-approved)
+        run: |
+          mkdir -p "$HOME/.aztec-accelerator"
+          # auto_approve_localhost:true auto-approves the localhost:5173 page (no /prove auth popup needed —
+          # the headless GUI has no popup surface). config_version:2 matches the v2 schema (B4 item 1).
+          printf '%s' '{"config_version":2,"https_enabled":true,"auto_approve_localhost":true}' \
+            > "$HOME/.aztec-accelerator/config.json"
+
+      - name: Launch the installed app + wait for HTTPS
+        run: |
+          dbus-launch AztecAccelerator >/tmp/accel.log 2>&1 &
+          echo "ACCEL_PID=$!" >> "$GITHUB_ENV"
+          # -k here only proves the app is SERVING TLS; the real trust check is the browser's fetch in the spec.
+          for i in $(seq 1 45); do
+            if curl -ksf https://127.0.0.1:59834/health >/dev/null 2>&1; then
+              echo "App serving HTTPS on :59834 (attempt $i)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::App did not serve HTTPS within 90s"
+          cat /tmp/accel.log 2>/dev/null || true
+          exit 1
+
+      # Point the playground at the PACKED SDK tarball (not the workspace source), so the composed proof
+      # exercises the PUBLISHED artifact — the brief's "packed SDK" requirement (codex harness review).
+      - name: Pack the SDK + install the tarball into the playground
+        run: bash .github/scripts/packaged-e2e-swap-sdk.sh
+
+      - name: Run packaged-E2E (composed proof)
+        env:
+          AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
+        run: bun run --cwd packages/playground test:e2e:packaged
+
+      - name: Upload app log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-e2e-linux-logs
+          path: |
+            /tmp/accel.log
+            /tmp/xvfb.log
+            /tmp/aztec-node.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: kill "$ACCEL_PID" 2>/dev/null || true
+
+  packaged-e2e-macos:
+    name: Packaged E2E (macos)
+    runs-on: macos-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read # `gh release download` in release-asset mode
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: ./.github/actions/setup-aztec
+        with:
+          skip_cli: ${{ inputs.aztec_node_url != 'http://localhost:8080' }}
+
+      # The playwright-cache action is Linux-only (GNU `timeout`), so install the browser directly on macOS.
+      - name: Install Playwright browser
+        run: bunx playwright install chromium
+
+      - uses: ./.github/actions/start-services
+        with:
+          aztec_node_url: ${{ inputs.aztec_node_url }}
+
+      - name: Download installer artifact (build-artifact mode)
+        if: inputs.release_tag == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.macos_app_artifact }}
+          path: app-artifact
+
+      - name: Download installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          # The draft's own uploaded macOS arm64 DMG (flatten/rename names it *macOS-Apple-Silicon.dmg).
+          gh release download "$TAG" --pattern '*macOS-Apple-Silicon.dmg' --dir app-artifact
+
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
+
+      # Install to /Applications (a real installed copy), not run-from-DMG — the composed gate should exercise
+      # the installed state (paths, autostart) the way a user gets it (codex harness review).
+      - name: Install the .app to /Applications
+        run: |
+          DMG=$(find app-artifact -name '*.dmg' | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::No .dmg found in artifact '${{ inputs.macos_app_artifact }}'"
+            ls -laR app-artifact
+            exit 1
+          fi
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator
+          APP=$(find /Volumes/AztecAccelerator -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP" || { echo "::error::.app not found in DMG"; find /Volumes/AztecAccelerator -type f; exit 1; }
+          cp -R "$APP" /Applications/
+          hdiutil detach /Volumes/AztecAccelerator || true
+          BIN=$(find /Applications -maxdepth 3 -name AztecAccelerator -path '*/MacOS/*' | head -1)
+          test -n "$BIN" || { echo "::error::installed app binary not found under /Applications"; exit 1; }
+          echo "APP_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Generate certs (headless bootstrap)
+        run: '"$APP_BIN" --generate-certs-only'
+
+      # macOS: the app's LAUNCH gates on trust (unlike Linux), so seed the System keychain BEFORE launch.
+      # `security add-trusted-cert -d` writes the admin/System domain (GH runners have passwordless sudo);
+      # the app's predicate `security verify-cert -l -L` reads the default search list (incl. System), and
+      # Playwright's Chromium on macOS honours the System keychain for the browser fetch too.
+      - name: Seed CA into the System keychain (app + browser trust)
+        run: |
+          CA="$HOME/.aztec-accelerator/certs/ca.pem"
+          test -f "$CA" || { echo "::error::$CA not generated"; exit 1; }
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$CA"
+          # Fail loudly here (not later with a mysterious TLS error) if the seed did not take — this is the
+          # macOS empirical unknown (codex): sudo on a newer TCC-tightened runner could refuse.
+          security verify-cert -l -L -c "$CA" || { echo "::error::CA not trusted after System-keychain seed"; exit 1; }
+
+      - name: Write config (HTTPS on, localhost auto-approved)
+        run: |
+          mkdir -p "$HOME/.aztec-accelerator"
+          printf '%s' '{"config_version":2,"https_enabled":true,"auto_approve_localhost":true}' \
+            > "$HOME/.aztec-accelerator/config.json"
+
+      - name: Launch the installed app + wait for HTTPS
+        run: |
+          "$APP_BIN" >/tmp/accel.log 2>&1 &
+          echo "ACCEL_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 45); do
+            if curl -ksf https://127.0.0.1:59834/health >/dev/null 2>&1; then
+              echo "App serving HTTPS on :59834 (attempt $i)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::App did not serve HTTPS within 90s"
+          cat /tmp/accel.log 2>/dev/null || true
+          exit 1
+
+      - name: Pack the SDK + install the tarball into the playground
+        run: bash .github/scripts/packaged-e2e-swap-sdk.sh
+
+      - name: Run packaged-E2E (composed proof)
+        env:
+          AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
+        run: bun run --cwd packages/playground test:e2e:packaged
+
+      - name: Upload app log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-e2e-macos-logs
+          path: |
+            /tmp/accel.log
+            /tmp/aztec-node.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$ACCEL_PID" 2>/dev/null || true
+          # Remove our out-of-band System-keychain seed — product uninstall does NOT (it only clears the
+          # app's own login-keychain anchor), so the harness cleans up what it planted.
+          CA="$HOME/.aztec-accelerator/certs/ca.pem"
+          if [ -f "$CA" ]; then
+            sudo security remove-trusted-cert -d "$CA" 2>/dev/null || true
+          fi
+          hdiutil detach /Volumes/AztecAccelerator 2>/dev/null || true
+
+  # E: prove item-1's config migration on a REAL 1.0.7→2.0.0 upgrade (not just the unit test). A 1.0.7-shaped
+  # config (legacy `safari_support`, no `config_version`) must, after the in-place upgrade + first launch,
+  # migrate + PERSIST on disk: `config_version:2`, `safari_support` removed, origins preserved. (The persist
+  # happens via the launch-time MissingCertsReset save — see main.rs; `https_enabled` resets to false without
+  # certs, which is expected and not asserted here.)
+  upgrade-migration-linux:
+    name: 1.0.7 upgrade + config migration (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Virtual display + tray
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb stalonetray dbus-x11
+          Xvfb :99 -screen 0 1280x1024x24 >/tmp/xvfb.log 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          sleep 2
+          DISPLAY=:99 stalonetray >/tmp/stalonetray.log 2>&1 &
+
+      - name: Download N-1 (1.0.7) installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREV_TAG: ${{ inputs.prev_stable_tag }}
+        run: gh release download "$PREV_TAG" --pattern '*.deb' --dir prev
+
+      - name: Download 2.0.0 installer (build-artifact mode)
+        if: inputs.release_tag == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: app-artifact
+
+      - name: Download 2.0.0 installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
+
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
+
+      - name: Install 1.0.7 + write a 1.0.7-shaped config
+        run: |
+          PREV_DEB=$(find prev -name '*.deb' | head -1)
+          test -n "$PREV_DEB" || { echo "::error::no 1.0.7 .deb"; ls -laR prev; exit 1; }
+          sudo apt-get install -y "./$PREV_DEB"
+          mkdir -p "$HOME/.aztec-accelerator"
+          # 1.0.7 schema: legacy `safari_support`, NO `config_version`, plus a marker origin to prove survival.
+          printf '%s' '{"safari_support":true,"approved_origins":["http://preserved.example"]}' \
+            > "$HOME/.aztec-accelerator/config.json"
+
+      - name: Upgrade to 2.0.0 in place + launch
+        run: |
+          NEW_DEB=$(find app-artifact -name '*.deb' | head -1)
+          test -n "$NEW_DEB" || { echo "::error::no 2.0.0 .deb"; ls -laR app-artifact; exit 1; }
+          sudo apt-get install -y "./$NEW_DEB"
+          dbus-launch AztecAccelerator >/tmp/accel.log 2>&1 &
+          echo "ACCEL_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:59833/health >/dev/null 2>&1; then
+              echo "2.0.0 up after upgrade (attempt $i)"; break
+            fi
+            sleep 2
+          done
+
+      - name: Assert the config migrated + survived on disk
+        run: |
+          CFG="$HOME/.aztec-accelerator/config.json"
+          # The migration persists via the launch-time reset save; poll until it lands.
+          for _ in $(seq 1 15); do
+            if jq -e '.config_version == 2' "$CFG" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "Post-upgrade config:"; cat "$CFG"
+          jq -e '.config_version == 2' "$CFG" || { echo "::error::config_version not migrated to 2"; exit 1; }
+          jq -e 'has("safari_support") | not' "$CFG" || { echo "::error::legacy safari_support not removed"; exit 1; }
+          jq -e '.approved_origins | index("http://preserved.example")' "$CFG" \
+            || { echo "::error::approved_origins not preserved across upgrade"; exit 1; }
+          echo "OK: config_version=2, safari_support removed, origins preserved across the 1.0.7→2.0.0 upgrade"
+
+      - name: Cleanup
+        if: always()
+        run: kill "$ACCEL_PID" 2>/dev/null || true
+
+  # B5 packaged uninstall: the ownership-checked teardown runs on the INSTALLED app, then the package is
+  # removed. Asserts the flow succeeds end-to-end + the binary is gone (the per-store cleanup detail is B5's
+  # unit tests).
+  uninstall-linux:
+    name: Full uninstall (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # `gh release download` in release-asset mode
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Download 2.0.0 installer (build-artifact mode)
+        if: inputs.release_tag == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: app-artifact
+
+      - name: Download 2.0.0 installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
+
+      - name: Download gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+
+      - name: Verify installer bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: bash .github/scripts/packaged-e2e-verify-manifest.sh
+
+      - name: Install, prepare-uninstall, then remove the package
+        run: |
+          NEW_DEB=$(find app-artifact -name '*.deb' | head -1)
+          test -n "$NEW_DEB" || { echo "::error::no .deb"; ls -laR app-artifact; exit 1; }
+          sudo apt-get update
+          sudo apt-get install -y "./$NEW_DEB"
+          command -v AztecAccelerator >/dev/null || { echo "::error::binary not on PATH after install"; exit 1; }
+          # The ownership-checked teardown (B5) — exits 0 on success (or a clean "another install owns it").
+          AztecAccelerator --prepare-uninstall
+          # Remove the package; the binary must be gone.
+          PKG=$(dpkg-deb -f "$NEW_DEB" Package)
+          sudo apt-get remove -y "$PKG"
+          if command -v AztecAccelerator >/dev/null; then
+            echo "::error::binary still present after package removal"; exit 1
+          fi
+          echo "OK: prepare-uninstall + package removal clean; binary gone"

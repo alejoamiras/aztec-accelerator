@@ -589,6 +589,30 @@ fn main() {
     // and ring (from tokio-rustls) are available — rustls panics if it can't auto-detect.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    // `--generate-certs-only`: B4 packaged-E2E bootstrap. Generate the app's real CA/leaf/key headlessly and
+    // exit WITHOUT installing OS trust or starting the GUI, so a CI harness can seed the generated CA into the
+    // trust store out-of-band (the app's own `enable_https` trust-install is INTERACTIVE on macOS/Windows and
+    // hangs a headless runner) and then relaunch into a Ready HTTPS state. This is NOT a trust bypass: it
+    // writes exactly the cert files `enable_https_inner` would, minus `install_ca_trust` — the OS trust step
+    // still has to happen (the harness does it out-of-band; a real user still gets the consent dialog). Placed
+    // AFTER the CryptoProvider install because `generate_and_save` validates the leaf+key load into a rustls
+    // ServerConfig. No-op-safe when a valid set already exists.
+    if std::env::args().any(|a| a == "--generate-certs-only") {
+        match certs::generate_and_save() {
+            Ok(()) => {
+                println!(
+                    "generated CA + leaf at {}",
+                    certs::live_ca_cert_path().display()
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: certificate generation failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let log_path = log_dir();
     std::fs::create_dir_all(&log_path).ok();
 
