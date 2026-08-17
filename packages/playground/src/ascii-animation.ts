@@ -273,6 +273,10 @@ function deniedFrames(): FrameFn {
   return () => box(["  site not authorized    ✗", "  falling back to wasm"], "round", "⚠ DENIED");
 }
 
+function versionMismatchFrames(): FrameFn {
+  return () => box(["  version not supported  ✗", "  falling back to wasm"], "round", "⚠ VERSION");
+}
+
 /** Return the frame generator for a given (mode, phase) combination. */
 export function getFrameFn(mode: UiMode, phase: AnimationPhase): FrameFn {
   switch (phase) {
@@ -295,6 +299,8 @@ export function getFrameFn(mode: UiMode, phase: AnimationPhase): FrameFn {
       return provedFrames();
     case "denied":
       return deniedFrames();
+    case "version-mismatch":
+      return versionMismatchFrames();
     case "receive":
       return receiveFrames();
     case "app:confirm":
