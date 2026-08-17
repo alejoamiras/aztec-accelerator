@@ -251,6 +251,9 @@ try {
     if ($LASTEXITCODE -eq 0) {
       Dump-Logs; Write-Error "(#97) pre-run cleanup FAILED — a stale '$TaskName' task survived /Delete; cannot prove this run armed it."; exit 1
     }
+    # The `Run` key is created lazily by Windows on the first entry — a clean runner may not have it yet, and
+    # `Set-ItemProperty` errors "Cannot find path" if the parent key is absent. Create it first (idempotent).
+    New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Force | Out-Null
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -Value "`"$($Exe.FullName)`""
     Log "armed crash-recovery (stale task cleared + verified gone; autostart Run key set)"
 
