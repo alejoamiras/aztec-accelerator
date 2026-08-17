@@ -810,8 +810,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write     # gh release create
-      id-token: write     # OIDC for aws-actions/configure-aws-credentials
+      contents: write     # gh release create (publish ONLY — B6: the S3 feed flip moved to `promote`)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1002,17 +1001,92 @@ jobs:
               "${FILES[@]}"
           fi
 
+  # B6: PROMOTE is a SEPARATE operational event from PUBLISH — its own `mode: promote-only` dispatch. It
+  # flips the S3 `latest.json` feed for an ALREADY-PUBLISHED version, and doubles as the ROLLBACK lever
+  # (dispatch an older version to move the feed back). It re-derives trust from scratch rather than trusting
+  # the publish run: it downloads the release's OWN `latest.json` asset, runs the production verifier, and
+  # asserts the release is a published, non-draft, non-prerelease stable whose version + full asset set
+  # match — THEN uploads those exact verified bytes. `dry_run` runs the whole pre-flight WITHOUT writing the
+  # feed (proves the machinery, incl. a rollback-to-prev pre-flight, with zero prod effect). Least-privilege:
+  # this is the only job with `id-token: write` (OIDC → the feed-only AWS role); publish has no AWS creds.
+  promote:
+    name: Promote (flip S3 feed)
+    needs: [validate]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'promote-only' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read     # gh release view/download
+      id-token: write    # OIDC → AWS feed-only role (Put latest.json)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: ./.github/actions/setup-accelerator
+        with:
+          rust-target: x86_64-unknown-linux-gnu
+          rust-cache-key: accelerator-sign-feed
+          rust-workspaces: packages/accelerator/core -> target
+          rust-components: ""
+          install-tauri-system-deps: "false"
+          run-prebuild: "false"
+
+      - name: Pre-flight — published stable + signature-valid feed + complete assets
+        run: |
+          set -euo pipefail
+          # 1. Refuse a prerelease/nightly promote — the feed serves stable only.
+          if [ "$IS_PRERELEASE" != "false" ]; then
+            echo "::error::promote-only refuses a prerelease version ($VERSION) — the feed serves stable only"; exit 1
+          fi
+          # 2. The release must EXIST, be PUBLISHED (not a draft), and not be flagged prerelease on GitHub.
+          META=$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets 2>/dev/null) \
+            || { echo "::error::no release $RELEASE_TAG to promote"; exit 1; }
+          echo "$META" | jq -e '.isDraft == false'      >/dev/null || { echo "::error::$RELEASE_TAG is a DRAFT — not promotable"; exit 1; }
+          echo "$META" | jq -e '.isPrerelease == false' >/dev/null || { echo "::error::$RELEASE_TAG is flagged prerelease — not promotable"; exit 1; }
+          # 3. Full asset completeness — the feed + all 5 installers must be present (never promote a
+          #    half-uploaded release). Matched by NAME (suffix), not just count.
+          NAMES=$(echo "$META" | jq -r '.assets[].name')
+          printf '%s\n' "$NAMES" | grep -qx "latest.json" || { echo "::error::$RELEASE_TAG missing latest.json"; exit 1; }
+          for suffix in macOS-Apple-Silicon.dmg macOS-Intel.dmg Linux-x86_64.deb Linux-x86_64.AppImage Windows-x86_64-setup.exe; do
+            printf '%s\n' "$NAMES" | grep -q "$suffix" || { echo "::error::$RELEASE_TAG missing an installer matching *$suffix"; exit 1; }
+          done
+          # 4. Download the release's OWN latest.json, assert its feed version == the dispatched version, and
+          #    run the PRODUCTION verifier over it. These are the exact bytes the flip will upload.
+          gh release download "$RELEASE_TAG" -p latest.json --dir feed --clobber
+          FEED_VERSION=$(jq -r '.version // empty' feed/latest.json)
+          [ "$FEED_VERSION" = "$VERSION" ] || { echo "::error::release latest.json version ($FEED_VERSION) != dispatched ($VERSION)"; exit 1; }
+          bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
+          cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- \
+            verify --feed feed/latest.json --pubkey pubkey.b64
+          # 5. Every updater-payload URL in the feed must resolve (the bytes clients will pull).
+          while read -r u; do
+            code=$(curl -fsIL --max-time 30 -o /dev/null -w '%{http_code}' "$u" 2>/dev/null || echo ERR)
+            [ "$code" = "200" ] || { echo "::error::feed payload URL not reachable ($code): $u"; exit 1; }
+          done < <(jq -r '.platforms[].url' feed/latest.json)
+          echo "✅ pre-flight OK: $RELEASE_TAG is a published stable $VERSION, feed signature valid, assets complete"
+
+      - name: DRY RUN — pre-flight only, feed NOT written
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "dry_run OK: promote pre-flight for $VERSION passed; the S3 feed was NOT flipped (no prod effect)"
+
       - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
-        if: needs.validate.outputs.is_prerelease == 'false'
+        if: ${{ !inputs.dry_run }}
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }} # F-005: feed-only role (Put latest.json)
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Upload latest.json to S3 for auto-updater
-        if: needs.validate.outputs.is_prerelease == 'false'
+      - name: Flip the S3 feed to this version + invalidate CloudFront
+        if: ${{ !inputs.dry_run }}
         run: |
-          # Uploaded under /landing/ because CloudFront routes aztec-accelerator.dev → /landing/
-          aws s3 cp release-files/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
+          set -euo pipefail
+          # Upload the EXACT verified bytes downloaded in pre-flight — never a re-synthesized feed.
+          # Uploaded under /landing/ because CloudFront routes aztec-accelerator.dev → /landing/.
+          aws s3 cp feed/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
             --content-type application/json \
             --cache-control "max-age=300"
           # F-005: the viewer-request CloudFront function rewrites the URI PRE-cache, so the cached key is
@@ -1020,17 +1094,20 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
             --paths "/landing/releases/latest.json" "/releases/latest.json"
+          echo "✅ promoted: the auto-updater feed now serves $VERSION"
 
-  # Enforce the live-feed check that was previously done by hand: after `release`
+  # Enforce the live-feed check that was previously done by hand: after `promote`
   # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
   # actually serves this version and every asset URL resolves. Separate job (own
-  # 15m timeout) so CDN lag can't trip the short `release`/`bump-source` jobs.
+  # 15m timeout) so CDN lag can't trip the short `promote`/`bump-source` jobs.
   # `bump-source` gates on this — don't bump source until users would really get
   # the release.
   verify-live-feed:
     name: Verify live updater feed
-    needs: [validate, release]
-    if: needs.validate.outputs.is_prerelease == 'false'
+    needs: [validate, promote]
+    # B6: verify only after a REAL promote (promote-only, not dry_run). A skipped `promote` (publish mode /
+    # dry_run) skips this via the dependency.
+    if: ${{ inputs.mode == 'promote-only' && !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -1095,8 +1172,10 @@ jobs:
 
   bump-source:
     name: Bump source version
-    needs: [validate, release, verify-live-feed]
-    if: needs.validate.outputs.is_prerelease == 'false'
+    needs: [validate, verify-live-feed]
+    # B6: bump source only after a REAL organic-GA promotion — mode==promote-only, bump_source=true, not a
+    # dry_run. A ROLLBACK promote (bump_source=false) must NOT bump the source version.
+    if: ${{ inputs.mode == 'promote-only' && inputs.bump_source && !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # No default-GITHUB_TOKEN perms: a short-lived, repo-scoped GitHub App
