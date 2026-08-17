@@ -27,11 +27,192 @@ pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
 /// state including auth_manager, config, and show_auth_popup — not a bare Default.
 pub type SharedAppState = Arc<crate::server::AppState>;
 
-/// Holds a pending, already-VERIFIED update so `respond_update_prompt` can use it directly instead of
-/// re-checking the network. Storing a `VerifiedUpdate` (not a raw plugin `Update`) means the prompt
-/// path physically cannot install anything that has not cleared both F-004 layers. Managed as Tauri
-/// state.
-pub type PendingUpdate = Arc<parking_lot::Mutex<Option<crate::updater::VerifiedUpdate>>>;
+/// B2 (F8): the pending-update slot lives in its OWN module so its `inner` storage is unreachable from
+/// the rest of `commands` — `take_or_reprompt` is then GENUINELY the only extractor, and it never
+/// hands the pending version back as a value (private-field encapsulation is module-scoped in Rust;
+/// a sibling function in `commands` could otherwise write `pending.inner.lock().take()` and defeat the
+/// consent binding entirely). This is the type-level enforcement the F8 doc claims — not a convention.
+mod pending_update {
+    /// Anything held pending in a [`PendingUpdateSlot`] must expose its version string, so the slot can
+    /// bind consumption to the version the user actually saw.
+    pub trait PendingVersion {
+        fn version_string(&self) -> String;
+    }
+
+    use tauri::Manager;
+
+    /// Outcome of [`PendingUpdateSlot::take_or_reprompt`].
+    pub enum TakeOutcome<T> {
+        /// The displayed version matched the pending one; the item is CONSUMED and returned.
+        Took(T),
+        /// A different version is pending; the item was RETAINED and an opaque [`Reprompt`] capability is
+        /// returned so the caller can re-point the prompt — WITHOUT ever seeing the pending version.
+        Reprompt(Reprompt),
+        /// Nothing is pending (expired/cleared).
+        Empty,
+    }
+
+    /// An opaque, single-use capability to re-point the update prompt at the pending version after a
+    /// display↔version mismatch. It holds the pending version PRIVATELY; the only thing `commands` can do
+    /// with it is [`navigate`], which builds the URL and drives the webview INSIDE this module. The
+    /// version is never handed to caller code as a value, by-reference, or otherwise — so it cannot be
+    /// captured and fed back into a take to force installing a version the user did not see (the escape
+    /// hatch codex flagged across rounds 2–4).
+    ///
+    /// [`navigate`]: Reprompt::navigate
+    pub struct Reprompt {
+        pending_version: String,
+    }
+
+    impl Reprompt {
+        /// Re-point the open update prompt at the pending version by rewriting only its query string
+        /// (preserving the live window's platform-specific scheme + path, so it is never hardcoded).
+        /// Reloading re-renders the version AND fires `pageshow`, re-arming the click-steal guard for the
+        /// fresh decision. Consumes `self`, so the capability is one-shot. Every failure path CLOSES the
+        /// prompt: the command returns `Ok`, so `wireButton` leaves the clicked control disabled — a
+        /// silent early-return would strand the user with a permanently-disabled window that future 12h
+        /// checks dedup against. A successful navigate reloads the page, re-enabling the controls itself.
+        pub fn navigate(
+            self,
+            app: &tauri::AppHandle,
+            current_version: &str,
+            displayed_version: &str,
+        ) {
+            tracing::warn!(
+                displayed = %displayed_version,
+                pending = %self.pending_version,
+                "SECURITY: update-prompt version mismatch — refusing the stale-displayed install; re-prompting for the pending version"
+            );
+            let Some(window) = app.get_webview_window("update-prompt") else {
+                return; // already gone — nothing to strand
+            };
+            let mut url = match window.url() {
+                Ok(url) => url,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Could not read the update prompt URL to re-point it; closing it");
+                    let _ = window.close();
+                    return;
+                }
+            };
+            url.set_query(Some(&format!(
+                "current={}&version={}",
+                urlencoding::encode(current_version),
+                urlencoding::encode(&self.pending_version)
+            )));
+            if let Err(e) = window.navigate(url) {
+                tracing::warn!(error = %e, "Failed to re-point the update prompt after a version mismatch; closing it");
+                let _ = window.close();
+            }
+        }
+
+        /// The captured version — TEST-ONLY, so a unit test can assert the right version was captured
+        /// without a production accessor that would reopen the re-feed escape hatch.
+        #[cfg(test)]
+        pub fn version(&self) -> &str {
+            &self.pending_version
+        }
+    }
+
+    /// Holds a pending, already-VERIFIED update so `respond_update_prompt` can install it directly
+    /// instead of re-checking the network.
+    ///
+    /// B2 (F8 — consent binding): the inner slot is PRIVATE TO THIS MODULE and the ONLY extractor is
+    /// [`take_or_reprompt`], which consumes the item ONLY IF the caller passes the version string the
+    /// prompt is currently displaying. There is no unconditional `take`, and the pending version is
+    /// NEVER exposed to `commands` — on a mismatch it is sealed inside an opaque [`Reprompt`] whose only
+    /// operation is navigation. So a caller cannot capture the pending version and feed it back in to
+    /// force an unbound take: the update prompt physically cannot install a version the user did not
+    /// consent to. Storing a `VerifiedUpdate` (not a raw plugin `Update`) additionally means nothing
+    /// that failed either F-004 layer can ever install.
+    ///
+    /// Generic over the payload purely so the consent logic is unit-testable with a dummy
+    /// `PendingVersion` (`VerifiedUpdate` itself has a private, network-gated constructor).
+    ///
+    /// [`take_or_reprompt`]: PendingUpdateSlot::take_or_reprompt
+    pub struct PendingUpdateSlot<T> {
+        inner: parking_lot::Mutex<Option<T>>,
+    }
+
+    impl<T> Default for PendingUpdateSlot<T> {
+        fn default() -> Self {
+            Self {
+                inner: parking_lot::Mutex::new(None),
+            }
+        }
+    }
+
+    impl<T: PendingVersion> PendingUpdateSlot<T> {
+        /// Store a freshly-verified item, replacing any prior pending one.
+        pub fn set(&self, item: T) {
+            *self.inner.lock() = Some(item);
+        }
+
+        /// B2 (F8): consume the pending item ONLY IF its version equals `displayed`. On mismatch the item
+        /// is left in place and an opaque [`Reprompt`] is returned — the consent-binding choke point. The
+        /// pending version is sealed inside `Reprompt` (never returned as a value), so it cannot be
+        /// captured and fed back in to force a take.
+        pub fn take_or_reprompt(&self, displayed: &str) -> TakeOutcome<T> {
+            let mut guard = self.inner.lock();
+            match guard.as_ref().map(PendingVersion::version_string) {
+                Some(v) if v == displayed => {
+                    TakeOutcome::Took(guard.take().expect("slot was Some in the arm above"))
+                }
+                Some(pending_version) => TakeOutcome::Reprompt(Reprompt { pending_version }),
+                None => TakeOutcome::Empty,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Dummy stand-in for `VerifiedUpdate` (whose only constructor is network-gated).
+        struct Dummy(&'static str);
+        impl PendingVersion for Dummy {
+            fn version_string(&self) -> String {
+                self.0.to_string()
+            }
+        }
+
+        #[test]
+        fn take_or_reprompt_takes_only_on_match_and_seals_version_on_mismatch() {
+            let slot = PendingUpdateSlot::<Dummy>::default();
+
+            // Empty slot → Empty.
+            assert!(matches!(slot.take_or_reprompt("2.0.0"), TakeOutcome::Empty));
+
+            slot.set(Dummy("2.0.0"));
+
+            // Mismatch: an opaque Reprompt is returned (version sealed inside, only accessible via the
+            // test-only accessor) and the item is NOT consumed. Reverting the `v == displayed` guard so
+            // it consumes unconditionally turns this into `Took` and fails the "still present" check.
+            match slot.take_or_reprompt("1.0.0") {
+                TakeOutcome::Reprompt(cap) => assert_eq!(cap.version(), "2.0.0"),
+                _ => panic!("a version mismatch must return a Reprompt, not consume the update"),
+            }
+
+            // Still present → an exact-version take now consumes it.
+            assert!(matches!(
+                slot.take_or_reprompt("2.0.0"),
+                TakeOutcome::Took(_)
+            ));
+            // Consumed exactly once.
+            assert!(matches!(slot.take_or_reprompt("2.0.0"), TakeOutcome::Empty));
+        }
+    }
+}
+
+use pending_update::{PendingUpdateSlot, PendingVersion, TakeOutcome};
+
+impl PendingVersion for crate::updater::VerifiedUpdate {
+    fn version_string(&self) -> String {
+        self.version().to_string()
+    }
+}
+
+/// The managed pending-update slot: a [`PendingUpdateSlot`] of network-verified updates.
+pub type PendingUpdate = PendingUpdateSlot<crate::updater::VerifiedUpdate>;
 
 #[tauri::command]
 pub fn get_config(
@@ -705,7 +886,7 @@ pub fn set_auto_update(
 }
 
 /// Called from the update prompt.
-/// - action="update": save auto_update preference, then download + install using stored Update
+/// - action="update": install the DISPLAYED update (if still pending), best-effort save the preference
 /// - action="later": dismiss, auto_update stays None (prompt returns next launch)
 #[tauri::command]
 pub fn respond_update_prompt(
@@ -715,28 +896,40 @@ pub fn respond_update_prompt(
     pending: tauri::State<'_, PendingUpdate>,
     action: String,
     auto_update: bool,
+    // B2 (F8): the version string the prompt is CURRENTLY displaying (from its URL param). The install
+    // proceeds only if this still equals the pending update's version — see `take_or_reprompt`.
+    displayed_version: String,
 ) -> Result<(), String> {
     require_label(window.label(), UPDATE_PROMPT_LABEL)?;
     match action.as_str() {
         "update" => {
-            // Save auto-update preference from the checkbox
-            {
-                // Q9 / Ask B (ship the fix): propagate the save error instead of swallowing it, so a
-                // failed auto-update-preference write surfaces to the user rather than the update
-                // silently proceeding on a stale preference. Rare (disk-write failure); the pending
-                // update is left untaken on the early return, so a retry re-saves and updates.
-                mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update))?;
-            }
-
-            // Take the stored Update object — no redundant network re-check
-            let update = pending.lock().take();
-            match update {
-                Some(update) => {
-                    tracing::info!(
-                        version = %update.version(),
-                        auto_update,
-                        "User clicked Update Now, downloading stored update"
-                    );
+            // B2 (F8): consume the stored update ONLY IF it is still the version the user is looking at.
+            // No unconditional take — a background re-check that swapped the pending update since this
+            // prompt rendered cannot be installed on the stale click. On mismatch we get an opaque
+            // `Reprompt` capability that re-points the window at the real version WITHOUT ever exposing
+            // that version to this code, so it can't be turned back into a forced take.
+            match pending.take_or_reprompt(&displayed_version) {
+                TakeOutcome::Took(update) => {
+                    // The displayed version matched — this IS the consented install. Persist the
+                    // auto-update preference as BEST-EFFORT FIRST, then spawn (codex B2 round-3): on
+                    // Windows a successful `install()` exits the process, so spawning before the
+                    // synchronous save could interrupt it — save first removes that ordering hazard. The
+                    // earlier "save-then-restore-on-failure" was wrong twice over (`mutate_config` mutates
+                    // in-memory before the disk write, and the restore could clobber a newer pending
+                    // update), so on a save failure we now only warn: the install is exactly the version
+                    // the user clicked, and an unsaved preference is simply re-asked next launch (never
+                    // less safe). Mirrors the approved-origin persist policy.
+                    let version = update.version().to_string();
+                    if let Err(e) =
+                        mutate_config(&config, |cfg| cfg.auto_update = Some(auto_update))
+                    {
+                        tracing::warn!(
+                            error = %e, version = %version,
+                            "Consented update is installing, but persisting the auto-update preference failed; it will be re-asked next launch"
+                        );
+                    } else {
+                        tracing::info!(version = %version, auto_update, "User clicked Update Now, downloading the displayed update");
+                    }
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {
                         crate::updater::perform_update(&handle, update).await;
@@ -744,7 +937,12 @@ pub fn respond_update_prompt(
                         close_update_prompt(&handle);
                     });
                 }
-                None => {
+                TakeOutcome::Reprompt(cap) => {
+                    // Version mismatch: the opaque capability logs + re-points the prompt at the pending
+                    // version inside `pending_update`; the version never reaches this code.
+                    cap.navigate(&app, env!("CARGO_PKG_VERSION"), &displayed_version);
+                }
+                TakeOutcome::Empty => {
                     tracing::warn!("No pending update found — may have expired. Closing prompt.");
                     close_update_prompt(&app);
                 }
@@ -813,4 +1011,11 @@ mod tests {
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     }
+
+    // B2 (F8): the update-consent version-binding primitive is tested inside `mod pending_update`
+    // (`take_or_reprompt_takes_only_on_match_and_lends_version_on_mismatch`), where the test can reach
+    // the private slot storage. The command wiring (`respond_update_prompt`) can't be unit-tested
+    // end-to-end because `VerifiedUpdate` has a private, network-gated constructor — but only the
+    // `TakeOutcome::Took` arm persists the preference or spawns an install, so a mismatch (which
+    // resolves to `Reprompted`, carrying no update) provably does neither.
 }

@@ -462,6 +462,67 @@ async fn prove_error_responses_stay_text_plain_json_string() {
     .await;
 }
 
+/// B2 (F9): after an origin is denied, an immediate re-request is refused with `403
+/// authorization_cooldown` WITHOUT re-popping a consent prompt (anti-nag). Pins both the server glue
+/// (is_cooling_down → AuthorizationCooldown) and the wire shape (403 + text/plain + code). Reverting the
+/// cooldown check in `authorize_origin` makes the second request pop a popup and never return this code.
+#[tokio::test]
+#[serial]
+async fn a_denied_origin_is_refused_with_authorization_cooldown_without_re_prompting() {
+    let evil = || {
+        Request::builder()
+            .header("host", "127.0.0.1:59833")
+            .method("POST")
+            .uri("/prove")
+            .header("content-type", "application/octet-stream")
+            .header("origin", "https://evil.com")
+            .body(Body::from(vec![0u8; 10]))
+            .unwrap()
+    };
+
+    let (popup_tx, popup_rx) = std::sync::mpsc::channel();
+    let (state, auth, _cfg_dir) = auth_state_with_popup(popup_tx);
+    let app = router(state);
+
+    // A background denier that answers EVERY popup with Deny. With the fix in place only the first
+    // request pops (the second is cooled down); if the cooldown check regresses, the second request
+    // ALSO pops → gets denied here → returns `origin_denied`, failing the code assertion cleanly rather
+    // than hanging on the auth backstop.
+    let auth_clone = auth.clone();
+    std::thread::spawn(move || {
+        while let Ok((_origin, request_id)) = popup_rx.recv() {
+            auth_clone.resolve(&request_id, crate::authorization::AuthDecision::Deny);
+        }
+    });
+
+    let resp1 = app.clone().oneshot(evil()).await.unwrap();
+    assert_eq!(
+        resp1.status(),
+        StatusCode::FORBIDDEN,
+        "first request is denied"
+    );
+
+    // Second request from the same origin, immediately: cooling down → refused WITHOUT a new popup.
+    let resp2 = app.oneshot(evil()).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::FORBIDDEN);
+    let ct = resp2
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.starts_with("text/plain"),
+        "cooldown reply stays text/plain, got {ct:?}"
+    );
+    let body = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON-shaped");
+    assert_eq!(json["error"], "authorization_cooldown");
+    assert!(json["message"].is_string());
+}
+
 /// CHARACTERIZATION (quality-refactor Phase 0 — Q2 ordering + Q10 status guards).
 /// Pins the `/prove` SUCCESS path via a fake `bb` (`BB_BINARY_PATH`): 200 + `{proof}` base64 body
 /// + `x-prove-duration-ms` header, and the on_status sequence `["Status: Proving...",

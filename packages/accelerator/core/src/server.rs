@@ -490,6 +490,12 @@ pub(crate) enum ProveError {
     ProveQueueFull,
     AuthorizationTimeout,
     AuthorizationCancelled,
+    /// B2 (F9): this origin was denied within the last `DENY_COOLDOWN` window, so we refuse it WITHOUT
+    /// re-popping a consent prompt (anti-nag / re-prompt-spam after a Deny). Deliberately a **403**, not
+    /// a 429: a cached denial IS a denial, and 403 keeps already-deployed SDKs on their existing
+    /// denied→WASM fallback path (they hard-throw on any non-403/503 status). The current SDK recognizes
+    /// the `authorization_cooldown` code and falls back without re-emitting a fresh "denied" phase.
+    AuthorizationCooldown,
 }
 
 impl IntoResponse for ProveError {
@@ -560,6 +566,11 @@ impl IntoResponse for ProveError {
                 StatusCode::FORBIDDEN,
                 "authorization_cancelled",
                 "Authorization request was cancelled".to_string(),
+            ),
+            ProveError::AuthorizationCooldown => (
+                StatusCode::FORBIDDEN,
+                "authorization_cooldown",
+                "This origin was recently denied; please try again later".to_string(),
             ),
         };
         (status, json_error(code, &message)).into_response()

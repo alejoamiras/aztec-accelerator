@@ -10,11 +10,22 @@ wireButton("update", {
   loadingText: "Updating…",
   onClick: () => {
     const autoUpdate = document.getElementById("auto-update").checked;
-    return invoke("respond_update_prompt", { action: "update", autoUpdate });
+    // B2 (F8): echo the version this prompt is DISPLAYING so the backend installs only that exact
+    // version — a background re-check that swapped the pending update is refused, not silently installed.
+    return invoke("respond_update_prompt", {
+      action: "update",
+      autoUpdate,
+      displayedVersion: newVersion,
+    });
   },
 });
 
 wireButton("later", {
   disableAlso: "update",
-  onClick: () => invoke("respond_update_prompt", { action: "later", autoUpdate: false }),
+  onClick: () =>
+    invoke("respond_update_prompt", {
+      action: "later",
+      autoUpdate: false,
+      displayedVersion: newVersion,
+    }),
 });

@@ -211,7 +211,13 @@ describe("Authorization Flow", () => {
     await removeTestOriginViaUI();
   });
 
-  it("should deny and return 403 when Deny is clicked", async () => {
+  it("Deny returns 403, does not persist the origin, and cools down re-requests (B2/F9)", async () => {
+    // Consolidates the two former deny tests (both asserted 403 + not-persisted) and additionally proves
+    // the B2/F9 post-deny cooldown end-to-end: after a Deny, an immediate re-request from the same origin
+    // is refused (403) WITHOUT popping a new consent window, so a page can't nag the user right after a
+    // No. Kept as ONE self-contained test because a second same-origin deny would itself be cooled down.
+    // (Deny leaving `approved_origins` untouched is worth a real-app assertion — a bug that persisted on
+    // Deny would hand a standing grant to a site the user just refused.)
     const handlesBefore = await browser.getWindowHandles();
 
     pendingProve = fireProveRequest();
@@ -229,39 +235,18 @@ describe("Authorization Flow", () => {
     pendingProve = null;
     expect(proveResponse.status).toBe(403);
 
-    const config = readConfig();
-    const origins = (config.approved_origins as string[]) || [];
+    const origins = (readConfig().approved_origins as string[]) || [];
     expect(origins).not.toContain(TEST_ORIGIN);
 
     await browser.switchToWindow(settingsHandle);
-  });
 
-  it("should NOT persist the origin when Denied", async () => {
-    // Replaces "allow without remembering": with Allow unconditionally persistent, Deny is the only
-    // path that must leave `approved_origins` untouched. Worth keeping as a real-app assertion —
-    // a bug that persisted on Deny would hand a standing grant to a site the user just refused.
-    const handlesBefore = await browser.getWindowHandles();
-
+    // B2 (F9): re-request within the cooldown → refused fast with 403 and NO new consent window.
+    const handlesBeforeRetry = await browser.getWindowHandles();
     pendingProve = fireProveRequest();
-
-    const authWindowHandle = await waitForNewWindow(handlesBefore);
-    expect(authWindowHandle).not.toBeNull();
-
-    await browser.switchToWindow(authWindowHandle!);
-
-    // C9 (D8/A): wait for the server origin to render + the click-guard to elapse.
-    await waitForActivePopup();
-
-    await clickBy("#deny");
-
-    const proveResponse = await pendingProve;
+    const retryResponse = await pendingProve;
     pendingProve = null;
-    expect(proveResponse.status).toBe(403);
-
-    const config = readConfig();
-    const origins = (config.approved_origins as string[]) || [];
-    expect(origins).not.toContain(TEST_ORIGIN);
-
-    await browser.switchToWindow(settingsHandle);
+    expect(retryResponse.status).toBe(403);
+    const handlesAfterRetry = await browser.getWindowHandles();
+    expect(handlesAfterRetry.length).toBe(handlesBeforeRetry.length);
   });
 });

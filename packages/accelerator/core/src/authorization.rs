@@ -1,5 +1,6 @@
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -197,6 +198,17 @@ pub enum ResolveOutcome {
     NotActive,
 }
 
+/// Why [`AuthorizationManager::request`] declined to register a new pending request. A typed error so
+/// the caller maps each to the right `/prove` response instead of collapsing both into one.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestError {
+    /// B2 (F9): the origin is within its post-deny cooldown — refuse without popping a consent prompt.
+    Cooldown,
+    /// A DoS cap was hit: too many distinct pending origins, or too many concurrent piggybacks for
+    /// this origin.
+    TooMany,
+}
+
 /// Manages pending authorization requests.
 ///
 /// When a `/prove` request arrives from an unknown origin, the handler calls
@@ -207,6 +219,20 @@ pub enum ResolveOutcome {
 /// Prevents popup/memory spam from a malicious site generating many subdomains. Public so the server's
 /// queue backstop (`AUTH_QUEUE_BACKSTOP`) can bound the worst-case queued wait at `MAX × 60 s` (C9 D18).
 pub const MAX_PENDING_ORIGINS: usize = 10;
+
+/// B2 (F9): after an origin is DENIED, refuse further `/prove` requests from it for this long WITHOUT
+/// re-popping a consent prompt. Anti-nag: a page that got a "No" can't immediately re-prompt the user
+/// on its next request (or spam the queue with re-asks). NOT a security boundary — it only ADDS friction
+/// to a decision the user already made; expiry simply restores the normal prompt-once behavior, and an
+/// approved origin never reaches the check.
+pub const DENY_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Cap on retained per-origin cooldown entries, so a subdomain-spraying page can't grow the map without
+/// bound. At the cap a new denial EVICTS THE OLDEST entry (evict-oldest, not drop-new): dropping the new
+/// denial would let a flooder disable cooldown for everyone else, whereas evicting the oldest is
+/// self-defeating for the flooder — its own early entries fall out first. Bounds the map to a handful of
+/// KB regardless of input.
+const MAX_COOLDOWN_ENTRIES: usize = 64;
 
 /// Maximum number of concurrent `/prove` requests from ONE origin that may piggyback on a single
 /// pending popup. Each piggyback holds a live `oneshot::Sender` in [`PendingRequest::senders`] until
@@ -237,6 +263,8 @@ struct PendingState {
     /// one popup is actionable at a time; on the active one resolving, the head of `queue` is promoted.
     active: Option<String>,
     queue: VecDeque<String>,
+    /// B2 (F9): origin → the `Instant` at which its post-deny cooldown EXPIRES. Pruned lazily on read.
+    cooldowns: HashMap<CanonicalOrigin, Instant>,
 }
 
 impl PendingState {
@@ -288,10 +316,37 @@ impl PendingState {
     fn is_active(&self, request_id: &str) -> bool {
         self.active.as_deref() == Some(request_id)
     }
+
+    /// B2 (F9): put `origin` into cooldown until `expiry`. Evicts the entry with the earliest expiry
+    /// first if inserting a NEW origin would exceed the cap (evict-oldest, see [`MAX_COOLDOWN_ENTRIES`]).
+    /// Re-denying an origin already present just refreshes its expiry and never evicts.
+    fn record_cooldown(&mut self, origin: CanonicalOrigin, expiry: Instant) {
+        if self.cooldowns.len() >= MAX_COOLDOWN_ENTRIES && !self.cooldowns.contains_key(&origin) {
+            if let Some(oldest) = self
+                .cooldowns
+                .iter()
+                .min_by_key(|(_, &exp)| exp)
+                .map(|(k, _)| k.clone())
+            {
+                self.cooldowns.remove(&oldest);
+            }
+        }
+        self.cooldowns.insert(origin, expiry);
+    }
+
+    /// B2 (F9): true iff `origin` is still within its cooldown window at `now`. Prunes every expired
+    /// entry lazily as a side effect, so the map self-drains without a timer.
+    fn is_cooling_down(&mut self, origin: &CanonicalOrigin, now: Instant) -> bool {
+        self.cooldowns.retain(|_, exp| *exp > now);
+        self.cooldowns.contains_key(origin)
+    }
 }
 
 pub struct AuthorizationManager {
     state: Mutex<PendingState>,
+    /// B2 (F9): how long an origin stays in cooldown after a denial. A field (not the bare const) so
+    /// tests can pin a known duration.
+    deny_cooldown: Duration,
 }
 
 impl Default for AuthorizationManager {
@@ -304,29 +359,35 @@ impl AuthorizationManager {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(PendingState::default()),
+            deny_cooldown: DENY_COOLDOWN,
         }
     }
 
     /// Register a pending authorization request for `origin`.
     ///
-    /// Returns `Ok((receiver, request_id, is_first))`. If `is_first` is true, the caller should show
-    /// the authorization popup carrying `request_id`. Otherwise a popup is already showing for this
-    /// origin and this request piggybacks on it (sharing the same `request_id` + decision).
-    ///
-    /// `request_id` is an **opaque, unguessable** UUID (SEC-06) — decisions are addressed by it, not
-    /// by origin string, so a caller that knows only an origin cannot resolve a concurrent request.
-    ///
-    /// Returns `Err` if the maximum number of pending requests is exceeded (DoS protection).
     /// Returns `Ok((receiver, request_id, is_first, is_active))`. `is_first` ⇒ the caller shows a popup
     /// carrying `request_id`; `is_active` (C9 D18) ⇒ that popup owns the actionable + always-on-top slot
     /// now (vs. being enqueued behind an already-active popup). For a piggyback (`!is_first`), `is_active`
     /// reflects the existing request it joined.
+    ///
+    /// `request_id` is an **opaque, unguessable** UUID (SEC-06) — decisions are addressed by it, not by
+    /// origin string, so a caller that knows only an origin cannot resolve a concurrent request.
+    ///
+    /// Returns [`RequestError::Cooldown`] if the origin is within its post-deny cooldown (B2 / F9) or
+    /// [`RequestError::TooMany`] if a DoS cap is hit. The cooldown check happens UNDER THE SAME LOCK as
+    /// the insert, so a concurrent Deny cannot slip between a separate check and the insert and let a
+    /// just-denied origin re-popup (codex B2 race fix).
     pub fn request(
         &self,
         origin: &CanonicalOrigin,
-    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool, bool), &'static str> {
+    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool, bool), RequestError> {
         let (tx, rx) = oneshot::channel();
         let mut st = self.state.lock();
+        // B2 (F9): refuse a recently-denied origin here, atomically with the insert below. Only reached
+        // for a non-approved origin on the popup path (the caller checks approval + headless first).
+        if st.is_cooling_down(origin, Instant::now()) {
+            return Err(RequestError::Cooldown);
+        }
         // Piggyback on an existing pending request for this origin.
         if let Some(request_id) = st.by_origin.get(origin).cloned() {
             let is_active = st.is_active(&request_id);
@@ -334,7 +395,7 @@ impl AuthorizationManager {
                 // Bound the per-origin piggyback fan-out: a flood of concurrent /prove during the
                 // decision window must not grow `senders` without limit (per-origin memory DoS).
                 if req.senders.len() >= MAX_PIGGYBACK_SENDERS {
-                    return Err("too many concurrent requests for this origin");
+                    return Err(RequestError::TooMany);
                 }
                 req.senders.push(tx);
                 return Ok((rx, request_id, false, is_active));
@@ -342,7 +403,7 @@ impl AuthorizationManager {
         }
         // New request.
         if st.by_request.len() >= MAX_PENDING_ORIGINS {
-            return Err("too many pending authorization requests");
+            return Err(RequestError::TooMany);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
         let is_active = st.insert(origin.clone(), request_id.clone(), tx);
@@ -357,6 +418,12 @@ impl AuthorizationManager {
     pub fn resolve(&self, request_id: &str, decision: AuthDecision) -> Option<String> {
         let mut st = self.state.lock();
         let (req, promoted) = st.remove(request_id)?;
+        // B2 (F9): every SYSTEM deny path (60s auto-deny, window-close, queue backstop) flows through
+        // here — record the cooldown once, at this single choke point, so no individual call site can
+        // forget it.
+        if matches!(decision, AuthDecision::Deny) {
+            st.record_cooldown(req.origin.clone(), Instant::now() + self.deny_cooldown);
+        }
         for tx in req.senders {
             let _ = tx.send(decision);
         }
@@ -375,6 +442,11 @@ impl AuthorizationManager {
         }
         match st.remove(request_id) {
             Some((req, promoted)) => {
+                // B2 (F9): the USER-deny path (a "No" click) records the same cooldown as the system
+                // paths, so a denied origin can't immediately re-prompt on its next request.
+                if matches!(decision, AuthDecision::Deny) {
+                    st.record_cooldown(req.origin.clone(), Instant::now() + self.deny_cooldown);
+                }
                 for tx in req.senders {
                     let _ = tx.send(decision);
                 }
@@ -915,5 +987,81 @@ mod tests {
                 assert_eq!(once, twice, "non-idempotent for {odd}");
             }
         }
+    }
+
+    // ── B2 (F9): post-deny cooldown ──
+
+    #[test]
+    fn user_deny_cools_down_the_origin_blocking_immediate_retry() {
+        let mgr = AuthorizationManager::new(); // 30s default
+        let origin = co("https://evil.example");
+        let (_rx, id, _first, _active) = mgr.request(&origin).unwrap();
+        assert!(matches!(
+            mgr.resolve_active(&id, AuthDecision::Deny),
+            ResolveOutcome::Resolved(_)
+        ));
+        // The security property: within the window, the origin is refused without a fresh prompt.
+        // Reverting the record in `resolve_active` makes this false.
+        assert!(mgr.state.lock().is_cooling_down(&origin, Instant::now()));
+    }
+
+    #[test]
+    fn system_deny_paths_timeout_and_close_also_cool_down() {
+        let mgr = AuthorizationManager::new();
+        let origin = co("https://evil.example");
+        let (_rx, id, _first, _active) = mgr.request(&origin).unwrap();
+        // The auto-deny timeout and window-close both go through `resolve` (system path).
+        mgr.resolve(&id, AuthDecision::Deny);
+        assert!(mgr.state.lock().is_cooling_down(&origin, Instant::now()));
+    }
+
+    #[test]
+    fn allow_does_not_cool_down() {
+        let mgr = AuthorizationManager::new();
+        let origin = co("https://good.example");
+        let (_rx, id, _first, _active) = mgr.request(&origin).unwrap();
+        assert!(matches!(
+            mgr.resolve_active(&id, AuthDecision::Allow),
+            ResolveOutcome::Resolved(_)
+        ));
+        assert!(!mgr.state.lock().is_cooling_down(&origin, Instant::now()));
+    }
+
+    #[test]
+    fn cooldown_expires_after_the_window() {
+        let mgr = AuthorizationManager::new(); // 30s
+        let origin = co("https://evil.example");
+        let (_rx, id, _first, _active) = mgr.request(&origin).unwrap();
+        mgr.resolve(&id, AuthDecision::Deny);
+        // 31s in the future is past the 30s window → no longer cooling down (and the entry is pruned).
+        assert!(!mgr
+            .state
+            .lock()
+            .is_cooling_down(&origin, Instant::now() + Duration::from_secs(31)));
+    }
+
+    #[test]
+    fn cooldown_map_evicts_the_oldest_at_the_cap() {
+        let mut st = PendingState::default();
+        let base = Instant::now();
+        // Fill to the cap with strictly increasing expiries (s0 is the oldest).
+        for i in 0..MAX_COOLDOWN_ENTRIES {
+            st.record_cooldown(
+                co(&format!("https://s{i}.example")),
+                base + Duration::from_secs(100 + i as u64),
+            );
+        }
+        assert_eq!(st.cooldowns.len(), MAX_COOLDOWN_ENTRIES);
+        // One more distinct origin evicts the oldest (s0), not the newcomer.
+        st.record_cooldown(
+            co("https://newcomer.example"),
+            base + Duration::from_secs(1000),
+        );
+        assert_eq!(st.cooldowns.len(), MAX_COOLDOWN_ENTRIES);
+        assert!(
+            !st.cooldowns.contains_key(&co("https://s0.example")),
+            "the oldest entry must be evicted"
+        );
+        assert!(st.cooldowns.contains_key(&co("https://newcomer.example")));
     }
 }

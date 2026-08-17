@@ -241,7 +241,7 @@ async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
 
         // Store the update so respond_update_prompt can use it directly
         if let Some(pending) = app.try_state::<PendingUpdate>() {
-            *pending.lock() = Some(update);
+            pending.set(update);
         }
 
         // Show prompt for both None (first time) and Some(false) (manual mode).
@@ -597,7 +597,7 @@ fn main() {
         .manage::<commands::VerifiedSitesState>(Arc::new(
             verified_sites::VerifiedSitesRegistry::load(),
         ))
-        .manage::<PendingUpdate>(Arc::new(parking_lot::Mutex::new(None)))
+        .manage::<PendingUpdate>(PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::get_autostart_enabled,
