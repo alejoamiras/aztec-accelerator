@@ -244,6 +244,10 @@ jobs:
             throw "makensis still not found after installing NSIS. Searched the standard install dirs, the Chocolatey bin shim, and PATH."
           }
           Write-Host "using makensis at $makensis"
+          # B5: the harness bundles a stub app exe so PREUNINSTALL has a real `--prepare-uninstall` target
+          # to invoke — compile it FIRST (the wine runner does the same).
+          & $makensis /V2 stub.test.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis stub.test.nsi failed ($LASTEXITCODE)" }
           & $makensis /V2 harness.test.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
 
