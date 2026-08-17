@@ -95,8 +95,34 @@ jobs:
             echo "::error::N-1 ($N1_TAG) is the version under test (accelerator-v$N_VERSION) — no-op no-update would pass trivially. Aborting."
             exit 1
           fi
-          mkdir -p n1
-          gh release download "$N1_TAG" --pattern "${{ inputs.n1-dmg-glob }}" --dir n1
+          # Retry the N-1 asset download: GitHub's release-asset CDN throttles/errors transiently (the
+          # 2026-08-17 incident hit it at ~50%, failing THIS unretried step on 3 straight RC dispatches).
+          # `gh release download` streams to the final path with O_TRUNC and verifies neither length nor
+          # digest — a transport error exits non-zero (→ retry) but a premature "clean" close could exit 0
+          # with a truncated file, so each success is integrity-checked against the asset's API sha256 digest
+          # (exact byte size as fallback for a release without one). 5 attempts, linear backoff; partials
+          # cleared between tries. bash runs -eo pipefail by default, so every branch uses if/then/fi.
+          for attempt in 1 2 3 4 5; do
+            rm -rf n1; mkdir -p n1
+            ok=""
+            if gh release download "$N1_TAG" --pattern "${{ inputs.n1-dmg-glob }}" --dir n1; then
+              f=$(find n1 -type f | head -1); bn=$(basename "${f:-x}")
+              want=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$N1_TAG" --jq ".assets[]|select(.name==\"$bn\")|.digest // empty" 2>/dev/null || true)
+              if [ -n "$f" ] && [ -n "$want" ]; then
+                if [ "sha256:$(shasum -a 256 "$f" | cut -d' ' -f1)" = "$want" ]; then ok=1; fi
+              elif [ -n "$f" ]; then
+                sz=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$N1_TAG" --jq ".assets[]|select(.name==\"$bn\")|.size" 2>/dev/null || true)
+                if [ -n "$sz" ] && [ "$(wc -c < "$f" | tr -d ' ')" = "$sz" ]; then ok=1; fi
+              fi
+            fi
+            if [ -n "$ok" ]; then break; fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::N-1 download failed or failed integrity after 5 attempts (file='${f:-}')"
+              exit 1
+            fi
+            echo "::warning::N-1 download attempt $attempt not OK; retrying in $((attempt * 10))s"
+            sleep "$((attempt * 10))"
+          done
 
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:

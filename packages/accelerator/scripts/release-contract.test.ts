@@ -12,6 +12,11 @@ import path from "node:path";
 
 const REPO = path.resolve(import.meta.dir, "..", "..", "..");
 const WF = fs.readFileSync(path.join(REPO, ".github/workflows/release-accelerator.yml"), "utf8");
+const UPDATER = fs.readFileSync(path.join(REPO, ".github/workflows/_e2e-updater.yml"), "utf8");
+const UPDATER_LINUX = fs.readFileSync(
+  path.join(REPO, ".github/workflows/_e2e-updater-linux.yml"),
+  "utf8",
+);
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
   test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
@@ -132,5 +137,35 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     // [mut: point verify-live-feed back at `release`, or drop the bump_source guard → fails]
     expect(WF).toContain("needs: [validate, promote]");
     expect(WF).toContain("inputs.bump_source && !inputs.dry_run");
+  });
+});
+
+describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", () => {
+  test("packaged-E2E-on-draft pins its harness checkout to the dispatched SHA, not moving main", () => {
+    // _e2e-packaged.yml checks out `inputs.ref || github.ref`; the caller must pass github.sha so a
+    // concurrent push to main mid-run can't test the draft's pinned installers against a newer harness.
+    // [mut: drop `ref: ${{ github.sha }}` from the _e2e-packaged.yml caller → this assert fails]
+    expect(WF).toMatch(
+      /uses: \.\/\.github\/workflows\/_e2e-packaged\.yml[\s\S]{0,500}?ref: \$\{\{ github\.sha \}\}/,
+    );
+  });
+
+  test("N-1 release-asset download retries + integrity-checks (linux + darwin) — the 3-strike flake fix", () => {
+    // The unretried `gh release download` failed 3 straight RC dispatches during a GitHub asset-CDN incident.
+    // Both legs must retry 5×, clear partials between tries, verify the asset's sha256 digest, and fail closed
+    // after exhaustion. [mut: drop the retry loop / digest check → a single transient CDN error (or a
+    // truncated exit-0 download) fails/poisons the gate again]
+    for (const [wf, name] of [
+      [UPDATER, "_e2e-updater.yml (darwin DMG)"],
+      [UPDATER_LINUX, "_e2e-updater-linux.yml (linux AppImage)"],
+    ] as const) {
+      expect(wf, `${name}: retries the download`).toContain("for attempt in 1 2 3 4 5; do");
+      expect(wf, `${name}: clears partials between tries`).toContain("rm -rf n1; mkdir -p n1");
+      expect(wf, `${name}: verifies the asset sha256 digest`).toContain("shasum -a 256");
+      expect(wf, `${name}: reads the API digest`).toContain(".digest // empty");
+      expect(wf, `${name}: fails closed after exhaustion`).toContain(
+        "failed or failed integrity after 5 attempts",
+      );
+    }
   });
 });
