@@ -60,6 +60,14 @@ pub(crate) async fn authorize_origin(
         return Err(ProveError::OriginDenied(origin.to_string()));
     }
 
+    // B2 (F9): a desktop origin denied within the last DENY_COOLDOWN is refused WITHOUT re-popping a
+    // consent prompt (anti-nag / re-prompt-spam). Checked only on the popup path and only after the
+    // approval check, so an approved site is never affected and expiry restores normal prompting.
+    if auth_manager.is_cooling_down(&origin) {
+        tracing::info!(origin = %origin, "Origin in post-deny cooldown; refusing without re-prompting");
+        return Err(ProveError::AuthorizationCooldown);
+    }
+
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
     let (rx, request_id, is_first, _is_active) = auth_manager.request(&origin).map_err(|_| {
         tracing::warn!(origin = %origin, "Too many pending authorization requests");
