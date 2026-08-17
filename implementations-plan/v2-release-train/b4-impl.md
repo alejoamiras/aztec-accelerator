@@ -251,7 +251,19 @@ Researched structure (`tag`:636, `sign-update-feed`:692, `release`:807):
 - This is release-integrity-critical surgery (tag anchor, signed feed, append-only no-delete rule) — do a
   dedicated codex consult on the F wiring diff before merging.
 
-**G. Codex review the harness (fresh session) → PR → CI → merge.** Then the release sequence.
+**G. Codex harness review — DONE + FOLDED** (session `01a00fb3` / `codex-DNGjdn6U`, `response-1.md`; commit
+`a1d8930`). codex confirmed the trust/bootstrap design viable + these sound: the `/prove`-header network
+witness (necessary), `auto_approve_localhost` (canonicalizes `localhost` regardless of port — no
+`approved_origins` needed), `/prove`→:59834 under `httpsOnly`, Linux NSS (Chromium reads `~/.pki/nssdb`),
+macOS System-domain (satisfies the predicate + Chromium; cert-gen needs no display). Folded 6 findings:
+(1) network witness alone doesn't prove the native proof was USED (decode can still WASM-fall-back) → added
+`window.__ACCEL_PHASES__` + assert `receive` present, `fallback`/`denied` absent; (2) macOS `"$APP_BIN"`
+quoting (space in the `.app` path); (3) `playwright-cache` is Linux-only → macOS installs Chromium directly;
+(4) packed-SDK swap (`.github/scripts/packaged-e2e-swap-sdk.sh`); (5) macOS installs to `/Applications`, not
+run-from-DMG; (6) Linux actually starts `stalonetray`. Typecheck+biome+actionlint+shellcheck green. **A/B/C
+are now review-clean.** REMAINING: E (upgrade/uninstall) + F (draft-gate wiring, its own codex consult) →
+**first real CI run (validates the empirical unknowns: Playwright/Chromium NSS trust, tray-app-under-Xvfb,
+`bun add` tarball swap, macOS System-domain)** → PR → merge → the 2.0.0-rc release sequence.
 
 ## Nomenclature checklist (root plan owns; verify ALL before RC)
 Updater/promote semver comparisons (real semver); version fields (tauri.conf.json / Cargo.toml / package.json
