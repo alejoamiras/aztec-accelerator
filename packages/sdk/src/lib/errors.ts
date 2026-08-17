@@ -1,14 +1,17 @@
 // B7 (F14): the SDK's ONE typed error. The accelerator is an optimisation, so the prover degrades to
 // WASM for every RECOGNISED transient/denial/version/capacity condition (see the fallback table in
 // `accelerator-prover.ts`). What must NOT be masked is a caller MISCONFIGURATION — a `400 invalid_version`
-// / `invalid_origin`, or any status/code the SDK does not recognise: silently falling back there would
-// hide a real integration bug behind "slow but working". Those, and only those, reach the dApp as this
-// typed error instead of a raw `ky` `HTTPError` (which is not part of the SDK's public surface).
+// / `invalid_origin`, a `500` with an unrecognised code, or a status the SDK does not recognise as a
+// transient/denial/capacity condition: silently falling back there would hide a real integration bug behind
+// "slow but working". Those, and only those, reach the dApp as this typed error instead of a raw `ky`
+// `HTTPError` (which is not part of the SDK's public surface).
 
 /**
  * Thrown by {@link AcceleratorProver} proving when the accelerator returns an HTTP error that indicates a
  * MISCONFIGURATION rather than a transient/denial/capacity condition — i.e. a `400 invalid_version` /
- * `invalid_origin`, or any unrecognised status/code. Recognised conditions degrade to WASM and never throw.
+ * `invalid_origin`, a `500` with an unrecognised code, or an unexpected HTTP status. Recognised conditions —
+ * EVERY `403`, EVERY `408`/`413`/`429`/`503`, and `500 download_failed`/`prove_failed` — degrade to WASM and
+ * never throw, so an unknown `403`/`503` code degrades rather than throwing.
  */
 export class AcceleratorHttpError extends Error {
   /** HTTP status the accelerator returned. */

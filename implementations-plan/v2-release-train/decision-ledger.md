@@ -287,15 +287,23 @@ only in the last cohorts. Implementation may begin at B2.
      default `npm install` SUCCEEDS for the dep (the dependent gets its own nested copy — 2 in the tree, and
      it binds to its correct version) and FAILS with **ERESOLVE** for the peer — on the DEFAULT resolver,
      not only `--strict-peer-deps`, because a direct/root peer conflict has no valid at-or-above placement
-     (npm RFC 25). For a drop-in SDK that must "just install and fall back to WASM", peers converting a
-     consumer/@aztec skew into a blocked `npm install` is strictly worse than deps letting it install with
-     the SDK bound to its vetted version. No manifest change; `dependencies` stay exact-pinned
-     (`minimumReleaseAge` + frozen lockfile keep the resolution vetted-once-frozen-forever).
-  - **codex B7 #3 (peers favoured) — codex was RIGHT on the mechanic; verdict still HELD, for the corrected
-    reason.** My first rebuttal claimed peers "nest a duplicate exactly like a dep" under default npm — that
-    is FALSE (check #2 shows ERESOLVE, as codex argued from RFC 25). But the corrected fact REINFORCES
-    KEEP DEPS instead of favouring peers: peers would block install on ANY version skew, whereas deps
-    succeed with the SDK on its exact vetted @aztec (a duplicate graph is the only cost, and only off the
-    exact-match host — which check #1 proves dedupes to a singleton). Cross-package Aztec type identity is a
-    real concern only when a host actually shares the graph, i.e. the exact-match case, where deps and peers
-    are identical. Recorded as a self-error corrected by review.
+     (npm RFC 25). No manifest change; `dependencies` stay exact-pinned (`minimumReleaseAge` + frozen
+     lockfile keep the resolution vetted-once-frozen-forever).
+  - **The honest trade-off (codex B7 #3, round 3) — verdict HELD as an OWNER CHOICE, not "strictly better".**
+    My earlier framing ("peers are strictly worse") was itself an overclaim; codex is right that peers carry
+    a real advantage this ledger must record:
+    - **Deps (chosen):** install SUCCEEDS on a version-skewed host and the SDK binds to its own vetted
+      @aztec — but the skew is DEFERRED, not removed. The WASM-fallback path proves the host's (e.g. 5.0.0)
+      execution steps with the SDK's (5.0.1) bb-prover/stdlib, so a cross-version serialization/proof
+      incompatibility can surface LATER, at runtime. (The accelerator path is protected: the SDK advertises
+      its own @aztec version at the `/health` handshake and a mismatch degrades via `version-mismatch`; the
+      exposed surface is the local WASM path.)
+    - **Peers (rejected):** would convert that latent skew into an IMMEDIATE, actionable `npm install`
+      ERESOLVE — but block install on ANY skew, including benign ones, for a drop-in SDK whose selling point
+      is "just installs, falls back to WASM".
+    We keep deps, prioritising installability + graceful degradation and EXPLICITLY ACCEPTING the runtime
+    cross-version compatibility risk (mitigated by exact-pinned deps, per-@aztec dist-tags, and docs telling
+    consumers to match versions). Also correcting a second self-error codex caught: type-identity is NOT
+    "only a concern when the host shares the graph" — exact-match dedup (check #1) REMOVES the hazard; a
+    SKEWED duplicate graph is precisely what CREATES two @aztec instances across the PXE→prover boundary. If
+    that runtime-skew risk is later judged unacceptable, revisit as exact peers (a follow-up, owner's call).

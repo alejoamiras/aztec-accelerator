@@ -592,10 +592,11 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
   /**
    * B7 (F14): classify an HTTP error the accelerator returned from `/prove` and either degrade to WASM or
-   * throw {@link AcceleratorHttpError}. The accelerator is an optimisation, so EVERY recognised
-   * denial / version / cooldown / capacity / transient condition falls back to local proving. Only a
-   * caller MISCONFIGURATION (`400 invalid_version` / `invalid_origin`) or an UNRECOGNISED status/code
-   * throws — masking those as "slow but working" WASM would hide a real integration bug.
+   * throw {@link AcceleratorHttpError}. The accelerator is an optimisation, so the degrade set is matched BY
+   * STATUS — EVERY `403` (denial / version / cooldown) and EVERY `408`/`413`/`429`/`503`, plus
+   * `500 download_failed`/`prove_failed` — all fall back to local proving regardless of `code`. Only a
+   * `400` MISCONFIGURATION (`invalid_version` / `invalid_origin`), a `500` with an unrecognised code, or an
+   * unexpected status throws — masking those as "slow but working" WASM would hide a real integration bug.
    *
    * The server sends its error body as `text/plain` carrying a JSON string, so the stable `code` is
    * recovered via {@link parseServerError} (a JSON content-type gives an object; both are handled).
