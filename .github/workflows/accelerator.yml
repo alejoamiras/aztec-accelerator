@@ -182,6 +182,11 @@ jobs:
       # OS by design (Windows mutates the real HKCU behind an RAII restore; --test-threads=1 makes
       # the serialization explicit rather than incidental).
       - run: cargo test --test autostart_heal -- --ignored --nocapture --test-threads=1
+      # B5: real-OS uninstall ownership. Linux exercises the copied-install foreign skip (a foreign
+      # .desktop + certs LEFT) and the CARGO_BIN_EXE owned+idempotent teardown; Windows round-trips
+      # crash-recovery ownership against a REAL scheduled task (schtasks /XML + UTF-16 — the layer the
+      # Wine NSIS harness cannot reach). One test per OS mutates real per-user state, so --test-threads=1.
+      - run: cargo test --test uninstall_ownership -- --ignored --nocapture --test-threads=1
       # D5 (autostart plan): a bare `cargo test` compiles + runs the crate's #[cfg(test)] blocks.
       # Until this line NO workflow ran one on macOS, so every #[cfg(target_os = "macos")] unit
       # test — including crash_recovery's three patch_plist_* tests — had never compiled anywhere.
