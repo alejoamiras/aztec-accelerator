@@ -341,11 +341,18 @@ async fn prove_with_timeout(
         // The -t flag was repurposed to --verifier_target in recent versions.
         cmd.env("HARDWARE_CONCURRENCY", t.to_string());
     }
-    // kill_on_drop ensures the bb process is killed if the future is cancelled
-    // (e.g., client disconnect, timeout). Without it, an orphaned bb would run to
-    // completion wasting CPU while holding the prove semaphore.
+    // kill_on_drop ensures the DIRECT bb process is killed if the future is cancelled (e.g. client
+    // disconnect, timeout). Without it, an orphaned bb would run to completion wasting CPU while holding
+    // the prove semaphore. B3 (F6): `configure` additionally puts bb in its own process group (Unix) so
+    // the whole TREE — including any process bb forks — can be reaped, and the guard below covers the
+    // exit/restart/update paths `kill_on_drop` cannot.
     cmd.kill_on_drop(true);
+    containment::configure(&mut cmd);
     let mut child = spawn_capturing_stderr(&mut cmd)?;
+    // B3 (F6): register the in-flight child so a quit/restart/update (via `terminate_inflight`) — or a
+    // cancellation/timeout (via this guard's Drop) — reaps the whole bb tree, not just the direct child.
+    // Fail-closed: if the child can't be contained (Windows Job Object assign failure), don't prove.
+    let guard = containment::Guard::register(&child)?;
     // B3 (F4): take the piped stderr and drain it CAP-and-CONTINUE, concurrently with waiting for exit.
     // `wait_with_output()` used to buffer ALL of stderr into memory for up to the timeout; draining with
     // a retain cap bounds the allocation while still emptying the pipe so bb never blocks writing to it.
@@ -362,13 +369,17 @@ async fn prove_with_timeout(
 
     let (status, stderr_retained, stderr_total) = match waited {
         Ok(Ok(triple)) => triple,
+        // On these paths bb may still be running; returning drops `guard`, whose Drop SIGKILLs the tree
+        // (and `kill_on_drop` reaps the direct child).
         Ok(Err(e)) => return Err(Box::new(e)),
         Err(_) => {
-            // Timeout: the outer future is being dropped, so `kill_on_drop` fires on `child`.
             tracing::error!("bb prove timed out after {:?}", timeout);
             return Err("bb prove timed out after 5 minutes".into());
         }
     };
+    // bb has EXITED (we hold its status). Clear the containment registration so neither the guard's drop
+    // nor a racing `terminate_inflight` signals a now-reaped pgid.
+    guard.finish();
 
     let stderr = String::from_utf8_lossy(&stderr_retained);
     if !stderr.is_empty() {
@@ -448,6 +459,185 @@ where
         }
     }
     (retained, total)
+}
+
+/// B3 (F6): kill the WHOLE in-flight bb process tree (bb + anything it spawns) when the app exits,
+/// restarts, updates, or the prove is cancelled/times out. `kill_on_drop` only reaps the direct child
+/// on an in-process future-drop; it does nothing for `std::process::exit`/`app.exit()`/`app.restart()`
+/// or for grandchildren. The mechanism is per-OS but the API — [`configure`], a [`Guard`] returned by
+/// `Guard::register`, and [`terminate_inflight`] — is uniform.
+///
+/// [`configure`]: containment::configure
+/// [`terminate_inflight`]: containment::terminate_inflight
+pub use containment::terminate_inflight;
+
+#[cfg(unix)]
+mod containment {
+    use std::sync::Mutex;
+
+    /// The process-group id of the in-flight bb (== bb's pid, because we spawn it as its own group
+    /// leader). `None` when no prove is running. `kill(-pgid)` SIGKILLs bb AND every descendant it
+    /// forked, in one call.
+    static ACTIVE_PGID: Mutex<Option<i32>> = Mutex::new(None);
+
+    /// Put the child in its OWN process group so the whole tree can be signalled at once.
+    pub(super) fn configure(cmd: &mut tokio::process::Command) {
+        cmd.process_group(0);
+    }
+
+    /// RAII registration for the spawned child's group. On drop it SIGKILLs the group **iff still
+    /// registered** — i.e. the prove did NOT complete normally (client-disconnect future-drop, timeout,
+    /// panic). On the normal path [`finish`](Guard::finish) clears the registration first, so drop is a
+    /// no-op. Registration/clear/kill all happen under one lock, so `terminate_inflight` and this guard
+    /// are serialized (no double kill; whoever clears first wins).
+    pub(super) struct Guard {
+        pgid: i32,
+    }
+
+    impl Guard {
+        pub(super) fn register(child: &tokio::process::Child) -> std::io::Result<Self> {
+            let pgid = child.id().ok_or_else(|| {
+                std::io::Error::other("bb child has no pid immediately after spawn")
+            })? as i32;
+            *ACTIVE_PGID.lock().unwrap() = Some(pgid);
+            Ok(Self { pgid })
+        }
+
+        /// Normal completion: bb has already exited (we hold its status). Clear the registration so
+        /// neither this guard's drop nor a racing `terminate_inflight` signals a now-reaped (and
+        /// potentially recycled) pgid.
+        pub(super) fn finish(self) {
+            let mut g = ACTIVE_PGID.lock().unwrap();
+            if *g == Some(self.pgid) {
+                *g = None;
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let mut g = ACTIVE_PGID.lock().unwrap();
+            if *g == Some(self.pgid) {
+                *g = None;
+                // SIGKILL the whole group. ESRCH (already gone) is harmless. NOTE: a microsecond window
+                // exists between `child.wait()` reaping bb and `finish()` clearing this entry in which a
+                // racing terminate could target a freed pgid; because we kill a process GROUP (not a bare
+                // pid), that is only wrong if a brand-new, unrelated process both reused the pid AND made
+                // itself a group leader in that window — vanishingly unlikely and documented as residual.
+                unsafe {
+                    libc::kill(-self.pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// SIGKILL the in-flight bb tree, if any. Called from the app's quit / pre-update paths so a
+    /// quit/restart/update cannot strand a running bb and its children.
+    pub fn terminate_inflight() {
+        let mut g = ACTIVE_PGID.lock().unwrap();
+        if let Some(pgid) = g.take() {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod containment {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// A process-lifetime Job Object handle (stored as `isize` so it is `Send`/`Sync` in the static).
+    /// Deliberately NEVER closed: `KILL_ON_JOB_CLOSE` fires exactly when this process exits and the OS
+    /// closes the last handle, so every bb assigned to the job — and every process bb spawned — is
+    /// killed on quit/restart/update/crash, with no per-exit-site code. 0 means creation failed.
+    static JOB: OnceLock<isize> = OnceLock::new();
+
+    fn job_handle() -> HANDLE {
+        let raw = *JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            job as isize
+        });
+        raw as HANDLE
+    }
+
+    /// No spawn-time configuration on Windows — the child is added to the job AFTER it exists.
+    pub(super) fn configure(_cmd: &mut tokio::process::Command) {}
+
+    /// On Windows the Job Object (KILL_ON_JOB_CLOSE) reaps the tree when the app exits, so the guard
+    /// carries no per-drop kill; `kill_on_drop` still reaps the direct child on a future-drop.
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn register(child: &tokio::process::Child) -> std::io::Result<Self> {
+            let job = job_handle();
+            if job.is_null() {
+                return Err(std::io::Error::other("failed to create the bb Job Object"));
+            }
+            // tokio's Child exposes the raw process handle on Windows.
+            let raw = child
+                .raw_handle()
+                .ok_or_else(|| std::io::Error::other("bb child has no OS handle after spawn"))?
+                as HANDLE;
+            unsafe {
+                if AssignProcessToJobObject(job, raw) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Fail-closed: prove must not proceed on a bb that is NOT actually contained (codex).
+                let mut in_job: i32 = 0;
+                if IsProcessInJob(raw, job, &mut in_job) == 0 || in_job == 0 {
+                    return Err(std::io::Error::other(
+                        "bb child is not in the Job Object after assignment",
+                    ));
+                }
+            }
+            Ok(Guard)
+        }
+
+        pub(super) fn finish(self) {}
+    }
+
+    /// Kill every process currently in the job (only ever one bb, since proving is serialized). The job
+    /// itself persists for the next prove.
+    pub fn terminate_inflight() {
+        let job = job_handle();
+        if !job.is_null() {
+            unsafe {
+                TerminateJobObject(job, 1);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod containment {
+    pub(super) fn configure(_cmd: &mut tokio::process::Command) {}
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn register(_child: &tokio::process::Child) -> std::io::Result<Self> {
+            Ok(Guard)
+        }
+        pub(super) fn finish(self) {}
+    }
+    pub fn terminate_inflight() {}
 }
 
 /// Prepend a 4-byte big-endian uint32 field count header.
@@ -916,5 +1106,71 @@ mod tests {
             .await
             .expect_err("a hung bb must time out");
         assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    // ── B3 (F6): terminate the whole bb PROCESS TREE, not just the direct child ──
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn terminate_inflight_kills_bb_and_its_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        // A bb that spawns a long-lived GRANDCHILD (which `kill_on_drop` would NOT reap), records its
+        // pid, then blocks. Removing `process_group(0)` in `containment::configure` leaves the grandchild
+        // in the test's own group, so `kill(-bb_pid)` finds no such group → the grandchild survives and
+        // this test fails: the mutation proof for the process-group containment.
+        let script = format!(
+            "{FIND_OUTDIR}\nsleep 300 & echo $! > \"{}\"\nwait",
+            pidfile.display()
+        );
+        let _env = install_fake_bb(dir.path(), &script);
+
+        // Run prove concurrently — it blocks until we terminate the tree.
+        let prove_task = tokio::spawn(async { prove(b"witness", None, None).await });
+
+        // Wait (bounded) for the grandchild to report its pid.
+        let mut gpid = None;
+        for _ in 0..250 {
+            if let Ok(s) = std::fs::read_to_string(&pidfile) {
+                if let Ok(p) = s.trim().parse::<i32>() {
+                    gpid = Some(p);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let gpid = gpid.expect("fake bb should have spawned a grandchild and written its pid");
+        assert_eq!(
+            unsafe { libc::kill(gpid, 0) },
+            0,
+            "the grandchild should be alive before terminate"
+        );
+
+        // Kill the whole tree, as a quit/restart/update would.
+        terminate_inflight();
+        // Stop waiting on prove regardless of outcome — the property under test is that the GRANDCHILD
+        // died. Aborting here means a regression (grandchild survives) fails the assertion below FAST
+        // instead of hanging the test on a prove that never returns. On the correct path prove is already
+        // finishing (bb was killed); its own `kill_on_drop` reaps the direct child on abort either way.
+        prove_task.abort();
+
+        // The grandchild must be gone (SIGKILL to the group). Poll briefly for the reap.
+        let mut dead = false;
+        for _ in 0..100 {
+            if unsafe { libc::kill(gpid, 0) } == -1 {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Best-effort cleanup so a FAILED run (mutation) doesn't leak the surviving grandchild.
+        if !dead {
+            unsafe { libc::kill(gpid, libc::SIGKILL) };
+        }
+        assert!(
+            dead,
+            "the grandchild must be killed with the group by terminate_inflight"
+        );
     }
 }

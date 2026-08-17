@@ -779,6 +779,14 @@ fn main() {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if should_prevent_exit(code) {
                     api.prevent_exit();
+                } else {
+                    // B3 (F6): the app IS exiting (explicit tray quit → app.exit(0), or the auto-updater's
+                    // app.restart()) — both fire ExitRequested here, so this ONE choke point reaps the
+                    // in-flight bb TREE before we go. `kill_on_drop` only reaps the direct child on an
+                    // in-process future-drop, never on process exit and never grandchildren. (Windows also
+                    // reaps via the Job Object's KILL_ON_JOB_CLOSE when the process handle closes, which
+                    // additionally covers the updater's internal `process::exit` on the NSIS handoff.)
+                    aztec_accelerator::bb::terminate_inflight();
                 }
             }
         });

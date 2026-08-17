@@ -555,6 +555,13 @@ pub async fn perform_update(app: &AppHandle, verified: VerifiedUpdate) {
         (paths, guard)
     };
 
+    // B3 (F6): kill any in-flight bb TREE BEFORE install(). On Windows install() hands off to NSIS and
+    // exits the process, bypassing the ExitRequested catch-all in main.rs — so this is the point at which
+    // bb must die before the installer touches files. On macOS/Linux the app.restart() below also reaps
+    // it via that catch-all, but killing here first means the install never runs alongside a live prover
+    // holding the (about-to-be-replaced) workspace/binary.
+    crate::bb::terminate_inflight();
+
     match update.install(bytes) {
         Ok(()) => {
             // Windows never reaches here — install() dispatched the installer and exited the process.
