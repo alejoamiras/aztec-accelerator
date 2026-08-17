@@ -60,6 +60,9 @@ windows-sys = { version = "0.61", features = [
   # killed by the OS when this process exits — quit, restart, auto-update, or crash. A FEATURE, no new
   # crate.
   "Win32_System_JobObjects",
+  # B4 (F-B4, codex round 3): OVERLAPPED for LockFileEx — the cross-process config-write lock (LockFileEx
+  # itself is in Win32_Storage_FileSystem, already enabled). A FEATURE, no new crate.
+  "Win32_System_IO",
 ] }
 
 # B3 (F6): kill(2) the in-flight bb PROCESS GROUP on Unix (SIGKILL the whole tree, not just the direct

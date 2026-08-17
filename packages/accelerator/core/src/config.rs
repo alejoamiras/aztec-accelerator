@@ -203,20 +203,33 @@ impl ConfigStore {
             cap: Some(PersistCapability::for_test()),
         }
     }
+
+    /// B4 (codex): did THIS build mint a persist capability AT STARTUP? `false` for the headless server
+    /// (never persists) and for a config seen as a NEWER schema at launch. This reflects the LOAD-TIME state
+    /// only — it does NOT re-read the disk, so it can't see a newer build that replaced the file since launch
+    /// (callers that care pair it with [`on_disk_is_overwritable`], a fresh probe). Neither is the security
+    /// gate: [`save_to`] re-checks the on-disk version under the cross-process lock at write time.
+    pub fn is_persistable(&self) -> bool {
+        self.cap.is_some()
+    }
 }
 
 /// Read ONLY `config_version` from a config JSON string (lenient — unknown fields ignored). `None` when the
 /// version can't be determined: malformed JSON, a non-object, or `config_version` of the wrong type / out of
 /// `u32` range. Shared by the load probe and the save-time TOCTOU re-check so both agree on "the version".
 fn probe_config_version(contents: &str) -> Option<u32> {
-    #[derive(Deserialize)]
-    struct VersionProbe {
-        #[serde(default = "default_config_version")]
-        config_version: u32,
+    // Parse to a Value and REQUIRE a JSON object. A `#[derive(Deserialize)]` struct probe was insufficient:
+    // serde also deserializes a struct from a JSON *sequence* (positional), so `[]` / `[1,2]` would defang
+    // the probe by defaulting `config_version` instead of failing. A non-object (array/scalar) now → `None`
+    // (fail closed). An object WITHOUT `config_version` → the current version (matches the load-time serde
+    // default, so a versionless-but-valid object stays loadable/overwritable). A present-but-wrong-typed or
+    // out-of-`u32`-range `config_version` → `None`.
+    let value: serde_json::Value = serde_json::from_str(contents).ok()?;
+    let obj = value.as_object()?;
+    match obj.get("config_version") {
+        None => Some(CONFIG_VERSION),
+        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()),
     }
-    serde_json::from_str::<VersionProbe>(contents)
-        .ok()
-        .map(|p| p.config_version)
 }
 
 /// B4 two-stage, save-capable load — use at startup where the config will later be SAVED. The returned
@@ -335,6 +348,132 @@ where
     Ok(out)
 }
 
+/// FAIL-CLOSED overwrite decision, shared by the save-time re-check and the [`on_disk_is_overwritable`]
+/// preflight so both agree. `contents` is the result of reading the DESTINATION. Overwrite ONLY a genuinely
+/// absent file (fresh install / our own in-flight write) or one whose `config_version` PROBES to
+/// `<= CONFIG_VERSION`. A read error (I/O / permission / mode-000), or content whose version can't be read
+/// (malformed / non-object / wrong-typed / out-of-range → [`probe_config_version`] `None`), REFUSES — we
+/// never clobber a file we couldn't confidently interpret (it may be a newer schema).
+fn version_is_overwritable(contents: std::io::Result<String>) -> bool {
+    match contents {
+        Ok(existing) => matches!(probe_config_version(&existing), Some(v) if v <= CONFIG_VERSION),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+/// B4 (codex round 3): is the config CURRENTLY on disk (at [`config_path`]) one this build may overwrite?
+/// A fresh read — unlike a startup [`PersistCapability`], which is stale the instant a newer build replaces
+/// the file. A PREFLIGHT for commands that perform config-dependent external side effects (cert/trust): they
+/// re-probe here so they refuse BEFORE the side effect when a newer build has appeared since load, rather
+/// than after the locked save rejects. Not the security gate itself — [`save_to`] re-checks under the
+/// cross-process lock at write time.
+pub fn on_disk_is_overwritable() -> bool {
+    version_is_overwritable(std::fs::read_to_string(config_path()))
+}
+
+/// B4 (codex round 3): a cross-process EXCLUSIVE advisory lock guarding config WRITES. Every v2+ writer holds
+/// it across the whole stage→recheck→rename critical section, so a concurrent process cannot install a newer
+/// config in the window between our version re-check and our rename — the race a lock-free re-check leaves
+/// open (OS descheduling after the check; the read-inode-vs-rename-pathname race; shared-temp interference
+/// between instances), none of which are microsecond-bounded. Sibling `config.json.lock`; the OS releases it
+/// automatically if the holder dies (`flock` / `LockFileEx` are tied to the open handle), so a crash never
+/// strands a stale lock. The lock is BLOCKING but held only for the brief write (no OS dialogs inside), so it
+/// cannot deadlock a UI thread. Held by the returned guard until it drops (after the rename).
+///
+/// Not enforced by the already-shipped 1.0.7 (the documented downgrade residual); this closes v2.0.0+ ⇄
+/// future-build concurrency.
+fn acquire_config_write_lock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let lock_path = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // flock(LOCK_EX): blocks until no other open-file-description holds the lock; released on close/exit.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+        // LockFileEx (no LOCKFILE_FAIL_IMMEDIATELY) blocks for an exclusive byte-range lock over the whole
+        // file; released on CloseHandle (guard drop) / process exit. OVERLAPPED is zeroed (offset 0).
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            LockFileEx(
+                file.as_raw_handle() as _,
+                LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(file)
+}
+
+/// Test-only NON-BLOCKING acquire of the same lock, so a test can PROVE exclusivity + release-on-drop without
+/// a flaky timing test: `Ok(None)` means the lock is already held (would block). flock/LockFileEx conflict
+/// even across two open handles in the SAME process, so a held guard makes this return `None`.
+#[cfg(test)]
+fn try_acquire_config_write_lock_nb(
+    path: &std::path::Path,
+) -> std::io::Result<Option<std::fs::File>> {
+    let lock_path = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(e);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+        };
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            LockFileEx(
+                file.as_raw_handle() as _,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            return Ok(None); // held elsewhere → would block
+        }
+    }
+    Ok(Some(file))
+}
+
 /// Save config to disk (to the default `config_path()`). Creates parent dirs; 0o600 on Unix.
 ///
 /// B4: requires a [`PersistCapability`] — a future-schema config yields none from load, so this cannot be
@@ -354,21 +493,6 @@ pub fn save_to(
     path: &std::path::Path,
     _cap: &PersistCapability,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // B4 (codex): the capability is minted at LOAD time; re-check the on-disk version at WRITE time to close
-    // the TOCTOU where a NEWER build replaced this file after our cap was minted. If the file is now a newer
-    // schema, refuse — never clobber it. (A missing/unreadable file is fine to write: fresh install / our own
-    // in-flight write.)
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        if let Some(v) = probe_config_version(&existing) {
-            if v > CONFIG_VERSION {
-                return Err(format!(
-                    "refusing to overwrite config at {}: on-disk config_version {v} is newer than this build's {CONFIG_VERSION}",
-                    path.display()
-                )
-                .into());
-            }
-        }
-    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -377,6 +501,13 @@ pub fn save_to(
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
     }
+
+    // B4 (codex round 3): hold the cross-process write lock across the WHOLE stage→recheck→rename section, so
+    // no other v2+ process can install a newer config between our re-check and our rename. Because staging is
+    // serialized under this lock too, the shared `config.json.tmp` name is safe among v2+ writers (no
+    // concurrent writer touches it inside our critical section). Dropped at function exit (after the rename).
+    let _write_lock = acquire_config_write_lock(path)?;
+
     let json = serde_json::to_string_pretty(config)?;
 
     // Write to a temp file then rename for atomicity — if the process crashes
@@ -406,6 +537,20 @@ pub fn save_to(
     #[cfg(all(not(unix), not(windows)))]
     {
         std::fs::write(&tmp_path, &json)?;
+    }
+
+    // B4 (codex): the capability is minted at LOAD time; re-check the on-disk version right before the atomic
+    // rename. Under the write lock (above), this recheck→rename is atomic w.r.t. other v2+ writers, so a
+    // newer build cannot slip a config in between. FAIL CLOSED — see [`version_is_overwritable`]. On refusal
+    // we remove the staged temp so nothing is left behind.
+    let overwrite_ok = version_is_overwritable(std::fs::read_to_string(path));
+    if !overwrite_ok {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "refusing to overwrite config at {}: its on-disk version is newer than this build's {CONFIG_VERSION}, or could not be read",
+            path.display()
+        )
+        .into());
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
@@ -438,15 +583,22 @@ pub fn lock_mutate_save_to(
     cap: &PersistCapability,
     f: impl FnOnce(&mut AcceleratorConfig) -> bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // B4 (codex): mutate a CLONE, and commit it to the lock ONLY after a successful save. If the save-time
+    // version re-check refuses (a newer build replaced the file since our cap was minted), the in-memory
+    // config is left UNCHANGED — the UI never diverges from disk on a rejected write (no phantom change that
+    // reverts on the next launch). The write lock is held across the whole read-modify-save, so an in-process
+    // racer can neither observe nor interleave a half-applied candidate.
     let mut cfg = lock.write();
-    if f(&mut cfg) {
-        match path {
-            Some(p) => save_to(&cfg, p, cap),
-            None => save(&cfg, cap),
-        }
-    } else {
-        Ok(())
+    let mut candidate = cfg.clone();
+    if !f(&mut candidate) {
+        return Ok(());
     }
+    match path {
+        Some(p) => save_to(&candidate, p, cap),
+        None => save(&candidate, cap),
+    }?;
+    *cfg = candidate;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -594,6 +746,135 @@ mod tests {
         assert!(
             std::fs::read_to_string(&path).unwrap().contains("999"),
             "the newer file is left untouched"
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "the staged temp is cleaned up on refusal"
+        );
+    }
+
+    #[test]
+    fn save_refuses_when_destination_version_is_unreadable() {
+        // [mut: change the `Ok(existing) =>` arm in save_to's overwrite_ok match to `Ok(_) => true` → the
+        //  unreadable file is clobbered, so the "left untouched" assert FAILS]
+        // FAIL CLOSED symmetry with load: a destination whose version we can't read might be a newer schema
+        // we simply can't parse — refuse rather than clobber it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "not json at all").unwrap();
+        let err = save_to(
+            &AcceleratorConfig::default(),
+            &path,
+            &PersistCapability::for_test(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("could not be read") || err.to_string().contains("newer"),
+            "save_to refuses a destination whose version it cannot read"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "not json at all",
+            "an unreadable-version destination is left untouched"
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "the staged temp is cleaned up on refusal"
+        );
+    }
+
+    #[test]
+    fn mutate_leaves_memory_unchanged_when_save_refused() {
+        // [mut: in lock_mutate_save_to, apply `f` to `cfg` directly (commit before save) instead of a
+        //  `candidate` clone → memory reflects the change even though the save was refused, so this FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A newer build replaced the file after our cap was minted → the save will refuse.
+        std::fs::write(&path, r#"{"config_version": 999}"#).unwrap();
+        let lock = parking_lot::RwLock::new(AcceleratorConfig::default());
+        let result =
+            lock_mutate_save_to(&lock, Some(&path), &PersistCapability::for_test(), |cfg| {
+                cfg.speed = Speed::Low;
+                true
+            });
+        assert!(result.is_err(), "a save over a newer config is refused");
+        assert_eq!(
+            lock.read().speed,
+            Speed::Full,
+            "the in-memory config is NOT mutated when the save is refused"
+        );
+    }
+
+    #[test]
+    fn version_is_overwritable_fails_closed() {
+        // [mut: change the `Err(_) => false` arm to `Err(_) => true` → the permission-error case flips, FAILS]
+        use std::io::{Error, ErrorKind};
+        assert!(version_is_overwritable(
+            Ok(r#"{"config_version":2}"#.into())
+        ));
+        assert!(version_is_overwritable(
+            Ok(r#"{"config_version":1}"#.into())
+        ));
+        assert!(version_is_overwritable(Ok("{}".into()))); // versionless object → defaults to current
+        assert!(!version_is_overwritable(Ok(
+            r#"{"config_version":999}"#.into()
+        )));
+        assert!(!version_is_overwritable(Ok("not json".into()))); // unprobeable → refuse
+        assert!(!version_is_overwritable(Ok("[]".into()))); // non-object → refuse
+        assert!(version_is_overwritable(Err(Error::from(
+            ErrorKind::NotFound
+        )))); // absent → write
+        assert!(!version_is_overwritable(Err(Error::from(
+            ErrorKind::PermissionDenied
+        )))); // unreadable → refuse
+    }
+
+    #[test]
+    fn config_write_lock_is_exclusive_and_released_on_drop() {
+        // [mut: delete the `flock`/`LockFileEx` call in acquire_config_write_lock → the held guard no longer
+        //  locks, so the non-blocking re-acquire SUCCEEDS and the `is_none` assertion FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let held = acquire_config_write_lock(&path).unwrap();
+        assert!(
+            try_acquire_config_write_lock_nb(&path).unwrap().is_none(),
+            "a second acquire must fail while the lock is held"
+        );
+        drop(held);
+        assert!(
+            try_acquire_config_write_lock_nb(&path).unwrap().is_some(),
+            "acquire must succeed once the lock is released"
+        );
+    }
+
+    #[test]
+    fn concurrent_saves_under_lock_never_corrupt() {
+        // Smoke: many threads saving the same file concurrently must not deadlock, must leave a COMPLETE
+        // valid config (atomic rename under the lock), and must leave no staged temp behind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("config.json"));
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let path = std::sync::Arc::clone(&path);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..10 {
+                    let cfg = AcceleratorConfig {
+                        onboarding_version: (t * 10 + i) as u32,
+                        ..Default::default()
+                    };
+                    save_to(&cfg, &path, &PersistCapability::for_test()).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Final file is a complete, valid config (never a half-written / interleaved mix).
+        let loaded = load_with_cap_from(&path);
+        assert!(loaded.cap.is_some(), "final config is valid + current");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "no staged temp remains after concurrent saves"
         );
     }
 
