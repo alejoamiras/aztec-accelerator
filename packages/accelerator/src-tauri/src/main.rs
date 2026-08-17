@@ -8,7 +8,6 @@ use aztec_accelerator::authorization::AuthorizationManager;
 use aztec_accelerator::commands::{AuthState, ConfigState, PendingUpdate, SharedAppState};
 use aztec_accelerator::server::{AppState, HeadlessState, ServerStatus};
 use aztec_accelerator::{certs, commands, config, log_dir, verified_sites};
-use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
