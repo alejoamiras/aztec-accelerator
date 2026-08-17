@@ -107,6 +107,48 @@ invariant, `:136`); or (b) the literal draft model — `release` creates `--draf
 [release]` downloads the draft's OWN assets, a `finalize` job (`gh release edit --draft=false`) `needs` it.
 Prefer (b) only if "prove the real published assets" is worth the extra release-graph complexity; else (a).
 
+## Codex design-review R1 (2026-08-17, session `01a00fb3` / `codex-DNGjdn6U`) — corrections that OVERRIDE the above
+The recon's "all 3 OSes automate out-of-band" was too optimistic. Codex (read-only, cited the code) corrected:
+
+1. **Windows is the real blocker (recon was wrong).** `windows.rs:16` *claims* CI seeds `CurrentUser\Root` via
+   PowerShell `Import-Certificate` non-interactively, but the actual P4 spike outcome (`tests/trust_windows.rs:3`)
+   states plainly: adding to `CurrentUser\Root` via `certutil -addstore` / `X509Store.Add` / Import-Certificate
+   all raise the root-CA "Security Warning" dialog and **hang headless**. `LocalMachine\Root` is silent (admin)
+   but the app's predicate queries only `-user` (`windows.rs` `live_present`, `-user -store Root <serial>`), so
+   an LM seed won't satisfy it. ⇒ **Windows CANNOT run the composed proof headless as-is.** OWNER DECISION
+   (Windows only) — options: **(a)** a small PRODUCTION predicate change: accept OUR-serial CA in
+   `LocalMachine\Root` *OR* `CurrentUser\Root` (NOT a bypass — still our specific serial; LM\Root is admin-gated
+   so it's a *higher* trust bar, and it's a real enterprise-IT-deploys-the-CA feature; then CI seeds LM\Root
+   silently + Chromium-on-Windows trusts LM\Root too); **(b)** a test-only `e2e-trust` bypass seam (rejected —
+   trust bypass in security code); **(c)** managed/pretrusted runner (infra, owner-only); **(d)** documented
+   manual pre-GA Windows verification (Linux+macOS stay automated). **Recommend (a); fallback (d).** → codex
+   confirm + owner PushNotification.
+2. **macOS is fine (recon's fear was misplaced).** `verify-cert` runs WITHOUT `-k`, so it's not login-keychain
+   restricted; a `sudo security add-trusted-cert -d` System/Admin anchor satisfies the predicate, and
+   Chromium-on-macOS consumes System-keychain roots. Bound the seed with a timeout; prove `dump-trust-settings
+   -d` + `verify-cert` + a browser fetch (sudo ≠ guaranteed on newer TCC-tightened runners).
+3. **Linux serves HTTPS decoupled from trust** (`main.rs:126` `ca_trusted = || true`) — so the Linux app needs
+   only certs-present; only the BROWSER's NSS (`~/.pki/nssdb` via `certutil`, preserving the content-hash
+   nickname) needs the seed. Use `.deb` (or `install libfuse2t64` for the AppImage — GH runners lack FUSE).
+4. **Bootstrap fix = a narrow `--generate-certs-only` CLI/command** (NOT a trust bypass): startup returns early
+   with HTTPS off and never generates (`main.rs:174`); generation lives only inside `enable_https_inner` right
+   before the interactive install (`commands.rs:618`). So add a headless "generate certs, don't install trust"
+   entry; the harness then seeds trust out-of-band + writes a config with `https_enabled:true` AND the harness
+   **approved origin pre-added** (else the `/prove` auth popup blocks headless). Do NOT reimplement the
+   keyless-CA profile in the harness. The `1.0.7` upgrade leg has the SAME passive-generation gap (1.0.7 also
+   won't self-generate headless) — the leg installs 1.0.7 then must bootstrap its certs the same way.
+5. **Positive-proof (proved ≠ enough — WASM emits `proved` too, `accelerator-prover.ts:580`):** require ALL of
+   — the exact `onPhase` sequence WITHOUT `fallback`, a successful returned proof, AND a Playwright-observed
+   `200 https://127.0.0.1:59834/prove` carrying `x-prove-duration-ms` (the server adds that header ONLY after a
+   successful `bb::prove`, `server/prove.rs:347`). Pass BOTH strict flags explicitly to the page (browser
+   `process.env` is unreliable): `httpsOnly:true` + `allowInsecureDowngrade:false`.
+6. **Wiring = literal draft → gate → finalize, and MOVE tag creation to finalize** (else a failed draft-gate
+   burns the version tag against a failed SHA). Adding the job to `tag.needs` (option a) does NOT test the
+   uploaded release assets — rejected.
+7. **Uninstall leg:** product uninstall removes only its LOGIN-keychain (mac) / `-user` (win) anchor — it does
+   NOT remove a harness-seeded System/LM anchor, so the harness must clean up its OWN out-of-band seed
+   (don't credit product-uninstall for it).
+
 ## Nomenclature checklist (root plan owns; verify ALL before RC)
 Updater/promote semver comparisons (real semver); version fields (tauri.conf.json / Cargo.toml / package.json
 / NSIS / CFBundleVersion / deb/AppImage); identity-guard/marker/scheduled-task names; docs/landing/runbook/
