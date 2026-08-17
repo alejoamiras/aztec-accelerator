@@ -20,6 +20,11 @@
 
 Var UpdateMode
 
+; The Tauri NSIS template `!define`s this from `mainBinaryName` (our `[[bin]]` = AztecAccelerator). The
+; PREUNINSTALL invocation and the POSTUNINSTALL native belt reference it, so mirror it here or makensis
+; fails on an undefined `${MAINBINARYNAME}`.
+!define MAINBINARYNAME "AztecAccelerator"
+
 !include "hooks.nsi"
 
 Name "hooks-harness"
@@ -31,6 +36,9 @@ SilentInstall silent
 Section "Install"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; The stand-in app exe, so PREUNINSTALL's `ExecWait "$INSTDIR\AztecAccelerator.exe" --prepare-uninstall`
+  ; has a real target to invoke (compiled first by the runner). It records that it ran.
+  File "AztecAccelerator.exe"
   ; Mirrors the Tauri template: POSTINSTALL fires as the LAST act of Section Install
   ; (installer.nsi:709-711 in tauri-bundler 2.8.1, !ifmacrodef-guarded).
   !insertmacro NSIS_HOOK_POSTINSTALL
@@ -44,5 +52,9 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
+  ; PREUNINSTALL first (as the Tauri template invokes it, before the exe is deleted). Its `ExecWait` of a
+  ; nonexistent `$INSTDIR\AztecAccelerator.exe` is a harmless no-op under the harness — we exercise its
+  ; GUARD (the same $EXEDIR/$INSTDIR discriminator the cert-trust cases drive) and that it compiles.
+  !insertmacro NSIS_HOOK_PREUNINSTALL
   !insertmacro NSIS_HOOK_POSTUNINSTALL
 SectionEnd

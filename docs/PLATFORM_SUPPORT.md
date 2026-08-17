@@ -33,6 +33,13 @@ degrades with an install hint if absent). Per-store trust status is shown honest
 **Sandboxed (snap/flatpak) Chromium keeps a private, confined trust store the app cannot reach** — it is
 disclaimed, not silently claimed as covered. Firefox must be restarted to pick up a newly added anchor.
 
+**Full uninstall (all OSes).** The trust-store column above is only the CA. A complete teardown also
+removes the autostart entry and the crash-recovery task/unit. **Windows** does all of it in the NSIS
+uninstaller (guarded so an in-place upgrade never fires it). **macOS/Linux** have no uninstall hook, so run
+`AztecAccelerator --prepare-uninstall` (or `packages/accelerator/scripts/uninstall.sh`) before deleting the
+app. It is **ownership-checked**: a second, copied install that still shares `~/.aztec-accelerator` leaves
+all shared state intact and reports why. Config and approved origins are never removed by any path.
+
 ## macOS Details
 
 - **Code-signed and notarized** via Apple Developer ID
