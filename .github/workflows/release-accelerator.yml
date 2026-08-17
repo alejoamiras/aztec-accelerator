@@ -817,7 +817,23 @@ jobs:
   release:
     name: Create draft release
     needs: [validate, release-auth-preflight, build, build-headless, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver, sign-update-feed]
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    # codex F-review: require EXPLICIT success of every MANDATORY need (a bare `!contains(failure)` would let a
+    # SKIPPED smoke/webdriver/preflight still create a draft). The ONLY tolerated skip is `sign-update-feed`,
+    # which is skipped for prereleases (no feed) — accept success OR skipped for it alone.
+    if: >-
+      ${{ !inputs.auth_probe && inputs.mode == 'publish'
+      && needs.validate.result == 'success'
+      && needs.release-auth-preflight.result == 'success'
+      && needs.build.result == 'success'
+      && needs.build-headless.result == 'success'
+      && needs.smoke.result == 'success'
+      && needs.smoke-intel.result == 'success'
+      && needs.update-smoke.result == 'success'
+      && needs.update-smoke-linux.result == 'success'
+      && needs.update-smoke-windows.result == 'success'
+      && needs.update-smoke-windows-negative.result == 'success'
+      && needs.e2e-webdriver.result == 'success'
+      && (needs.sign-update-feed.result == 'success' || needs.sign-update-feed.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -936,6 +952,13 @@ jobs:
               echo "::error::draft $RELEASE_TAG unexpectedly has a pushed tag — refusing to delete"
               exit 1
             fi
+            # codex F-review: re-check isDraft IMMEDIATELY before delete to tighten the TOCTOU vs a manual/API
+            # publish landing between the view above and the delete (automated dispatches are already
+            # serialized by the workflow concurrency group; no atomic delete-if-draft primitive exists).
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
+              echo "::error::$RELEASE_TAG is no longer a draft (published between view and delete) — aborting"
+              exit 1
+            fi
             echo "Replacing a stale unpublished draft for $RELEASE_TAG (a prior run's gate failed)"
             gh release delete "$RELEASE_TAG" --yes
           elif gh release view "$RELEASE_TAG" &>/dev/null; then
@@ -1036,9 +1059,10 @@ jobs:
           path: asset-manifest.sha256
           retention-days: 7
 
-  # B4/F: the DRAFT gate — run the 3-OS composed native-bb-over-HTTPS proof + the 1.0.7→2.0.0 upgrade +
-  # uninstall legs against the DRAFT's OWN uploaded installers (release-asset mode). Only on PASS does `tag`
-  # push the tag and `finalize` publish. This is the "packaged-E2E-on-draft" slot B6 deferred to B4.
+  # B4/F: the DRAFT gate — run the composed native-bb-over-HTTPS proof (Linux + macOS; Windows is the deferred
+  # owner-decision leg D, verified per that decision, NOT here yet) + the 1.0.7→2.0.0 upgrade + uninstall legs
+  # against the DRAFT's OWN uploaded installers (release-asset mode). Only on PASS does `tag` push the tag and
+  # `finalize` publish. This is the "packaged-E2E-on-draft" slot B6 deferred to B4.
   packaged-e2e-on-draft:
     name: Packaged E2E on draft
     needs: [validate, release]
@@ -1055,28 +1079,37 @@ jobs:
   finalize:
     name: Publish release (finalize)
     needs: [validate, release, packaged-e2e-on-draft, tag]
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.tag.result == 'success' && needs.packaged-e2e-on-draft.result == 'success' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    # codex F-review: EXPLICIT success of ALL needs (none of these skip in publish mode; a skip must not
+    # publish an ungated draft).
+    if: >-
+      ${{ !inputs.auth_probe && inputs.mode == 'publish'
+      && needs.validate.result == 'success'
+      && needs.release.result == 'success'
+      && needs.packaged-e2e-on-draft.result == 'success'
+      && needs.tag.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-tags: true
 
-      - name: Re-assert the pushed tag targets the reviewed commit
+      - name: Re-assert the pushed remote tag targets the reviewed commit
         env:
           TAG: ${{ needs.validate.outputs.tag }}
           EXPECTED_SHA: ${{ github.sha }}
         run: |
-          git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
-          ACTUAL="$(git rev-parse "refs/tags/$TAG^{commit}")"
-          if [ "$ACTUAL" != "$EXPECTED_SHA" ]; then
-            echo "::error::tag $TAG at $ACTUAL != github.sha $EXPECTED_SHA — refusing to publish"
+          # codex F-review: query the REMOTE tag directly — a `git fetch … || true` could leave a stale LOCAL
+          # tag and verify that. `tag` pushes a LIGHTWEIGHT tag, so ls-remote's first column IS the commit SHA.
+          REMOTE_SHA="$(git ls-remote origin "refs/tags/$TAG" | awk '{print $1}')"
+          if [ -z "$REMOTE_SHA" ]; then
+            echo "::error::tag $TAG not found on origin — refusing to publish"; exit 1
+          fi
+          if [ "$REMOTE_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::remote tag $TAG at $REMOTE_SHA != github.sha $EXPECTED_SHA — refusing to publish"
             exit 1
           fi
-          echo "Tag $TAG verified at $EXPECTED_SHA"
+          echo "Remote tag $TAG verified at $EXPECTED_SHA"
 
       - name: Download the gated asset manifest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -1084,27 +1117,39 @@ jobs:
           name: release-asset-manifest
           path: manifest
 
-      - name: Verify the draft asset set is unchanged, then publish
+      - name: Verify live asset SHA-256 digests == the gated manifest, then publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          # The gate ran against exactly these asset names; assert the live draft's set is unchanged before
-          # publishing (draft assets are mutable pre-publish). Full per-asset digest re-verify is a hardening
-          # TODO — the name/count set-match catches add/remove/rename in the automated same-run flow.
-          MANIFEST_NAMES="$(awk '{print $2}' manifest/asset-manifest.sha256 | sort)"
-          DRAFT_NAMES="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
-          if [ "$MANIFEST_NAMES" != "$DRAFT_NAMES" ]; then
-            echo "::error::draft asset set changed since the gate:"
-            diff <(echo "$MANIFEST_NAMES") <(echo "$DRAFT_NAMES") || true
+          # codex F-review: names-only false-greens a same-name byte replacement. Compare the DRAFT's LIVE
+          # per-asset SHA-256 digests (GitHub exposes `.digest = "sha256:<hex>"`) to the gated manifest, so the
+          # published bytes are provably the gated bytes. `sha256sum` lines are "<hex>  <name>".
+          sort manifest/asset-manifest.sha256 > /tmp/want.txt
+          echo "Gated manifest:"; cat /tmp/want.txt
+          # GitHub computes asset digests asynchronously after upload — poll until all are present (fail
+          # closed on a missing digest rather than false-green).
+          for attempt in $(seq 1 10); do
+            gh api "repos/$GH_REPO/releases/tags/$TAG" \
+              --jq '.assets[] | (.digest // "MISSING") + "  " + .name' \
+              | sed 's/^sha256://' | sort > /tmp/have.txt
+            if ! grep -q '^MISSING' /tmp/have.txt; then break; fi
+            echo "Some asset digests not computed yet (attempt $attempt) — waiting..."
+            sleep 6
+          done
+          echo "Live draft asset digests:"; cat /tmp/have.txt
+          if grep -q '^MISSING' /tmp/have.txt; then
+            echo "::error::a draft asset still has no computed digest — refusing to publish (fail closed)"
             exit 1
           fi
-          echo "Draft asset set matches the gated manifest ($(echo "$DRAFT_NAMES" | grep -c .) assets)"
-          # Flip draft → published. The tag was pushed by `tag` and VERIFIED == github.sha above (a stronger
-          # check than gh's --verify-tag, which only asserts existence), so publishing associates the release
-          # with that reviewed tag. --latest=false: the signed S3 feed is the source of truth (landing +
-          # updater read it); `promote` flips it later.
+          if ! diff -u /tmp/want.txt /tmp/have.txt; then
+            echo "::error::draft asset digests/names differ from the gated manifest — refusing to publish"
+            exit 1
+          fi
+          echo "All draft asset digests match the gated manifest — the published bytes are the gated bytes"
+          # Flip draft → published. The tag was pushed by `tag` and VERIFIED == github.sha above (stronger than
+          # gh's --verify-tag). --latest=false: the signed S3 feed is the source of truth; `promote` flips it.
           gh release edit "$TAG" --draft=false --latest=false
           echo "Published $TAG (draft finalized)"
 

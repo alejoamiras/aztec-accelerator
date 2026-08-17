@@ -336,11 +336,21 @@ jobs:
           PREV_TAG: ${{ inputs.prev_stable_tag }}
         run: gh release download "$PREV_TAG" --pattern '*.deb' --dir prev
 
-      - name: Download 2.0.0 installer artifact
+      - name: Download 2.0.0 installer (build-artifact mode)
+        if: inputs.release_tag == ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.app_artifact }}
           path: app-artifact
+
+      - name: Download 2.0.0 installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
 
       - name: Install 1.0.7 + write a 1.0.7-shaped config
         run: |
@@ -392,16 +402,28 @@ jobs:
     name: Full uninstall (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read # `gh release download` in release-asset mode
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Download 2.0.0 installer artifact
+      - name: Download 2.0.0 installer (build-artifact mode)
+        if: inputs.release_tag == ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.app_artifact }}
           path: app-artifact
+
+      - name: Download 2.0.0 installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
 
       - name: Install, prepare-uninstall, then remove the package
         run: |
