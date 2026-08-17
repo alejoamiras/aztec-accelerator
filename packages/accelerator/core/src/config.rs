@@ -38,13 +38,16 @@ impl Speed {
 /// Current config schema version. Bump when fields are removed or renamed.
 /// Added fields with `#[serde(default)]` don't require a version bump.
 ///
-/// NOTE: nothing currently *reads* `config_version`. The HTTPS-by-default feature is a CLEAN-INSTALL
-/// (no migration from the old macOS-only "Safari Support" state — decided with the owner): a config
-/// written by an older build that carried `safari_support` simply deserializes with `https_enabled`
-/// at its serde default (`false`); the onboarding wizard (shown once because `onboarding_version`
-/// defaults to 0) re-enables HTTPS in one click. Dropping the `safari_support` alias also removes the
-/// duplicate-field edge that could reset an entire config to defaults.
-const CONFIG_VERSION: u32 = 1;
+/// B4: `config_version` is now READ and ENFORCED (two-stage load, see [`load_with_cap`]):
+/// - A config at `config_version <= CONFIG_VERSION` is current-or-migratable: the load mints a
+///   [`PersistCapability`], and the app may persist over it. `safari_support` (from the pre-HTTPS-default
+///   clean-install era) is migrated to `https_enabled` via a Value-pass (new key wins), and v2 is written.
+/// - A config at `config_version > CONFIG_VERSION` (a NEWER build wrote it) yields NO capability: every
+///   save path requires `&PersistCapability`, so an older app structurally CANNOT overwrite a newer
+///   config — a compile-enforced invariant, not a runtime check (same discipline as B2's `PendingUpdate`).
+///
+/// v2 (this build): adds the `safari_support`→`https_enabled` migration on top of the v1 clean-install.
+const CONFIG_VERSION: u32 = 2;
 
 /// The onboarding-wizard consent version. The first-run wizard shows while a config's
 /// `onboarding_version` is `< ONBOARDING_VERSION`. A versioned int (not a bool) so a future
@@ -58,8 +61,9 @@ pub struct AcceleratorConfig {
     #[serde(default = "default_config_version")]
     pub config_version: u32,
     /// Whether the local HTTPS listener (browser ⇄ accelerator encrypted channel) is enabled.
-    /// Clean-install: NO `safari_support` alias (see `CONFIG_VERSION`) — an older config's
-    /// `safari_support` key is simply ignored and this defaults to `false`; the wizard re-enables.
+    /// B4: a pre-v2 config's legacy `safari_support` key is migrated into this at LOAD time (Value-pass,
+    /// see [`migrate_value`]) — not a serde alias (which would duplicate-field-error). Absent on a clean
+    /// install ⇒ `false`; the onboarding wizard re-enables.
     #[serde(default)]
     pub https_enabled: bool,
     #[serde(default, deserialize_with = "de_approved_origins")]
@@ -122,15 +126,162 @@ pub fn load() -> AcceleratorConfig {
     load_from(&config_path())
 }
 
-/// q7e3-F-15: load from an explicit path (so tests exercise the real load instead of re-implementing
-/// it). Missing or malformed file → defaults.
+/// q7e3-F-15 / B4: load from an explicit path, READ-ONLY (no persist capability). Applies the same
+/// migration as [`load_with_cap_from`] so reads are consistent, but drops the capability — a caller that
+/// then wants to save must use [`load_with_cap_from`]. Missing or malformed file → defaults.
 pub fn load_from(path: &std::path::Path) -> AcceleratorConfig {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
+    load_with_cap_from(path).config
+}
+
+/// B4: a non-forgeable token proving the loaded config is at a schema THIS build may safely OVERWRITE.
+/// Minted ONLY by [`load_with_cap_from`] on a current-or-migratable config (`config_version <=
+/// CONFIG_VERSION`). It has NO `Default` and NO public constructor, so a future-schema load (which yields
+/// `None`) makes every save — all of which require `&PersistCapability` — a COMPILE error, not a runtime
+/// guard (same discipline as B2's `PendingUpdate`).
+// `Clone` is safe: the non-forgeable property is about CONSTRUCTION (no public/Default ctor — a cap can
+// only be MINTED by a successful current-or-migratable load), not about copying a right you already hold.
+#[derive(Debug, Clone)]
+pub struct PersistCapability {
+    /// Private unit field: constructible only inside this module.
+    _seal: (),
+}
+
+impl PersistCapability {
+    /// Test-only mint. Production code can obtain a capability ONLY from a `load_with_cap*` on a
+    /// current-or-migratable config; a future-schema config yields `None`, so tests that specifically
+    /// prove the future-config guard must NOT use this (they assert the *absence* of a cap / a compile
+    /// failure). It exists so the many save-round-trip tests needn't fake a load.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self { _seal: () }
+    }
+}
+
+/// Result of a save-capable load. `cap` is `Some` iff the on-disk config is at a schema this build may
+/// persist over (`config_version <= CONFIG_VERSION`); `None` for a FUTURE-schema config (read-only).
+pub struct LoadedConfig {
+    pub config: AcceleratorConfig,
+    pub cap: Option<PersistCapability>,
+}
+
+/// B4: the config lock bundled with its persist capability. Shared between the desktop's Tauri-managed
+/// state and the headless server's `HeadlessState.config`, so the cap travels with the config to every
+/// save site. `Deref`s to the inner lock — all existing `.read()/.write()` uses are unchanged; the cap
+/// gates saves (a future-schema load yields `None`, so those saves can't be compiled / are skipped).
+pub struct ConfigStore {
+    pub lock: parking_lot::RwLock<AcceleratorConfig>,
+    pub cap: Option<PersistCapability>,
+}
+
+impl std::ops::Deref for ConfigStore {
+    type Target = parking_lot::RwLock<AcceleratorConfig>;
+    fn deref(&self) -> &Self::Target {
+        &self.lock
+    }
+}
+
+impl ConfigStore {
+    /// Build from a save-capable load (the startup path).
+    pub fn new(loaded: LoadedConfig) -> Self {
+        Self {
+            lock: parking_lot::RwLock::new(loaded.config),
+            cap: loaded.cap,
+        }
+    }
+
+    /// Test-only: a persistable store around `config` (capability present).
+    #[cfg(test)]
+    pub(crate) fn for_test(config: AcceleratorConfig) -> Self {
+        Self {
+            lock: parking_lot::RwLock::new(config),
+            cap: Some(PersistCapability::for_test()),
+        }
+    }
+}
+
+/// B4 two-stage, save-capable load — use at startup where the config will later be SAVED. The returned
+/// `cap` gates every save path.
+pub fn load_with_cap() -> LoadedConfig {
+    load_with_cap_from(&config_path())
+}
+
+/// As [`load_with_cap`] but from an explicit path (tests + the headless server).
+///
+/// Stage 1 (lenient probe): read only `{ config_version }` — unknown fields ignored — so a newer config's
+/// added/renamed fields don't derail the version check. If `config_version > CONFIG_VERSION`, return the
+/// best-effort parsed config with `cap: None` (never persist over a newer schema).
+///
+/// Stage 2 (parse + migrate): parse the raw JSON `Value`, migrate legacy keys ([`migrate_value`]),
+/// deserialize, stamp `config_version = CONFIG_VERSION`, and mint the capability.
+pub fn load_with_cap_from(path: &std::path::Path) -> LoadedConfig {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        // Missing file = fresh install: current-schema defaults, persist allowed.
+        Err(_) => {
+            return LoadedConfig {
+                config: AcceleratorConfig::default(),
+                cap: Some(PersistCapability { _seal: () }),
+            };
+        }
+    };
+
+    // Stage 1: lenient version probe (unknown fields ignored).
+    #[derive(Deserialize)]
+    struct VersionProbe {
+        #[serde(default = "default_config_version")]
+        config_version: u32,
+    }
+    let probe: VersionProbe = serde_json::from_str(&contents).unwrap_or(VersionProbe {
+        config_version: CONFIG_VERSION,
+    });
+    if probe.config_version > CONFIG_VERSION {
+        // A NEWER build wrote this — load best-effort for READ use, but mint NO capability.
+        let config = serde_json::from_str(&contents).unwrap_or_default();
+        tracing::warn!(
+            path = %path.display(), on_disk = probe.config_version, supported = CONFIG_VERSION,
+            "Config was written by a NEWER build; running read-only (no persist)"
+        );
+        return LoadedConfig { config, cap: None };
+    }
+
+    // Stage 2: raw-Value parse + migration + stamp.
+    let mut value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "Malformed config, using defaults");
-            AcceleratorConfig::default()
-        }),
-        Err(_) => AcceleratorConfig::default(),
+            return LoadedConfig {
+                config: AcceleratorConfig::default(),
+                cap: Some(PersistCapability { _seal: () }),
+            };
+        }
+    };
+    migrate_value(&mut value);
+    let mut config: AcceleratorConfig = serde_json::from_value(value).unwrap_or_else(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "Config failed to deserialize post-migration, using defaults");
+        AcceleratorConfig::default()
+    });
+    config.config_version = CONFIG_VERSION;
+    LoadedConfig {
+        config,
+        cap: Some(PersistCapability { _seal: () }),
+    }
+}
+
+/// Value-pass migration: fold pre-v2 legacy keys forward before deserialization. `safari_support` (the
+/// bool macOS-only HTTPS toggle from before HTTPS-by-default) → `https_enabled`, only when `https_enabled`
+/// is ABSENT (the new key wins if both are present — avoids the duplicate-field error a serde alias caused).
+/// The legacy key is then removed so it never round-trips back to disk.
+fn migrate_value(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        if !obj.contains_key("https_enabled") {
+            if let Some(legacy) = obj
+                .get("safari_support")
+                .and_then(serde_json::Value::as_bool)
+            {
+                obj.insert("https_enabled".to_string(), serde_json::Value::Bool(legacy));
+            }
+        }
+        obj.remove("safari_support");
     }
 }
 
@@ -160,15 +311,23 @@ where
 }
 
 /// Save config to disk (to the default `config_path()`). Creates parent dirs; 0o600 on Unix.
-pub fn save(config: &AcceleratorConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    save_to(config, &config_path())
+///
+/// B4: requires a [`PersistCapability`] — a future-schema config yields none from load, so this cannot be
+/// called to overwrite it. The token is otherwise unused; its PRESENCE is the whole point (compile gate).
+pub fn save(
+    config: &AcceleratorConfig,
+    cap: &PersistCapability,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    save_to(config, &config_path(), cap)
 }
 
 /// q7e3-F-15: save to an explicit path atomically (write-tmp-rename, 0o600 on Unix) — so tests exercise
-/// the real save (atomicity + perms + parent creation) instead of re-implementing it.
+/// the real save (atomicity + perms + parent creation) instead of re-implementing it. B4: gated by
+/// [`PersistCapability`] (see [`save`]).
 pub fn save_to(
     config: &AcceleratorConfig,
     path: &std::path::Path,
+    _cap: &PersistCapability,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -220,9 +379,10 @@ pub fn save_to(
 /// becoming an always-write on the piggyback-Allow path.
 pub fn lock_mutate_save(
     lock: &parking_lot::RwLock<AcceleratorConfig>,
+    cap: &PersistCapability,
     f: impl FnOnce(&mut AcceleratorConfig) -> bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    lock_mutate_save_to(lock, None, f)
+    lock_mutate_save_to(lock, None, cap, f)
 }
 
 /// As [`lock_mutate_save`], but writes to `path` when given instead of [`config_path`].
@@ -235,13 +395,14 @@ pub fn lock_mutate_save(
 pub fn lock_mutate_save_to(
     lock: &parking_lot::RwLock<AcceleratorConfig>,
     path: Option<&std::path::Path>,
+    cap: &PersistCapability,
     f: impl FnOnce(&mut AcceleratorConfig) -> bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cfg = lock.write();
     if f(&mut cfg) {
         match path {
-            Some(p) => save_to(&cfg, p),
-            None => save(&cfg),
+            Some(p) => save_to(&cfg, p, cap),
+            None => save(&cfg, cap),
         }
     } else {
         Ok(())
@@ -260,6 +421,83 @@ mod tests {
         assert_eq!(config.speed, Speed::Full);
         assert_eq!(config.onboarding_version, 0);
         assert_eq!(config.last_rotation_prompt_at, None);
+    }
+
+    // ── B4: config migration (safari_support→https_enabled) + version-gated persist capability ──
+
+    #[test]
+    fn migrates_safari_support_to_https_and_stamps_v2() {
+        // [mut: delete the `safari_support` branch in migrate_value → https_enabled stays false, FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"config_version": 1, "safari_support": true}"#).unwrap();
+        let loaded = load_with_cap_from(&path);
+        assert!(
+            loaded.config.https_enabled,
+            "safari_support:true migrates to https_enabled:true"
+        );
+        assert_eq!(loaded.config.config_version, CONFIG_VERSION);
+        assert!(
+            loaded.cap.is_some(),
+            "a v1 (migratable) config yields a capability"
+        );
+        // The persisted form drops the legacy key and is stamped v2.
+        save_to(&loaded.config, &path, loaded.cap.as_ref().unwrap()).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("safari_support"),
+            "legacy key never round-trips"
+        );
+        assert!(on_disk.contains("\"config_version\": 2"), "stamped v2");
+    }
+
+    #[test]
+    fn migration_new_key_wins_when_both_present() {
+        // [mut: `if !obj.contains_key("https_enabled")` → unconditional insert → legacy overwrites, FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"safari_support": true, "https_enabled": false}"#).unwrap();
+        assert!(
+            !load_from(&path).https_enabled,
+            "explicit https_enabled wins over legacy safari_support"
+        );
+    }
+
+    #[test]
+    fn future_config_never_persisted_over() {
+        // [mut: drop the `probe.config_version > CONFIG_VERSION` gate → cap becomes Some, FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A NEWER build's config: version ahead AND a shape THIS build can't fully parse.
+        std::fs::write(
+            &path,
+            r#"{"config_version": 999, "https_enabled": {"future": true}}"#,
+        )
+        .unwrap();
+        let loaded = load_with_cap_from(&path);
+        assert!(
+            loaded.cap.is_none(),
+            "a newer-schema config yields NO capability"
+        );
+        // STRUCTURAL: every save path requires `&PersistCapability`; with cap == None there is no way to
+        // persist over this config. The DECISIVE mutation — removing the cap arg from a save signature —
+        // makes the whole crate fail to COMPILE, not merely this test.
+    }
+
+    #[test]
+    fn v2_config_round_trips_untouched_with_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let original = AcceleratorConfig {
+            https_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(original.config_version, CONFIG_VERSION);
+        save_to(&original, &path, &PersistCapability::for_test()).unwrap();
+        let loaded = load_with_cap_from(&path);
+        assert!(loaded.config.https_enabled);
+        assert_eq!(loaded.config.config_version, CONFIG_VERSION);
+        assert!(loaded.cap.is_some(), "a current v2 config is persistable");
     }
 
     #[test]
@@ -284,7 +522,7 @@ mod tests {
         // q7e3-F-15: exercise the REAL save_to/load_from (atomic write-tmp-rename + 0o600 + the
         // de_approved_origins deserializer) instead of re-implementing them — so this test can now
         // catch a regression in save()/load() itself.
-        save_to(&original, &cfg_path).unwrap();
+        save_to(&original, &cfg_path, &PersistCapability::for_test()).unwrap();
         let loaded = load_from(&cfg_path);
 
         assert_eq!(loaded.https_enabled, original.https_enabled);

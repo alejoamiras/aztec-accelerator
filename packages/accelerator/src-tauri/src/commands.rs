@@ -1,25 +1,38 @@
 use crate::authorization::{AuthDecision, AuthorizationManager, ResolveOutcome};
 use crate::config::{self, AcceleratorConfig};
 use crate::verified_sites::VerifiedSitesRegistry;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use tauri::Manager;
 
-pub type ConfigState = Arc<RwLock<AcceleratorConfig>>;
+/// B4: core's shared [`config::ConfigStore`] (config lock + persist capability), also held by
+/// `HeadlessState.config`. `Deref`s to the lock so existing reads are unchanged; [`mutate_config`] uses
+/// `.cap` to gate the save.
+pub use crate::config::ConfigStore;
+pub type ConfigState = Arc<config::ConfigStore>;
 
-/// Lock the config, apply `f`, then persist — the single source of truth for the lock-mutate-save
-/// pattern (replaces copy-pasted `config.write()` + `config::save` blocks). Propagates the save error.
+/// Lock the config, apply `f`, then persist IFF this build may overwrite the on-disk schema (B4) — the
+/// single source of truth for the lock-mutate-save pattern. Propagates the save error.
 fn mutate_config(
     config: &ConfigState,
     f: impl FnOnce(&mut AcceleratorConfig),
 ) -> Result<(), String> {
-    // q7e3-F-13: delegate to core's shared lock_mutate_save; mutate_config keeps its always-save +
-    // propagate policy (the closure always returns true).
-    config::lock_mutate_save(config, |cfg| {
-        f(cfg);
-        true
-    })
-    .map_err(|e| e.to_string())
+    match config.cap.as_ref() {
+        // q7e3-F-13: delegate to core's shared lock_mutate_save; keep the always-save + propagate policy.
+        Some(cap) => config::lock_mutate_save(&config.lock, cap, |cfg| {
+            f(cfg);
+            true
+        })
+        .map_err(|e| e.to_string()),
+        // B4: a NEWER build wrote this config — apply in-memory (UI stays responsive this session) but do
+        // NOT persist over it. Intentionally non-durable in this rare downgrade case.
+        None => {
+            tracing::warn!(
+                "Config was written by a newer build; applying in-memory only (not persisted)"
+            );
+            f(&mut config.lock.write());
+            Ok(())
+        }
+    }
 }
 pub type AuthState = Arc<AuthorizationManager>;
 pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;

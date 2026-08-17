@@ -211,12 +211,18 @@ async fn launch_https(state: AppState) {
 /// Disable HTTPS in config (certs missing/invalid/untrusted) so the user can re-enable to
 /// regenerate a fresh, trusted cert set.
 fn reset_https_enabled(state: &AppState) {
-    if let Some(ref cfg_lock) = state.config {
+    if let Some(ref store) = state.config {
         // q7e3-F-13: shared core helper; swallow the save error (best-effort reset, unchanged policy).
-        let _ = config::lock_mutate_save(cfg_lock, |cfg| {
-            cfg.https_enabled = false;
-            true
-        });
+        // B4: persist only with the capability; a newer-schema config is reset in-memory only.
+        match store.cap.as_ref() {
+            Some(cap) => {
+                let _ = config::lock_mutate_save(&store.lock, cap, |cfg| {
+                    cfg.https_enabled = false;
+                    true
+                });
+            }
+            None => store.lock.write().https_enabled = false,
+        }
     }
 }
 
@@ -644,8 +650,10 @@ fn main() {
         tracing::info!("Developer mode enabled");
     }
 
-    // Load config early so it can be shared with AppState and Tauri commands
-    let config_state: ConfigState = Arc::new(RwLock::new(config::load()));
+    // Load config early so it can be shared with AppState and Tauri commands. B4: two-stage save-capable
+    // load — the minted capability rides inside the shared ConfigStore and gates every later persist (a
+    // newer-schema config yields none).
+    let config_state: ConfigState = Arc::new(config::ConfigStore::new(config::load_with_cap()));
     let auth_manager: AuthState = Arc::new(AuthorizationManager::new());
 
     #[allow(unused_mut)]

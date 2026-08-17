@@ -155,7 +155,7 @@ async fn health_hides_https_port_when_https_configured_but_not_bound() {
     };
     let state = AppState {
         core: Arc::new(HeadlessState {
-            config: Some(Arc::new(RwLock::new(cfg))),
+            config: Some(Arc::new(crate::config::ConfigStore::for_test(cfg))),
             https_bound: Arc::new(AtomicBool::new(false)),
             ..Default::default()
         }),
@@ -642,10 +642,12 @@ async fn health_minimal_for_unapproved_cross_origin() {
             bundled_version: Some("5.0.0-nightly.20260307".into()),
             // Gated, with localhost auto-approve ON so the localhost probe below is "approved"
             // and exercises the detailed tier (SEC-04 defaults this off; tested separately).
-            config: Some(Arc::new(RwLock::new(crate::config::AcceleratorConfig {
-                auto_approve_localhost: true,
-                ..Default::default()
-            }))),
+            config: Some(Arc::new(crate::config::ConfigStore::for_test(
+                crate::config::AcceleratorConfig {
+                    auto_approve_localhost: true,
+                    ..Default::default()
+                },
+            ))),
             ..Default::default()
         }),
         ..Default::default()
@@ -740,7 +742,7 @@ fn auth_state_with_popup_at(
     let state = AppState {
         core: Arc::new(HeadlessState {
             auth_manager: Some(auth_for_state),
-            config: Some(Arc::new(RwLock::new(cfg))),
+            config: Some(Arc::new(crate::config::ConfigStore::for_test(cfg))),
             config_path,
             ..Default::default()
         }),
@@ -982,7 +984,7 @@ async fn prove_returns_403_without_popup_in_headless() {
     let state = AppState {
         core: Arc::new(HeadlessState {
             auth_manager: Some(auth),
-            config: Some(Arc::new(RwLock::new(cfg))),
+            config: Some(Arc::new(crate::config::ConfigStore::for_test(cfg))),
             ..Default::default()
         }),
         show_auth_popup: None, // headless
@@ -1089,7 +1091,7 @@ fn compute_threads_returns_none_for_full_speed() {
     };
     let state = AppState {
         core: Arc::new(HeadlessState {
-            config: Some(Arc::new(RwLock::new(cfg))),
+            config: Some(Arc::new(crate::config::ConfigStore::for_test(cfg))),
             ..Default::default()
         }),
         ..Default::default()
@@ -1105,7 +1107,7 @@ fn compute_threads_returns_some_for_non_full_speed() {
     };
     let state = AppState {
         core: Arc::new(HeadlessState {
-            config: Some(Arc::new(RwLock::new(cfg))),
+            config: Some(Arc::new(crate::config::ConfigStore::for_test(cfg))),
             ..Default::default()
         }),
         ..Default::default()

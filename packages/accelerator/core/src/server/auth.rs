@@ -101,26 +101,37 @@ pub(crate) async fn authorize_origin(
             tracing::info!(origin = %origin, "Origin authorized (persistent)");
             // Unconditional: there is no ephemeral Allow any more. The popup discloses that approving
             // is permanent, so this write IS the thing the user consented to.
-            if let Some(ref cfg_lock) = state.config {
+            if let Some(ref store) = state.config {
                 // q7e3-F-13: shared core helper; the closure's bool keeps the conditional save (only
                 // when the origin is new) — no always-write on the piggyback-Allow path. Warn-and-
                 // continue on save failure (a config-write error must NOT fail an approved prove).
                 // NOTE this is why the popup copy says "stays approved until you remove it in
                 // Settings" rather than promising the write succeeded: if it fails the user is asked
                 // again, which is safer than promised, never less safe.
-                if let Err(e) = config::lock_mutate_save_to(
-                    cfg_lock,
-                    state.core.config_path.as_deref(),
-                    |cfg| {
-                        if cfg.approved_origins.contains(&origin) {
-                            false
-                        } else {
-                            cfg.approved_origins.push(origin);
-                            true
+                // B4: persist only with the capability — a config written by a NEWER build yields none, so
+                // an older app must not overwrite it (the approval simply isn't remembered; the user is
+                // re-asked next time — safer, per the popup copy, never less safe).
+                match store.cap.as_ref() {
+                    Some(cap) => {
+                        if let Err(e) = config::lock_mutate_save_to(
+                            &store.lock,
+                            state.core.config_path.as_deref(),
+                            cap,
+                            |cfg| {
+                                if cfg.approved_origins.contains(&origin) {
+                                    false
+                                } else {
+                                    cfg.approved_origins.push(origin);
+                                    true
+                                }
+                            },
+                        ) {
+                            tracing::warn!(error = %e, "Failed to persist approved origin");
                         }
-                    },
-                ) {
-                    tracing::warn!(error = %e, "Failed to persist approved origin");
+                    }
+                    None => tracing::warn!(
+                        "Config was written by a newer build; not persisting approved origin (read-only)"
+                    ),
                 }
             }
             Ok(())
