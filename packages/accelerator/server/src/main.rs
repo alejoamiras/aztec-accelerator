@@ -80,7 +80,13 @@ async fn main() {
             };
             (
                 Some(Arc::new(AuthorizationManager::new())),
-                Some(Arc::new(RwLock::new(cfg))),
+                // B4: cap = None → this env-derived config is never persisted to disk. Headless has no
+                // approval popup, so pre-approved ALLOWED_ORIGINS short-circuit the save path (the origin
+                // is already in the list); a CI tool must not clobber the user's ~/.aztec-accelerator config.
+                Some(Arc::new(accelerator_core::config::ConfigStore {
+                    lock: RwLock::new(cfg),
+                    cap: None,
+                })),
             )
         }
     };

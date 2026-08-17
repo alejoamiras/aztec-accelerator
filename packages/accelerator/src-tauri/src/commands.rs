@@ -1,25 +1,65 @@
 use crate::authorization::{AuthDecision, AuthorizationManager, ResolveOutcome};
 use crate::config::{self, AcceleratorConfig};
 use crate::verified_sites::VerifiedSitesRegistry;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use tauri::Manager;
 
-pub type ConfigState = Arc<RwLock<AcceleratorConfig>>;
+/// B4: core's shared [`config::ConfigStore`] (config lock + persist capability), also held by
+/// `HeadlessState.config`. `Deref`s to the lock so existing reads are unchanged; [`mutate_config`] uses
+/// `.cap` to gate the save.
+pub use crate::config::ConfigStore;
+pub type ConfigState = Arc<config::ConfigStore>;
 
-/// Lock the config, apply `f`, then persist — the single source of truth for the lock-mutate-save
-/// pattern (replaces copy-pasted `config.write()` + `config::save` blocks). Propagates the save error.
+/// B4 (codex): the single user-facing message for "the on-disk config is from a newer build, so this build
+/// may not overwrite it." Shared by [`mutate_config`]'s refuse arm and the [`require_persistable`] preflight
+/// so the Settings UI shows one consistent string whether a command bails early or fails at the save.
+const NEWER_CONFIG_MSG: &str =
+    "This config was written by a newer version of the app; changes can't be saved. Update the app to change settings.";
+
+/// Lock the config, apply `f`, then persist IFF this build may overwrite the on-disk schema (B4) — the
+/// single source of truth for the lock-mutate-save pattern. Propagates the save error.
 fn mutate_config(
     config: &ConfigState,
     f: impl FnOnce(&mut AcceleratorConfig),
 ) -> Result<(), String> {
-    // q7e3-F-13: delegate to core's shared lock_mutate_save; mutate_config keeps its always-save +
-    // propagate policy (the closure always returns true).
-    config::lock_mutate_save(config, |cfg| {
-        f(cfg);
-        true
-    })
-    .map_err(|e| e.to_string())
+    match config.cap.as_ref() {
+        // q7e3-F-13: delegate to core's shared lock_mutate_save; keep the always-save + propagate policy.
+        Some(cap) => config::lock_mutate_save(&config.lock, cap, |cfg| {
+            f(cfg);
+            true
+        })
+        .map_err(|e| e.to_string()),
+        // B4 (codex): a NEWER build wrote this config. REFUSE the change and report it — do NOT apply it
+        // in-memory (that would silently diverge from disk, revert next launch, and be undone by the
+        // fresh-disk-read on the HTTPS-launch path, so the command would falsely "succeed"). Surface a clear
+        // error so the UI shows the failure instead of a false success. `f` is dropped unused.
+        None => {
+            let _ = f;
+            tracing::warn!("Refusing a config change: on-disk config was written by a newer build");
+            Err(NEWER_CONFIG_MSG.to_string())
+        }
+    }
+}
+
+/// B4 (codex): preflight persistence eligibility BEFORE a command performs config-dependent EXTERNAL side
+/// effects (generating certs, mutating the OS trust store, rotating the cert identity). Without it, a
+/// command run against a newer-schema config would install/remove trust and THEN fail the config commit —
+/// leaving an orphaned CA in the user's trust store with nothing in config to reflect it.
+///
+/// Two checks: the STARTUP capability ([`is_persistable`], `false` ⇒ this build never had a writable config —
+/// headless or a future schema seen at launch), AND a FRESH on-disk re-probe (`on_disk_is_overwritable`) that
+/// catches a newer build appearing SINCE launch (the stale-cap case codex round 3 flagged — the startup cap
+/// alone would false-positive). Best-effort early-out; the save path still re-checks under the cross-process
+/// lock at write time, which is the actual gate.
+fn require_persistable(config: &ConfigState) -> Result<(), String> {
+    if config.is_persistable() && config::on_disk_is_overwritable() {
+        Ok(())
+    } else {
+        tracing::warn!(
+            "Refusing a trust/HTTPS action: on-disk config was written by a newer build"
+        );
+        Err(NEWER_CONFIG_MSG.to_string())
+    }
 }
 pub type AuthState = Arc<AuthorizationManager>;
 pub type VerifiedSitesState = Arc<VerifiedSitesRegistry>;
@@ -542,6 +582,11 @@ async fn enable_https_inner(
     use crate::certs;
     use std::sync::atomic::Ordering;
 
+    // B4 (codex): preflight — if a newer build wrote the config we can't persist `https_enabled = true`, so
+    // refuse BEFORE generating certs / installing CA trust rather than mutating the OS trust store only to
+    // fail the commit at the end. (Reached from both the Settings toggle and onboarding.)
+    require_persistable(config)?;
+
     // Take the HTTPS bring-up lock FIRST — before ANY cert inspection or write. `certs_exist()` reads
     // the leaf+key and `generate_and_save()` writes a whole new set; running either while the launch
     // gate is mid-rotation could observe a MIXED new-leaf/old-key set and then write a third set over
@@ -671,6 +716,10 @@ pub async fn remove_https_trust(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), SETTINGS_LABEL)?;
+    // B4 (codex): preflight — refuse against a newer-schema config BEFORE removing trust, so we don't strip
+    // the CA from the user's stores only to fail the `https_enabled = false` commit (which would leave HTTPS
+    // "on" in the newer config with its anchor gone). The save path re-checks too; this avoids the side effect.
+    require_persistable(&config)?;
     // Removal MUTATES trust state, so it joins the same serialization as launch/enable/renewal. The
     // Settings window offers this button and the HTTPS toggle at once (and enable can sit on a
     // Keychain dialog), so without the lock a removal could delete every anchor and report success
@@ -809,6 +858,10 @@ pub async fn renew_cert(
     shared_state: tauri::State<'_, SharedAppState>,
 ) -> Result<(), String> {
     require_label(window.label(), RENEWAL_LABEL)?;
+    // B4 (codex): preflight — renewal rotates the cert set (mutates trust) and then records the throttle;
+    // if a newer build wrote the config we can't record it, so refuse BEFORE rotating rather than rotating
+    // and silently failing the (currently ignored) `last_rotation_prompt_at` write.
+    require_persistable(&config)?;
 
     // Claim the prove permit BEFORE rotating, not after.
     //

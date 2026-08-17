@@ -142,7 +142,10 @@ pub struct HeadlessState {
     /// while the listener serves a cert whose anchor was since removed (post-impl codex Medium).
     /// Compared against `certs::live_ca_fingerprint()` to detect exactly that.
     pub served_ca_fingerprint: Arc<RwLock<Option<String>>>,
-    pub config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
+    /// B4: the shared [`config::ConfigStore`] (config lock + persist capability). `Deref`s to the lock, so
+    /// `state.config` reads are unchanged; `.cap` gates config saves (a newer-schema on-disk config yields
+    /// none → persists are skipped, read-only).
+    pub config: Option<Arc<config::ConfigStore>>,
     pub auth_manager: Option<Arc<AuthorizationManager>>,
     /// Limits concurrent proving to 1 — bb already uses all cores. Always present (F-01).
     pub prove_semaphore: Arc<Semaphore>,
@@ -196,7 +199,7 @@ impl HeadlessState {
     pub fn headless(
         app_version: impl Into<String>,
         bundled_version: Option<String>,
-        config: Option<Arc<RwLock<config::AcceleratorConfig>>>,
+        config: Option<Arc<config::ConfigStore>>,
         auth_manager: Option<Arc<AuthorizationManager>>,
     ) -> Self {
         Self {
