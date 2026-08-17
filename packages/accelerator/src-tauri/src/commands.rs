@@ -23,14 +23,14 @@ fn mutate_config(
             true
         })
         .map_err(|e| e.to_string()),
-        // B4: a NEWER build wrote this config — apply in-memory (UI stays responsive this session) but do
-        // NOT persist over it. Intentionally non-durable in this rare downgrade case.
+        // B4 (codex): a NEWER build wrote this config. REFUSE the change and report it — do NOT apply it
+        // in-memory (that would silently diverge from disk, revert next launch, and be undone by the
+        // fresh-disk-read on the HTTPS-launch path, so the command would falsely "succeed"). Surface a clear
+        // error so the UI shows the failure instead of a false success. `f` is dropped unused.
         None => {
-            tracing::warn!(
-                "Config was written by a newer build; applying in-memory only (not persisted)"
-            );
-            f(&mut config.lock.write());
-            Ok(())
+            let _ = f;
+            tracing::warn!("Refusing a config change: on-disk config was written by a newer build");
+            Err("This config was written by a newer version of the app; your change was not saved. Update the app to change settings.".to_string())
         }
     }
 }

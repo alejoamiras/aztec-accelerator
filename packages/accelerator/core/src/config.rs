@@ -38,6 +38,12 @@ impl Speed {
 /// Current config schema version. Bump when fields are removed or renamed.
 /// Added fields with `#[serde(default)]` don't require a version bump.
 ///
+/// ACCEPTED LIMITATION (codex B4): because additive fields don't bump the version, a same-`config_version`
+/// build that PRE-dates an additive field will omit it on save; the newer build then re-defaults it on the
+/// next load. This additive-downgrade reset is tolerated (the field has a serde default, so it is reset, not
+/// corrupted). The version gate only protects against REMOVED/RENAMED-field schemas (which DO bump), which
+/// is where silent data loss would otherwise occur.
+///
 /// B4: `config_version` is now READ and ENFORCED (two-stage load, see [`load_with_cap`]):
 /// - A config at `config_version <= CONFIG_VERSION` is current-or-migratable: the load mints a
 ///   [`PersistCapability`], and the app may persist over it. `safari_support` (from the pre-HTTPS-default
@@ -199,6 +205,20 @@ impl ConfigStore {
     }
 }
 
+/// Read ONLY `config_version` from a config JSON string (lenient — unknown fields ignored). `None` when the
+/// version can't be determined: malformed JSON, a non-object, or `config_version` of the wrong type / out of
+/// `u32` range. Shared by the load probe and the save-time TOCTOU re-check so both agree on "the version".
+fn probe_config_version(contents: &str) -> Option<u32> {
+    #[derive(Deserialize)]
+    struct VersionProbe {
+        #[serde(default = "default_config_version")]
+        config_version: u32,
+    }
+    serde_json::from_str::<VersionProbe>(contents)
+        .ok()
+        .map(|p| p.config_version)
+}
+
 /// B4 two-stage, save-capable load — use at startup where the config will later be SAVED. The returned
 /// `cap` gates every save path.
 pub fn load_with_cap() -> LoadedConfig {
@@ -207,63 +227,68 @@ pub fn load_with_cap() -> LoadedConfig {
 
 /// As [`load_with_cap`] but from an explicit path (tests + the headless server).
 ///
-/// Stage 1 (lenient probe): read only `{ config_version }` — unknown fields ignored — so a newer config's
-/// added/renamed fields don't derail the version check. If `config_version > CONFIG_VERSION`, return the
-/// best-effort parsed config with `cap: None` (never persist over a newer schema).
-///
-/// Stage 2 (parse + migrate): parse the raw JSON `Value`, migrate legacy keys ([`migrate_value`]),
-/// deserialize, stamp `config_version = CONFIG_VERSION`, and mint the capability.
+/// **FAIL CLOSED (codex B4):** a capability is minted ONLY when this build is CONFIDENT the on-disk config
+/// is at a schema it may overwrite — a fresh install, OR a file it fully read, version-probed
+/// (`config_version <= CONFIG_VERSION`), migrated, and deserialized. Every uncertainty — a read error, an
+/// unreadable version (malformed / non-object / non-integer / out-of-range), a newer schema, or a malformed
+/// current config — yields `cap: None` and a best-effort read, so this build never overwrites a config it
+/// couldn't confidently interpret (a newer one, or a partially-recoverable one whose values would be lost).
 pub fn load_with_cap_from(path: &std::path::Path) -> LoadedConfig {
+    let read_only = |config| LoadedConfig { config, cap: None };
+    // Only reachable below where we've confirmed the config is current-or-migratable.
+    let persistable = |config| LoadedConfig {
+        config,
+        cap: Some(PersistCapability { _seal: () }),
+    };
+
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        // Missing file = fresh install: current-schema defaults, persist allowed.
-        Err(_) => {
-            return LoadedConfig {
-                config: AcceleratorConfig::default(),
-                cap: Some(PersistCapability { _seal: () }),
-            };
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Fresh install: current-schema defaults, persist allowed.
+            return persistable(AcceleratorConfig::default());
+        }
+        Err(e) => {
+            // I/O / permission error — we could NOT read the existing config (it may be valid, even newer).
+            // Never mint a cap for a file we couldn't read. Run read-only on defaults.
+            tracing::warn!(path = %path.display(), error = %e, "Could not read config; running read-only (no persist)");
+            return read_only(AcceleratorConfig::default());
         }
     };
 
-    // Stage 1: lenient version probe (unknown fields ignored).
-    #[derive(Deserialize)]
-    struct VersionProbe {
-        #[serde(default = "default_config_version")]
-        config_version: u32,
-    }
-    let probe: VersionProbe = serde_json::from_str(&contents).unwrap_or(VersionProbe {
-        config_version: CONFIG_VERSION,
-    });
-    if probe.config_version > CONFIG_VERSION {
-        // A NEWER build wrote this — load best-effort for READ use, but mint NO capability.
-        let config = serde_json::from_str(&contents).unwrap_or_default();
-        tracing::warn!(
-            path = %path.display(), on_disk = probe.config_version, supported = CONFIG_VERSION,
-            "Config was written by a NEWER build; running read-only (no persist)"
-        );
-        return LoadedConfig { config, cap: None };
+    // Stage 1: version probe. If the version can't be determined, FAIL CLOSED (no cap).
+    let version = match probe_config_version(&contents) {
+        Some(v) => v,
+        None => {
+            tracing::warn!(path = %path.display(), "Config version unreadable (malformed?); running read-only (no persist)");
+            return read_only(AcceleratorConfig::default());
+        }
+    };
+    if version > CONFIG_VERSION {
+        // A NEWER build wrote this — best-effort read for the UI, NEVER persist.
+        tracing::warn!(path = %path.display(), on_disk = version, supported = CONFIG_VERSION, "Config from a newer build; running read-only (no persist)");
+        return read_only(serde_json::from_str(&contents).unwrap_or_default());
     }
 
-    // Stage 2: raw-Value parse + migration + stamp.
+    // Stage 2: raw-Value parse + migration + deserialize (current-or-older schema). A malformed current
+    // config FAILS CLOSED (read-only, no cap) rather than overwriting the user's file with defaults — a
+    // partial corruption (e.g. a bad `https_enabled`) would otherwise discard a recoverable `safari_support`.
     let mut value: serde_json::Value = match serde_json::from_str(&contents) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "Malformed config, using defaults");
-            return LoadedConfig {
-                config: AcceleratorConfig::default(),
-                cap: Some(PersistCapability { _seal: () }),
-            };
+            tracing::warn!(path = %path.display(), error = %e, "Malformed config; running read-only (no persist)");
+            return read_only(AcceleratorConfig::default());
         }
     };
     migrate_value(&mut value);
-    let mut config: AcceleratorConfig = serde_json::from_value(value).unwrap_or_else(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "Config failed to deserialize post-migration, using defaults");
-        AcceleratorConfig::default()
-    });
-    config.config_version = CONFIG_VERSION;
-    LoadedConfig {
-        config,
-        cap: Some(PersistCapability { _seal: () }),
+    match serde_json::from_value::<AcceleratorConfig>(value) {
+        Ok(mut config) => {
+            config.config_version = CONFIG_VERSION;
+            persistable(config)
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Config failed to deserialize post-migration; running read-only (no persist)");
+            read_only(AcceleratorConfig::default())
+        }
     }
 }
 
@@ -329,6 +354,21 @@ pub fn save_to(
     path: &std::path::Path,
     _cap: &PersistCapability,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // B4 (codex): the capability is minted at LOAD time; re-check the on-disk version at WRITE time to close
+    // the TOCTOU where a NEWER build replaced this file after our cap was minted. If the file is now a newer
+    // schema, refuse — never clobber it. (A missing/unreadable file is fine to write: fresh install / our own
+    // in-flight write.)
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        if let Some(v) = probe_config_version(&existing) {
+            if v > CONFIG_VERSION {
+                return Err(format!(
+                    "refusing to overwrite config at {}: on-disk config_version {v} is newer than this build's {CONFIG_VERSION}",
+                    path.display()
+                )
+                .into());
+            }
+        }
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -498,6 +538,63 @@ mod tests {
         assert!(loaded.config.https_enabled);
         assert_eq!(loaded.config.config_version, CONFIG_VERSION);
         assert!(loaded.cap.is_some(), "a current v2 config is persistable");
+    }
+
+    #[test]
+    fn malformed_config_is_read_only_no_capability() {
+        // [mut: revert load to `unwrap_or(VersionProbe{v:CONFIG_VERSION})` / `.unwrap_or_default()`+cap → FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // Non-object JSON: version un-probable → FAIL CLOSED (no cap), never overwrite.
+        std::fs::write(&path, r#"[1, 2, 3]"#).unwrap();
+        assert!(
+            load_with_cap_from(&path).cap.is_none(),
+            "non-object config is read-only"
+        );
+        // A valid object whose current-schema field is the WRONG type: the recoverable parts (a legacy
+        // safari_support) must NOT be discarded + persisted over — fail closed.
+        std::fs::write(
+            &path,
+            r#"{"config_version": 2, "https_enabled": "not-a-bool", "safari_support": true}"#,
+        )
+        .unwrap();
+        assert!(
+            load_with_cap_from(&path).cap.is_none(),
+            "a partially-corrupt current config is read-only"
+        );
+    }
+
+    #[test]
+    fn read_io_error_yields_no_capability() {
+        // A directory path → read_to_string errors (not NotFound) → FAIL CLOSED (no cap).
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            load_with_cap_from(dir.path()).cap.is_none(),
+            "an unreadable config path is read-only"
+        );
+    }
+
+    #[test]
+    fn save_refuses_when_disk_version_is_newer_toctou() {
+        // [mut: delete the save-time version re-check in save_to → the save succeeds, FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A NEWER build replaced the file AFTER our (for_test) cap was minted.
+        std::fs::write(&path, r#"{"config_version": 999}"#).unwrap();
+        let err = save_to(
+            &AcceleratorConfig::default(),
+            &path,
+            &PersistCapability::for_test(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("newer"),
+            "save_to refuses to clobber a newer on-disk config"
+        );
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("999"),
+            "the newer file is left untouched"
+        );
     }
 
     #[test]
