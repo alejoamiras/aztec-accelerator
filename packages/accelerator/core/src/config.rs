@@ -254,9 +254,14 @@ fn probe_config_version(contents: &str) -> Option<u32> {
     }
 
     // `deserialize_map` errors for a non-object (serde_json never calls `visit_map`), so those → `None`.
-    serde_json::Deserializer::from_str(contents)
-        .deserialize_map(Probe)
-        .ok()
+    // It does NOT verify the WHOLE input was consumed, though, so `{"config_version":2} garbage` or a
+    // concatenated `{...}{...}` would otherwise probe as an overwritable v2 (codex round 5) — the load path is
+    // safe (stage 2 uses full `from_str`), but the save-time re-check would accept the malformed destination.
+    // Require end-of-input: any trailing non-whitespace → `None` (fail closed).
+    let mut de = serde_json::Deserializer::from_str(contents);
+    let version = (&mut de).deserialize_map(Probe).ok()?;
+    de.end().ok()?;
+    Some(version)
 }
 
 /// B4 two-stage, save-capable load — use at startup where the config will later be SAVED. The returned
@@ -880,6 +885,31 @@ mod tests {
             err.to_string().contains("newer") || err.to_string().contains("could not be read"),
             "save refuses to overwrite an ambiguous (duplicate-key) config"
         );
+    }
+
+    #[test]
+    fn probe_rejects_trailing_and_concatenated_content() {
+        // [mut: delete `de.end().ok()?` in probe_config_version → deserialize_map stops after the first
+        //  object, so trailing garbage / a concatenated newer object read as an overwritable v2 and the
+        //  save-refusal assert FAILS]
+        // `deserialize_map` alone doesn't consume the whole input; end-of-input enforcement fails these closed.
+        for junk in [
+            r#"{"config_version":2} garbage"#,
+            r#"{"config_version":2}{"config_version":999}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            std::fs::write(&path, junk).unwrap();
+            assert!(
+                save_to(
+                    &AcceleratorConfig::default(),
+                    &path,
+                    &PersistCapability::for_test()
+                )
+                .is_err(),
+                "save refuses a destination with trailing/concatenated content: {junk}"
+            );
+        }
     }
 
     #[test]
