@@ -214,22 +214,49 @@ impl ConfigStore {
     }
 }
 
-/// Read ONLY `config_version` from a config JSON string (lenient — unknown fields ignored). `None` when the
-/// version can't be determined: malformed JSON, a non-object, or `config_version` of the wrong type / out of
-/// `u32` range. Shared by the load probe and the save-time TOCTOU re-check so both agree on "the version".
+/// Read ONLY `config_version` from a config JSON string. Shared by the load probe and the save-time re-check
+/// so both agree on "the version". FAIL CLOSED (`None`) on anything ambiguous:
+/// - not a JSON object (array / scalar / malformed) → `None`;
+/// - `config_version` of the wrong type or out of `u32` range → `None`;
+/// - **DUPLICATE `config_version` keys** → `None` (codex round 4). A `serde_json::Value` parse collapses
+///   duplicate keys last-wins, so `{"config_version":999,"config_version":2}` would probe as an overwritable
+///   v2. A STREAMING map visitor sees the raw key stream instead and refuses the ambiguous object.
+///
+/// An object WITHOUT `config_version` → the current version (matches the load-time serde default, so a
+/// versionless-but-valid object stays loadable/overwritable).
 fn probe_config_version(contents: &str) -> Option<u32> {
-    // Parse to a Value and REQUIRE a JSON object. A `#[derive(Deserialize)]` struct probe was insufficient:
-    // serde also deserializes a struct from a JSON *sequence* (positional), so `[]` / `[1,2]` would defang
-    // the probe by defaulting `config_version` instead of failing. A non-object (array/scalar) now → `None`
-    // (fail closed). An object WITHOUT `config_version` → the current version (matches the load-time serde
-    // default, so a versionless-but-valid object stays loadable/overwritable). A present-but-wrong-typed or
-    // out-of-`u32`-range `config_version` → `None`.
-    let value: serde_json::Value = serde_json::from_str(contents).ok()?;
-    let obj = value.as_object()?;
-    match obj.get("config_version") {
-        None => Some(CONFIG_VERSION),
-        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()),
+    use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+    use serde::Deserializer as _;
+
+    struct Probe;
+    impl<'de> Visitor<'de> for Probe {
+        type Value = u32;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a config JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<u32, A::Error> {
+            let mut version: Option<u32> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "config_version" {
+                    if version.is_some() {
+                        return Err(A::Error::custom("duplicate config_version"));
+                        // ambiguous → fail closed
+                    }
+                    // `u64` value rejects strings/floats/negatives; `try_from` rejects > u32::MAX.
+                    let n: u64 = map.next_value()?;
+                    version = Some(u32::try_from(n).map_err(A::Error::custom)?);
+                } else {
+                    let _: IgnoredAny = map.next_value()?;
+                }
+            }
+            Ok(version.unwrap_or(CONFIG_VERSION))
+        }
     }
+
+    // `deserialize_map` errors for a non-object (serde_json never calls `visit_map`), so those → `None`.
+    serde_json::Deserializer::from_str(contents)
+        .deserialize_map(Probe)
+        .ok()
 }
 
 /// B4 two-stage, save-capable load — use at startup where the config will later be SAVED. The returned
@@ -827,6 +854,32 @@ mod tests {
         assert!(!version_is_overwritable(Err(Error::from(
             ErrorKind::PermissionDenied
         )))); // unreadable → refuse
+    }
+
+    #[test]
+    fn probe_rejects_duplicate_config_version() {
+        // [mut: delete the `if version.is_some() { return Err(...) }` guard in probe_config_version → the
+        //  stream collapses last-wins to 2, so the future config reads as overwritable, load mints a cap,
+        //  and this `is_none` assert FAILS]
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A `serde_json::Value` parse would collapse this last-wins to `config_version: 2` (overwritable);
+        // the streaming visitor sees both keys and fails closed.
+        std::fs::write(&path, r#"{"config_version":999,"config_version":2}"#).unwrap();
+        assert!(
+            load_with_cap_from(&path).cap.is_none(),
+            "a duplicate config_version is ambiguous → read-only, no capability"
+        );
+        let err = save_to(
+            &AcceleratorConfig::default(),
+            &path,
+            &PersistCapability::for_test(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("newer") || err.to_string().contains("could not be read"),
+            "save refuses to overwrite an ambiguous (duplicate-key) config"
+        );
     }
 
     #[test]
