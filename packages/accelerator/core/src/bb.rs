@@ -348,11 +348,12 @@ async fn prove_with_timeout(
     // exit/restart/update paths `kill_on_drop` cannot.
     cmd.kill_on_drop(true);
     containment::configure(&mut cmd);
-    let mut child = spawn_capturing_stderr(&mut cmd)?;
-    // B3 (F6): register the in-flight child so a quit/restart/update (via `terminate_inflight`) — or a
-    // cancellation/timeout (via this guard's Drop) — reaps the whole bb tree, not just the direct child.
-    // Fail-closed: if the child can't be contained (Windows Job Object assign failure), don't prove.
-    let guard = containment::Guard::register(&child)?;
+    // B3 (F6 + codex r3 H2a): SPAWN and register the child's group ATOMICALLY under the containment lock so
+    // a quit/restart/update (via `terminate_inflight`) — or a cancellation/timeout (via the guard's Drop) —
+    // reaps the whole bb tree, AND so the spawn→contain window is serialized against `begin_quiesce` (no bb
+    // can exist un-tracked while an install confirms nothing is running). Fail-closed: if the child can't be
+    // contained, or an install is quiescing, don't prove.
+    let (mut child, guard) = containment::spawn_and_register(&mut cmd)?;
     // B3 (F4): drain stderr CAP-and-CONTINUE in a CONCURRENT TASK so the pipe never fills (bb would block
     // writing) — and, importantly, so `child.wait()` (which does NOT depend on stderr EOF) can clear the
     // containment registration the instant bb exits rather than after the drain. Without that split, a
@@ -363,7 +364,13 @@ async fn prove_with_timeout(
         .stderr
         .take()
         .expect("spawn_capturing_stderr pipes stderr");
-    let mut drain = AbortingDrain(tokio::spawn(drain_capped(stderr_pipe, STDERR_RETAIN_CAP)));
+    // codex r3 M4b: the drain writes into a SHARED accumulator so the partial stderr survives an abort.
+    let stderr_acc: DrainAcc = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0)));
+    let mut drain = AbortingDrain(tokio::spawn(drain_capped_into(
+        stderr_pipe,
+        STDERR_RETAIN_CAP,
+        stderr_acc.clone(),
+    )));
 
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -382,14 +389,15 @@ async fn prove_with_timeout(
     // codex r2 M4a) then clears; that kill is also what makes the drain above EOF promptly.
     guard.finish();
 
-    // Collect the concurrently-drained stderr, bounded: `finish()` above SIGKILLed the group, so any
-    // grandchild that was holding the pipe open is now dead and stderr EOFs promptly — the 2s bound is a
-    // backstop, not the expected path. On any early return `drain` drops and aborts the task (codex r2 M4b).
-    let (stderr_retained, stderr_total) =
-        match tokio::time::timeout(Duration::from_secs(2), &mut drain.0).await {
-            Ok(Ok(pair)) => pair,
-            _ => (Vec::new(), 0),
-        };
+    // Wait (bounded) for the concurrent drain to finish: `finish()` above SIGKILLed the group, so any
+    // grandchild holding the pipe open is now dead and stderr EOFs promptly — the 2s bound is a backstop,
+    // not the expected path. Whether it completes or times out, the retained bytes are in `stderr_acc`
+    // (codex r3 M4b), and `drain` drops + aborts the task on the way out / on any early return.
+    let _ = tokio::time::timeout(Duration::from_secs(2), &mut drain.0).await;
+    let (stderr_retained, stderr_total) = {
+        let g = stderr_acc.lock().unwrap();
+        (g.0.clone(), g.1)
+    };
 
     let stderr = String::from_utf8_lossy(&stderr_retained);
     if !stderr.is_empty() {
@@ -453,39 +461,55 @@ fn validate_proof_len(len: u64) -> Result<(), Box<dyn std::error::Error + Send +
     Ok(())
 }
 
-/// B3 (F4): read `reader` to EOF, RETAINING at most `cap` bytes but continuing to drain the rest, and
-/// return `(retained, total_bytes_seen)`. Cap-and-continue (not fail-closed): stderr volume is a
+/// Shared stderr accumulator: `(retained ≤cap bytes, total bytes seen)`. Written incrementally by
+/// [`drain_capped_into`] so a reader can recover the PARTIAL diagnostics even if the drain task is later
+/// aborted (codex r3 M4b) — a plain return value would be lost on abort.
+type DrainAcc = std::sync::Arc<std::sync::Mutex<(Vec<u8>, u64)>>;
+
+/// B3 (F4): read `reader` to EOF, RETAINING at most `cap` bytes into `acc` but continuing to drain the
+/// rest, updating `acc` after every chunk. Cap-and-continue (not fail-closed): stderr volume is a
 /// diagnostic, not an integrity signal, so aborting a valid proof over a chatty bb would be a
 /// self-inflicted DoS — but we must keep emptying the pipe so bb never blocks on a full buffer.
-async fn drain_capped<R>(mut reader: R, cap: usize) -> (Vec<u8>, u64)
+async fn drain_capped_into<R>(mut reader: R, cap: usize, acc: DrainAcc)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
-    let mut retained: Vec<u8> = Vec::new();
-    let mut total: u64 = 0;
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break, // EOF
             Ok(n) => {
-                total = total.saturating_add(n as u64);
-                if retained.len() < cap {
-                    let room = cap - retained.len();
-                    retained.extend_from_slice(&buf[..room.min(n)]);
+                let mut g = acc.lock().unwrap();
+                g.1 = g.1.saturating_add(n as u64);
+                if g.0.len() < cap {
+                    let room = cap - g.0.len();
+                    g.0.extend_from_slice(&buf[..room.min(n)]);
                 }
             }
-            Err(_) => break, // read error — stop draining, return what we have
+            Err(_) => break, // read error — stop draining, keep what we have
         }
     }
-    (retained, total)
+}
+
+/// Thin wrapper returning the accumulated `(retained, total)` — used by the unit tests; the production path
+/// keeps its own [`DrainAcc`] so it can read the partial result on an abort.
+#[cfg(test)]
+async fn drain_capped<R>(reader: R, cap: usize) -> (Vec<u8>, u64)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let acc: DrainAcc = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0)));
+    drain_capped_into(reader, cap, acc.clone()).await;
+    let g = acc.lock().unwrap();
+    (g.0.clone(), g.1)
 }
 
 /// Owns the spawned stderr-drain task and ABORTS it on drop (codex r2 M4b). Without this, the early-return
 /// paths of `prove_with_timeout` (timeout, wait error) would DETACH the task rather than tear it down. The
-/// success path reads the pair out via `&mut self.0`; the wrapper still drops afterwards, aborting an
-/// already-finished task (a no-op).
-struct AbortingDrain(tokio::task::JoinHandle<(Vec<u8>, u64)>);
+/// retained stderr lives in the shared [`DrainAcc`], not this handle, so the caller reads it independently
+/// of whether the task finished or was aborted.
+struct AbortingDrain(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortingDrain {
     fn drop(&mut self) {
@@ -562,6 +586,30 @@ mod containment {
         STATE.lock().unwrap().quiescing = false;
     }
 
+    /// Spawn bb and register its group ATOMICALLY under the state lock (codex r3 H2a). Registering AFTER a
+    /// separate spawn left a hole: a prove that had already spawned — with a grandchild `kill_on_drop`
+    /// can't reach — would run during install, because the quiesce latch only gated *registration*. Holding
+    /// the lock ACROSS the (synchronous, no-`.await`) spawn closes it: `begin_quiesce` either takes the lock
+    /// first (this then refuses to spawn) or must wait out the in-flight spawn, after which the terminator
+    /// sees the registered pgid and kills it. Fail-closed on a quiescing install.
+    pub(super) fn spawn_and_register(
+        cmd: &mut tokio::process::Command,
+    ) -> std::io::Result<(tokio::process::Child, Guard)> {
+        let mut st = STATE.lock().unwrap();
+        if st.quiescing {
+            return Err(std::io::Error::other(
+                "the accelerator is installing an update; proving is paused",
+            ));
+        }
+        let child = super::spawn_capturing_stderr(cmd)?;
+        let pgid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("bb child has no pid immediately after spawn"))?
+            as i32;
+        st.pgid = Some(pgid);
+        Ok((child, Guard { pgid }))
+    }
+
     /// RAII registration for the spawned child's group. On drop it SIGKILLs the group **iff still
     /// registered** — i.e. the prove did NOT complete normally (client-disconnect future-drop, timeout,
     /// panic). On the normal path [`finish`](Guard::finish) reaps+clears first, so drop is a no-op.
@@ -572,23 +620,6 @@ mod containment {
     }
 
     impl Guard {
-        pub(super) fn register(child: &tokio::process::Child) -> std::io::Result<Self> {
-            let pgid = child.id().ok_or_else(|| {
-                std::io::Error::other("bb child has no pid immediately after spawn")
-            })? as i32;
-            let mut st = STATE.lock().unwrap();
-            // codex r2 H2a: refuse to register once an install has begun quiescing. Checked under the same
-            // lock that `begin_quiesce` sets and `terminate_and_confirm` takes the pgid, so registration
-            // cannot slip in after the terminator has confirmed the registry empty.
-            if st.quiescing {
-                return Err(std::io::Error::other(
-                    "the accelerator is installing an update; proving is paused",
-                ));
-            }
-            st.pgid = Some(pgid);
-            Ok(Self { pgid })
-        }
-
         /// Normal completion: bb has already exited (we hold its status). SIGKILL the group FIRST — to reap
         /// any child process bb orphaned (normally none, but once we clear the registry they'd be
         /// unkillable) — THEN clear (codex r2 M4a). bb's pid was reaped microseconds ago by `child.wait()`;
@@ -665,8 +696,7 @@ mod containment {
 #[cfg(windows)]
 mod containment {
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
@@ -682,11 +712,12 @@ mod containment {
     /// is killed on quit/restart/update/crash. 0 means creation FAILED (fail-closed: register() errors).
     static JOB: OnceLock<isize> = OnceLock::new();
 
-    /// Set while an update installs (codex r2 H2a). `register` refuses new bb, so no live bb.exe can hold
-    /// the file the installer must replace. Unlike Unix there is no pgid mutex to piggyback on, so this is
-    /// an atomic re-checked AFTER assignment (see `register`); the poll in `terminate_and_confirm` is the
-    /// backstop that keeps it fail-SAFE even under a race.
-    static QUIESCING: AtomicBool = AtomicBool::new(false);
+    /// `quiescing` flag under a mutex (codex r3 H2a). `spawn_and_register` holds this lock ACROSS
+    /// spawn+assign and `begin_quiesce` takes it, so the two are serialized: a spawn in flight when an
+    /// install begins is waited out (its bb lands in the job, which `terminate_and_confirm`'s poll then sees
+    /// → the update aborts over it, fail-safe), and once quiescing is set no new bb is spawned. Replaces the
+    /// r2 atomic, whose check/assign could not be made atomic without this lock.
+    static GATE: Mutex<bool> = Mutex::new(false);
 
     fn job_handle() -> HANDLE {
         let raw = *JOB.get_or_init(|| unsafe {
@@ -740,12 +771,13 @@ mod containment {
     /// No spawn-time configuration on Windows — the child is added to the job AFTER it exists.
     pub(super) fn configure(_cmd: &mut tokio::process::Command) {}
 
-    /// Stop accepting new proves (an update is about to install); [`end_quiesce`] re-opens on abort.
+    /// Stop accepting new proves (an update is about to install); [`end_quiesce`] re-opens on abort. Taking
+    /// `GATE` here waits out any spawn currently mid-assignment (codex r3 H2a).
     pub(super) fn begin_quiesce() {
-        QUIESCING.store(true, Ordering::SeqCst);
+        *GATE.lock().unwrap() = true;
     }
     pub(super) fn end_quiesce() {
-        QUIESCING.store(false, Ordering::SeqCst);
+        *GATE.lock().unwrap() = false;
     }
 
     /// Armed on register; on ABNORMAL drop (cancellation / timeout / panic — `finish` NOT called) it
@@ -755,51 +787,45 @@ mod containment {
         armed: bool,
     }
 
-    impl Guard {
-        pub(super) fn register(child: &tokio::process::Child) -> std::io::Result<Self> {
-            // codex r2 H2a: refuse to start a bb once an install is quiescing (cheap pre-assign check).
-            if QUIESCING.load(Ordering::SeqCst) {
-                return Err(std::io::Error::other(
-                    "the accelerator is installing an update; proving is paused",
-                ));
-            }
-            let job = job_handle();
-            if job.is_null() {
-                return Err(std::io::Error::other("failed to create the bb Job Object"));
-            }
-            // tokio's Child exposes the raw process handle on Windows.
-            let raw = child
-                .raw_handle()
-                .ok_or_else(|| std::io::Error::other("bb child has no OS handle after spawn"))?
-                as HANDLE;
-            unsafe {
-                if AssignProcessToJobObject(job, raw) == 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Fail-closed: prove must not proceed on a bb that is NOT actually contained (codex).
-                let mut in_job: i32 = 0;
-                if IsProcessInJob(raw, job, &mut in_job) == 0 || in_job == 0 {
-                    return Err(std::io::Error::other(
-                        "bb child is not in the Job Object after assignment",
-                    ));
-                }
-            }
-            // codex r2 H2a: re-check AFTER assignment. If quiesce began while we were assigning, this bb may
-            // have joined the job just after `terminate_and_confirm` confirmed it empty — kill it NOW
-            // (fail-closed) so it cannot hold bb.exe during install. (A quiesce that begins after THIS check
-            // is still safe: the bb is in the job, so the terminator's poll sees ActiveProcesses>0 and
-            // aborts the install rather than installing over it.)
-            if QUIESCING.load(Ordering::SeqCst) {
-                unsafe {
-                    TerminateJobObject(job, 1);
-                }
-                return Err(std::io::Error::other(
-                    "proving paused for update install (assignment raced quiesce)",
-                ));
-            }
-            Ok(Guard { armed: true })
+    /// Spawn bb and assign it to the job ATOMICALLY under `GATE` (codex r3 H2a — see [`GATE`]). Holding the
+    /// lock across the (synchronous) spawn+assign is what makes `begin_quiesce` exclude or wait out an
+    /// in-flight spawn; the r2 before/after atomic checks could not close that race.
+    pub(super) fn spawn_and_register(
+        cmd: &mut tokio::process::Command,
+    ) -> std::io::Result<(tokio::process::Child, Guard)> {
+        let gate = GATE.lock().unwrap();
+        if *gate {
+            return Err(std::io::Error::other(
+                "the accelerator is installing an update; proving is paused",
+            ));
         }
+        let job = job_handle();
+        if job.is_null() {
+            return Err(std::io::Error::other("failed to create the bb Job Object"));
+        }
+        let child = super::spawn_capturing_stderr(cmd)?;
+        // tokio's Child exposes the raw process handle on Windows.
+        let raw = child
+            .raw_handle()
+            .ok_or_else(|| std::io::Error::other("bb child has no OS handle after spawn"))?
+            as HANDLE;
+        unsafe {
+            if AssignProcessToJobObject(job, raw) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Fail-closed: prove must not proceed on a bb that is NOT actually contained (codex).
+            let mut in_job: i32 = 0;
+            if IsProcessInJob(raw, job, &mut in_job) == 0 || in_job == 0 {
+                return Err(std::io::Error::other(
+                    "bb child is not in the Job Object after assignment",
+                ));
+            }
+        }
+        drop(gate); // release only after the bb is contained, so a waiting begin_quiesce sees it in the job
+        Ok((child, Guard { armed: true }))
+    }
 
+    impl Guard {
         pub(super) fn finish(mut self) {
             self.armed = false;
         }
@@ -864,10 +890,13 @@ mod containment {
     pub(super) fn begin_quiesce() {}
     pub(super) fn end_quiesce() {}
     pub(super) struct Guard;
+    pub(super) fn spawn_and_register(
+        cmd: &mut tokio::process::Command,
+    ) -> std::io::Result<(tokio::process::Child, Guard)> {
+        let child = super::spawn_capturing_stderr(cmd)?;
+        Ok((child, Guard))
+    }
     impl Guard {
-        pub(super) fn register(_child: &tokio::process::Child) -> std::io::Result<Self> {
-            Ok(Guard)
-        }
         pub(super) fn finish(self) {}
     }
     pub fn terminate_inflight() {}
@@ -1465,23 +1494,23 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial]
-    async fn register_is_refused_while_quiescing_then_reopens(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // codex r2 H2a: once an install quiesces, NO new bb may register — that is what stops a fresh
-        // bb.exe from holding the file the installer must replace. Mutation proof: delete the
-        // `if st.quiescing` guard in `register` and the first registration below SUCCEEDS.
-        use super::containment::{configure, Guard};
-        let spawn = || {
+    async fn spawn_is_refused_while_quiescing_then_reopens() {
+        // codex r3 H2a: once an install quiesces, NO new bb may even SPAWN (the check is under the same lock
+        // held across spawn+register), so no fresh bb.exe can hold the file the installer must replace.
+        // Mutation proof: delete the `if st.quiescing` guard in `spawn_and_register` and the first call
+        // below SUCCEEDS (spawning a bb during a quiesced install).
+        use super::containment::spawn_and_register;
+        let mk = || {
             let mut cmd = tokio::process::Command::new("sleep");
             cmd.arg("30").kill_on_drop(true);
-            configure(&mut cmd);
-            cmd.spawn()
+            super::containment::configure(&mut cmd);
+            cmd
         };
 
         let quiesce = begin_quiesce();
-        let child_a = spawn()?;
-        let err = match Guard::register(&child_a) {
-            Ok(_) => panic!("register must be refused while quiescing"),
+        let mut cmd_a = mk();
+        let err = match spawn_and_register(&mut cmd_a) {
+            Ok(_) => panic!("spawn must be refused while quiescing"),
             Err(e) => e,
         };
         assert!(
@@ -1491,11 +1520,10 @@ mod tests {
 
         // Dropping the guard (an ABORTED install) must re-open proving.
         drop(quiesce);
-        let child_b = spawn()?;
-        Guard::register(&child_b)
-            .expect("registration must work again once the quiesce guard drops")
-            .finish();
-        Ok(())
+        let mut cmd_b = mk();
+        let (_child, guard) = spawn_and_register(&mut cmd_b)
+            .expect("spawn must work again once the quiesce guard drops");
+        guard.finish(); // reaps the sleep's group
     }
 
     #[cfg(unix)]
