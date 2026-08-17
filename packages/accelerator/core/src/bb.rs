@@ -916,19 +916,25 @@ mod containment {
                 "a previously spawned bb could not be confirmed terminated; refusing to install until the accelerator restarts".to_string(),
             );
         }
-        let job = job_handle();
-        if job.is_null() {
+        // Hold the job handle as an `isize` (Send) across the `.await` below, materializing the raw `HANDLE`
+        // (`*mut c_void`, which is !Send) only transiently for each synchronous WinAPI call. If the raw
+        // HANDLE were live across the await, this whole future would be !Send and `perform_update` — which
+        // `tauri::async_runtime::spawn`s it (Send + 'static bound) — would fail to compile on Windows. NB: a
+        // core `--lib` cross-check does NOT surface this; only the src-tauri spawn site enforces the bound
+        // (guarded now by `_assert_terminate_and_confirm_future_is_send`).
+        let job_addr = job_handle() as isize;
+        if job_addr == 0 {
             return Ok(());
         }
         // `TerminateJobObject` is ASYNCHRONOUS (like `TerminateProcess`). codex r2 H2b: capture its result
         // rather than discarding it, but the poll below is the real confirmation — a failed terminate just
         // means the poll never reaches Some(0) and we abort the install.
-        let term_ok = unsafe { TerminateJobObject(job, 1) } != 0;
+        let term_ok = unsafe { TerminateJobObject(job_addr as HANDLE, 1) } != 0;
         let deadline = std::time::Instant::now() + timeout;
         loop {
             // Confirm ONLY on a SUCCESSFUL query that reads 0 (codex r2 H2b: a failed query — `None` — is
             // NOT an empty job).
-            if active_processes(job) == Some(0) {
+            if active_processes(job_addr as HANDLE) == Some(0) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -938,6 +944,17 @@ mod containment {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// Compile-time guard: `terminate_and_confirm`'s future MUST stay `Send`, because `perform_update`
+    /// `tauri::async_runtime::spawn`s it (`Future + Send + 'static`). A raw `HANDLE` (`*mut c_void`, !Send)
+    /// held across the `.await` would silently make it !Send — and a core `--lib` cross-check would STILL
+    /// pass, only the MSVC src-tauri build failing 15 minutes into CI. This never runs; it exists so
+    /// `cargo check --target x86_64-pc-windows-gnu` fails FAST on a regression.
+    #[allow(dead_code)]
+    fn _assert_terminate_and_confirm_future_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(terminate_and_confirm(std::time::Duration::from_secs(0)));
     }
 }
 
