@@ -1,0 +1,236 @@
+<!-- ELI5 companion for the v2-release-train blueprint. Plain-language decision layer;
+     the engineering detail lives in plan.md. Relative links resolve when opened locally. -->
+<title>v2 Release Train — the plain-language plan</title>
+<style>
+  :root {
+    --bg: #f7f6f3; --panel: #fffdfa; --ink: #1b1a17; --soft: #5f5b52;
+    --line: #e4e0d6; --accent: #b4531f; --accent-soft: #f0e2d7;
+    --ok: #3f7d54; --warn: #a8791b; --stop: #b23b3b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16150f; --panel: #1e1d16; --ink: #ece8df; --soft: #a49e90;
+      --line: #322f25; --accent: #e08a4c; --accent-soft: #2c2417;
+      --ok: #6fb585; --warn: #d8ab4e; --stop: #e07070;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f6f3; --panel: #fffdfa; --ink: #1b1a17; --soft: #5f5b52;
+    --line: #e4e0d6; --accent: #b4531f; --accent-soft: #f0e2d7;
+    --ok: #3f7d54; --warn: #a8791b; --stop: #b23b3b;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16150f; --panel: #1e1d16; --ink: #ece8df; --soft: #a49e90;
+    --line: #322f25; --accent: #e08a4c; --accent-soft: #2c2417;
+    --ok: #6fb585; --warn: #d8ab4e; --stop: #e07070;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 50rem; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 1.5rem; margin-bottom: 2.5rem; }
+  .eyebrow {
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 .6rem;
+  }
+  h1 { font-size: clamp(1.9rem, 5vw, 2.9rem); line-height: 1.08; margin: 0 0 .5rem; text-wrap: balance; letter-spacing: -.01em; }
+  .sub { font-size: 1.08rem; color: var(--soft); margin: 0; max-width: 40rem; }
+  h2 {
+    font-size: 1.4rem; margin: 3rem 0 1rem; letter-spacing: -.01em;
+    display: flex; align-items: baseline; gap: .6rem;
+  }
+  h2 .n { font-family: var(--mono); font-size: .85rem; color: var(--accent); }
+  h3 { font-size: 1.05rem; margin: 0 0 .3rem; }
+  p { margin: 0 0 1rem; }
+  a { color: var(--accent); }
+  .lede { font-size: 1.12rem; }
+  .callout {
+    background: var(--accent-soft); border-left: 3px solid var(--accent);
+    padding: 1rem 1.2rem; border-radius: 0 6px 6px 0; margin: 1.5rem 0;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .grid { display: grid; gap: 1rem; }
+  @media (min-width: 34rem) { .grid.two { grid-template-columns: 1fr 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+  }
+  .card .tag {
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent); display: block; margin-bottom: .35rem;
+  }
+  .card p { font-size: .95rem; color: var(--soft); margin: .4rem 0 0; }
+  .card .who { font-size: .82rem; color: var(--ink); margin-top: .6rem; font-style: italic; }
+  ol.flow { list-style: none; counter-reset: step; padding: 0; margin: 1.5rem 0; }
+  ol.flow li {
+    counter-increment: step; position: relative; padding: .55rem 0 .55rem 3rem;
+    border-bottom: 1px dashed var(--line);
+  }
+  ol.flow li:last-child { border-bottom: none; }
+  ol.flow li::before {
+    content: counter(step); position: absolute; left: 0; top: .5rem;
+    width: 2rem; height: 2rem; border-radius: 50%; background: var(--ink); color: var(--bg);
+    font-family: var(--mono); font-size: .85rem; font-weight: 600;
+    display: grid; place-items: center;
+  }
+  ol.flow b { font-weight: 600; }
+  ol.flow .meta { font-size: .85rem; color: var(--soft); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .92rem; }
+  th, td { text-align: left; padding: .55rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-family: var(--mono); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--soft); font-weight: 600; }
+  td .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .pill {
+    display: inline-block; font-family: var(--mono); font-size: .7rem; padding: .12rem .5rem;
+    border-radius: 20px; letter-spacing: .04em;
+  }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+  .pill.stop { background: color-mix(in srgb, var(--stop) 18%, transparent); color: var(--stop); }
+  .seed {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    margin: 1rem 0; overflow: hidden;
+  }
+  .seed .head {
+    font-family: var(--mono); font-size: .74rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--soft); padding: .6rem 1rem; border-bottom: 1px solid var(--line); background: var(--bg);
+  }
+  .seed pre {
+    margin: 0; padding: 1rem; overflow-x: auto; font-family: var(--mono); font-size: .82rem;
+    line-height: 1.5; color: var(--ink); white-space: pre-wrap; word-break: break-word;
+  }
+  footer { margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--line); font-size: .85rem; color: var(--soft); }
+  footer a { font-family: var(--mono); }
+  .toggle {
+    position: fixed; top: 1rem; right: 1rem; font-family: var(--mono); font-size: .7rem;
+    background: var(--panel); border: 1px solid var(--line); color: var(--soft);
+    border-radius: 20px; padding: .3rem .7rem; cursor: pointer;
+  }
+</style>
+
+<button class="toggle" onclick="(function(r){var d=r.getAttribute('data-theme')==='dark'?'light':'dark';r.setAttribute('data-theme',d);})(document.documentElement)">◐ theme</button>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Blueprint · deep tier · autonomous</p>
+    <h1>Shipping Aztec Accelerator v2.0</h1>
+    <p class="sub">What the release train fixes, why each piece matters, and how the plan was pressure-tested before a single line of code — in plain terms.</p>
+  </header>
+
+  <p class="lede">The accelerator is a strong release <em>candidate</em> today, but not yet a production 2.0. Six things stand between here and there. This plan fixes all six, proves each fix, ships the desktop app as <b>2.0.0</b> on macOS, Linux and Windows, publishes the matching SDK — and does it end-to-end without needing you at the keyboard.</p>
+
+  <div class="callout">
+    <p><b>One thing is deliberately <em>not</em> here:</b> Windows code-signing (B1). It has the longest lead time of anything in the report and you chose to start that clock separately. Everything else is in scope.</p>
+  </div>
+
+  <h2><span class="n">01</span> The six blockers, in plain language</h2>
+
+  <div class="grid two">
+    <div class="card">
+      <span class="tag">B2 · consent · security</span>
+      <h3>Close the click-steal race</h3>
+      <p>The "Allow this site?" popup has a 700ms guard so a malicious page can't time a click and self-approve. Today that guard is only on <em>one</em> popup and arms at the wrong moment. We make it default-on everywhere and arm it when the button truly becomes clickable.</p>
+      <p class="who">The only blocker a remote web page with zero local access can exploit.</p>
+    </div>
+    <div class="card">
+      <span class="tag">B3 · the prover</span>
+      <h3>Fully contain the bb worker</h3>
+      <p>The native prover can spew unbounded error text into memory, hand back a truncated proof as if it succeeded, and — worst — keep running after the app quits or updates. We cap it, validate its output, and guarantee it dies with the app.</p>
+      <p class="who">No attacker needed; a buggy prover is enough.</p>
+    </div>
+    <div class="card">
+      <span class="tag">B5 · lifecycle</span>
+      <h3>Make uninstall actually uninstall</h3>
+      <p>Removing the app leaves behind autostart entries, a recovery task that relaunches it, and trust state. We add a real cleanup step the uninstaller runs — and it only removes what <em>this</em> install owns.</p>
+      <p class="who">Hygiene, not an exploit — but it's what "production" means.</p>
+    </div>
+    <div class="card">
+      <span class="tag">B7 · the SDK</span>
+      <h3>Fix the SDK's release contract</h3>
+      <p>The published package is never tested as it actually ships, some errors escape untyped, and the migration guide isn't even in the download. We test the real tarball in fresh projects and give errors a proper type.</p>
+      <p class="who">Breaks integrations silently, not maliciously.</p>
+    </div>
+    <div class="card">
+      <span class="tag">B6 · release engineering</span>
+      <h3>Separate "publish" from "go live"</h3>
+      <p>Today one job both publishes a build and points every user's auto-updater at it, with no way back. We split them: publish and verify first, flip the switch only after every gate passes, and keep a real rollback lever.</p>
+      <p class="who">A validly-signed bad build is all it takes to hurt the fleet.</p>
+    </div>
+    <div class="card">
+      <span class="tag">B4 · the proof · goes last</span>
+      <h3>Prove the shipped product upgrades</h3>
+      <p>Nothing today tests the <em>installed</em> app doing a real proof over HTTPS, or a 1.0.7 user upgrading to 2.0 without losing their settings. We build that test on all three OSes — it's the gate the real release must pass through.</p>
+      <p class="who">Catches packaging & migration regressions nothing else would.</p>
+    </div>
+  </div>
+
+  <h2><span class="n">02</span> Why you can trust the plan before any code</h2>
+  <p>This plan wasn't written once and shipped. It was drafted three independent ways, then attacked in four escalating rounds. Each round found real defects — including several in my own consolidation — and every one was folded in and recorded in the <a href="decision-ledger.md">decision ledger</a>.</p>
+
+  <table>
+    <thead><tr><th>Stage</th><th>What happened</th><th>Found</th></tr></thead>
+    <tbody>
+      <tr><td>Recon</td><td>Six read-only agents mapped every surface the work touches</td><td class="num">17 design forks</td></tr>
+      <tr><td>Three plans</td><td>Main, Codex, and a Fable agent each drafted the whole arc independently</td><td class="num">3 legs</td></tr>
+      <tr><td>Consolidate</td><td>Best pieces merged; disagreements recorded, not smoothed over</td><td class="num">7 decisions</td></tr>
+      <tr><td>Contradiction-check</td><td>Both external reviewers attacked the <em>merge</em> for internal conflicts</td><td class="num">20 findings</td></tr>
+      <tr><td>Double audit</td><td>Codex + a <em>fresh</em> hostile reviewer, full adversarial pass</td><td class="num">31 findings</td></tr>
+      <tr><td>Final pass</td><td>New Codex session with the whole trail; ruled on the one open dispute</td><td class="num">7 findings · 2 blockers</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><b>The pattern worth knowing:</b> three separate times I wrote a security rule as a <em>comment</em> that the code didn't actually enforce ("this can't happen") — and each time an auditor showed a one-line bypass. Rev 4 has a standing rule now: every "cannot happen" invariant is enforced by the type system with a proof, never by convention. That's the difference between a plan that sounds safe and one that is.</p>
+  </div>
+
+  <h2><span class="n">03</span> How it ships</h2>
+  <p>Six cohorts, merged one at a time onto a green main, in this order:</p>
+  <ol class="flow">
+    <li><b>B2 → B3 → B5 → B7 → B6</b> <span class="meta">— each its own branch and PR stack, every security fix mutation-proved (revert the fix, watch the named test fail, restore).</span></li>
+    <li><b>B4 last</b> <span class="meta">— because its 3-OS installed-product test is the gate the real release runs through.</span></li>
+    <li><b>Cut 2.0.0-rc.N</b> <span class="meta">— published, run through the full gate suite, soaked ≥2h.</span></li>
+    <li><b>Stable as a private draft</b> <span class="meta">— gated on the exact bytes that will ship; published only once it passes, so a failed build was never public.</span></li>
+    <li><b>Promote</b> <span class="meta">— flip the updater feed to 2.0.0, then publish the SDK's next revision and verify a clean install from npm.</span></li>
+  </ol>
+  <p>If anything can't be done safely inside the granted authorization — a bad build that's already public and would need a 2.0.1, or a trust-seeding step that can't be automated on an OS — the run <b>stops and surfaces to you</b> rather than improvising. Those exit points are named in the ledger.</p>
+
+  <h2><span class="n">04</span> Where each risk lands</h2>
+  <table>
+    <thead><tr><th>Concern</th><th>Disposition</th></tr></thead>
+    <tbody>
+      <tr><td>Consent click-steal (B2)</td><td><span class="pill ok">fixed + proved</span></td></tr>
+      <tr><td>Prover containment (B3)</td><td><span class="pill ok">fixed + proved</span></td></tr>
+      <tr><td>Fleet rollback (B6)</td><td><span class="pill ok">real lever + drill</span></td></tr>
+      <tr><td>3-OS HTTPS proof (B4)</td><td><span class="pill warn">auto if trust-seeding lands, else surface</span></td></tr>
+      <tr><td>SDK peer-deps shape (B7)</td><td><span class="pill warn">decided by evidence in-cohort</span></td></tr>
+      <tr><td>Windows code-signing (B1)</td><td><span class="pill stop">deferred by you</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">05</span> The seeds</h2>
+  <p>The autonomous run is already driving from this goal. Kept here so the arc can be re-seeded or resumed in a fresh session.</p>
+  <div class="seed">
+    <div class="head">/goal — the standing directive</div>
+    <pre>Ship aztec-accelerator v2.0 end-to-end: fix blockers B2–B7, then cut,
+gate, and promote the 2.0.0 desktop release and publish the SDK's next
+-revision.N. B1 deferred. Binding brief + full plan:
+implementations-plan/v2-release-train/{brief.md,plan.md}. Cohorts merge
+B2 → B3 → B5 → B7 → B6 → B4-last, each mutation-proved and codex-clean;
+release via publish→gate→promote; every dead-end routes to STOP-and-surface.</pre>
+  </div>
+  <div class="seed">
+    <div class="head">/loop — resume a stalled cohort</div>
+    <pre>Re-read implementations-plan/v2-release-train/plan.md + decision-ledger.md,
+find the current cohort's worktree and open PRs, and continue: implement →
+mutation-prove → codex loop until a clean round → gh-stack PR → merge on
+fresh main with one green run per context → advance. Stop only at a defined
+STOP-and-surface point or a genuine blocker.</pre>
+  </div>
+
+  <footer>
+    <p>Engineering detail, file-level change maps, and every fork's rationale live in <a href="plan.md">plan.md</a>. Decisions, disputes, and the error log are in <a href="decision-ledger.md">decision-ledger.md</a>. Audit trails: <a href="audit-codex.md">codex</a> · <a href="audit-fable.md">fable</a>.</p>
+  </footer>
+</div>
