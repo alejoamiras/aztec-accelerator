@@ -270,3 +270,43 @@ Deep-tier protocol fully executed: recon (6 agents, 17 forks) -> 3 independent l
 pass (7 findings/2 blockers/1 ruling) -> confirmation (3 nits). 5 revisions. 13 self-errors caught
 and logged. Cohorts B2/B3/B5/B7 audit-clean; B6/B4 carry defined owner-decision points reached
 only in the last cohorts. Implementation may begin at B2.
+
+## B7 outcomes (in-cohort)
+
+- **D-C29 OUTCOME (F13) — VERDICT: KEEP DEPS (no `peerDependencies`).** Predeclared bar (D-C13/D-C29):
+  default `npm install` is the decisive test; the exact-host (5.0.1) must yield a SINGLETON `@aztec/stdlib`
+  graph, and a version-skewed host must not be silently mis-resolved. Two independent empirical checks
+  settle it:
+  1. **Exact-host singleton (the shipped gate).** `scripts/sdk-tarball-consumer.sh` (the `tarball-consumer`
+     CI job) packs the REAL tarball and installs it with default npm into an exact-host (5.0.1), asserting a
+     single `@aztec/stdlib`. Exact-pinned deps already deliver "one @aztec graph" for the normal case, so
+     peers could not improve on it.
+  2. **Conflict-host: deps degrade gracefully, peers HARD-FAIL.** `implementations-plan/v2-release-train/`
+     `evidence/f13-peer-vs-deps.sh` (package/version-agnostic; captured 2026-08-17, npm 10) installs a
+     package wanting a newer exact version than the host pins, declared once as a dep and once as a peer:
+     default `npm install` SUCCEEDS for the dep (the dependent gets its own nested copy — 2 in the tree, and
+     it binds to its correct version) and FAILS with **ERESOLVE** for the peer — on the DEFAULT resolver,
+     not only `--strict-peer-deps`, because a direct/root peer conflict has no valid at-or-above placement
+     (npm RFC 25). No manifest change; `dependencies` stay exact-pinned (`minimumReleaseAge` + frozen
+     lockfile keep the resolution vetted-once-frozen-forever).
+  - **The honest trade-off (codex B7 #3, round 3) — verdict HELD as an OWNER CHOICE, not "strictly better".**
+    My earlier framing ("peers are strictly worse") was itself an overclaim; codex is right that peers carry
+    a real advantage this ledger must record:
+    - **Deps (chosen):** install SUCCEEDS on a version-skewed host and the SDK binds to its own vetted
+      @aztec — but the skew is DEFERRED, not removed. The SDK proves the host's (e.g. 5.0.0) execution steps
+      with its own (5.0.1) stdlib serializer + bb-prover, so a cross-version serialization/proof
+      incompatibility can surface LATER, at runtime, on BOTH proving paths. (Correcting a round-3 error codex
+      caught: `version-mismatch` does NOT protect the accelerator path from this. The `/health` /
+      `x-aztec-version` handshake advertises the SDK's OWN pinned version against the accelerator's bb cache —
+      it gates SDK↔accelerator, not host↔SDK, and never sees the host dApp's version. A modern multi-version
+      accelerator simply downloads the SDK's version (`needsDownload`) and proves with it, so native bb-5.0.1
+      processes 5.0.0 host steps exactly as the WASM path does.)
+    - **Peers (rejected):** would convert that latent skew into an IMMEDIATE, actionable `npm install`
+      ERESOLVE — but block install on ANY skew, including benign ones, for a drop-in SDK whose selling point
+      is "just installs, falls back to WASM".
+    We keep deps, prioritising installability + graceful degradation and EXPLICITLY ACCEPTING the runtime
+    cross-version compatibility risk (mitigated by exact-pinned deps, per-@aztec dist-tags, and docs telling
+    consumers to match versions). Also correcting a second self-error codex caught: type-identity is NOT
+    "only a concern when the host shares the graph" — exact-match dedup (check #1) REMOVES the hazard; a
+    SKEWED duplicate graph is precisely what CREATES two @aztec instances across the PXE→prover boundary. If
+    that runtime-skew risk is later judged unacceptable, revisit as exact peers (a follow-up, owner's call).

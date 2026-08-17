@@ -11,7 +11,7 @@ You are helping a developer integrate `@alejoamiras/aztec-accelerator` into thei
 ## Key facts
 
 - Package: `@alejoamiras/aztec-accelerator`
-- Peer dependency: `@aztec/aztec.js` (or `@aztec/stdlib` + `@aztec/bb-prover`)
+- Ships its `@aztec/*` as exact-pinned dependencies (installs standalone; dedupes with a host on the same exact version)
 - Accelerator ports: HTTP `127.0.0.1:59833`, HTTPS `127.0.0.1:59834`
 - Zero config by default — just `new AcceleratorProver()`
 - Transparent fallback: if accelerator is offline, proves via WASM silently (no errors thrown)
@@ -147,10 +147,17 @@ Chrome 142+ gates requests from public sites to loopback behind a permission pro
 The SDK is designed to be fail-safe:
 
 - **Accelerator offline**: automatically falls back to WASM (no error thrown)
-- **Accelerator returns HTTP error**: falls back to WASM
+- **Accelerator returns a RECOGNISED error**: falls back to WASM — a denial (`denied` phase), a version
+  refusal (`version-mismatch` phase), an authorization cooldown, and capacity/transient errors (408, 413,
+  429, 503, `500 download_failed`/`prove_failed`)
 - **Version mismatch**: modern accelerators auto-download the right bb version
 
-The only cases that throw are corrupted execution steps or simulator unavailability.
+The cases that THROW are: corrupted execution steps, simulator unavailability, and — new in the typed
+error surface — a caller **misconfiguration** (`400 invalid_version`/`invalid_origin`), a `500` with an
+**unrecognised** code, or any other unexpected HTTP status, surfaced as a typed `AcceleratorHttpError`
+(`.status`, `.code`) rather than masked as WASM. The degrade set is matched by status: **every** `403`
+(denial/version/cooldown) and **every** `408`/`413`/`429`/`503` falls back regardless of its `code`, so an
+unknown `403`/`503` code degrades — it does not throw.
 
 ## Vite configuration (browser bundling)
 

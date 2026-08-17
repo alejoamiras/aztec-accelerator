@@ -58,6 +58,8 @@ describe("getFrameFn", () => {
     "transmit",
     "proving",
     "receive",
+    "denied",
+    "version-mismatch",
     "app:prove",
     "app:confirm",
   ];

@@ -101,16 +101,9 @@ jobs:
         working-directory: packages/sdk
         env:
           VERSION: ${{ steps.sdk-version.outputs.version }}
-        run: |
-          node -e "
-            const p = require('./package.json');
-            p.version = process.env.VERSION;
-            p.main = './dist/index.js';
-            p.types = './dist/index.d.ts';
-            p.exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } };
-            delete p.publishConfig.exports;
-            require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
-          "
+        # B7: the rewrite is a committed, unit-tested script (scripts/prepare-sdk-publish.ts) rather than an
+        # inline node -e — diff-reviewable, and the SAME rewrite the tarball-consumer CI job runs.
+        run: bun ../../scripts/prepare-sdk-publish.ts "$VERSION"
 
       # If this step fails AFTER npm accepted the publish, never blind-redispatch: check
       # `npm view @alejoamiras/aztec-accelerator versions` first — a redispatch mints a
@@ -167,7 +160,10 @@ jobs:
           # "Latest" badge belongs to accelerator releases — the 4.2.0-revision.2 SDK release stole
           # it from accelerator-v1.0.5 (2026-06-11), breaking the updater smokes' N-1 resolution
           # and the releases/latest URL.
+          # B7 (F15): attach MIGRATION.md so the release page carries the upgrade guide even for consumers
+          # who never open the npm tarball (it is also shipped IN the tarball via `files`).
           gh release create "$TAG" \
             --title "$TAG" \
             --notes "$NOTES" \
-            --latest=false
+            --latest=false \
+            packages/sdk/MIGRATION.md

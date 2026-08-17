@@ -12,7 +12,8 @@
   "files": [
     "src",
     "dist",
-    ".claude"
+    ".claude",
+    "MIGRATION.md"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc",

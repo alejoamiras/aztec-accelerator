@@ -4,6 +4,7 @@ import { WASMSimulator } from "@aztec/simulator/client";
 import * as stdlibKernel from "@aztec/stdlib/kernel";
 import sdkPkg from "../../package.json" with { type: "json" };
 import { AcceleratorProver } from "./accelerator-prover.js";
+import { AcceleratorHttpError } from "./errors.js";
 
 const SDK_AZTEC_VERSION = (sdkPkg.dependencies as Record<string, string>)["@aztec/stdlib"];
 
@@ -299,6 +300,113 @@ describe("AcceleratorProver", () => {
       expect(wasmSpy).toHaveBeenCalled();
       wasmSpy.mockRestore();
       serializeSpy.mockRestore();
+    });
+
+    // ── B7 (F14): the prove error taxonomy ──
+    // The accelerator sends its error body as text/plain carrying a JSON string (server.rs
+    // `prove_error_responses_stay_text_plain`), so `ky` makes `err.data` a STRING — the fixtures below use
+    // that exact shape (NOT `Response.json`) so the code-recovery path is exercised the way production hits
+    // it. Recognised conditions degrade to WASM; only a caller misconfiguration / unrecognised error is
+    // thrown as a typed `AcceleratorHttpError`.
+    const healthOk = () =>
+      Response.json({
+        status: "ok",
+        api_version: 1,
+        aztec_version: SDK_AZTEC_VERSION,
+        available_versions: [SDK_AZTEC_VERSION],
+      });
+    const proveError = (status: number, code?: string) =>
+      new Response(code ? JSON.stringify({ error: code, message: "server said so" }) : "", {
+        status,
+        headers: { "content-type": "text/plain" },
+      });
+
+    // [name, status, code, expected phase (or null), phase that must NOT appear]
+    const fallbackCases: Array<[string, number, string | undefined, string | null, string | null]> =
+      [
+        ["403 origin_denied", 403, "origin_denied", "denied", null],
+        ["403 authorization_timeout", 403, "authorization_timeout", "denied", null],
+        ["403 authorization_cancelled", 403, "authorization_cancelled", "denied", null],
+        ["403 version_not_allowed", 403, "version_not_allowed", "version-mismatch", "denied"],
+        ["403 authorization_cooldown", 403, "authorization_cooldown", null, "denied"],
+        // The by-status nuance the docs promise: an UNRECOGNISED 403 code still degrades (catch-all →
+        // denied), it does NOT throw. Guards against a future "tighten 403 to known codes only" regression.
+        ["403 unrecognised code → denied", 403, "some_future_denial_code", "denied", null],
+        ["503 service_unavailable", 503, "service_unavailable", null, null],
+        ["408 body_read_timeout", 408, "body_read_timeout", null, null],
+        ["413 payload_too_large", 413, "payload_too_large", null, null],
+        ["429 too_many_requests", 429, "too_many_requests", null, null],
+        ["429 prove_queue_full", 429, "prove_queue_full", null, null],
+        ["500 download_failed", 500, "download_failed", null, null],
+        ["500 prove_failed", 500, "prove_failed", null, null],
+      ];
+    for (const [name, status, code, wantPhase, notPhase] of fallbackCases) {
+      test(`F14 falls back to WASM: ${name}`, async () => {
+        mockFetch({ "/health": healthOk, "/prove": () => proveError(status, code) });
+        const serializeSpy = mockSerializer();
+        const wasmSpy = mockWasmProver();
+        const phases: string[] = [];
+        const prover = new AcceleratorProver({
+          simulator: new WASMSimulator(),
+          onPhase: (p) => phases.push(p),
+        });
+        // Reaching the WASM prover (which the mock rejects) is how we observe a fallback.
+        await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+          "local prover not available in test",
+        );
+        expect(wasmSpy).toHaveBeenCalled();
+        expect(phases).toContain("fallback");
+        if (wantPhase) expect(phases, `must emit ${wantPhase}`).toContain(wantPhase);
+        if (notPhase) expect(phases, `must NOT emit ${notPhase}`).not.toContain(notPhase);
+        wasmSpy.mockRestore();
+        serializeSpy.mockRestore();
+      });
+    }
+
+    // no_raw_ky_error_escapes: a misconfiguration or unrecognised error is a TYPED throw, never a raw ky
+    // HTTPError, and never silently masked as WASM. [mut: revert the `#fallbackOrThrowHttp` throw → WASM].
+    const throwCases: Array<[string, number, string | undefined]> = [
+      ["400 invalid_version", 400, "invalid_version"],
+      ["400 invalid_origin", 400, "invalid_origin"],
+      ["500 unrecognised code", 500, "some_unknown_fault"],
+      ["418 unrecognised status", 418, undefined],
+      ["404 not found", 404, "not_found"],
+    ];
+    for (const [name, status, code] of throwCases) {
+      test(`F14 throws typed AcceleratorHttpError, never falls back: ${name}`, async () => {
+        mockFetch({ "/health": healthOk, "/prove": () => proveError(status, code) });
+        const serializeSpy = mockSerializer();
+        const wasmSpy = mockWasmProver();
+        const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+        const err = await prover.createChonkProof([fakeStep]).catch((e) => e);
+        expect(err, `${name} must be typed`).toBeInstanceOf(AcceleratorHttpError);
+        expect(err.status).toBe(status);
+        if (code) expect(err.code).toBe(code);
+        expect(wasmSpy, "must NOT mask a misconfiguration as WASM").not.toHaveBeenCalled();
+        wasmSpy.mockRestore();
+        serializeSpy.mockRestore();
+      });
+    }
+
+    test("B7: surfaces the accelerator appVersion + apiVersion from /health", async () => {
+      mockFetch({
+        "/health": () =>
+          Response.json({
+            status: "ok",
+            api_version: 1,
+            version: "2.0.0",
+            aztec_version: SDK_AZTEC_VERSION,
+            available_versions: [SDK_AZTEC_VERSION],
+          }),
+      });
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const status = await prover.checkAcceleratorStatus();
+      expect(status.available).toBe(true);
+      if (status.available) {
+        // Mutation proof: drop `appVersion`/`apiVersion` from #classifyHealth's return and these fail.
+        expect(status.appVersion).toBe("2.0.0");
+        expect(status.apiVersion).toBe(1);
+      }
     });
 
     test("multi-version accelerator always proceeds (no WASM fallback on version mismatch)", async () => {
