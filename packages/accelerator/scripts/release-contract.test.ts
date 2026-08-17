@@ -18,20 +18,22 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     // [mut: move the aws s3 cp back into `release`, or add id-token to release → fails]
     expect(WF).toContain("aws s3 cp feed/latest.json"); // promote uploads the verified downloaded bytes
     expect(WF).not.toContain("aws s3 cp release-files/latest.json"); // the old in-release promote is gone
-    expect(WF).toContain("contents: write     # gh release create (publish ONLY");
+    expect(WF).toContain("contents: write     # gh release create --draft");
     // release-auth-preflight ALSO holds id-token but only PROBES — it must be gated off standalone
     // promote-only so it can't fail RED after the flip already mutated S3.
     expect(WF).toContain("inputs.auth_probe || inputs.mode == 'publish'");
   });
 
-  test("append-only: never delete a published release, never --clobber", () => {
-    // [mut: re-add `gh release delete "$RELEASE_TAG" --yes` → fails]
-    // B6 has NO release delete at all. When B4 adds the stable DRAFT-gate it will introduce an
-    // isDraft-GUARDED draft cleanup — at that point tighten this to reject only an UNguarded/published
-    // delete, not the blanket string. (codex flagged the blanket check would reject B4's legit cleanup.)
-    expect(WF).not.toContain("gh release delete");
+  test("append-only: only an isDraft-guarded draft delete, never a published release, never --clobber", () => {
+    // B4 draft-gate: `release` MAY delete a stale UNPUBLISHED draft (fix-forward re-run), but never a
+    // published release. The one `gh release delete` must be isDraft-guarded (a no-tag check + an immediate
+    // isDraft re-check right before the delete), and the PUBLISHED path must still error, not delete.
+    // [mut: remove the immediate `is no longer a draft` re-check before the delete → this assert fails]
+    expect(WF).toContain("gh release delete"); // the B4 draft cleanup exists now
+    expect(WF).toContain("is no longer a draft (published between view and delete)"); // TOCTOU re-check guard
+    expect(WF).toContain("refusing to delete"); // the no-pushed-tag guard
+    expect(WF).toContain("already PUBLISHED — append-only; bump the version"); // published ⇒ error, never delete
     expect(WF).not.toContain("--clobber");
-    expect(WF).toContain("append-only; bump the version");
   });
 
   test("the signed feed is the source of truth — no release is marked GitHub --latest", () => {
@@ -41,12 +43,28 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).toContain("--latest=false");
   });
 
-  test("mode split: `promote` runs only under promote-only; `release` only under publish", () => {
-    // [mut: drop the mode guard on `release` → its !cancelled() would run it under promote-only → fails]
+  test("mode split: `promote` runs only under promote-only; publish gated across release/tag/finalize", () => {
+    // [mut: drop the mode guard on `release` → its always()/!cancelled() would run it under promote-only → fails]
     expect(WF).toContain("inputs.mode == 'promote-only'");
-    // The release job's guard: publish-mode AND tag SUCCESS (not merely not-failed) so a skipped tag can't
-    // publish onto an orphan tag via --verify-tag. This exact fragment is unique to the release job.
-    expect(WF).toContain("inputs.mode == 'publish' && needs.tag.result == 'success'");
+    expect(WF).toContain("inputs.mode == 'publish'"); // release/tag/finalize are all publish-only
+    // B4 draft-gate: the publish DECISION moved to `finalize`, which requires the gate + tag to have
+    // SUCCEEDED — a skipped/failed packaged gate or tag can NEVER publish. (Was one `release` fragment pre-B4.)
+    expect(WF).toContain("needs.tag.result == 'success'");
+    expect(WF).toContain("needs.packaged-e2e-on-draft.result == 'success'");
+  });
+
+  test("B4 draft-gate: draft(--target sha) → packaged-e2e → finalize with byte-provable publish", () => {
+    // Recipe F: `release` creates a DRAFT pinned to the reviewed SHA + an immutable asset manifest; the
+    // packaged gate runs the legs against the draft's OWN assets; `finalize` publishes only after the tag +
+    // per-asset digests re-verify. So a failed gate never burns the version tag, and tested==published bytes.
+    // [mut: drop `--target "$GITHUB_SHA"` from the draft create → this pin assert fails]
+    expect(WF).toContain("--draft"); // draft, not a direct publish
+    expect(WF).toContain('--target "$GITHUB_SHA"'); // pinned to the dispatched commit, not HEAD-at-publish
+    expect(WF).toContain("packaged-e2e-on-draft"); // the gate job
+    expect(WF).toContain("uses: ./.github/workflows/_e2e-packaged.yml"); // runs the packaged legs
+    expect(WF).toContain("release-asset-manifest"); // the immutable SHA-256 asset manifest
+    expect(WF).toContain("--draft=false"); // finalize flips draft → published
+    expect(WF).toContain("digests/names differ from the gated manifest"); // finalize's byte re-verify
   });
 
   test("promote pre-flight verifies a published, non-draft, non-prerelease stable with a signed feed", () => {
