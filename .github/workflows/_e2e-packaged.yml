@@ -23,6 +23,11 @@ on:
         required: false
         type: string
         default: accelerator-linux-x86_64
+      macos_app_artifact:
+        description: Name of the uploaded macOS arm64 installer artifact (contains the .dmg)
+        required: false
+        type: string
+        default: accelerator-macos-arm64
       aztec_node_url:
         description: Aztec node URL (skips local CLI install when not localhost)
         required: false
@@ -140,3 +145,106 @@ jobs:
       - name: Cleanup
         if: always()
         run: kill "$ACCEL_PID" 2>/dev/null || true
+
+  packaged-e2e-macos:
+    name: Packaged E2E (macos)
+    runs-on: macos-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: ./.github/actions/setup-aztec
+        with:
+          skip_cli: ${{ inputs.aztec_node_url != 'http://localhost:8080' }}
+
+      - uses: ./.github/actions/playwright-cache
+
+      - uses: ./.github/actions/start-services
+        with:
+          aztec_node_url: ${{ inputs.aztec_node_url }}
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.macos_app_artifact }}
+          path: app-artifact
+
+      - name: Mount DMG + resolve the app binary
+        run: |
+          DMG=$(find app-artifact -name '*.dmg' | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::No .dmg found in artifact '${{ inputs.macos_app_artifact }}'"
+            ls -laR app-artifact
+            exit 1
+          fi
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/AztecAccelerator
+          BIN=$(find /Volumes/AztecAccelerator -name AztecAccelerator -path '*/MacOS/*' | head -1)
+          test -n "$BIN" || { echo "::error::app binary not found in DMG"; find /Volumes/AztecAccelerator -type f; exit 1; }
+          echo "APP_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Generate certs (headless bootstrap)
+        run: "$APP_BIN --generate-certs-only"
+
+      # macOS: the app's LAUNCH gates on trust (unlike Linux), so seed the System keychain BEFORE launch.
+      # `security add-trusted-cert -d` writes the admin/System domain (GH runners have passwordless sudo);
+      # the app's predicate `security verify-cert -l -L` reads the default search list (incl. System), and
+      # Playwright's Chromium on macOS honours the System keychain for the browser fetch too.
+      - name: Seed CA into the System keychain (app + browser trust)
+        run: |
+          CA="$HOME/.aztec-accelerator/certs/ca.pem"
+          test -f "$CA" || { echo "::error::$CA not generated"; exit 1; }
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$CA"
+          # Fail loudly here (not later with a mysterious TLS error) if the seed did not take — this is the
+          # macOS empirical unknown (codex): sudo on a newer TCC-tightened runner could refuse.
+          security verify-cert -l -L -c "$CA" || { echo "::error::CA not trusted after System-keychain seed"; exit 1; }
+
+      - name: Write config (HTTPS on, localhost auto-approved)
+        run: |
+          mkdir -p "$HOME/.aztec-accelerator"
+          printf '%s' '{"config_version":2,"https_enabled":true,"auto_approve_localhost":true}' \
+            > "$HOME/.aztec-accelerator/config.json"
+
+      - name: Launch the installed app + wait for HTTPS
+        run: |
+          "$APP_BIN" >/tmp/accel.log 2>&1 &
+          echo "ACCEL_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 45); do
+            if curl -ksf https://127.0.0.1:59834/health >/dev/null 2>&1; then
+              echo "App serving HTTPS on :59834 (attempt $i)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::App did not serve HTTPS within 90s"
+          cat /tmp/accel.log 2>/dev/null || true
+          exit 1
+
+      - name: Run packaged-E2E (composed proof)
+        env:
+          AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
+        run: bun run --cwd packages/playground test:e2e:packaged
+
+      - name: Upload app log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-e2e-macos-logs
+          path: |
+            /tmp/accel.log
+            /tmp/aztec-node.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$ACCEL_PID" 2>/dev/null || true
+          # Remove our out-of-band System-keychain seed — product uninstall does NOT (it only clears the
+          # app's own login-keychain anchor), so the harness cleans up what it planted.
+          CA="$HOME/.aztec-accelerator/certs/ca.pem"
+          if [ -f "$CA" ]; then
+            sudo security remove-trusted-cert -d "$CA" 2>/dev/null || true
+          fi
+          hdiutil detach /Volumes/AztecAccelerator 2>/dev/null || true
