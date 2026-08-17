@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: "http://localhost:8080"
+      prev_stable_tag:
+        description: The N-1 stable release tag for the 1.0.7→2.0.0 upgrade leg (its .deb is downloaded)
+        required: false
+        type: string
+        default: accelerator-v1.0.7
 
 jobs:
   packaged-e2e-linux:
@@ -265,3 +270,118 @@ jobs:
             sudo security remove-trusted-cert -d "$CA" 2>/dev/null || true
           fi
           hdiutil detach /Volumes/AztecAccelerator 2>/dev/null || true
+
+  # E: prove item-1's config migration on a REAL 1.0.7→2.0.0 upgrade (not just the unit test). A 1.0.7-shaped
+  # config (legacy `safari_support`, no `config_version`) must, after the in-place upgrade + first launch,
+  # migrate + PERSIST on disk: `config_version:2`, `safari_support` removed, origins preserved. (The persist
+  # happens via the launch-time MissingCertsReset save — see main.rs; `https_enabled` resets to false without
+  # certs, which is expected and not asserted here.)
+  upgrade-migration-linux:
+    name: 1.0.7 upgrade + config migration (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Virtual display + tray
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb stalonetray dbus-x11
+          Xvfb :99 -screen 0 1280x1024x24 >/tmp/xvfb.log 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          sleep 2
+          DISPLAY=:99 stalonetray >/tmp/stalonetray.log 2>&1 &
+
+      - name: Download N-1 (1.0.7) installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREV_TAG: ${{ inputs.prev_stable_tag }}
+        run: gh release download "$PREV_TAG" --pattern '*.deb' --dir prev
+
+      - name: Download 2.0.0 installer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: app-artifact
+
+      - name: Install 1.0.7 + write a 1.0.7-shaped config
+        run: |
+          PREV_DEB=$(find prev -name '*.deb' | head -1)
+          test -n "$PREV_DEB" || { echo "::error::no 1.0.7 .deb"; ls -laR prev; exit 1; }
+          sudo apt-get install -y "./$PREV_DEB"
+          mkdir -p "$HOME/.aztec-accelerator"
+          # 1.0.7 schema: legacy `safari_support`, NO `config_version`, plus a marker origin to prove survival.
+          printf '%s' '{"safari_support":true,"approved_origins":["http://preserved.example"]}' \
+            > "$HOME/.aztec-accelerator/config.json"
+
+      - name: Upgrade to 2.0.0 in place + launch
+        run: |
+          NEW_DEB=$(find app-artifact -name '*.deb' | head -1)
+          test -n "$NEW_DEB" || { echo "::error::no 2.0.0 .deb"; ls -laR app-artifact; exit 1; }
+          sudo apt-get install -y "./$NEW_DEB"
+          dbus-launch AztecAccelerator >/tmp/accel.log 2>&1 &
+          echo "ACCEL_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:59833/health >/dev/null 2>&1; then
+              echo "2.0.0 up after upgrade (attempt $i)"; break
+            fi
+            sleep 2
+          done
+
+      - name: Assert the config migrated + survived on disk
+        run: |
+          CFG="$HOME/.aztec-accelerator/config.json"
+          # The migration persists via the launch-time reset save; poll until it lands.
+          for _ in $(seq 1 15); do
+            if jq -e '.config_version == 2' "$CFG" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "Post-upgrade config:"; cat "$CFG"
+          jq -e '.config_version == 2' "$CFG" || { echo "::error::config_version not migrated to 2"; exit 1; }
+          jq -e 'has("safari_support") | not' "$CFG" || { echo "::error::legacy safari_support not removed"; exit 1; }
+          jq -e '.approved_origins | index("http://preserved.example")' "$CFG" \
+            || { echo "::error::approved_origins not preserved across upgrade"; exit 1; }
+          echo "OK: config_version=2, safari_support removed, origins preserved across the 1.0.7→2.0.0 upgrade"
+
+      - name: Cleanup
+        if: always()
+        run: kill "$ACCEL_PID" 2>/dev/null || true
+
+  # B5 packaged uninstall: the ownership-checked teardown runs on the INSTALLED app, then the package is
+  # removed. Asserts the flow succeeds end-to-end + the binary is gone (the per-store cleanup detail is B5's
+  # unit tests).
+  uninstall-linux:
+    name: Full uninstall (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Download 2.0.0 installer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.app_artifact }}
+          path: app-artifact
+
+      - name: Install, prepare-uninstall, then remove the package
+        run: |
+          NEW_DEB=$(find app-artifact -name '*.deb' | head -1)
+          test -n "$NEW_DEB" || { echo "::error::no .deb"; ls -laR app-artifact; exit 1; }
+          sudo apt-get update
+          sudo apt-get install -y "./$NEW_DEB"
+          command -v AztecAccelerator >/dev/null || { echo "::error::binary not on PATH after install"; exit 1; }
+          # The ownership-checked teardown (B5) — exits 0 on success (or a clean "another install owns it").
+          AztecAccelerator --prepare-uninstall
+          # Remove the package; the binary must be gone.
+          PKG=$(dpkg-deb -f "$NEW_DEB" Package)
+          sudo apt-get remove -y "$PKG"
+          if command -v AztecAccelerator >/dev/null; then
+            echo "::error::binary still present after package removal"; exit 1
+          fi
+          echo "OK: prepare-uninstall + package removal clean; binary gone"
