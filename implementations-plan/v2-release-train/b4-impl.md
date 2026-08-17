@@ -149,6 +149,63 @@ The recon's "all 3 OSes automate out-of-band" was too optimistic. Codex (read-on
    NOT remove a harness-seeded System/LM anchor, so the harness must clean up its OWN out-of-band seed
    (don't credit product-uninstall for it).
 
+## Harness build recipe (EXECUTE NEXT — grounded, zero re-research needed)
+Branch `worktree-b4-e2e` (off `db8a373`). Landed: `--generate-certs-only` (`289181e`). Build order:
+
+**A. Browser proof harness (reusable core) — a tiny Vite app, port `sdk/e2e/proving.test.ts` + `e2e-helpers.ts`
+into the browser.** New dir (proposed `packages/accelerator/e2e-packaged/`): `index.html` + `main.ts` +
+`vite.config.ts` (nodePolyfills `["buffer","path"]` + `Buffer:true`; COOP `same-origin` + COEP
+`credentialless`; `optimizeDeps.exclude` the noir wasm; `build.target:"esnext"`) + a `package.json` that deps
+the **PACKED** `@alejoamiras/aztec-accelerator` tarball (via `npm pack` in CI) + `@aztec/wallets`, etc. `main.ts`:
+```ts
+const phases:{p:string,d?:number}[]=[];
+const prover=new AcceleratorProver({ simulator:new WASMSimulator(),
+  accelerator:{ httpsOnly:true, allowInsecureDowngrade:false },   // BOTH flags via opts (codex: env unreliable)
+  onPhase:(p,data)=>phases.push({p,d:data?.durationMs}) });
+const node=createAztecNodeClient(NODE_URL);                        // NODE_URL injected (sandbox/testnet)
+const wallet=await EmbeddedWallet.create(node,{ ephemeral:true, pxe:{proverEnabled:true,proverOrOptions:prover} });
+const fpc=await getContractInstanceFromInstantiationParams(SponsoredFPCContract.artifact,{salt:new Fr(0)});
+await wallet.registerContract(fpc,SponsoredFPCContract.artifact);
+// then deploySchnorrAccount(wallet, new SponsoredFeePaymentMethod(fpc.address)) — the proving tx
+(window as any).__RESULT={ ok:true, phases };                     // Playwright reads this
+```
+Serve the page from **localhost** (Chrome 142+ LNA gates public→loopback; localhost is same-address-space,
+exempt — the SDK skill's gotcha). **Positive assertion (Playwright):** `phases` contains `proving`→`proved`,
+does NOT contain `fallback`/`denied`, the `proved` entry has a numeric `durationMs` (server-reported), AND a
+Playwright-intercepted `200 https://127.0.0.1:59834/prove` carrying `x-prove-duration-ms` (`server/prove.rs:347`
+adds it only after a real `bb::prove`). Tolerate a leading `downloading` phase (first-proof bb fetch — or
+pre-warm the bb cache). Do NOT set `ignoreHTTPSErrors` (that would defeat the trust proof).
+
+**B. Linux CI leg (reference — fully automated).** Job `needs:[build]` on `ubuntu`: install `libnss3-tools`
+(+ `libfuse2t64` if AppImage, else prefer `.deb`); download `accelerator-linux-x86_64`; install; run
+`AztecAccelerator --generate-certs-only`; `certutil -A -t C,, -n <content-hash-nick> -d sql:~/.pki/nssdb -i
+ca.pem` (the app's own store; PRESERVE the content-hash nickname `install_ca_trust` uses); write
+`~/.aztec-accelerator/config.json` with `https_enabled:true` + the harness origin in `approved_origins` (else
+the `/prove` auth popup blocks); launch the app (serves HTTPS — Linux launch is trust-decoupled, `main.rs:126`);
+set up an Aztec node (reuse `_e2e.yml`'s node setup); `npm pack` the SDK; `vite build` + `playwright test` the
+harness page. On green → the composed proof passed.
+
+**C. macOS leg.** Same, but seed via `sudo security add-trusted-cert -d -r trustRoot -k
+/Library/Keychains/System.keychain ca.pem` (bound with a timeout; on failure fall to the manual-gate residual);
+verify with `security dump-trust-settings -d` + `security verify-cert -c ca.pem` before launch. The app's launch
+predicate must pass (macOS gates on trust).
+
+**D. Windows leg — BLOCKED on the owner decision** (LocalMachine\Root predicate extension vs manual gate). Do
+NOT build until resolved.
+
+**E. Upgrade + uninstall legs.** Install `1.0.7`, set origins/config, upgrade to `2.0.0` in place, assert the
+config migration (item-1: `safari_support→https_enabled`, `config_version`→2) + origins/autostart/HTTPS survive
++ CA-trust survives; then B5 FULL uninstall asserts app-owned stores cleaned. NOTE the 1.0.7 passive-generation
+gap (bootstrap its certs the same way) and that product-uninstall does NOT remove the harness's System/LM seed
+(the harness cleans its own).
+
+**F. Wiring (`release-accelerator.yml`).** LITERAL draft→gate→finalize: `release` creates `--draft`; the
+packaged-e2e job `needs:[release]` downloads the DRAFT's own assets; a `finalize` job (`gh release edit
+--draft=false`) `needs` it; MOVE tag creation to finalize (a failed draft-gate must not burn the version tag
+against a failed SHA). Keep every side-effecting job transitively `needs: e2e-webdriver` (`:136` invariant).
+
+**G. Codex review the harness (fresh session) → PR → CI → merge.** Then the release sequence.
+
 ## Nomenclature checklist (root plan owns; verify ALL before RC)
 Updater/promote semver comparisons (real semver); version fields (tauri.conf.json / Cargo.toml / package.json
 / NSIS / CFBundleVersion / deb/AppImage); identity-guard/marker/scheduled-task names; docs/landing/runbook/
