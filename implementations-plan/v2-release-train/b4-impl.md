@@ -221,10 +221,25 @@ config migration (item-1: `safari_support→https_enabled`, `config_version`→2
 gap (bootstrap its certs the same way) and that product-uninstall does NOT remove the harness's System/LM seed
 (the harness cleans its own).
 
-**F. Wiring (`release-accelerator.yml`).** LITERAL draft→gate→finalize: `release` creates `--draft`; the
-packaged-e2e job `needs:[release]` downloads the DRAFT's own assets; a `finalize` job (`gh release edit
---draft=false`) `needs` it; MOVE tag creation to finalize (a failed draft-gate must not burn the version tag
-against a failed SHA). Keep every side-effecting job transitively `needs: e2e-webdriver` (`:136` invariant).
+**F. Wiring (`release-accelerator.yml`) — the biggest + riskiest piece; codex-consult the wiring before writing.**
+Researched structure (`tag`:636, `sign-update-feed`:692, `release`:807):
+- **KEY: a GitHub DRAFT release does NOT push the git tag until it is PUBLISHED.** So making `release` create
+  `gh release create <tag> --draft` gives codex's "tag at finalize" FOR FREE — the tag is only pushed when
+  `finalize` flips `--draft=false`. This lets me RETIRE the standalone `tag` job (which today pushes the tag
+  pre-gate, `:663`) — or keep it but move it into `finalize`. Preserve the `tag == github.sha` integrity anchor
+  (`:653`) at whatever step ends up pushing the tag.
+- **The draft-gate job must download the RELEASE's OWN assets** (`gh release download <tag> --dir …`), NOT the
+  build artifacts — the whole point is proving the REAL uploaded installers. So `_e2e-packaged.yml` (which
+  today `actions/download-artifact`s BUILD artifacts — the PR-gate/standalone form) needs a `source` input
+  (`build-artifact | release-asset`) + a `release_tag`, OR a thin wrapper job that `gh release download`s then
+  the reusable installs from a path. Decide in the codex F-consult.
+- **Sequence:** `… → build → release(--draft) → packaged-e2e-on-draft(needs:release, downloads draft assets,
+  3-OS composed proof + the 1.0.7→2.0.0 upgrade + uninstall legs) → finalize(gh release edit --draft=false +
+  push tag, needs the gate)`. `sign-update-feed` (needs the assets) stays pre-finalize (stable only); confirm
+  it doesn't need the tag pushed first. Keep every side-effecting job transitively `needs: e2e-webdriver`
+  (`:136` invariant). RC (`is_prerelease`) publishes without promotion, unchanged.
+- This is release-integrity-critical surgery (tag anchor, signed feed, append-only no-delete rule) — do a
+  dedicated codex consult on the F wiring diff before merging.
 
 **G. Codex review the harness (fresh session) → PR → CI → merge.** Then the release sequence.
 
