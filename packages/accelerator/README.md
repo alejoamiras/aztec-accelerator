@@ -291,6 +291,19 @@ disk, so the trusted anchor can mint nothing) and Name-Constrained to `127.0.0.1
 removes it; on macOS you can alternatively delete it from Keychain Access; on Linux you can run
 `AztecAccelerator --remove-ca-trust`.
 
+**Full uninstall cleanup (non-Windows).** The Windows NSIS uninstaller runs the teardown automatically.
+On macOS (`.app`) and Linux (`.deb`/AppImage) there is no uninstall hook, so before deleting the app run:
+
+```bash
+AztecAccelerator --prepare-uninstall
+```
+
+It removes the autostart entry, the crash-recovery task, and — only if THIS install owns them — the CA
+trust and generated certs (`~/.aztec-accelerator/certs/`). It is ownership-checked: if a second (copied)
+install still shares this account's state it leaves everything shared and says so, exiting non-zero only on
+a real failure. Your config and approved origins (`~/.aztec-accelerator/config.json`) are never touched.
+The `scripts/uninstall.sh` wrapper locates the binary and runs this for you.
+
 **Certificate details:**
 - CA: ECDSA P-256, 10-year validity, keyless, Name Constraints (localhost only)
 - Leaf: ECDSA P-256, 824-day validity (one day under Apple's inclusive 825-day TLS cap), auto-renewed
