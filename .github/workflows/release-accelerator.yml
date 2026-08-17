@@ -12,6 +12,29 @@ on:
         required: false
         type: boolean
         default: false
+      # B6: publish and promote are SEPARATE operational events (two dispatches), not one job.
+      #   publish      = build → 3-OS gates → publish (RC public prerelease / stable DRAFT-gated → finalized
+      #                  public, --latest=false). Does NOT touch the S3 feed.
+      #   promote-only = no build; pre-flight an ALREADY-PUBLISHED version, then flip the S3 `latest.json`
+      #                  feed. This is also the rollback lever (`promote-only` an older version).
+      mode:
+        description: "publish (build+gate+publish, no feed flip) | promote-only (flip the S3 feed for an already-published version — also the rollback lever)"
+        required: false
+        type: choice
+        options:
+          - publish
+          - promote-only
+        default: publish
+      bump_source:
+        description: "promote-only + organic GA only: open the post-release source version-bump PR. Leave false for a rollback promote."
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: "promote-only: run the promote pre-flight (and rehearsal checks) WITHOUT writing the feed. Proves the rollback machinery with no prod effect."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-accelerator
