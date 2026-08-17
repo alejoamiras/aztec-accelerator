@@ -16,11 +16,12 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 1
 fi
 for f in "${files[@]}"; do
-  line="$(grep -F "  ${f}" "../$MANIFEST" || true)"
-  if [ -z "$line" ]; then
+  # EXACT filename match (manifest field 2 == f), not a substring — so "o.deb" can't match a line for
+  # "foo.deb" (codex F-review r3). `sha256sum` names never contain spaces here (hyphenated release assets).
+  line="$(awk -v want="$f" '$2 == want {print; found=1} END {exit !found}' "../$MANIFEST")" || {
     echo "::error::${f} is not in the gated manifest — refusing (an unexpected asset)"
     exit 1
-  fi
+  }
   echo "$line" | sha256sum -c -
 done
 echo "All release-asset installers verified against the gated manifest"
