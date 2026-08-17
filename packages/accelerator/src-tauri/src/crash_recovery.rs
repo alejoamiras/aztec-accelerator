@@ -47,13 +47,19 @@ pub enum RecoveryOwnership {
     Absent,
 }
 
-/// OS-agnostic, pure (testable anywhere): is `xml` a COMPLETE (`</Task>`), SINGLE-action (exactly one
-/// `<Command>`) task whose command is exactly `escaped_exe_element` (`<Command>…</Command>`)? Mirrors the
-/// NSIS belt (codex #4) and matches in the ESCAPED domain `task_xml` writes, so no decoding is needed.
+/// OS-agnostic, pure (testable anywhere): is `xml` a COMPLETE (`</Task>`) task with EXACTLY ONE action —
+/// a single `<Exec>` holding a single `<Command>` and NO other action type (codex r2 #2: exactly-one
+/// `<Command>` alone let our command coexist with a `<ComHandler>`/`<SendEmail>`/`<ShowMessage>`) — whose
+/// command is exactly `escaped_exe_element`. Matches in the ESCAPED domain `task_xml` writes, so no
+/// decoding is needed. Mirrors the NSIS belt.
 #[cfg(any(windows, test))]
 fn task_xml_is_exactly_ours(xml: &str, escaped_exe_element: &str) -> bool {
     xml.contains("</Task>")
+        && xml.matches("<Exec>").count() == 1
         && xml.matches("<Command>").count() == 1
+        && !xml.contains("<ComHandler")
+        && !xml.contains("<SendEmail")
+        && !xml.contains("<ShowMessage")
         && xml.contains(escaped_exe_element)
 }
 
@@ -84,7 +90,14 @@ pub fn recovery_ownership(reference: &std::path::Path) -> RecoveryOwnership {
         return RecoveryOwnership::Foreign;
     };
     let needle = format!("ExecStart={exec_start}");
-    if content.lines().any(|l| l.trim() == needle) {
+    // Require EXACTLY ONE ExecStart line, and it must be ours (codex r2 #3: `any()` matched our line even
+    // amid other ExecStart entries a multi-exec unit could carry). A false-foreign from an AppImage
+    // canonicalization mismatch is safe — it leaves our unit (documented residual).
+    let execstarts = content
+        .lines()
+        .filter(|l| l.trim_start().starts_with("ExecStart="))
+        .count();
+    if execstarts == 1 && content.lines().any(|l| l.trim() == needle) {
         RecoveryOwnership::Ours
     } else {
         RecoveryOwnership::Foreign
@@ -98,7 +111,10 @@ pub fn recovery_ownership(reference: &std::path::Path) -> RecoveryOwnership {
         .output()
     {
         Ok(o) if o.status.success() => o.stdout,
-        Ok(_) => return RecoveryOwnership::Absent, // /Query nonzero ⇒ task absent
+        // Only the RECOGNIZED not-found code (1) proves absence; any other nonzero (access denied,
+        // scheduler failure) is NOT "no task" — fail closed and leave it (codex r2 #4).
+        Ok(o) if o.status.code() == Some(1) => return RecoveryOwnership::Absent,
+        Ok(_) => return RecoveryOwnership::Foreign,
         Err(_) => return RecoveryOwnership::Foreign, // couldn't query ⇒ fail-closed
     };
     // schtasks `/XML` emits UTF-16LE (BOM) on modern Windows; fall back to UTF-8 lossy otherwise.
@@ -644,28 +660,35 @@ mod tests {
     fn task_xml_ownership_requires_complete_single_and_exact() {
         let ours = "<Command>C:\\Install\\AztecAccelerator.exe</Command>";
         let t = super::task_xml_is_exactly_ours;
+        let wrap = |inner: &str| format!("<Task><Actions>{inner}</Actions></Task>");
+        // ours: a single <Exec> holding our single <Command>, complete.
         assert!(t(
-            "<Task><Command>C:\\Install\\AztecAccelerator.exe</Command></Task>",
+            &wrap("<Exec><Command>C:\\Install\\AztecAccelerator.exe</Command></Exec>"),
             ours
         ));
         // foreign path
         assert!(!t(
-            "<Task><Command>C:\\Other\\AztecAccelerator.exe</Command></Task>",
+            &wrap("<Exec><Command>C:\\Other\\AztecAccelerator.exe</Command></Exec>"),
             ours
         ));
         // deceptive prefix
         assert!(!t(
-            "<Task><Command>C:\\Install-evil\\AztecAccelerator.exe</Command></Task>",
+            &wrap("<Exec><Command>C:\\Install-evil\\AztecAccelerator.exe</Command></Exec>"),
             ours
         ));
-        // multi-action (two <Command>)
+        // two <Exec> actions
         assert!(!t(
-            "<Task><Command>C:\\Install\\AztecAccelerator.exe</Command><Command>x</Command></Task>",
+            &wrap("<Exec><Command>C:\\Install\\AztecAccelerator.exe</Command></Exec><Exec><Command>x</Command></Exec>"),
+            ours
+        ));
+        // our sole <Command> alongside a DIFFERENT action type (codex r2 #2)
+        assert!(!t(
+            &wrap("<Exec><Command>C:\\Install\\AztecAccelerator.exe</Command></Exec><ComHandler><ClassId>x</ClassId></ComHandler>"),
             ours
         ));
         // truncated AFTER our element (no </Task>)
         assert!(!t(
-            "<Task><Command>C:\\Install\\AztecAccelerator.exe</Command>",
+            "<Task><Actions><Exec><Command>C:\\Install\\AztecAccelerator.exe</Command></Exec>",
             ours
         ));
     }

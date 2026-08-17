@@ -210,30 +210,54 @@
   Pop $R0 ; exit code
   Pop $R1 ; XML output
   ${If} $R0 == 0 ; require a SUCCESSFUL query — otherwise leave (task absent, or scheduler unreachable)
-    ; Delete ONLY a COMPLETE definition (ends in </Task> — codex #4: truncation AFTER our element would
-    ; else match) with EXACTLY ONE action (a task can hold up to 32; a multi-action task is not the
-    ; single-command task we create → leave) whose one <Command> is EXACTLY ours.
-    !insertmacro AztecStrContains $R2 $R1 "</Task>"
+    ; Delete ONLY a definition that EXACTLY matches the single-action task we create: complete (</Task> —
+    ; codex #4: truncation AFTER our element would else match), EXACTLY ONE <Exec> action holding EXACTLY
+    ; ONE <Command> and NO other action type (<ComHandler>/<SendEmail>/<ShowMessage> — codex r2 #2: a lone
+    ; matching <Command> could otherwise coexist with a second action), and that command is EXACTLY ours.
+    ; $R2 = running "ok" flag; $R3 = scratch result.
+    StrCpy $R2 "1"
+    !insertmacro AztecStrContains $R3 $R1 "</Task>"
+    ${IfNot} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
+    !insertmacro AztecStrCount $R3 $R1 "<Exec>"
+    ${IfNot} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
     !insertmacro AztecStrCount $R3 $R1 "<Command>"
-    !insertmacro AztecStrContains $R4 $R1 "<Command>$INSTDIR\${MAINBINARYNAME}.exe</Command>"
+    ${IfNot} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
+    !insertmacro AztecStrContains $R3 $R1 "<ComHandler"
+    ${If} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
+    !insertmacro AztecStrContains $R3 $R1 "<SendEmail"
+    ${If} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
+    !insertmacro AztecStrContains $R3 $R1 "<ShowMessage"
+    ${If} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
+    !insertmacro AztecStrContains $R3 $R1 "<Command>$INSTDIR\${MAINBINARYNAME}.exe</Command>"
+    ${IfNot} $R3 == "1"
+      StrCpy $R2 "0"
+    ${EndIf}
     ${If} $R2 == "1"
-    ${AndIf} $R3 == "1"
-    ${AndIf} $R4 == "1"
       ExecWait '"$SYSDIR\schtasks.exe" /Delete /F /TN "Aztec Accelerator Crash Recovery"'
-      ; Confirm. `/Query` exits 0 iff the task is STILL present; nsExec's exit is a STRING, so a real
-      ; numeric nonzero ("1") means absent (removed) but "error"/"timeout" mean the query could not RUN —
-      ; those must NOT be reported as removed (codex #7a).
+      ; Confirm. `/Query` exits 0 iff the task is STILL present and 1 (recognized not-found) once removed;
+      ; nsExec's exit is a STRING, so ONLY "1" proves removal — "0"=present, and "error"/"timeout"/any other
+      ; code (access denied, scheduler failure) are UNCONFIRMED, never reported as removed (codex r2 #4).
       nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /Query /TN "Aztec Accelerator Crash Recovery"'
       Pop $R0
       Pop $R1
-      ${If} $R0 == "0"
-        DetailPrint "aztec: crash-recovery task could NOT be removed (still present)"
-      ${ElseIf} $R0 == "error"
-        DetailPrint "aztec: crash-recovery task removal could not be confirmed (schtasks did not run)"
-      ${ElseIf} $R0 == "timeout"
-        DetailPrint "aztec: crash-recovery task removal could not be confirmed (schtasks timed out)"
-      ${Else}
+      ${If} $R0 == "1"
         DetailPrint "aztec: crash-recovery task removed"
+      ${ElseIf} $R0 == "0"
+        DetailPrint "aztec: crash-recovery task could NOT be removed (still present)"
+      ${Else}
+        DetailPrint "aztec: crash-recovery task removal could not be confirmed ($R0)"
       ${EndIf}
     ${EndIf}
   ${EndIf}
@@ -306,11 +330,15 @@
     StrCpy $R7 "0"
     StrCpy $R8 0
     ${Do}
+      ${If} $R8 >= 10000
+        StrCpy $R6 "1" ; abnormally many values — do not conclude "absent"; fail closed (codex r2 #1)
+        ${ExitDo}
+      ${EndIf}
       ClearErrors
       EnumRegValue $R0 HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Run" $R8
       ${If} ${Errors}
       ${OrIf} $R0 == ""
-        ${ExitDo} ; no more values → name is absent → foreign stays 0
+        ${ExitDo} ; enumerated to the end without our name → absent (the Run key is always present)
       ${EndIf}
       ${If} $R0 == "Aztec Accelerator"
         StrCpy $R6 "1" ; PRESENT → foreign until proven ours (covers present-but-empty/overlong)

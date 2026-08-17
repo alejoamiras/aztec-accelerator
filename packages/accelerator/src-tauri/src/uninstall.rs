@@ -167,6 +167,7 @@ pub fn prepare_uninstall() -> UninstallOutcome {
 /// `<Command>`/`ExecStart`), not inferred from the autostart verdict (codex #6): a divergent copied-install
 /// task — NoEntry autostart yet a surviving foreign task — must not be deleted.
 fn remove_ours(reference: &std::path::Path, remove_autostart_entry: bool) -> UninstallOutcome {
+    use crate::crash_recovery::RecoveryOwnership;
     let autostart = if remove_autostart_entry {
         match crate::autostart::remove_entry_locked() {
             Ok(()) => Step::Removed,
@@ -175,18 +176,32 @@ fn remove_ours(reference: &std::path::Path, remove_autostart_entry: bool) -> Uni
     } else {
         Step::NotPresent
     };
+    // A crash-recovery task/unit owned by a COPIED install is itself proof another install shares this
+    // account's state, so it gates SHARED removal too (codex r2 #3: leaving the foreign task but still
+    // running `remove_trust_and_certs` stripped copy B's trust). Our own autostart entry above was ours to
+    // remove; the shared CA + certs are not.
+    let recovery = crate::crash_recovery::recovery_ownership(reference);
+    if recovery == RecoveryOwnership::Foreign {
+        return UninstallOutcome {
+            foreign_detected: true,
+            reason: Some("a copied install owns the crash-recovery task; left shared state".into()),
+            autostart,
+            crash_recovery: Step::LeftForeign,
+            trust: Step::LeftForeign,
+        };
+    }
     // Crash recovery MUST die when it is ours (its task/unit relaunches the app ~1 min after it quits,
-    // resurrecting it mid-uninstall — recon collision #2) but must be LEFT when a copied install owns it.
-    let crash_recovery = match crate::crash_recovery::recovery_ownership(reference) {
-        crate::crash_recovery::RecoveryOwnership::Ours => {
+    // resurrecting it mid-uninstall — recon collision #2).
+    let crash_recovery = match recovery {
+        RecoveryOwnership::Ours => {
             if crate::crash_recovery::disable_crash_recovery() {
                 Step::Removed
             } else {
                 Step::Failed("could not confirm crash recovery was disabled".into())
             }
         }
-        crate::crash_recovery::RecoveryOwnership::Foreign => Step::LeftForeign,
-        crate::crash_recovery::RecoveryOwnership::Absent => Step::NotPresent,
+        RecoveryOwnership::Absent => Step::NotPresent,
+        RecoveryOwnership::Foreign => unreachable!("handled above"),
     };
     let trust = remove_trust_and_certs();
     UninstallOutcome {

@@ -77,6 +77,54 @@ fn foreign_entry_leaves_everything_incl_certs() {
     );
 }
 
+/// codex r2 #3: a FOREIGN crash-recovery unit is itself evidence of a copied install, so the SHARED
+/// trust/certs must be LEFT even when this install has no autostart entry (NoEntry). Before the fix,
+/// `remove_trust_and_certs` ran unconditionally after leaving the foreign task.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "real-OS integration: writes a systemd unit + certs under a throwaway $HOME; CI runs with --ignored"]
+#[serial_test::serial]
+fn foreign_recovery_unit_leaves_shared_trust() {
+    use aztec_accelerator::uninstall::{prepare_uninstall, Step};
+    let home = tempfile::tempdir().expect("temp HOME");
+    let xdg = home.path().join(".config");
+    std::env::set_var("HOME", home.path());
+    std::env::set_var("XDG_CONFIG_HOME", &xdg);
+
+    // No autostart entry (NoEntry), but a crash-recovery unit whose ExecStart targets ANOTHER install
+    // (its serialized `:`-prefixed form never equals our reference's) ⇒ Foreign.
+    let unit_dir = xdg.join("systemd/user");
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    std::fs::write(
+        unit_dir.join("aztec-accelerator.service"),
+        "[Service]\nExecStart=\":/opt/other-install/AztecAccelerator\"\n",
+    )
+    .unwrap();
+
+    // Shared state the OTHER install relies on.
+    let certs = home.path().join(".aztec-accelerator/certs");
+    std::fs::create_dir_all(&certs).unwrap();
+    let anchor = certs.join("ca.pem");
+    std::fs::write(&anchor, b"-----BEGIN CERTIFICATE-----\n").unwrap();
+
+    let outcome = prepare_uninstall();
+    assert!(
+        outcome.foreign_detected,
+        "a foreign crash-recovery unit must be detected"
+    );
+    assert_eq!(
+        outcome.trust,
+        Step::LeftForeign,
+        "shared trust must be LEFT"
+    );
+    assert_eq!(outcome.crash_recovery, Step::LeftForeign);
+    assert!(!outcome.incomplete(), "a foreign skip is success (exit 0)");
+    assert!(
+        anchor.exists(),
+        "a foreign recovery unit must NOT strip the shared certs"
+    );
+}
+
 /// End-to-end via the BUILT binary (establishes the CARGO_BIN_EXE pattern the plan asked for): an OWNED
 /// install is torn down and a re-run is idempotent. Runs `AztecAccelerator --prepare-uninstall` for real,
 /// so it also proves the early-argv branch + exit code, not just the library.
