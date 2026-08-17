@@ -6,7 +6,7 @@
 //! requests are first constrained to a loopback `Host` (SEC-01a, `super::host`). Extracted from
 //! server.rs (Q2).
 
-use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin};
+use crate::authorization::{AuthDecision, AuthorizationManager, CanonicalOrigin, RequestError};
 use crate::config;
 
 use super::{AppState, ProveError, AUTH_QUEUE_BACKSTOP};
@@ -60,18 +60,20 @@ pub(crate) async fn authorize_origin(
         return Err(ProveError::OriginDenied(origin.to_string()));
     }
 
-    // B2 (F9): a desktop origin denied within the last DENY_COOLDOWN is refused WITHOUT re-popping a
-    // consent prompt (anti-nag / re-prompt-spam). Checked only on the popup path and only after the
-    // approval check, so an approved site is never affected and expiry restores normal prompting.
-    if auth_manager.is_cooling_down(&origin) {
-        tracing::info!(origin = %origin, "Origin in post-deny cooldown; refusing without re-prompting");
-        return Err(ProveError::AuthorizationCooldown);
-    }
-
     tracing::info!(origin = %origin, "Origin not approved, requesting authorization");
-    let (rx, request_id, is_first, _is_active) = auth_manager.request(&origin).map_err(|_| {
-        tracing::warn!(origin = %origin, "Too many pending authorization requests");
-        ProveError::TooManyRequests
+    // B2 (F9): `request` checks the post-deny cooldown atomically with the insert (so a concurrent Deny
+    // can't slip in and let a just-denied origin re-popup). A cooling-down origin is refused WITHOUT a
+    // prompt; only reached for a non-approved, non-headless origin, so approved sites are never affected
+    // and expiry restores normal prompt-once behavior.
+    let (rx, request_id, is_first, _is_active) = auth_manager.request(&origin).map_err(|e| match e {
+        RequestError::Cooldown => {
+            tracing::info!(origin = %origin, "Origin in post-deny cooldown; refusing without re-prompting");
+            ProveError::AuthorizationCooldown
+        }
+        RequestError::TooMany => {
+            tracing::warn!(origin = %origin, "Too many pending authorization requests");
+            ProveError::TooManyRequests
+        }
     })?;
 
     if is_first {

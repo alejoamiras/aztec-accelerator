@@ -198,6 +198,17 @@ pub enum ResolveOutcome {
     NotActive,
 }
 
+/// Why [`AuthorizationManager::request`] declined to register a new pending request. A typed error so
+/// the caller maps each to the right `/prove` response instead of collapsing both into one.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestError {
+    /// B2 (F9): the origin is within its post-deny cooldown — refuse without popping a consent prompt.
+    Cooldown,
+    /// A DoS cap was hit: too many distinct pending origins, or too many concurrent piggybacks for
+    /// this origin.
+    TooMany,
+}
+
 /// Manages pending authorization requests.
 ///
 /// When a `/prove` request arrives from an unknown origin, the handler calls
@@ -352,33 +363,31 @@ impl AuthorizationManager {
         }
     }
 
-    /// B2 (F9): true iff `origin` is within its post-deny cooldown right now. Public so the server can
-    /// refuse a recently-denied origin without re-popping a consent prompt. Only meaningful for a
-    /// non-approved origin — the caller checks approval first.
-    pub fn is_cooling_down(&self, origin: &CanonicalOrigin) -> bool {
-        self.state.lock().is_cooling_down(origin, Instant::now())
-    }
-
     /// Register a pending authorization request for `origin`.
     ///
-    /// Returns `Ok((receiver, request_id, is_first))`. If `is_first` is true, the caller should show
-    /// the authorization popup carrying `request_id`. Otherwise a popup is already showing for this
-    /// origin and this request piggybacks on it (sharing the same `request_id` + decision).
-    ///
-    /// `request_id` is an **opaque, unguessable** UUID (SEC-06) — decisions are addressed by it, not
-    /// by origin string, so a caller that knows only an origin cannot resolve a concurrent request.
-    ///
-    /// Returns `Err` if the maximum number of pending requests is exceeded (DoS protection).
     /// Returns `Ok((receiver, request_id, is_first, is_active))`. `is_first` ⇒ the caller shows a popup
     /// carrying `request_id`; `is_active` (C9 D18) ⇒ that popup owns the actionable + always-on-top slot
     /// now (vs. being enqueued behind an already-active popup). For a piggyback (`!is_first`), `is_active`
     /// reflects the existing request it joined.
+    ///
+    /// `request_id` is an **opaque, unguessable** UUID (SEC-06) — decisions are addressed by it, not by
+    /// origin string, so a caller that knows only an origin cannot resolve a concurrent request.
+    ///
+    /// Returns [`RequestError::Cooldown`] if the origin is within its post-deny cooldown (B2 / F9) or
+    /// [`RequestError::TooMany`] if a DoS cap is hit. The cooldown check happens UNDER THE SAME LOCK as
+    /// the insert, so a concurrent Deny cannot slip between a separate check and the insert and let a
+    /// just-denied origin re-popup (codex B2 race fix).
     pub fn request(
         &self,
         origin: &CanonicalOrigin,
-    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool, bool), &'static str> {
+    ) -> Result<(oneshot::Receiver<AuthDecision>, String, bool, bool), RequestError> {
         let (tx, rx) = oneshot::channel();
         let mut st = self.state.lock();
+        // B2 (F9): refuse a recently-denied origin here, atomically with the insert below. Only reached
+        // for a non-approved origin on the popup path (the caller checks approval + headless first).
+        if st.is_cooling_down(origin, Instant::now()) {
+            return Err(RequestError::Cooldown);
+        }
         // Piggyback on an existing pending request for this origin.
         if let Some(request_id) = st.by_origin.get(origin).cloned() {
             let is_active = st.is_active(&request_id);
@@ -386,7 +395,7 @@ impl AuthorizationManager {
                 // Bound the per-origin piggyback fan-out: a flood of concurrent /prove during the
                 // decision window must not grow `senders` without limit (per-origin memory DoS).
                 if req.senders.len() >= MAX_PIGGYBACK_SENDERS {
-                    return Err("too many concurrent requests for this origin");
+                    return Err(RequestError::TooMany);
                 }
                 req.senders.push(tx);
                 return Ok((rx, request_id, false, is_active));
@@ -394,7 +403,7 @@ impl AuthorizationManager {
         }
         // New request.
         if st.by_request.len() >= MAX_PENDING_ORIGINS {
-            return Err("too many pending authorization requests");
+            return Err(RequestError::TooMany);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
         let is_active = st.insert(origin.clone(), request_id.clone(), tx);

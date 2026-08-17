@@ -130,3 +130,30 @@ test("authorize: promotion to active re-arms the click-steal guard", async ({ pa
     "a click within the promotion-armed guard must be ignored",
   ).toBe(0);
 });
+
+// F7 (the LATCH, not just the re-arm): under a STEADY active:true, the guard must arm exactly ONCE (on
+// the transition) so it can CLEAR and let a later click through. Reverting the `wasActive` latch so every
+// 1s poll re-arms starves clicks forever when the guard window (1500ms) exceeds the poll interval (1s):
+// the guard is re-armed before it can expire, so the click below is ignored and this test fails.
+test("authorize: a steady-active popup arms the guard once, so a later click gets through", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    (window as any).__CLICK_GUARD_MS__ = 1500;
+    (window as any).__TAURI_MOCK__.setHandler("get_pending_auth", () => ({
+      origin: "https://example.com",
+      active: true,
+    }));
+  });
+  await page.goto("/authorize.html?requestId=r1");
+  await expect(page.locator("#allow")).toBeEnabled();
+
+  // Wait past one guard window. With the latch the guard armed only at the initial transition and has
+  // now cleared; without it, the 1s polls keep re-arming a 1500ms window that never expires.
+  await page.waitForTimeout(1700);
+  await page.locator("#allow").click();
+  expect(
+    (await callsFor(page, "respond_auth")).length,
+    "after the guard clears under steady-active, the click must fire",
+  ).toBeGreaterThanOrEqual(1);
+});
