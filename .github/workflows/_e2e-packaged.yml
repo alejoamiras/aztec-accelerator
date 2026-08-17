@@ -48,12 +48,78 @@ on:
         default: ""
 
 jobs:
+  # Draft-gate privilege isolation (codex): a DRAFT release's assets are only visible to a WRITE-level token,
+  # but the E2E jobs below execute the installed app + a browser + the packed SDK, so they must NOT hold one.
+  # THIS job is the sole holder of `contents: write` — it takes NO checkout and runs NO downloaded/app code:
+  # it only fetches the draft's own release-named installers (+ the gated manifest), verifies them, and
+  # re-uploads them as one immutable artifact the read-only E2E jobs consume. It always runs (build-artifact
+  # mode just re-stages the run's build artifacts) so the E2E `needs` is always satisfied without always()-gating.
+  stage-installers:
+    name: Stage installers (privileged fetch, no code execution)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the draft's own installers (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p app-artifact
+          gh release download "$TAG" --repo "$REPO" \
+            --pattern '*Linux-x86_64.deb' --pattern '*macOS-Apple-Silicon.dmg' --dir app-artifact
+      - name: Fetch the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-asset-manifest
+          path: manifest
+      - name: Verify the draft bytes against the gated manifest (release-asset mode)
+        if: inputs.release_tag != ''
+        run: |
+          # Inline (this job takes NO checkout, so it cannot run the repo verify script): exact filename match
+          # + sha256, the same rule as .github/scripts/packaged-e2e-verify-manifest.sh — which the E2E jobs
+          # re-run against this same artifact after their checkout (defence in depth).
+          set -euo pipefail
+          MANIFEST="manifest/asset-manifest.sha256"
+          test -f "$MANIFEST" || { echo "::error::gated manifest not found"; exit 1; }
+          shopt -s nullglob
+          cd app-artifact
+          staged=(*)
+          [ ${#staged[@]} -gt 0 ] || { echo "::error::no draft installer downloaded to stage"; exit 1; }
+          for f in "${staged[@]}"; do
+            line="$(awk -v want="$f" '$2 == want {print; found=1} END {exit !found}' "../$MANIFEST")" \
+              || { echo "::error::$f is not in the gated manifest — refusing"; exit 1; }
+            echo "$line" | sha256sum -c -
+          done
+          echo "Staged draft installers verified against the gated manifest"
+      - name: Re-stage the run's build installers (build-artifact mode)
+        if: inputs.release_tag == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: accelerator-*x86_64
+          path: app-artifact
+          merge-multiple: true
+      - name: Upload the staged installers (+ manifest) for the read-only E2E jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: staged-installers
+          path: |
+            app-artifact
+            manifest
+          if-no-files-found: warn
+          retention-days: 1
+
   packaged-e2e-linux:
     name: Packaged E2E (linux)
+    needs: stage-installers
     runs-on: ubuntu-latest
     timeout-minutes: 55
     permissions:
-      contents: read # `gh release download` in release-asset mode
+      contents: read # consumes the staged-installers artifact; the draft fetch's write token stays in staging
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -85,29 +151,13 @@ jobs:
           sleep 2
           DISPLAY=:99 stalonetray >/tmp/stalonetray.log 2>&1 &
 
-      - name: Download installer artifact (build-artifact mode)
-        if: inputs.release_tag == ''
+      # The privileged stage-installers job fetched + verified the draft's own installers (+ manifest) with the
+      # only write token; this read-only job consumes the staged artifact (restores app-artifact/ + manifest/),
+      # then re-verifies below.
+      - name: Download the staged installers (+ manifest)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ${{ inputs.app_artifact }}
-          path: app-artifact
-
-      - name: Download installer (release-asset mode)
-        if: inputs.release_tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          mkdir -p app-artifact
-          # The draft's own uploaded Linux installer (flatten/rename names it *Linux-x86_64.deb).
-          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
-
-      - name: Download gated manifest (release-asset mode)
-        if: inputs.release_tag != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-asset-manifest
-          path: manifest
+          name: staged-installers
 
       - name: Verify installer bytes against the gated manifest (release-asset mode)
         if: inputs.release_tag != ''
@@ -191,10 +241,11 @@ jobs:
 
   packaged-e2e-macos:
     name: Packaged E2E (macos)
+    needs: stage-installers
     runs-on: macos-latest
     timeout-minutes: 55
     permissions:
-      contents: read # `gh release download` in release-asset mode
+      contents: read # consumes the staged-installers artifact; the draft fetch's write token stays in staging
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -212,29 +263,11 @@ jobs:
         with:
           aztec_node_url: ${{ inputs.aztec_node_url }}
 
-      - name: Download installer artifact (build-artifact mode)
-        if: inputs.release_tag == ''
+      # Consume the privileged stage-installers artifact (restores app-artifact/ + manifest/), then re-verify.
+      - name: Download the staged installers (+ manifest)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ${{ inputs.macos_app_artifact }}
-          path: app-artifact
-
-      - name: Download installer (release-asset mode)
-        if: inputs.release_tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          mkdir -p app-artifact
-          # The draft's own uploaded macOS arm64 DMG (flatten/rename names it *macOS-Apple-Silicon.dmg).
-          gh release download "$TAG" --pattern '*macOS-Apple-Silicon.dmg' --dir app-artifact
-
-      - name: Download gated manifest (release-asset mode)
-        if: inputs.release_tag != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-asset-manifest
-          path: manifest
+          name: staged-installers
 
       - name: Verify installer bytes against the gated manifest (release-asset mode)
         if: inputs.release_tag != ''
@@ -334,10 +367,11 @@ jobs:
   # certs, which is expected and not asserted here.)
   upgrade-migration-linux:
     name: 1.0.7 upgrade + config migration (linux)
+    needs: stage-installers
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: read # the N-1 (1.0.7) is a PUBLISHED release (read-ok); the 2.0.0 draft comes via staging
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -358,28 +392,13 @@ jobs:
           PREV_TAG: ${{ inputs.prev_stable_tag }}
         run: gh release download "$PREV_TAG" --pattern '*.deb' --dir prev
 
-      - name: Download 2.0.0 installer (build-artifact mode)
-        if: inputs.release_tag == ''
+      # The 2.0.0 draft installer comes via the privileged stage-installers artifact (restores app-artifact/ +
+      # manifest/); this read-only job re-verifies below. (The N-1 1.0.7 .deb was fetched above from its
+      # PUBLISHED release, which read perms can see.)
+      - name: Download the staged installers (+ manifest)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ${{ inputs.app_artifact }}
-          path: app-artifact
-
-      - name: Download 2.0.0 installer (release-asset mode)
-        if: inputs.release_tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          mkdir -p app-artifact
-          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
-
-      - name: Download gated manifest (release-asset mode)
-        if: inputs.release_tag != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-asset-manifest
-          path: manifest
+          name: staged-installers
 
       - name: Verify installer bytes against the gated manifest (release-asset mode)
         if: inputs.release_tag != ''
@@ -433,37 +452,22 @@ jobs:
   # unit tests).
   uninstall-linux:
     name: Full uninstall (linux)
+    needs: stage-installers
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read # `gh release download` in release-asset mode
+      contents: read # consumes the staged-installers artifact; the draft fetch's write token stays in staging
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Download 2.0.0 installer (build-artifact mode)
-        if: inputs.release_tag == ''
+      # The 2.0.0 draft installer comes via the privileged stage-installers artifact (restores app-artifact/ +
+      # manifest/); this read-only job re-verifies below.
+      - name: Download the staged installers (+ manifest)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ${{ inputs.app_artifact }}
-          path: app-artifact
-
-      - name: Download 2.0.0 installer (release-asset mode)
-        if: inputs.release_tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-        run: |
-          mkdir -p app-artifact
-          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
-
-      - name: Download gated manifest (release-asset mode)
-        if: inputs.release_tag != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-asset-manifest
-          path: manifest
+          name: staged-installers
 
       - name: Verify installer bytes against the gated manifest (release-asset mode)
         if: inputs.release_tag != ''

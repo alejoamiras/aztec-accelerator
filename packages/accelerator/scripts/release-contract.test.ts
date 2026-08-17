@@ -17,6 +17,7 @@ const UPDATER_LINUX = fs.readFileSync(
   path.join(REPO, ".github/workflows/_e2e-updater-linux.yml"),
   "utf8",
 );
+const PACKAGED = fs.readFileSync(path.join(REPO, ".github/workflows/_e2e-packaged.yml"), "utf8");
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
   test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
@@ -190,5 +191,19 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
         new RegExp(`${esc}[\\s\\S]{0,900}?${escNeed}`),
       );
     }
+  });
+
+  test("draft-asset write is isolated to the no-code staging job; E2E jobs stay read-only", () => {
+    // codex privilege isolation: a DRAFT release is only visible to a write token, but the E2E jobs execute the
+    // installed app + a browser + the packed SDK. Only `stage-installers` (no checkout, no app code) holds
+    // contents:write to fetch+verify+re-upload the draft's installers; the 4 code-executing E2E jobs consume
+    // the staged artifact at contents:read. [mut: elevate an E2E job to contents:write → the write count
+    //  exceeds 1 (and reads drop below 4) → this fails]
+    expect(PACKAGED).toContain("stage-installers");
+    // Count the actual job PERMISSION lines (6-space indent), not comment mentions of the words.
+    const writes = (PACKAGED.match(/^ {6}contents: write\b/gm) || []).length;
+    const reads = (PACKAGED.match(/^ {6}contents: read\b/gm) || []).length;
+    expect(writes, "exactly one contents:write perm — the staging job only").toBe(1);
+    expect(reads, "the 4 code-executing E2E jobs stay read-only").toBe(4);
   });
 });
