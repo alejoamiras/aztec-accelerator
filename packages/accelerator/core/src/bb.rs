@@ -363,7 +363,7 @@ async fn prove_with_timeout(
         .stderr
         .take()
         .expect("spawn_capturing_stderr pipes stderr");
-    let mut drain_handle = tokio::spawn(drain_capped(stderr_pipe, STDERR_RETAIN_CAP));
+    let mut drain = AbortingDrain(tokio::spawn(drain_capped(stderr_pipe, STDERR_RETAIN_CAP)));
 
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -376,20 +376,19 @@ async fn prove_with_timeout(
             return Err("bb prove timed out after 5 minutes".into());
         }
     };
-    // bb has EXITED (reaped by child.wait()). Clear the containment registration IMMEDIATELY — before the
-    // stderr drain necessarily finishes — so the pgid can't go stale while a lingering pipe-holder keeps
-    // draining. This keeps the guard-drop/`terminate_inflight` stale-pgid window at a few instructions.
+    // bb has EXITED (reaped by child.wait()). Finish the guard IMMEDIATELY — before the stderr drain
+    // necessarily finishes — so the pgid can't go stale while a lingering pipe-holder keeps draining. On
+    // Unix `finish()` SIGKILLs the group first (reaping any child bb orphaned before we clear the registry —
+    // codex r2 M4a) then clears; that kill is also what makes the drain above EOF promptly.
     guard.finish();
 
-    // Collect the concurrently-drained stderr, bounded: now that bb is gone, a grandchild still holding
-    // the pipe open must not hang us. Abort the drain on timeout so it doesn't leak.
+    // Collect the concurrently-drained stderr, bounded: `finish()` above SIGKILLed the group, so any
+    // grandchild that was holding the pipe open is now dead and stderr EOFs promptly — the 2s bound is a
+    // backstop, not the expected path. On any early return `drain` drops and aborts the task (codex r2 M4b).
     let (stderr_retained, stderr_total) =
-        match tokio::time::timeout(Duration::from_secs(2), &mut drain_handle).await {
+        match tokio::time::timeout(Duration::from_secs(2), &mut drain.0).await {
             Ok(Ok(pair)) => pair,
-            _ => {
-                drain_handle.abort();
-                (Vec::new(), 0)
-            }
+            _ => (Vec::new(), 0),
         };
 
     let stderr = String::from_utf8_lossy(&stderr_retained);
@@ -482,6 +481,18 @@ where
     (retained, total)
 }
 
+/// Owns the spawned stderr-drain task and ABORTS it on drop (codex r2 M4b). Without this, the early-return
+/// paths of `prove_with_timeout` (timeout, wait error) would DETACH the task rather than tear it down. The
+/// success path reads the pair out via `&mut self.0`; the wrapper still drops afterwards, aborting an
+/// already-finished task (a no-op).
+struct AbortingDrain(tokio::task::JoinHandle<(Vec<u8>, u64)>);
+
+impl Drop for AbortingDrain {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// B3 (F6): kill the WHOLE in-flight bb process tree (bb + anything it spawns) when the app exits,
 /// restarts, updates, or the prove is cancelled/times out. `kill_on_drop` only reaps the direct child
 /// on an in-process future-drop; it does nothing for `std::process::exit`/`app.exit()`/`app.restart()`
@@ -492,25 +503,70 @@ where
 /// [`terminate_inflight`]: containment::terminate_inflight
 pub use containment::{terminate_and_confirm, terminate_inflight};
 
+/// B3 (codex r2 H2a): while an update installs, NO new bb may start — a live `bb.exe` blocks the Windows
+/// installer from replacing it, and proving over a half-installed app is undefined everywhere. Flip a
+/// process-global latch (making every subsequent [`Guard::register`](containment) FAIL) and hold the
+/// returned guard across terminate-and-confirm + install. Dropping it — an ABORTED install — re-opens
+/// proving. Together with [`terminate_and_confirm`] this closes the window between "confirmed dead" and
+/// "installed": a prove that registered just before the latch is killed+confirmed by the terminator; one
+/// that races after is refused registration.
+#[must_use = "hold the guard across the install; dropping it immediately re-opens proving"]
+pub fn begin_quiesce() -> QuiesceGuard {
+    containment::begin_quiesce();
+    QuiesceGuard(())
+}
+
+/// RAII latch from [`begin_quiesce`]. Re-opens proving on drop (only reached when the install ABORTS — a
+/// successful install exits/restarts the process, so the drop never runs).
+pub struct QuiesceGuard(());
+
+impl Drop for QuiesceGuard {
+    fn drop(&mut self) {
+        containment::end_quiesce();
+    }
+}
+
 #[cfg(unix)]
 mod containment {
     use std::sync::Mutex;
 
-    /// The process-group id of the in-flight bb (== bb's pid, because we spawn it as its own group
-    /// leader). `None` when no prove is running. `kill(-pgid)` SIGKILLs bb AND every descendant it
-    /// forked, in one call.
-    static ACTIVE_PGID: Mutex<Option<i32>> = Mutex::new(None);
+    /// The in-flight-bb registry, under ONE mutex so every operation is serialized:
+    /// - `pgid`: the process-group id of the running bb (== bb's pid, because we spawn it as its own group
+    ///   leader). `None` when no prove is running. `kill(-pgid)` SIGKILLs bb AND every descendant it forked
+    ///   in one call.
+    /// - `quiescing`: set by [`begin_quiesce`] while an update installs. `register` refuses new bb while
+    ///   set, so — because setting it and taking the pgid both happen under this lock —
+    ///   [`terminate_and_confirm`] observes a registry that CANNOT grow under it: any bb registered before
+    ///   the latch is killed+confirmed; any that races after fails to register. Closes the "a prove starts
+    ///   between confirm and install" hole (codex r2 H2a).
+    struct State {
+        pgid: Option<i32>,
+        quiescing: bool,
+    }
+    static STATE: Mutex<State> = Mutex::new(State {
+        pgid: None,
+        quiescing: false,
+    });
 
     /// Put the child in its OWN process group so the whole tree can be signalled at once.
     pub(super) fn configure(cmd: &mut tokio::process::Command) {
         cmd.process_group(0);
     }
 
+    /// Stop accepting new proves (an update is about to install). Held via an RAII guard in the caller;
+    /// [`end_quiesce`] re-opens proving if the install ABORTS.
+    pub(super) fn begin_quiesce() {
+        STATE.lock().unwrap().quiescing = true;
+    }
+    pub(super) fn end_quiesce() {
+        STATE.lock().unwrap().quiescing = false;
+    }
+
     /// RAII registration for the spawned child's group. On drop it SIGKILLs the group **iff still
     /// registered** — i.e. the prove did NOT complete normally (client-disconnect future-drop, timeout,
-    /// panic). On the normal path [`finish`](Guard::finish) clears the registration first, so drop is a
-    /// no-op. Registration/clear/kill all happen under one lock, so `terminate_inflight` and this guard
-    /// are serialized (no double kill; whoever clears first wins).
+    /// panic). On the normal path [`finish`](Guard::finish) reaps+clears first, so drop is a no-op.
+    /// Registration/clear/kill all happen under one lock, so `terminate_inflight` and this guard are
+    /// serialized (no double kill; whoever clears first wins).
     pub(super) struct Guard {
         pgid: i32,
     }
@@ -520,31 +576,42 @@ mod containment {
             let pgid = child.id().ok_or_else(|| {
                 std::io::Error::other("bb child has no pid immediately after spawn")
             })? as i32;
-            *ACTIVE_PGID.lock().unwrap() = Some(pgid);
+            let mut st = STATE.lock().unwrap();
+            // codex r2 H2a: refuse to register once an install has begun quiescing. Checked under the same
+            // lock that `begin_quiesce` sets and `terminate_and_confirm` takes the pgid, so registration
+            // cannot slip in after the terminator has confirmed the registry empty.
+            if st.quiescing {
+                return Err(std::io::Error::other(
+                    "the accelerator is installing an update; proving is paused",
+                ));
+            }
+            st.pgid = Some(pgid);
             Ok(Self { pgid })
         }
 
-        /// Normal completion: bb has already exited (we hold its status). Clear the registration so
-        /// neither this guard's drop nor a racing `terminate_inflight` signals a now-reaped (and
-        /// potentially recycled) pgid.
+        /// Normal completion: bb has already exited (we hold its status). SIGKILL the group FIRST — to reap
+        /// any child process bb orphaned (normally none, but once we clear the registry they'd be
+        /// unkillable) — THEN clear (codex r2 M4a). bb's pid was reaped microseconds ago by `child.wait()`;
+        /// we kill a process GROUP under the lock, so for this to hit an unrelated process the OS would have
+        /// to recycle bb's exact pid INTO a new group leader within those few instructions — physically
+        /// impossible, documented as residual.
         pub(super) fn finish(self) {
-            let mut g = ACTIVE_PGID.lock().unwrap();
-            if *g == Some(self.pgid) {
-                *g = None;
+            let mut st = STATE.lock().unwrap();
+            if st.pgid == Some(self.pgid) {
+                unsafe {
+                    libc::kill(-self.pgid, libc::SIGKILL);
+                }
+                st.pgid = None;
             }
         }
     }
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            let mut g = ACTIVE_PGID.lock().unwrap();
-            if *g == Some(self.pgid) {
-                *g = None;
-                // SIGKILL the whole group. ESRCH (already gone) is harmless. NOTE: a microsecond window
-                // exists between `child.wait()` reaping bb and `finish()` clearing this entry in which a
-                // racing terminate could target a freed pgid; because we kill a process GROUP (not a bare
-                // pid), that is only wrong if a brand-new, unrelated process both reused the pid AND made
-                // itself a group leader in that window — vanishingly unlikely and documented as residual.
+            let mut st = STATE.lock().unwrap();
+            if st.pgid == Some(self.pgid) {
+                st.pgid = None;
+                // SIGKILL the whole group (bb here is likely still alive — timeout/cancel/panic path).
                 unsafe {
                     libc::kill(-self.pgid, libc::SIGKILL);
                 }
@@ -555,19 +622,19 @@ mod containment {
     /// SIGKILL the in-flight bb tree, if any. Fire-and-forget — for the QUIT path, which must never
     /// block. (The pre-update path uses [`terminate_and_confirm`] instead.)
     pub fn terminate_inflight() {
-        let mut g = ACTIVE_PGID.lock().unwrap();
-        if let Some(pgid) = g.take() {
+        let mut st = STATE.lock().unwrap();
+        if let Some(pgid) = st.pgid.take() {
             unsafe {
                 libc::kill(-pgid, libc::SIGKILL);
             }
         }
     }
 
-    /// SIGKILL the in-flight bb tree and WAIT (bounded) until the group is actually gone, so the pre-update
+    /// SIGKILL the in-flight bb tree and WAIT (bounded) until the group is CONFIRMED gone, so the pre-update
     /// caller can ABORT the install if bb can't be confirmed dead (codex H2: `kill` reaps asynchronously;
     /// installing over a still-live prover risks file/lock conflicts). `Ok(())` if nothing was in flight.
     pub async fn terminate_and_confirm(timeout: std::time::Duration) -> Result<(), String> {
-        let pgid = ACTIVE_PGID.lock().unwrap().take();
+        let pgid = STATE.lock().unwrap().pgid.take();
         let Some(pgid) = pgid else {
             return Ok(());
         };
@@ -576,13 +643,19 @@ mod containment {
         }
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            // `kill(-pgid, 0)` → -1/ESRCH once the whole group is gone AND reaped. bb is reaped by the
-            // concurrent prove's `child.wait()`; grandchildren are reaped by init after reparenting.
-            if unsafe { libc::kill(-pgid, 0) } == -1 {
+            // Confirm ONLY on ESRCH — the group is gone AND reaped. bb is reaped by the concurrent prove's
+            // `child.wait()`; grandchildren are reaped by init after reparenting. codex r2 H2b: treating
+            // EVERY `kill(..., 0) == -1` as success was fail-open (e.g. EPERM would falsely "confirm"); a
+            // non-ESRCH error is NOT a confirmation, so we keep polling until ESRCH or the deadline.
+            if unsafe { libc::kill(-pgid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
-                return Err(format!("bb process group {pgid} still alive after SIGKILL"));
+                return Err(format!(
+                    "bb process group {pgid} not confirmed dead after SIGKILL"
+                ));
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -592,6 +665,7 @@ mod containment {
 #[cfg(windows)]
 mod containment {
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
@@ -607,6 +681,12 @@ mod containment {
     /// exits and the OS closes the last handle, so every bb in the job — and every process bb spawned —
     /// is killed on quit/restart/update/crash. 0 means creation FAILED (fail-closed: register() errors).
     static JOB: OnceLock<isize> = OnceLock::new();
+
+    /// Set while an update installs (codex r2 H2a). `register` refuses new bb, so no live bb.exe can hold
+    /// the file the installer must replace. Unlike Unix there is no pgid mutex to piggyback on, so this is
+    /// an atomic re-checked AFTER assignment (see `register`); the poll in `terminate_and_confirm` is the
+    /// backstop that keeps it fail-SAFE even under a race.
+    static QUIESCING: AtomicBool = AtomicBool::new(false);
 
     fn job_handle() -> HANDLE {
         let raw = *JOB.get_or_init(|| unsafe {
@@ -635,8 +715,11 @@ mod containment {
         raw as HANDLE
     }
 
-    /// Active process count in the job — 0 once every bb + descendant is gone.
-    fn active_processes(job: HANDLE) -> u32 {
+    /// Active process count in the job — `Some(0)` once every bb + descendant is gone, `None` if the query
+    /// itself FAILED. codex r2 H2b: mapping a failed query to `0` was fail-open — it would let
+    /// `terminate_and_confirm` "confirm" an empty job it could not actually read, and install over a live
+    /// bb. A `None` is NOT a confirmation.
+    fn active_processes(job: HANDLE) -> Option<u32> {
         let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
         let ok = unsafe {
             QueryInformationJobObject(
@@ -648,14 +731,22 @@ mod containment {
             )
         };
         if ok == 0 {
-            0
+            None
         } else {
-            acct.ActiveProcesses
+            Some(acct.ActiveProcesses)
         }
     }
 
     /// No spawn-time configuration on Windows — the child is added to the job AFTER it exists.
     pub(super) fn configure(_cmd: &mut tokio::process::Command) {}
+
+    /// Stop accepting new proves (an update is about to install); [`end_quiesce`] re-opens on abort.
+    pub(super) fn begin_quiesce() {
+        QUIESCING.store(true, Ordering::SeqCst);
+    }
+    pub(super) fn end_quiesce() {
+        QUIESCING.store(false, Ordering::SeqCst);
+    }
 
     /// Armed on register; on ABNORMAL drop (cancellation / timeout / panic — `finish` NOT called) it
     /// `TerminateJobObject`s the tree NOW rather than leaving grandchildren alive in the still-open job
@@ -666,6 +757,12 @@ mod containment {
 
     impl Guard {
         pub(super) fn register(child: &tokio::process::Child) -> std::io::Result<Self> {
+            // codex r2 H2a: refuse to start a bb once an install is quiescing (cheap pre-assign check).
+            if QUIESCING.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other(
+                    "the accelerator is installing an update; proving is paused",
+                ));
+            }
             let job = job_handle();
             if job.is_null() {
                 return Err(std::io::Error::other("failed to create the bb Job Object"));
@@ -686,6 +783,19 @@ mod containment {
                         "bb child is not in the Job Object after assignment",
                     ));
                 }
+            }
+            // codex r2 H2a: re-check AFTER assignment. If quiesce began while we were assigning, this bb may
+            // have joined the job just after `terminate_and_confirm` confirmed it empty — kill it NOW
+            // (fail-closed) so it cannot hold bb.exe during install. (A quiesce that begins after THIS check
+            // is still safe: the bb is in the job, so the terminator's poll sees ActiveProcesses>0 and
+            // aborts the install rather than installing over it.)
+            if QUIESCING.load(Ordering::SeqCst) {
+                unsafe {
+                    TerminateJobObject(job, 1);
+                }
+                return Err(std::io::Error::other(
+                    "proving paused for update install (assignment raced quiesce)",
+                ));
             }
             Ok(Guard { armed: true })
         }
@@ -727,18 +837,21 @@ mod containment {
         if job.is_null() {
             return Ok(());
         }
-        unsafe {
-            TerminateJobObject(job, 1);
-        }
+        // `TerminateJobObject` is ASYNCHRONOUS (like `TerminateProcess`). codex r2 H2b: capture its result
+        // rather than discarding it, but the poll below is the real confirmation — a failed terminate just
+        // means the poll never reaches Some(0) and we abort the install.
+        let term_ok = unsafe { TerminateJobObject(job, 1) } != 0;
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if active_processes(job) == 0 {
+            // Confirm ONLY on a SUCCESSFUL query that reads 0 (codex r2 H2b: a failed query — `None` — is
+            // NOT an empty job).
+            if active_processes(job) == Some(0) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
-                return Err(
-                    "bb Job Object still has active processes after TerminateJobObject".to_string(),
-                );
+                return Err(format!(
+                    "bb Job Object not confirmed empty after TerminateJobObject (terminate_ok={term_ok})"
+                ));
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -748,6 +861,8 @@ mod containment {
 #[cfg(not(any(unix, windows)))]
 mod containment {
     pub(super) fn configure(_cmd: &mut tokio::process::Command) {}
+    pub(super) fn begin_quiesce() {}
+    pub(super) fn end_quiesce() {}
     pub(super) struct Guard;
     impl Guard {
         pub(super) fn register(_child: &tokio::process::Child) -> std::io::Result<Self> {
@@ -1345,5 +1460,86 @@ mod tests {
         assert!(terminate_and_confirm(Duration::from_millis(50))
             .await
             .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn register_is_refused_while_quiescing_then_reopens(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // codex r2 H2a: once an install quiesces, NO new bb may register — that is what stops a fresh
+        // bb.exe from holding the file the installer must replace. Mutation proof: delete the
+        // `if st.quiescing` guard in `register` and the first registration below SUCCEEDS.
+        use super::containment::{configure, Guard};
+        let spawn = || {
+            let mut cmd = tokio::process::Command::new("sleep");
+            cmd.arg("30").kill_on_drop(true);
+            configure(&mut cmd);
+            cmd.spawn()
+        };
+
+        let quiesce = begin_quiesce();
+        let child_a = spawn()?;
+        let err = match Guard::register(&child_a) {
+            Ok(_) => panic!("register must be refused while quiescing"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("paused"),
+            "unexpected error: {err}"
+        );
+
+        // Dropping the guard (an ABORTED install) must re-open proving.
+        drop(quiesce);
+        let child_b = spawn()?;
+        Guard::register(&child_b)
+            .expect("registration must work again once the quiesce guard drops")
+            .finish();
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn finish_reaps_a_straggler_grandchild_on_the_success_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        // bb spawns a GRANDCHILD that outlives it, writes a VALID 32-byte proof, then exits 0 — orphaning
+        // the grandchild into bb's still-live process group. On the SUCCESS path `finish()` must SIGKILL
+        // that group BEFORE clearing the registry (codex r2 M4a); otherwise the grandchild leaks,
+        // unkillable. Mutation proof: drop the `kill(-pgid)` from `finish()` and this assertion fails.
+        let script = format!(
+            "{FIND_OUTDIR}\nsleep 300 & echo $! > \"{}\"\nprintf '%032d' 0 > \"$out/proof\"\nexit 0",
+            pidfile.display()
+        );
+        let _env = install_fake_bb(dir.path(), &script);
+
+        let proof = prove(b"witness", None, None)
+            .await
+            .expect("a valid proof must succeed");
+        assert_eq!(proof.len(), 4 + 32);
+
+        let gpid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("bb should have written the grandchild pid")
+            .trim()
+            .parse()
+            .expect("valid pid");
+
+        // Once prove returned, finish() should already have reaped the group. Poll briefly for the kill.
+        let mut dead = false;
+        for _ in 0..100 {
+            if unsafe { libc::kill(gpid, 0) } == -1 {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !dead {
+            unsafe { libc::kill(gpid, libc::SIGKILL) };
+        }
+        assert!(
+            dead,
+            "finish() must SIGKILL the group, reaping the orphaned grandchild"
+        );
     }
 }
