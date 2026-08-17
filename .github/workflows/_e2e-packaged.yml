@@ -38,12 +38,22 @@ on:
         required: false
         type: string
         default: accelerator-v1.0.7
+      release_tag:
+        description: >-
+          When set, download the app installers from THIS release's OWN assets (the draft-gate: prove the
+          real uploaded bytes) via `gh release download` instead of the run's build artifacts. Empty ⇒
+          build-artifact mode (PR gate / standalone).
+        required: false
+        type: string
+        default: ""
 
 jobs:
   packaged-e2e-linux:
     name: Packaged E2E (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    permissions:
+      contents: read # `gh release download` in release-asset mode
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -75,11 +85,22 @@ jobs:
           sleep 2
           DISPLAY=:99 stalonetray >/tmp/stalonetray.log 2>&1 &
 
-      - name: Download installer artifact
+      - name: Download installer artifact (build-artifact mode)
+        if: inputs.release_tag == ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.app_artifact }}
           path: app-artifact
+
+      - name: Download installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          # The draft's own uploaded Linux installer (flatten/rename names it *Linux-x86_64.deb).
+          gh release download "$TAG" --pattern '*Linux-x86_64.deb' --dir app-artifact
 
       - name: Install the .deb
         run: |
@@ -161,6 +182,8 @@ jobs:
     name: Packaged E2E (macos)
     runs-on: macos-latest
     timeout-minutes: 55
+    permissions:
+      contents: read # `gh release download` in release-asset mode
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -178,11 +201,22 @@ jobs:
         with:
           aztec_node_url: ${{ inputs.aztec_node_url }}
 
-      - name: Download installer artifact
+      - name: Download installer artifact (build-artifact mode)
+        if: inputs.release_tag == ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.macos_app_artifact }}
           path: app-artifact
+
+      - name: Download installer (release-asset mode)
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p app-artifact
+          # The draft's own uploaded macOS arm64 DMG (flatten/rename names it *macOS-Apple-Silicon.dmg).
+          gh release download "$TAG" --pattern '*macOS-Apple-Silicon.dmg' --dir app-artifact
 
       # Install to /Applications (a real installed copy), not run-from-DMG — the composed gate should exercise
       # the installed state (paths, autostart) the way a user gets it (codex harness review).
