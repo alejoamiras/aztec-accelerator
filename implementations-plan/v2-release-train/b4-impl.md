@@ -163,14 +163,17 @@ extension + a new Playwright project + the CI job.
   keeps the dual-probe for real users. Typechecks. The proving tx already exists: `deployTestAccount`
   (`createSchnorrAccount → getDeployMethod → sendWithRetry`) with `onPhase` + a `proveTracker` that captures
   `proved.durationMs`.
-- **NEXT (A2):** a Playwright project `packaged-e2e` + spec that loads the playground from **localhost**
-  (Chrome 142+ LNA exempts localhost) with `?forceProofs=true&httpsOnly=true`, drives deploy-account, waits for
-  the success result, and — the decisive witness — **intercepts a `200 https://127.0.0.1:59834/prove` carrying
-  `x-prove-duration-ms`** (`server/prove.rs:347` adds it ONLY after a real `bb::prove`; WASM/HTTP emit no such
-  request, so this alone discriminates native-over-HTTPS from a silent fallback). Corroborate with the
-  deploy-success UI. Do NOT set `ignoreHTTPSErrors` (defeats the trust proof). Tolerate a `downloading` phase
-  (first-proof bb fetch — or pre-warm the bb cache). If codex's harness review wants the explicit `onPhase`
-  no-`fallback` sequence too, add a `window.__ACCEL_PHASES__` export in `deployTestAccount`.
+- **DONE (A2):** `e2e/accelerator.packaged-e2e.spec.ts` + a `packaged-e2e` Playwright project (`playwright.
+  config.ts`) + `test:e2e:packaged` script. Loads the playground from **localhost** (Chrome 142+ LNA exempts
+  localhost) with `?forceProofs=true&httpsOnly=true`, drives deploy-account via the existing `deployAndAssert`,
+  and asserts the decisive witness — an intercepted **`200 https://127.0.0.1:59834/prove` carrying
+  `x-prove-duration-ms`** (`server/prove.rs` adds it ONLY after a real `bb::prove`; WASM/HTTP emit no such
+  request, so this alone discriminates native-over-HTTPS from a silent fallback). No `ignoreHTTPSErrors` (the
+  TLS handshake against the seeded CA must really succeed). Typecheck + biome green. **⇒ Recipe A COMPLETE.**
+  (If codex's harness review wants the explicit `onPhase` no-`fallback` trail too, add a `window.__ACCEL_PHASES__`
+  export in `deployTestAccount` — deferred as belt-and-suspenders; the HTTPS-header witness is sufficient.)
+  Note for B: `bun run dev` serves HTTP on :5173, so the HTTP page fetching `https://:59834` is an UPGRADE (fine,
+  not mixed-content) and same-address-space as loopback (LNA-exempt). Pre-warm or allow a `downloading` phase.
 
 **B. Linux CI leg (reference — fully automated).** Job `needs:[build]` on `ubuntu`: install `libnss3-tools`
 (+ `libfuse2t64` if AppImage, else prefer `.deb`); download `accelerator-linux-x86_64`; install; run
