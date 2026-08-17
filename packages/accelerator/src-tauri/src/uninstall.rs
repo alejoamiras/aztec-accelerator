@@ -140,35 +140,53 @@ pub fn prepare_uninstall() -> UninstallOutcome {
             ))
         }
     };
+    // Hold the autostart lock across the WHOLE transaction — ownership verdict → entry removal →
+    // crash-recovery → trust — so a copied second install cannot arm (its `set_enabled` takes the same
+    // lock) between the verdict and the deletions (codex #6). Every mutation below is therefore lock-free
+    // (`remove_entry_locked`), or a different subsystem the held lock still serializes against arming.
+    let _lock = match crate::autostart::acquire_uninstall_lock() {
+        Ok(l) => l,
+        Err(e) => {
+            return UninstallOutcome::left_all(format!(
+                "another Aztec Accelerator operation is in progress: {e}"
+            ))
+        }
+    };
     let stored = crate::autostart::read_stored_target(Some(&reference));
     match classify(&stored) {
         Ownership::ForeignOrUncertain => UninstallOutcome::left_all(
             "the autostart entry belongs to another install, or is unreadable".into(),
         ),
-        Ownership::ConfirmedOurs => remove_ours(true),
-        Ownership::NoEntry => remove_ours(false),
+        Ownership::ConfirmedOurs => remove_ours(&reference, true),
+        Ownership::NoEntry => remove_ours(&reference, false),
     }
 }
 
-/// Remove the artifacts THIS install owns. `remove_autostart_entry` is false for [`Ownership::NoEntry`]
-/// (there is no entry). Crash-recovery is gated on the same ownership verdict: `set_enabled` always arms
-/// the autostart entry and the recovery task/unit together, so a ConfirmedOurs/NoEntry verdict means the
-/// recovery task is ours too. (The exe-gone NSIS belt independently re-checks the task's own `<Command>`.)
-fn remove_ours(remove_autostart_entry: bool) -> UninstallOutcome {
+/// Remove the artifacts THIS install owns, under the held autostart lock. `remove_autostart_entry` is
+/// false for [`Ownership::NoEntry`] (there is no entry). Crash-recovery is checked TASK-LOCALLY (its own
+/// `<Command>`/`ExecStart`), not inferred from the autostart verdict (codex #6): a divergent copied-install
+/// task — NoEntry autostart yet a surviving foreign task — must not be deleted.
+fn remove_ours(reference: &std::path::Path, remove_autostart_entry: bool) -> UninstallOutcome {
     let autostart = if remove_autostart_entry {
-        match crate::autostart::remove_entry() {
+        match crate::autostart::remove_entry_locked() {
             Ok(()) => Step::Removed,
             Err(e) => Step::Failed(e),
         }
     } else {
         Step::NotPresent
     };
-    // Crash recovery MUST die: its task/unit relaunches the app ~1 min after it quits, which would
-    // resurrect the app in the middle of an uninstall (recon collision #2).
-    let crash_recovery = if crate::crash_recovery::disable_crash_recovery() {
-        Step::Removed
-    } else {
-        Step::Failed("could not confirm crash recovery was disabled".into())
+    // Crash recovery MUST die when it is ours (its task/unit relaunches the app ~1 min after it quits,
+    // resurrecting it mid-uninstall — recon collision #2) but must be LEFT when a copied install owns it.
+    let crash_recovery = match crate::crash_recovery::recovery_ownership(reference) {
+        crate::crash_recovery::RecoveryOwnership::Ours => {
+            if crate::crash_recovery::disable_crash_recovery() {
+                Step::Removed
+            } else {
+                Step::Failed("could not confirm crash recovery was disabled".into())
+            }
+        }
+        crate::crash_recovery::RecoveryOwnership::Foreign => Step::LeftForeign,
+        crate::crash_recovery::RecoveryOwnership::Absent => Step::NotPresent,
     };
     let trust = remove_trust_and_certs();
     UninstallOutcome {

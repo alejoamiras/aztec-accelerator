@@ -1878,6 +1878,21 @@ pub fn remove_entry() -> Result<(), String> {
     backend::remove()
 }
 
+/// Remove OUR autostart entry assuming the caller ALREADY holds [`acquire_autostart_lock`]. The
+/// `--prepare-uninstall` transaction (B5) holds that lock across the ownership verdict + entry removal +
+/// crash-recovery + trust as ONE critical section, so a copied second install cannot arm (its `set_enabled`
+/// also takes the lock) between the verdict and the deletions (codex). Re-entering [`remove_entry`] there
+/// would deadlock on the same-process re-lock, hence this lock-free core. Idempotent (`NotFound ⇒ Ok`).
+pub(crate) fn remove_entry_locked() -> Result<(), String> {
+    backend::remove()
+}
+
+/// Acquire the autostart lock for a whole cross-subsystem transaction (B5). `pub(crate)` re-export so the
+/// `uninstall` module can hold it across autostart + crash-recovery + trust.
+pub(crate) fn acquire_uninstall_lock() -> Result<std::fs::File, String> {
+    acquire_autostart_lock()
+}
+
 /// Explicit user toggle (replaces the plugin's enable/disable; plan §4.5). Runs the existing
 /// `enable_transaction` (C8) with OUR writer closures: `prior_enabled := intent_enabled` (D16 —
 /// health-aware prior would send a Broken entry down the full recreate path, stripping KeepAlive),

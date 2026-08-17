@@ -35,6 +35,93 @@ pub fn disable_crash_recovery() -> bool {
     PlatformRecovery.disable()
 }
 
+/// Whether the crash-recovery artifact belongs to `reference` (this install). `--prepare-uninstall` (B5,
+/// codex #6) MUST NOT delete it by name alone — that would strip a COPIED second install's recovery.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecoveryOwnership {
+    /// The task/unit targets this install — safe to disable.
+    Ours,
+    /// It targets a DIFFERENT install, or we could not confirm — leave it (fail-closed).
+    Foreign,
+    /// No crash-recovery artifact exists.
+    Absent,
+}
+
+/// OS-agnostic, pure (testable anywhere): is `xml` a COMPLETE (`</Task>`), SINGLE-action (exactly one
+/// `<Command>`) task whose command is exactly `escaped_exe_element` (`<Command>…</Command>`)? Mirrors the
+/// NSIS belt (codex #4) and matches in the ESCAPED domain `task_xml` writes, so no decoding is needed.
+#[cfg(any(windows, test))]
+fn task_xml_is_exactly_ours(xml: &str, escaped_exe_element: &str) -> bool {
+    xml.contains("</Task>")
+        && xml.matches("<Command>").count() == 1
+        && xml.contains(escaped_exe_element)
+}
+
+/// macOS: crash recovery is the autostart LaunchAgent's `KeepAlive`, NOT a separate artifact — it is
+/// removed with the plist (the autostart step, gated on the ConfirmedOurs/NoEntry verdict the caller
+/// already established). Nothing separate to ownership-check.
+#[cfg(target_os = "macos")]
+pub fn recovery_ownership(_reference: &std::path::Path) -> RecoveryOwnership {
+    RecoveryOwnership::Ours
+}
+
+#[cfg(target_os = "linux")]
+pub fn recovery_ownership(reference: &std::path::Path) -> RecoveryOwnership {
+    let Some(config_dir) = dirs::config_dir() else {
+        return RecoveryOwnership::Foreign;
+    };
+    let unit = config_dir.join(format!("systemd/user/{SYSTEMD_NAME}.service"));
+    let content = match std::fs::read_to_string(&unit) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RecoveryOwnership::Absent,
+        Err(_) => return RecoveryOwnership::Foreign, // unreadable ⇒ fail-closed
+    };
+    // Match the EXACT `ExecStart=` value THIS install would write — systemd-serialized (quoted,
+    // `:`-prefixed, `%`-doubled; see `systemd_exec_start`), NOT the bare path. `reference` is already the
+    // AppImage-resolved identity (owned_reference_path), matching what `recovery_target` stores. A path we
+    // cannot represent as a safe ExecStart can't be ours.
+    let Some(exec_start) = systemd_exec_start(reference) else {
+        return RecoveryOwnership::Foreign;
+    };
+    let needle = format!("ExecStart={exec_start}");
+    if content.lines().any(|l| l.trim() == needle) {
+        RecoveryOwnership::Ours
+    } else {
+        RecoveryOwnership::Foreign
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn recovery_ownership(reference: &std::path::Path) -> RecoveryOwnership {
+    let out = match std::process::Command::new(schtasks_exe())
+        .args(["/Query", "/TN", TASK_NAME, "/XML"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(_) => return RecoveryOwnership::Absent, // /Query nonzero ⇒ task absent
+        Err(_) => return RecoveryOwnership::Foreign, // couldn't query ⇒ fail-closed
+    };
+    // schtasks `/XML` emits UTF-16LE (BOM) on modern Windows; fall back to UTF-8 lossy otherwise.
+    let xml = if out.starts_with(&[0xFF, 0xFE]) {
+        let u16s: Vec<u16> = out[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else {
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let element = format!(
+        "<Command>{}</Command>",
+        xml_escape(&reference.display().to_string())
+    );
+    if task_xml_is_exactly_ours(&xml, &element) {
+        RecoveryOwnership::Ours
+    } else {
+        RecoveryOwnership::Foreign
+    }
+}
+
 /// The current platform's crash-recovery implementation. A unit struct — the actual state lives in
 /// the OS (launchd plist / systemd unit / Task Scheduler task). Dispatches to the `#[cfg]`-selected
 /// `enable_impl` / `disable_impl`.
@@ -549,6 +636,77 @@ mod tests {
 
     use super::enable_transaction;
     use std::cell::Cell;
+
+    // The Windows CLI task-ownership decision (B5 codex #6/#4) — the same complete + single-command + exact
+    // logic the NSIS belt applies, in Rust. Mutation proof: drop any of the three conjuncts and a case
+    // below flips.
+    #[test]
+    fn task_xml_ownership_requires_complete_single_and_exact() {
+        let ours = "<Command>C:\\Install\\AztecAccelerator.exe</Command>";
+        let t = super::task_xml_is_exactly_ours;
+        assert!(t(
+            "<Task><Command>C:\\Install\\AztecAccelerator.exe</Command></Task>",
+            ours
+        ));
+        // foreign path
+        assert!(!t(
+            "<Task><Command>C:\\Other\\AztecAccelerator.exe</Command></Task>",
+            ours
+        ));
+        // deceptive prefix
+        assert!(!t(
+            "<Task><Command>C:\\Install-evil\\AztecAccelerator.exe</Command></Task>",
+            ours
+        ));
+        // multi-action (two <Command>)
+        assert!(!t(
+            "<Task><Command>C:\\Install\\AztecAccelerator.exe</Command><Command>x</Command></Task>",
+            ours
+        ));
+        // truncated AFTER our element (no </Task>)
+        assert!(!t(
+            "<Task><Command>C:\\Install\\AztecAccelerator.exe</Command>",
+            ours
+        ));
+    }
+
+    // The Linux crash-recovery ownership check reads the unit's serialized ExecStart. Foreign target ⇒
+    // leave; absent unit ⇒ Absent. (An OURS unit is covered by systemd_exec_start's round-trip test.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[serial_test::serial]
+    fn linux_recovery_ownership_leaves_a_foreign_unit() {
+        use super::{recovery_ownership, RecoveryOwnership};
+        use std::path::Path;
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", home.path());
+        let unit_dir = home.path().join("systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let unit = unit_dir.join("aztec-accelerator.service");
+
+        // No unit yet ⇒ Absent.
+        assert_eq!(
+            recovery_ownership(Path::new("/opt/us/AztecAccelerator")),
+            RecoveryOwnership::Absent
+        );
+
+        // A unit whose ExecStart targets ANOTHER install ⇒ Foreign (must not be deleted).
+        let foreign = super::systemd_exec_start(Path::new("/opt/other/AztecAccelerator")).unwrap();
+        std::fs::write(&unit, format!("[Service]\nExecStart={foreign}\n")).unwrap();
+        assert_eq!(
+            recovery_ownership(Path::new("/opt/us/AztecAccelerator")),
+            RecoveryOwnership::Foreign
+        );
+
+        // A unit whose ExecStart targets US ⇒ Ours.
+        let ours = super::systemd_exec_start(Path::new("/opt/us/AztecAccelerator")).unwrap();
+        std::fs::write(&unit, format!("[Service]\nExecStart={ours}\n")).unwrap();
+        assert_eq!(
+            recovery_ownership(Path::new("/opt/us/AztecAccelerator")),
+            RecoveryOwnership::Ours
+        );
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
 
     // Residual #3 (arc-bug-hunt): the COMPOSITION nothing else covers. `recovery_target` and
     // `systemd_exec_start` were each unit-tested, but no test asserted the ExecStart value the
