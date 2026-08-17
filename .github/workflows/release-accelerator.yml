@@ -13,8 +13,10 @@ on:
         type: boolean
         default: false
       # B6: publish and promote are SEPARATE operational events (two dispatches), not one job.
-      #   publish      = build → 3-OS gates → publish (RC public prerelease / stable DRAFT-gated → finalized
-      #                  public, --latest=false). Does NOT touch the S3 feed.
+      #   publish      = build → 3-OS gates → publish. RC + stable are both PUBLIC GitHub releases pinned
+      #                  --latest=false; the signed latest.json ships as a stable release ASSET. Does NOT
+      #                  touch the S3 feed. (The stable DRAFT-gate — draft → packaged-E2E-on-draft →
+      #                  finalize — lands in B4, which is a hard prerequisite of any 2.0.0 stable publish.)
       #   promote-only = no build; pre-flight an ALREADY-PUBLISHED version, then flip the S3 `latest.json`
       #                  feed. This is also the rollback lever (`promote-only` an older version).
       mode:
@@ -96,6 +98,10 @@ jobs:
   release-auth-preflight:
     name: Release AWS trust preflight
     needs: [validate]
+    # B6/codex: run under auth_probe or publish (where `tag` needs it), NOT standalone under promote-only —
+    # there it would race the `promote` job and could fail RED after promote already flipped the feed.
+    # promote does its own configure-aws before its (post-verify) S3 write, so it needs no separate preflight.
+    if: ${{ inputs.auth_probe || inputs.mode == 'publish' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -806,7 +812,10 @@ jobs:
     # a skipped one (prerelease) does not.
     # F-005: `!inputs.auth_probe` so a probe never publishes. `tag` is skipped in probe mode, but this
     # job's `!cancelled()` would otherwise still run it — guard explicitly.
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    # B6/codex: require tag SUCCESS (not merely "not failed") — a skipped tag (e.g. release-auth-preflight
+    # failed → tag skipped) must NOT publish onto a pre-existing/orphan tag via --verify-tag without this
+    # run's tag-SHA check. sign-update-feed may still be skipped (prerelease) — that's a different need.
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.tag.result == 'success' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1012,7 +1021,8 @@ jobs:
   # asserts the release is a published, non-draft, non-prerelease stable whose version + full asset set
   # match — THEN uploads those exact verified bytes. `dry_run` runs the whole pre-flight WITHOUT writing the
   # feed (proves the machinery, incl. a rollback-to-prev pre-flight, with zero prod effect). Least-privilege:
-  # this is the only job with `id-token: write` (OIDC → the feed-only AWS role); publish has no AWS creds.
+  # this is the only job that WRITES the feed (OIDC → the feed-only AWS role); publish has no AWS creds
+  # (release-auth-preflight also holds id-token but only PROBES GetBucketLocation, never mutates).
   promote:
     name: Promote (flip S3 feed)
     needs: [validate]
@@ -1051,27 +1061,43 @@ jobs:
             || { echo "::error::no release $RELEASE_TAG to promote"; exit 1; }
           echo "$META" | jq -e '.isDraft == false'      >/dev/null || { echo "::error::$RELEASE_TAG is a DRAFT — not promotable"; exit 1; }
           echo "$META" | jq -e '.isPrerelease == false' >/dev/null || { echo "::error::$RELEASE_TAG is flagged prerelease — not promotable"; exit 1; }
-          # 3. Full asset completeness — the feed + all 5 installers must be present (never promote a
-          #    half-uploaded release). Matched by NAME (suffix), not just count.
+          # 3. Full asset completeness — never promote a half-uploaded release. Assert the EXACT count (16
+          #    build assets + latest.json = 17) AND every category by name: installers, the macOS .app.tar.gz
+          #    updaters, the headless server tarballs, and the feed. (codex: count alone omitted headless.)
           NAMES=$(echo "$META" | jq -r '.assets[].name')
+          COUNT=$(printf '%s\n' "$NAMES" | grep -c . || true)
+          [ "$COUNT" = "17" ] || { echo "::error::$RELEASE_TAG has $COUNT assets, expected exactly 17"; exit 1; }
           printf '%s\n' "$NAMES" | grep -qx "latest.json" || { echo "::error::$RELEASE_TAG missing latest.json"; exit 1; }
-          for suffix in macOS-Apple-Silicon.dmg macOS-Intel.dmg Linux-x86_64.deb Linux-x86_64.AppImage Windows-x86_64-setup.exe; do
-            printf '%s\n' "$NAMES" | grep -q "$suffix" || { echo "::error::$RELEASE_TAG missing an installer matching *$suffix"; exit 1; }
+          need() { printf '%s\n' "$NAMES" | grep -q -- "$1" || { echo "::error::$RELEASE_TAG missing an asset matching: $1"; exit 1; }; }
+          for pat in macOS-Apple-Silicon.dmg macOS-Intel.dmg Linux-x86_64.deb Linux-x86_64.AppImage \
+                     Windows-x86_64-setup.exe Windows-x86_64-setup.nsis.zip \
+                     macOS-Apple-Silicon.app.tar.gz macOS-Intel.app.tar.gz accelerator-server-; do
+            need "$pat"
           done
-          # 4. Download the release's OWN latest.json, assert its feed version == the dispatched version, and
-          #    run the PRODUCTION verifier over it. These are the exact bytes the flip will upload.
+          # 4. Download the release's OWN latest.json, assert feed version == dispatched, run the PRODUCTION
+          #    verifier. These are the exact bytes the flip uploads.
           gh release download "$RELEASE_TAG" -p latest.json --dir feed
           FEED_VERSION=$(jq -r '.version // empty' feed/latest.json)
           [ "$FEED_VERSION" = "$VERSION" ] || { echo "::error::release latest.json version ($FEED_VERSION) != dispatched ($VERSION)"; exit 1; }
           bun -e "console.log(JSON.parse(await Bun.file('packages/accelerator/src-tauri/tauri.conf.json').text()).plugins.updater.pubkey)" > pubkey.b64
           cargo run --quiet --manifest-path packages/accelerator/core/Cargo.toml --example update-manifest -- \
             verify --feed feed/latest.json --pubkey pubkey.b64
-          # 5. Every updater-payload URL in the feed must resolve (the bytes clients will pull).
+          # 5. The verifier accepts ANY non-empty signed platform map, so bind the feed to THIS release: it
+          #    must carry EXACTLY the 4 supported platform keys, and each URL must be a CANONICAL $RELEASE_TAG
+          #    download URL that resolves 200 (a valid signature binds whatever URL was signed — not that it
+          #    targets this tag). (codex: signature validity + HEAD 200 alone don't prove the right target.)
+          jq -e '(.platforms | keys | sort) == ["darwin-aarch64","darwin-x86_64","linux-x86_64","windows-x86_64"]' feed/latest.json >/dev/null \
+            || { echo "::error::feed platform keys are not exactly the 4 supported platforms"; exit 1; }
+          CANON="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/"
           while read -r u; do
+            case "$u" in
+              "$CANON"*) : ;;
+              *) echo "::error::feed platform URL is not a canonical $RELEASE_TAG download URL: $u"; exit 1 ;;
+            esac
             code=$(curl -fsIL --max-time 30 -o /dev/null -w '%{http_code}' "$u" 2>/dev/null || echo ERR)
             [ "$code" = "200" ] || { echo "::error::feed payload URL not reachable ($code): $u"; exit 1; }
           done < <(jq -r '.platforms[].url' feed/latest.json)
-          echo "✅ pre-flight OK: $RELEASE_TAG is a published stable $VERSION, feed signature valid, assets complete"
+          echo "✅ pre-flight OK: $RELEASE_TAG is a published stable $VERSION — 17 assets, exactly-4 canonical platform URLs, feed signature valid"
 
       - name: DRY RUN — pre-flight only, feed NOT written
         if: ${{ inputs.dry_run }}
