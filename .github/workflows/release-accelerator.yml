@@ -1074,6 +1074,10 @@ jobs:
       contents: read
     uses: ./.github/workflows/_e2e-packaged.yml
     with:
+      # Pin the gate's harness/packed-SDK checkout to the DISPATCHED commit, not the moving `refs/heads/main`
+      # (_e2e-packaged.yml checks out `inputs.ref || github.ref`). Without this, a concurrent push to main
+      # mid-run would test the draft's pinned installers against a newer harness — breaking "tested == shipped".
+      ref: ${{ github.sha }}
       release_tag: ${{ needs.validate.outputs.tag }}
 
   # B4/F: FINALIZE — flip the gated draft to PUBLISHED (which pushes the git tag GitHub deferred). Runs only
