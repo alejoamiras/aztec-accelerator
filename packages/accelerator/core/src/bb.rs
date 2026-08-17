@@ -6,6 +6,17 @@ use crate::versions;
 /// Maximum time to wait for bb prove to complete before killing the process.
 const PROVE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
+/// B3 (F4): cap on bb stderr RETAINED for the log line. The reader keeps draining past this to EOF (so
+/// bb can never block on a full pipe buffer), but stops ACCUMULATING — the earlier `wait_with_output()`
+/// buffered all of stderr into memory for up to `PROVE_TIMEOUT`, an unbounded allocation an authentic
+/// chatty (or pathological) bb could drive. 64 KiB is far more than any real diagnostic.
+const STDERR_RETAIN_CAP: usize = 64 * 1024;
+
+/// B3 (F5): reject a bb proof file larger than this before reading it into memory. A real chonk proof is
+/// a few tens of KiB; this generous ceiling bounds the read so a wrong/corrupt/huge `proof` file can't be
+/// slurped whole (`std::fs::read` is unbounded) into a memory-exhaustion.
+const MAX_PROOF_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Find the `bb` binary. When `version` is provided, the marker-verified version cache is the ONLY
 /// acceptable source — never the standard search chain.
 ///
@@ -270,6 +281,17 @@ pub async fn prove(
     version: Option<&versions::AztecVersion>,
     threads: Option<usize>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    prove_with_timeout(ivc_inputs, version, threads, PROVE_TIMEOUT).await
+}
+
+/// The body of [`prove`], with the timeout injected so tests can drive the timeout/kill path without a
+/// 5-minute wait (the same externalized-`Duration` shape as `bind_with_retry_inner`).
+async fn prove_with_timeout(
+    ivc_inputs: &[u8],
+    version: Option<&versions::AztecVersion>,
+    threads: Option<usize>,
+    timeout: Duration,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     // Take the lease BEFORE resolving the path, and hold it for this whole function — the window
     // being closed is between "cleanup decided this version was evictable" and "we executed it".
     // `_lease` is bound (not `_`) so it lives to the end of the scope rather than dropping instantly.
@@ -323,33 +345,109 @@ pub async fn prove(
     // (e.g., client disconnect, timeout). Without it, an orphaned bb would run to
     // completion wasting CPU while holding the prove semaphore.
     cmd.kill_on_drop(true);
-    let child = spawn_capturing_stderr(&mut cmd)?;
-    let output = match tokio::time::timeout(PROVE_TIMEOUT, child.wait_with_output()).await {
-        Ok(result) => result?,
+    let mut child = spawn_capturing_stderr(&mut cmd)?;
+    // B3 (F4): take the piped stderr and drain it CAP-and-CONTINUE, concurrently with waiting for exit.
+    // `wait_with_output()` used to buffer ALL of stderr into memory for up to the timeout; draining with
+    // a retain cap bounds the allocation while still emptying the pipe so bb never blocks writing to it.
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .expect("spawn_capturing_stderr pipes stderr");
+    let waited = tokio::time::timeout(timeout, async {
+        let (drained, status) =
+            tokio::join!(drain_capped(stderr_pipe, STDERR_RETAIN_CAP), child.wait());
+        status.map(|s| (s, drained.0, drained.1))
+    })
+    .await;
+
+    let (status, stderr_retained, stderr_total) = match waited {
+        Ok(Ok(triple)) => triple,
+        Ok(Err(e)) => return Err(Box::new(e)),
         Err(_) => {
-            tracing::error!("bb prove timed out after {:?}", PROVE_TIMEOUT);
+            // Timeout: the outer future is being dropped, so `kill_on_drop` fires on `child`.
+            tracing::error!("bb prove timed out after {:?}", timeout);
             return Err("bb prove timed out after 5 minutes".into());
         }
     };
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&stderr_retained);
     if !stderr.is_empty() {
-        tracing::warn!("bb stderr:\n{}", truncate_stderr(&stderr));
+        tracing::warn!(
+            stderr_total_bytes = stderr_total,
+            "bb stderr:\n{}",
+            truncate_stderr(&stderr)
+        );
     }
 
-    if !output.status.success() {
+    if !status.success() {
         // Log full stderr server-side, but return only a generic error to HTTP clients
         // to avoid leaking bb internals (file paths, witness data) to the browser.
-        tracing::error!(exit_code = %output.status, "bb prove failed");
-        return Err(format!("bb prove failed (exit {})", output.status).into());
+        tracing::error!(exit_code = %status, "bb prove failed");
+        return Err(format!("bb prove failed (exit {status})").into());
     }
 
+    // B3 (F5): validate the proof output before trusting it. Exit-code success was the ONLY gate, so an
+    // empty or truncated `proof` file produced a "successful" response (a 0-byte proof → a 4-byte
+    // header-only body; a non-32-aligned file → silently floor-divided). Validate the size on disk
+    // BEFORE reading (the read is otherwise unbounded); the file is in our own temp dir and bb has
+    // exited, so the on-disk length equals what we then read.
     let proof_path = output_dir.join("proof");
+    let proof_len = std::fs::metadata(&proof_path)?.len();
+    validate_proof_len(proof_len)?;
     let raw_proof = std::fs::read(&proof_path)?;
 
     tracing::debug!(proof_bytes = raw_proof.len(), "bb prove completed");
 
     Ok(prepend_field_count_header(&raw_proof))
+}
+
+/// B3 (F5): a bb proof file must be non-empty, within [`MAX_PROOF_BYTES`], and a whole number of 32-byte
+/// field elements. All three checks are on the byte length alone, so they run against the on-disk size
+/// before the file is read into memory. Pure, so every rejection is unit-testable.
+fn validate_proof_len(len: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if len == 0 {
+        return Err("bb reported success but produced an empty proof file".into());
+    }
+    if len > MAX_PROOF_BYTES {
+        return Err(format!(
+            "bb proof file is {len} bytes, exceeding the {MAX_PROOF_BYTES}-byte cap"
+        )
+        .into());
+    }
+    if len % 32 != 0 {
+        return Err(
+            format!("bb proof is not a whole number of 32-byte fields ({len} bytes)").into(),
+        );
+    }
+    Ok(())
+}
+
+/// B3 (F4): read `reader` to EOF, RETAINING at most `cap` bytes but continuing to drain the rest, and
+/// return `(retained, total_bytes_seen)`. Cap-and-continue (not fail-closed): stderr volume is a
+/// diagnostic, not an integrity signal, so aborting a valid proof over a chatty bb would be a
+/// self-inflicted DoS — but we must keep emptying the pipe so bb never blocks on a full buffer.
+async fn drain_capped<R>(mut reader: R, cap: usize) -> (Vec<u8>, u64)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut retained: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                total = total.saturating_add(n as u64);
+                if retained.len() < cap {
+                    let room = cap - retained.len();
+                    retained.extend_from_slice(&buf[..room.min(n)]);
+                }
+            }
+            Err(_) => break, // read error — stop draining, return what we have
+        }
+    }
+    (retained, total)
 }
 
 /// Prepend a 4-byte big-endian uint32 field count header.
@@ -686,5 +784,137 @@ mod tests {
             reap_prove_dirs_older_than(&missing, Duration::from_secs(1)),
             0
         );
+    }
+
+    // ── B3 (F4): capped stderr drain ──
+
+    #[tokio::test]
+    async fn drain_capped_retains_at_most_cap_and_counts_the_full_total() {
+        // 1 MiB of input, 64-byte retain cap: we must KEEP only 64 bytes but COUNT all 1 MiB (proving it
+        // drained to EOF rather than stopping at the cap). Reverting the `retained.len() < cap` guard so
+        // it accumulates everything makes `retained.len()` 1 MiB and fails the cap assertion.
+        let data = vec![b'x'; 1024 * 1024];
+        let (retained, total) = drain_capped(data.as_slice(), 64).await;
+        assert_eq!(retained.len(), 64, "must retain at most the cap");
+        assert_eq!(total, 1024 * 1024, "must still count every byte to EOF");
+        assert!(retained.iter().all(|&b| b == b'x'));
+    }
+
+    #[tokio::test]
+    async fn drain_capped_handles_input_smaller_than_cap() {
+        let (retained, total) = drain_capped(b"hello".as_slice(), 64).await;
+        assert_eq!(retained, b"hello");
+        assert_eq!(total, 5);
+    }
+
+    // ── B3 (F5): proof-output validation ──
+
+    #[test]
+    fn validate_proof_len_accepts_only_nonempty_capped_field_aligned() {
+        // The security property: exit-code success is no longer the only gate. Reverting any arm of
+        // `validate_proof_len` lets a bad proof through and fails one of these.
+        assert!(validate_proof_len(32).is_ok());
+        assert!(validate_proof_len(32 * 40).is_ok());
+        assert!(validate_proof_len(0).is_err(), "empty must be rejected");
+        assert!(
+            validate_proof_len(5).is_err(),
+            "non-32-aligned must be rejected"
+        );
+        assert!(validate_proof_len(31).is_err());
+        assert!(
+            validate_proof_len(MAX_PROOF_BYTES + 32).is_err(),
+            "oversized must be rejected"
+        );
+    }
+
+    // ── B3 (F4/F5): end-to-end through prove() with a fake bb ──
+
+    /// Write an executable fake `bb` at `dir/fake-bb` whose body is `script` (a `/bin/sh` program that
+    /// receives bb's real argv, incl. `-o <output_dir>`), and point `BB_BINARY_PATH` at it. Returns an
+    /// `EnvGuard` that clears the var on drop. Unix-only (shell script); the prove path is POSIX anyway.
+    #[cfg(unix)]
+    fn install_fake_bb(dir: &Path, script: &str) -> EnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-bb");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("BB_BINARY_PATH", &path);
+        EnvGuard
+    }
+
+    /// Clears `BB_BINARY_PATH` on drop so a panicking test can't leak it into a sibling (`#[serial]`).
+    #[cfg(unix)]
+    struct EnvGuard;
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("BB_BINARY_PATH");
+        }
+    }
+
+    /// Extract `-o <dir>` from bb's argv, portably, for the fake scripts below.
+    #[cfg(unix)]
+    const FIND_OUTDIR: &str =
+        r#"prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn prove_rejects_an_empty_proof_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = install_fake_bb(dir.path(), &format!("{FIND_OUTDIR}\n: > \"$out/proof\""));
+        let err = prove(b"witness", None, None)
+            .await
+            .expect_err("an empty proof must be rejected");
+        assert!(err.to_string().contains("empty proof"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn prove_rejects_a_non_field_aligned_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        // 5 bytes → not a whole number of 32-byte fields.
+        let _guard = install_fake_bb(
+            dir.path(),
+            &format!("{FIND_OUTDIR}\nprintf 'xxxxx' > \"$out/proof\""),
+        );
+        let err = prove(b"witness", None, None)
+            .await
+            .expect_err("a misaligned proof must be rejected");
+        assert!(err.to_string().contains("32-byte fields"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn prove_succeeds_with_a_valid_proof_despite_chatty_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        // ~600 KiB of stderr (well over the 64 KiB retain cap) plus a valid 32-byte proof. Proves the
+        // capped drain neither deadlocks (pipe stays emptied) nor rejects a good proof.
+        let _guard = install_fake_bb(
+            dir.path(),
+            &format!(
+                "{FIND_OUTDIR}\ni=0; while [ $i -lt 10000 ]; do echo 'noise noise noise noise noise noise' >&2; i=$((i+1)); done\nprintf '%032d' 0 > \"$out/proof\""
+            ),
+        );
+        let proof = prove(b"witness", None, None)
+            .await
+            .expect("a valid proof must succeed even with heavy stderr");
+        // 4-byte header (field_count = 32/32 = 1) + 32-byte proof.
+        assert_eq!(proof.len(), 4 + 32);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn prove_times_out_and_errs_when_bb_hangs() {
+        let dir = tempfile::tempdir().unwrap();
+        // A bb that sleeps far past the injected timeout and never writes a proof.
+        let _guard = install_fake_bb(dir.path(), "sleep 30");
+        let err = prove_with_timeout(b"witness", None, None, Duration::from_millis(150))
+            .await
+            .expect_err("a hung bb must time out");
+        assert!(err.to_string().contains("timed out"), "got: {err}");
     }
 }
