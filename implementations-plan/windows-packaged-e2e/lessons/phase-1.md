@@ -1,5 +1,22 @@
 # Phase 1 — lessons + codex loop log
 
+## OUTCOME (2026-08-18): uninstall leg SHIPPED; composed proof resolved as (C), a manual check
+
+The owner chose **(C)**. The Windows composed-proof leg is deliberately not built; the proof lives as an
+executable manual pre-GA runbook in `packages/accelerator/README.md` ("Windows composed proof"), scoped to
+releases touching Windows / trust / certs / the HTTPS listener.
+
+Worth recording *why the decision was cheap to make*: by the time it was asked, nothing about it was
+speculative. The infeasibility was measured five ways rather than cited (below), the competing option (A) had
+been narrowed from "widen the predicate" — which would have corrupted the two callers that verify the app's
+own write — to "add a launch-gate-only predicate", and (B)'s hidden costs (runner service identity, the
+uninstall leg deleting the very trust it depends on, 824-day CA expiry landing on an interactive rotation
+path) were known. The decision took one word because the analysis was already done.
+
+The residual risk is stated in `plan.md` rather than buried: Windows is now the one platform where the
+composed path is never machine-verified, and the mitigation is a runbook precise enough to execute — with an
+explicit warning not to accept the `proved` phase as the witness, since WASM fallback emits it too.
+
 ## Codex round 1 (design, before implementation)
 
 Session `01a0143a`-successor, prompt: "can a Windows composed-proof E2E leg work on a hosted runner?"

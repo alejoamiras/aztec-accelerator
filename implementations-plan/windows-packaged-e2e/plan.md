@@ -15,7 +15,34 @@
 | Validation layers | Local `bun run test` + `bun run lint:actions`; live proof via `2.0.1-rc.N` `mode=publish` dispatches (rc tags are cheap, append-only, fix-forward). |
 | Escalate vs decide | Any change to production trust semantics escalates to the owner. Harness-only choices are mine. |
 
-## The fork (Phase 2 is gated on this)
+## DECISION: (C) — owner, 2026-08-18
+
+**The Windows composed-proof leg is NOT built, by decision.** The uninstall leg ships; the composed proof
+becomes a documented manual pre-GA check
+([`packages/accelerator/README.md` → "Windows composed proof"](../../packages/accelerator/README.md)).
+
+This is a scope decision, not a deferral to be quietly reopened. The reasoning it rests on is measured, not
+assumed: the shipped app serves HTTPS only when its own predicate (`certutil -user -store Root <serial>`)
+passes, and that physical store is populated ONLY by the interactive consent dialog — five headless seeding
+mechanisms were measured dead on hosted runners (see lessons). Automating it therefore required either a
+production trust change (A) or dedicated pre-trusted runner infrastructure (B); (C) accepts a human step
+instead of paying either cost for one CI leg.
+
+**What (C) costs, stated plainly** so it can be revisited on evidence rather than vibes:
+- Windows is the one platform where "packed SDK → real browser → installed app → native bb proof over HTTPS"
+  is never machine-verified. A regression in that specific path can reach users if the manual check is
+  skipped.
+- The mitigation is that the check is written to be executable and unambiguous (exact witnesses, and an
+  explicit warning not to accept the `proved` phase, which WASM fallback also emits), and is scoped to
+  releases touching Windows / trust / certs / the HTTPS listener rather than every release.
+- Everything else on Windows IS machine-verified: WebDriver E2E, updater smokes (real 1.0.7 N-1, positive and
+  negative), the NSIS hook harness, and now the full-uninstall leg.
+
+Revisit if the manual check ever catches a real regression (evidence the gap matters), or if (A) becomes
+attractive for its own sake — today's predicate is a false negative for MDM/enterprise installs where the CA
+is deployed machine-wide.
+
+## The fork (superseded by the decision above; kept for the reasoning)
 
 Recon §0 is the headline: on Windows the SHIPPED app launch-gates HTTPS on its own trust predicate
 (`main.rs:121-129` -> `trust/windows.rs:155-177`), which queries **CurrentUser `Root`** — a store that cannot
@@ -104,7 +131,9 @@ Windows is the only OS with a native uninstall hook whose ownership logic has ne
 - **P1 — DONE + PROVEN**: `uninstall-windows` leg. Green three times on a hosted runner against the REAL
   published 2.0.0 installer (as first written, after the codex round-2 hardening, and after round 3).
   Absorbs backlog #61. Contract-pinned and mutation-proven; write-isolation now 1 write / 5 reads.
-- **P2 — BLOCKED (owner), infeasibility now fully measured**: `packaged-e2e-windows` composed-proof leg.
+- **P2 — CLOSED as (C), not built**: `packaged-e2e-windows` composed-proof leg. The owner chose the
+  documented manual pre-GA check over a production trust change or dedicated runner infrastructure. The
+  measured infeasibility that forced the decision:
   BOTH claims behind the blocker are first-hand measurements against the shipped 2.0.0 binary on the CI
   runner image, not inherited from prior art:
   1. `certutil -user -store Root` does NOT see a LocalMachine-imported anchor (though

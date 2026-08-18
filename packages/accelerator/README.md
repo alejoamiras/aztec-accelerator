@@ -406,6 +406,44 @@ bun run --cwd packages/accelerator test:e2e:webdriver
 
 These run on both macOS and Linux in CI as a PR gate (`accelerator.yml`) and pre-release gate (`release-accelerator.yml`).
 
+### Windows composed proof — MANUAL pre-GA check
+
+Linux and macOS prove the composed path in CI (`_e2e-packaged.yml`: packed SDK → real browser → installed app
+→ native `bb` proof over HTTPS). **Windows cannot**, and the reason is a property of the OS, not a gap in the
+harness: the app only serves HTTPS when its own trust predicate passes
+(`trust/windows.rs` → `certutil -user -store Root <serial>`), and that store is populated **only** by the
+interactive root-CA consent dialog. Five seeding mechanisms were measured on hosted runners and all fail —
+`certutil -addstore` and .NET `X509Store.Add` hang on the dialog; `Import-Certificate`, a LocalMachine import,
+and a GroupPolicy-store write all *succeed* yet stay invisible to that query. Everything else on Windows is
+verified: Chromium installs, launches, and reaches the app over loopback. So this one check is done by hand.
+
+**Run it before GA on any release that touches Windows, trust, certs, or the HTTPS listener.**
+
+1. On a real Windows machine or VM, install the release's `Aztec-Accelerator-<version>-Windows-x86_64-setup.exe`.
+2. Launch it and complete onboarding with **Encrypted Connection** enabled. Windows raises the root-CA
+   "Security Warning" dialog — click **Yes**. *(This click is the entire reason the check is manual.)*
+3. Confirm the anchor landed:
+   ```powershell
+   certutil -user -store Root "Aztec Accelerator Local CA"
+   ```
+4. Confirm the HTTPS listener came up (no `-SkipCertificateCheck` — a 200 here means Windows itself
+   chain-builds to the anchor):
+   ```powershell
+   Invoke-RestMethod https://127.0.0.1:59834/health
+   ```
+5. Open the playground at `/?forceProofs=true&httpsOnly=true` (production or `bun run --cwd packages/playground dev`)
+   and run a deploy. With DevTools open, require **both** witnesses — the same ones the automated legs assert:
+   - a **200** response for `https://127.0.0.1:59834/prove` carrying an **`x-prove-duration-ms`** header (the
+     server sets it only after a real `bb::prove`);
+   - `window.__ACCEL_PHASES__` contains **`receive`** and does **not** contain `fallback` or `denied`.
+
+   Do not accept `proved` as the witness: WASM fallback emits that phase too, so it cannot distinguish a
+   native proof from a local one.
+6. Record pass/fail in the release notes for that version.
+
+If step 4 fails but step 3 passed, the app found the anchor and still refused — capture `%LOCALAPPDATA%\aztec-accelerator\logs\`
+and treat it as a product bug, not a setup problem.
+
 ### Cross-version download test
 Tests the full bb binary download pipeline (HTTP → SHA-256 → extract → cache). Gated behind `ACCELERATOR_DOWNLOAD_TEST=1`:
 ```bash

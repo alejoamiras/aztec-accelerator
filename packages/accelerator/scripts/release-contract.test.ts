@@ -257,7 +257,10 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
     const reads = (PACKAGED.match(/^ {6}contents: read\b/gm) || []).length;
     expect(writes, "exactly one contents:write perm — the staging job only").toBe(1);
     // linux composed / macos composed / linux upgrade-migration / linux uninstall / windows uninstall.
-    // Goes to 6 when the windows composed-proof leg lands.
+    // Five, not six: there is deliberately NO windows composed-proof leg. The app only serves HTTPS when its
+    // own trust predicate passes, and that store is populated only by the interactive root-CA consent dialog
+    // — five headless seeding mechanisms were measured dead on hosted runners. That proof is a documented
+    // manual pre-GA check instead (packages/accelerator/README.md, "Windows composed proof").
     expect(reads, "every code-executing E2E job stays read-only").toBe(5);
   });
 
