@@ -39,8 +39,10 @@ if (-not $setup) {
 }
 
 # The installer is unsigned (B1 Authenticode is still deferred); a Defender quarantine mid-run would
-# masquerade as a product failure. Scoped to the per-user install target on an ephemeral runner.
-Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA" -ErrorAction SilentlyContinue
+# masquerade as a product failure. Scoped to the EXACT install directory (not all of %LOCALAPPDATA%) — the
+# path need not exist yet for an exclusion to be registered.
+$installRoot = Join-Path $env:LOCALAPPDATA "Aztec Accelerator"
+Add-MpPreference -ExclusionPath $installRoot -ErrorAction SilentlyContinue
 
 # NSIS /S is ASYNC: -PassThru + WaitForExit so a (never-expected) interactive prompt fails fast here instead
 # of hanging the job to its timeout.
@@ -51,6 +53,7 @@ if (-not $inst.WaitForExit(180000)) {
   Write-Host "::error::installer did not finish within 180s — an interactive NSIS prompt would hang the runner"
   exit 1
 }
+if ($inst.ExitCode -ne 0) { Write-Host "::error::installer exited $($inst.ExitCode)"; exit 1 }
 
 # Address the app BY NAME under the per-user install root (installMode currentUser). Never a bare recursive
 # first-match: the install dir also carries the bundled `bb` sidecar.
@@ -113,18 +116,36 @@ if ($armedRun -cne $expectedRun) {
   Write-Host "::error::precondition: the product did not heal the Run value to its own quoted path (got '$armedRun')"
   exit 1
 }
-schtasks /Query /TN $taskName 2>$null | Out-Null
+$taskXml = schtasks /Query /TN $taskName /XML 2>$null
 if ($LASTEXITCODE -ne 0) {
   Write-Host "::error::precondition: the product did not arm the crash-recovery task (intent was seeded on)"
   exit 1
 }
-Write-Host "armed by the product: healed Run value + crash-recovery task + certs on disk"
+# A task merely EXISTING under that name proves little (a foreign task could hold the name). Bind the
+# precondition to OUR installed exe, so the removal assertion below is about the task we actually armed.
+if (($taskXml -join "`n") -notlike "*$($exe.FullName)*") {
+  Write-Host "::error::precondition: the crash-recovery task does not reference the installed exe"
+  Write-Host ($taskXml -join "`n")
+  exit 1
+}
+# Byte-exact config snapshot: "still exists" would also pass if uninstall truncated or rewrote it.
+$configHashBefore = (Get-FileHash -Path $configFile -Algorithm SHA256).Hash
+Write-Host "armed by the product: healed Run value + crash-recovery task (bound to our exe) + certs on disk"
 
 # ── The real uninstaller, silently, with the app STILL RUNNING (what a user does from Add/Remove Programs).
 #    PREUNINSTALL runs `--prepare-uninstall` (ownership-checked teardown); POSTUNINSTALL runs the belt.
 #    `$EXEDIR != $INSTDIR` holds because Windows copies uninstall.exe to a temp dir for a real uninstall. ──
+# "Uninstalled while running" is the whole point of this leg, so prove the app is ALIVE right now — health
+# was sampled earlier, and an app that crashed in between would let a broken running-app teardown pass.
+$proc.Refresh()
+if ($proc.HasExited) {
+  Write-Host "::error::precondition: the app exited before the uninstall (nothing proves running-app teardown)"
+  exit 1
+}
+
 $un = Start-Process -FilePath $uninstaller -ArgumentList "/S" -PassThru
 if (-not $un.WaitForExit(180000)) { $un.Kill(); Write-Host "::error::uninstaller did not finish within 180s"; exit 1 }
+if ($un.ExitCode -ne 0) { Write-Host "::error::uninstaller exited $($un.ExitCode)"; exit 1 }
 
 # NSIS returns before its temp-dir copy finishes removing $INSTDIR; give it a bounded settle.
 $gone = $false
@@ -137,25 +158,46 @@ do {
 # ── POSTCONDITIONS ──
 $failures = @()
 if (-not $gone) { $failures += "install dir still present: $installDir" }
-$runAfter = (Get-ItemProperty -Path $runKey -Name $runValueName -EA SilentlyContinue).$runValueName
-if ($null -ne $runAfter) { $failures += "autostart Run value survived: '$runAfter'" }
-schtasks /Query /TN $taskName 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) { $failures += "crash-recovery scheduled task survived" }
-if (Test-Path $certsDir) { $failures += "certs dir survived: $certsDir" }
-# Retention is as load-bearing as removal: an uninstall that eats the user's config is a data-loss bug.
-if (-not (Test-Path $configFile)) { $failures += "config.json was deleted (documented retention says it is never touched)" }
 
-# The PT1M crash-recovery trigger is exactly why "no orphan" needs a wait, not an instant check: a surviving
-# task would relaunch the app within ~1 minute of it going away.
-Start-Sleep -Seconds 75
-$alive = Get-Process -Name "AztecAccelerator" -EA SilentlyContinue
-if ($alive) { $failures += "an AztecAccelerator process is running 75s after uninstall (resurrected by a surviving task?)" }
-if (Test-Path $installDir) { $failures += "install dir reappeared after the crash-recovery window" }
+# Run-value absence must not be FAIL-OPEN: `-EA SilentlyContinue` maps an unreadable-but-SURVIVING value to
+# $null, which would pass. Read the key and enumerate value NAMES instead, so a real read error throws.
+if (Test-Path $runKey) {
+  if ((Get-Item -Path $runKey).GetValueNames() -contains $runValueName) {
+    $survived = (Get-ItemProperty -Path $runKey -Name $runValueName).$runValueName
+    $failures += "autostart Run value survived: '$survived'"
+  }
+}
+
+# Same fail-open trap on the task: treating ANY non-zero as "absent" would pass on access-denied or a
+# scheduler fault with the task still armed. Exit code 1 is the "does not exist" answer; anything else
+# non-zero is an ERROR, not an absence — the product's own trust/recovery code draws the same distinction.
+schtasks /Query /TN $taskName 2>$null | Out-Null
+$queryCode = $LASTEXITCODE
+if ($queryCode -eq 0) { $failures += "crash-recovery scheduled task survived" }
+elseif ($queryCode -ne 1) { $failures += "schtasks /Query failed with $queryCode - cannot conclude the task is gone" }
+
+if (Test-Path $certsDir) { $failures += "certs dir survived: $certsDir" }
+
+# Retention is as load-bearing as removal, and EXISTENCE is not retention: a truncated or rewritten config
+# would sail through a Test-Path. Compare the bytes.
+if (-not (Test-Path $configFile)) {
+  $failures += "config.json was deleted (documented retention says it is never touched)"
+} else {
+  $configHashAfter = (Get-FileHash -Path $configFile -Algorithm SHA256).Hash
+  if ($configHashAfter -ne $configHashBefore) { $failures += "config.json was MODIFIED by the uninstall" }
+}
+
+# The app was provably alive when the uninstaller started, so THAT process must now be gone.
+# A "did anything come back?" sleep is deliberately absent: a missed scheduled start can be delayed by
+# minutes, so no bounded wait proves the absence of a relaunch — it would look like evidence without being
+# any. The relaunch trigger is proven dead by asserting the task itself is gone, above.
+$proc.Refresh()
+if (-not $proc.HasExited) { $failures += "the running app survived the uninstall (pid $($proc.Id))" }
 
 if ($failures.Count -gt 0) {
   foreach ($f in $failures) { Write-Host "::error::$f" }
   Write-Host "::error::uninstall left $($failures.Count) artifact(s) behind"
   exit 1
 }
-Write-Host "OK: real NSIS uninstall removed install dir + autostart + crash-recovery task + certs, kept config, and nothing came back"
+Write-Host "OK: real NSIS uninstall removed install dir + autostart + crash-recovery task + certs, kept config byte-identical, and stopped the running app"
 exit 0

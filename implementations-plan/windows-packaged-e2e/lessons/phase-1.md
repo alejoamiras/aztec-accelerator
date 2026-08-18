@@ -72,6 +72,38 @@ keeps HTTPS closed with an LM-only seed, confirmed end-to-end (`:59834` never ca
 proved the negative control cheaply, and — usefully — that the shipped 2.0.0 app installs, runs, and serves
 `/health` on a hosted Windows runner with no virtual display, which de-risks the rest of the Windows work.
 
+## Codex round 2 (after the uninstall leg's first green run)
+
+Session `01a0152c`. Verdict: *"Not yet trustworthy as a proof — likely product success, but several
+assertions can still false-green."* Exactly the right finding for a leg whose entire value is that it can
+FAIL when the product is broken. Folded all six:
+
+| # | Finding | Fix |
+|---|---|---|
+| High | **Task absence was fail-open** — any non-zero `schtasks /Query` counted as "gone", so access-denied or a scheduler fault passed with the task intact | exit **1** is the only "does not exist" answer; every other non-zero is now an explicit error. (The product's own code draws the same distinction.) |
+| High | **Task precondition proved only a NAME existed**, not that it was ours | query `/XML` and require it to reference the installed exe |
+| High | **"Uninstalled while running" was unproven** — health was sampled earlier, so an app that crashed in between would let a broken running-app teardown pass | assert `-not $proc.HasExited` immediately before the uninstall, and assert THAT process is gone after |
+| Medium | installer/uninstaller **exit codes ignored** — either can fail after enough side effects for the filesystem assertions to pass | check `.ExitCode` after both |
+| Medium | **config "survival" permitted corruption** — `Test-Path` passes on a truncated or rewritten file | SHA-256 before/after |
+| Medium | **Run-value absence was fail-open** — `-EA SilentlyContinue` maps a read failure to `$null` | enumerate value names via `Get-Item`, so a real error throws |
+
+**Deleted on codex's advice** (it was evidence-shaped, not evidence): the `Start-Sleep 75` + "did anything
+come back?" check, and its contract-test pin. A missed scheduled start can be delayed by minutes, so no
+bounded wait proves the absence of a relaunch. The relaunch trigger is proven dead by asserting the TASK is
+gone — which is now a fail-closed assertion. Runtime drops by 75s as a side effect.
+
+**Rejected, with reasons**
+- **Foreign-ownership case** (seed a Run value pointing at another exe, expect PRESERVED). Codex said no and
+  I agree: it doubles this leg's runtime, and the branch is already covered by the ownership classifier's
+  unit tests, the real-OS `uninstall_ownership` test, and the Wine execution of the native foreign belt.
+  This leg's unique signal is the composed ConfirmedOurs teardown.
+- **Deleting the 20s heal poll** (codex: reconciliation completes synchronously before the server binds).
+  Kept — `accelerator.yml:770-773` polls for exactly this value "to be robust" despite making the same
+  ordering argument, and a poll that normally exits on its first iteration costs nothing. Not worth
+  contradicting working prior art to save zero seconds.
+
+**Also folded**: Defender exclusion narrowed from all of `%LOCALAPPDATA%` to the exact install directory.
+
 ## Windows-CI gotchas hit while building the uninstall leg
 
 1. **The release pipeline refuses a non-main ref** — `release-accelerator.yml`'s `Assert main ref` step

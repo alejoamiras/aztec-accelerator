@@ -286,9 +286,21 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
     expect(UNINSTALL_WIN).toContain(
       "precondition: the product did not arm the crash-recovery task",
     );
-    // Retention is asserted alongside removal — an uninstall that eats the user's config is data loss.
+    // Retention is asserted alongside removal, BY BYTES — "still exists" would also pass if the uninstall
+    // truncated or rewrote the user's config (codex r2).
     expect(UNINSTALL_WIN).toContain("config.json was deleted");
-    // The no-resurrection check must outlast the crash-recovery PT1M relaunch trigger.
-    expect(UNINSTALL_WIN).toMatch(/Start-Sleep -Seconds 75/);
+    expect(UNINSTALL_WIN).toContain("config.json was MODIFIED by the uninstall");
+    // Absence oracles must be FAIL-CLOSED. `schtasks /Query` exit 1 is "does not exist"; any other non-zero
+    // is an error (access denied, scheduler fault) and must NOT be read as "gone". Likewise the Run value is
+    // checked by enumerating value names, not via -EA SilentlyContinue (which maps a read failure to $null).
+    // [mut: accept any non-zero as absent, or go back to the SilentlyContinue read → these fail]
+    expect(UNINSTALL_WIN).toContain("cannot conclude the task is gone");
+    expect(UNINSTALL_WIN).toMatch(/GetValueNames\(\) -contains \$runValueName/);
+    // "Uninstalled while running" is the leg's whole point, so the app must be provably alive at that moment
+    // and that exact process must be gone after.
+    expect(UNINSTALL_WIN).toContain(
+      "precondition: the app exited before the uninstall (nothing proves running-app teardown)",
+    );
+    expect(UNINSTALL_WIN).toContain("the running app survived the uninstall");
   });
 });
