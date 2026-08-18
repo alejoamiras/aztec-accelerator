@@ -1,0 +1,113 @@
+# Windows packaged-E2E legs — composed proof + full uninstall
+
+**Tier**: `/blueprint light` (bounded surface: two CI jobs in one reusable workflow + one contract-test count).
+**Branch/worktree**: `windows-packaged-e2e` off `main` @ `b98352b` (source already at `2.0.1-rc.1`).
+**Recon**: [recon.md](recon.md) — read it first; every design choice below cites it.
+
+## Phase 0 answers (derived from the goal, not re-asked)
+
+| Question | Answer |
+|---|---|
+| Success criterion | Both Windows legs green on a REAL draft's installers in a full rc dispatch, alongside the existing 4 legs. |
+| In scope | "Packaged E2E (windows)" composed proof; "Full uninstall (windows)" (absorbs backlog #61). |
+| Out of scope | The Windows stateful upgrade + config-migration leg. Updater smokes already cover Windows update mechanics against the real 1.0.7 N-1 (positive+negative); migration code is platform-shared and E2E'd on Linux; Windows deltas (DACL, paths, legacy-exe prune) are unit-tested. |
+| Quality bar | Production release gate — these legs become release-blocking the moment they merge (recon §2). |
+| Validation layers | Local `bun run test` + `bun run lint:actions`; live proof via `2.0.1-rc.N` `mode=publish` dispatches (rc tags are cheap, append-only, fix-forward). |
+| Escalate vs decide | Any change to production trust semantics escalates to the owner. Harness-only choices are mine. |
+
+## The fork (Phase 2 is gated on this)
+
+Recon §0 is the headline: on Windows the SHIPPED app launch-gates HTTPS on its own trust predicate
+(`main.rs:121-129` -> `trust/windows.rs:155-177`), which queries **CurrentUser `Root`** — a store that cannot
+be written without the OS consent dialog on a hosted runner (`tests/trust_windows.rs:1-9`). The goal requires
+testing the shipped artifact, which rules out the previously-recommended test-only `e2e-trust` cargo feature
+(a specially-featured build is not what users install). This exact wall is already recorded as an
+owner-blocked decision (`v2-release-train/b4-impl.md:215-216`).
+
+Candidate resolutions, to be decided with codex's design round + the owner:
+
+- **(A) Extend the production predicate** to also accept the anchor in `LocalMachine\Root`. CI can seed that
+  store silently today (`updater-smoke-windows.ps1:156-163`, runner is admin) and Chromium chains to it, so
+  the proof stays real. Cost: a security-sensitive widening of what the app accepts as trusted.
+- **(B) Presence-satisfying seed + browser SPKI pin** — IF `certutil -user -store Root` enumerates a
+  raw-written store entry (the app's gate is a PRESENCE query, not a chain build), pair it with Chromium's
+  `--ignore-certificate-errors-spki-list=<one key>`. Zero production change, real TLS, one pinned key.
+  Hinges on two empirical facts to verify on a runner.
+- **(C) Descope the composed proof to a documented manual/self-hosted check** and ship only the uninstall leg.
+  The goal forbids silently choosing this — it is an explicit owner call.
+
+**Phase 1 does not depend on this.** The uninstall leg needs no HTTPS and no chain trust: removal is
+delete-only and headless-safe (`trust/windows.rs:189-209`, `hooks.nsi:388`).
+
+## Architecture & Implementation (light tier)
+
+**Shape**: two additional STANDALONE named jobs in `_e2e-packaged.yml` (never a `strategy: matrix` — matrix
+interpolation renames the check names branch protection may pin, recon §7), each `needs: stage-installers`,
+each `permissions: contents: read`, unconditional at job level with the `release_tag != ''` gate applied
+per-step (existing convention). No caller edits: `packaged-e2e-on-draft` gates on the whole called workflow's
+result, so the new jobs fold into `tag`/`finalize` automatically — and become release-blocking (recon §2).
+
+**Reused as-is** (recon §1): `.github/scripts/packaged-e2e-verify-manifest.sh` and `packaged-e2e-swap-sdk.sh`
+are OS-agnostic (awk/sha256sum/tar/npm all present in Git Bash) — no OS branch, no new script for them.
+
+**Changed once, shared**: `stage-installers` release-asset mode gained `--pattern '*Windows-x86_64-setup.exe'`
+(build-artifact mode's `accelerator-*x86_64` already matched `accelerator-windows-x86_64` — verified against
+`release-accelerator.yml:746,880,898`).
+
+**Windows-specific deltas** (no Linux/macOS analogue, recon §5):
+1. Defender exclusion BEFORE touching the unsigned installer (`Add-MpPreference -ExclusionPath`).
+2. `Start-Process ... "/S" -PassThru` + `WaitForExit(timeout)` + `Kill()` — NSIS `/S` is async; a non-silent
+   prompt would otherwise hang to the job timeout.
+3. Binary located under `%LOCALAPPDATA%\Aztec Accelerator\` (no PATH registration) — address it by name, the
+   `b823374` lesson (a bare `find|head -1` grabs the bundled `bb` sidecar).
+4. `AZTEC_ACCEL_NO_UPDATE=1` so the launched app never polls the prod feed.
+5. **Disarm crash-recovery BEFORE any forced kill** — else Task Scheduler treats it as a crash and relaunches
+   mid-assertion (`accelerator.yml:723-729`).
+6. Cleanup mirrors the macOS hardening: `if: always()` + `timeout-minutes` + `continue-on-error` (a hung
+   trust/cleanup call once burned a PASSING run to the job timeout, `def1cbe`).
+7. Shell split: bash (Git Bash) for portable glue; `pwsh` ONLY for cert-store / registry / schtasks steps,
+   with a trailing `exit 0` where a native tool leaves a stale non-zero code.
+8. No xvfb/tray/dbus needed — WebView2 runs unattended on the Windows runner session (`accelerator.yml:635-790`).
+
+**File-level change map**
+- `.github/workflows/_e2e-packaged.yml` — +Windows download pattern (done); +`uninstall-windows` job (P1);
+  +`packaged-e2e-windows` job (P2).
+- `packages/accelerator/scripts/release-contract.test.ts` — write-isolation reads `4 -> 6` (only after BOTH
+  jobs land; `-> 5` in the interim if P2 is deferred), + name/behaviour pins, mutation-proven.
+- `implementations-plan/windows-packaged-e2e/` — this plan, `recon.md`, `lessons/`.
+
+**Trade-off taken**: assertion depth. The linux uninstall leg deliberately asserts only "flow succeeded +
+binary gone", pushing per-store detail to unit tests (`_e2e-packaged.yml:460-462`). The Windows leg asserts
+much deeper (Run value, scheduled task, install dir, processes, certs-dir removal vs config retention) —
+because that breadth is exactly the still-open #61 item (`v2-release-train/lessons/b5.md:100-105`) and because
+Windows is the only OS with a native uninstall hook whose ownership logic has never run end-to-end.
+
+## Security & Adversarial considerations
+
+- **Privilege isolation must not regress**: `stage-installers` stays the ONLY `contents: write`; both new jobs
+  execute downloaded installer code and therefore stay `contents: read`. The contract test's count guard is
+  what enforces this — updating it is part of the change, not an afterthought (recon §3).
+- **Trust predicate**: option (A) widens what the shipped app accepts as a trust anchor. Threat: anyone who
+  can write `LocalMachine\Root` (local admin / admin-level malware) could make the app serve HTTPS with an
+  anchor the user never approved. Counter-argument: an attacker with admin already owns the box AND browsers
+  already trust that anchor, so the app refusing is a false negative. This is precisely why it escalates.
+- **Uninstall ownership**: the leg must not "prove" removal by running as the only install — the foreign-owner
+  path (`uninstall.rs:157-163`, `ForeignOrUncertain` -> leave everything, exit 0) is the security-relevant
+  branch. Where cheap, assert the preserve-foreign case too (that is half of #61's scoped harness).
+- **Unsigned installer**: Defender exclusion is scoped to the install/staging paths only — never a blanket
+  real-time-protection disable.
+- **No new secrets, no new permissions, no network egress** beyond the existing staged-artifact download.
+
+## Phases
+
+- **P0** (done): recon + this plan + `stage-installers` Windows pattern.
+- **P1** (unblocked, in progress): `uninstall-windows` leg — real install, arm autostart/crash-recovery, real
+  `uninstall.exe /S`, broad assertions. Absorbs backlog #61.
+- **P2** (gated on the fork): `packaged-e2e-windows` composed-proof leg.
+- **P3**: contract-test counts + pins, mutation-proven.
+- **P4**: live `2.0.1-rc.N` validation until green; codex rounds until a round is clean; docs/lessons/index.
+
+## Codex loop log
+
+Rounds are logged in [lessons/phase-1.md](lessons/phase-1.md) — round, question, verdict, folded vs rejected
+(with the rejection rationale, since "reject over-engineering" is an explicit goal constraint).
