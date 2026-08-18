@@ -18,9 +18,19 @@ if [ ! -f "${ABS}" ]; then
 fi
 echo "Packed ${ABS}"
 
-# Install the tarball into the playground, overriding the workspace:* resolution for this run. A failure here
-# must abort the leg (never silently fall back to the workspace SDK — that would defeat the packed-SDK gate).
-bun add --cwd packages/playground "${ABS}"
-
-echo "Playground @alejoamiras/aztec-accelerator now resolved from the packed tarball:"
-grep -m1 "aztec-accelerator" packages/playground/package.json || true
+# Swap the packed tarball in for the workspace SDK. `bun add --cwd packages/playground "${ABS}"` LOOPS here:
+# bun re-resolves the workspace and the tarball collides with the same-named workspace member
+# (error: "@alejoamiras/aztec-accelerator@workspace:packages/sdk has a dependency loop"). The SDK resolves via
+# a ROOT node_modules symlink (node_modules/@alejoamiras/aztec-accelerator -> ../../packages/sdk); replace that
+# symlink IN PLACE with the EXTRACTED packed tarball, so the playground resolves the PUBLISHED dist with no bun
+# re-resolution. The SDK's @aztec/* deps still resolve from the hoisted root node_modules (exact-pinned, one
+# graph). A failure here aborts the leg — never silently fall back to the workspace SDK (that would defeat the
+# packed-SDK gate).
+DEST="node_modules/@alejoamiras/aztec-accelerator"
+rm -rf "${DEST}"
+mkdir -p "${DEST}"
+# npm-pack tarballs nest everything under package/; --strip-components=1 drops that prefix.
+tar -xzf "${ABS}" -C "${DEST}" --strip-components=1
+test -f "${DEST}/package.json" || { echo "::error::tarball extraction produced no ${DEST}/package.json"; exit 1; }
+echo "Playground @alejoamiras/aztec-accelerator now resolves to the packed tarball (version below):"
+grep -m1 '"version"' "${DEST}/package.json" || true

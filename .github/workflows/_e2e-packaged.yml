@@ -288,8 +288,11 @@ jobs:
           test -n "$APP" || { echo "::error::.app not found in DMG"; find /Volumes/AztecAccelerator -type f; exit 1; }
           cp -R "$APP" /Applications/
           hdiutil detach /Volumes/AztecAccelerator || true
-          BIN=$(find /Applications -maxdepth 3 -name AztecAccelerator -path '*/MacOS/*' | head -1)
-          test -n "$BIN" || { echo "::error::installed app binary not found under /Applications"; exit 1; }
+          # The .app binary lives at /Applications/<productName>.app/Contents/MacOS/<bin> — depth 4, so the
+          # old `-maxdepth 3` never reached it. Match by PATH (any executable under a .app's MacOS/), robust to
+          # the productName-vs-bin-name question.
+          BIN=$(find /Applications -maxdepth 5 -path '*.app/Contents/MacOS/*' -type f -perm -u+x | head -1)
+          test -n "$BIN" || { echo "::error::installed app binary not found under /Applications"; find /Applications -maxdepth 5 -path '*.app/Contents/MacOS/*'; exit 1; }
           echo "APP_BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Generate certs (headless bootstrap)
@@ -485,6 +488,10 @@ jobs:
           # Remove the package; the binary must be gone.
           PKG=$(dpkg-deb -f "$NEW_DEB" Package)
           sudo apt-get remove -y "$PKG"
+          # `command -v` consults bash's PATH hash, which cached AztecAccelerator's location from the
+          # post-install check above; after removal that hash is STALE and would falsely report the binary as
+          # still present. Clear it so the lookup re-checks the filesystem.
+          hash -r
           if command -v AztecAccelerator >/dev/null; then
             echo "::error::binary still present after package removal"; exit 1
           fi
