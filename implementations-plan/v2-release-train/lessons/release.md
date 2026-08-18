@@ -74,3 +74,23 @@ fails RED; one that landed despite a RED `promote` is confirmed GREEN. release-c
 **Prior blocker status.** Blocker 2 (E2E SHA-pin) folded earlier. Blocker 3 (finalize digest-read→publish
 window) — accepted B4 residual (privileged-writer, seconds-wide). Blocker 4 withdrawn. Blocker 5 (GitHub
 "Latest" stale) — intentional `--latest=false`; the signed S3 feed is the sole source of truth.
+
+## 2026-08-18 — GA COMPLETE: 2.0.0 promoted + SDK shipped
+
+After #463 merged: stable **2.0.0** published clean on the first dispatch (byte-identical to the soaked rc.2;
+`sign-update-feed` ran for the first time on a non-prerelease — signs `latest.json` with the production key —
+and passed). Release body augmented post-publish with a "What's New in 2.0.0" block (body-text edit only, no
+asset/tag change — allowed under append-only). **Promote**: ran a `dry_run` rehearsal first (pre-flight GREEN:
+published/non-draft/non-prerelease, exact 17-asset set, production Ed25519 verifier over the feed — zero prod
+effect), then the real `promote-only bump_source=false`. The failure-atomic flip + `always()`
+`verify-live-feed` both went GREEN first try; an independent curl of the live feed confirmed `version=2.0.0`,
+4 platforms, signatures present, asset URLs at the 2.0.0 release. **SDK**: published `5.0.1-revision.1` via
+`_publish-sdk.yml` DIRECTLY (dist_tag=testnet) — NOT `publish-testnet.yml`, to avoid its playground prod-deploy
+(AFK hard limit). SLSA provenance present; npm `latest` untouched at 5.0.1. Ran the tarball-consumer test
+locally first (packed real tarball resolves + typechecks + @aztec singleton). **Linux live smoke**: downloaded
+the real 2.0.0 AppImage from the public release URL — sha256 matched the release digest, valid AppImage type-2.
+
+**AFK discipline at the irreversible steps.** `bump_source=false` (true auto-merges a bump PR to `main`),
+`_publish-sdk.yml` direct (avoids the playground prod-deploy), npm `latest` NOT moved (not in the /goal).
+Held for the owner: source-version bump, playground deploy, Windows composed-HTTPS-proof leg, B1 Authenticode.
+Notified at each milestone (RC published / promoted / SDK published) per the brief.
