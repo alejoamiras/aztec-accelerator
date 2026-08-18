@@ -86,12 +86,28 @@ jobs:
           Record "predicate_before" (Predicate-Sees)
 
           # THE MEASUREMENT: seed the GroupPolicy physical store (HKCU, policy-sourced, no consent UI).
+          # Attempt 1 returned 0x80070002 (ERROR_FILE_NOT_FOUND) with nothing written, which reads as "the
+          # policy store key does not exist" rather than "policy stores are filtered" — so create the key
+          # first and retry before concluding anything about this path.
+          $gpRoot = "HKCU:\Software\Policies\Microsoft\SystemCertificates\Root"
+          New-Item -Path "$gpRoot\Certificates" -Force -EA SilentlyContinue | Out-Null
+          Record "gp_key_created" (Test-Path "$gpRoot\Certificates")
+
           $p = Start-Process -FilePath "C:\Windows\System32\certutil.exe" `
                  -ArgumentList "-user", "-GroupPolicy", "-addstore", "Root", "`"$ca`"" -PassThru -NoNewWindow
           if ($p.WaitForExit(45000)) {
             Record "gp_addstore_exit" $p.ExitCode
             Record "gp_addstore_hung" $false
           } else { $p.Kill(); Record "gp_addstore_hung" $true }
+
+          # Second arm: the documented store NAME form (some certutil builds want the physical store spelled
+          # out as `Root\.GroupPolicy` instead of the -GroupPolicy switch).
+          if ((@(Get-ChildItem -Path "$gpRoot\Certificates" -EA SilentlyContinue).Count) -eq 0) {
+            $p2 = Start-Process -FilePath "C:\Windows\System32\certutil.exe" `
+                    -ArgumentList "-user", "-addstore", "Root\.GroupPolicy", "`"$ca`"" -PassThru -NoNewWindow
+            if ($p2.WaitForExit(45000)) { Record "gp_addstore_physicalname_exit" $p2.ExitCode }
+            else { $p2.Kill(); Record "gp_addstore_physicalname_hung" $true }
+          }
 
           $gpKey = "HKCU:\Software\Policies\Microsoft\SystemCertificates\Root\Certificates"
           Record "gp_registry_entries" (@(Get-ChildItem -Path $gpKey -EA SilentlyContinue).Count)
