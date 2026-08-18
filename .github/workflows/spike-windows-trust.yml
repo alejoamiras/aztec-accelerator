@@ -11,14 +11,13 @@ name: SPIKE — Windows trust inheritance (TEMPORARY, delete before merge)
 # production change. If it does not, the fork needs an owner decision (extend the predicate to LM Root).
 # This workflow is a throwaway probe — it is deleted in the same PR that consumes its answer.
 
+# `push` on this one branch, not workflow_dispatch: a dispatch-only workflow must exist on the DEFAULT
+# branch to be triggerable, and a throwaway probe does not belong on main. Both the trigger and the file
+# are removed before this PR merges.
 on:
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Published release whose real Windows installer to probe"
-        required: false
-        type: string
-        default: accelerator-v2.0.0
+  push:
+    branches: [worktree-windows-packaged-e2e]
+    paths: [".github/workflows/spike-windows-trust.yml"]
 
 permissions:
   contents: read
@@ -35,7 +34,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
+          TAG: accelerator-v2.0.0
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
