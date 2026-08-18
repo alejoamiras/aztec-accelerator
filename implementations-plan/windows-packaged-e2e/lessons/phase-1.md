@@ -156,6 +156,29 @@ wait was right.
    job have already caused the key to exist. Create it with `New-Item -Force` first (a no-op on a real
    user's machine, where it always exists).
 
+5. **`inputs.*` is EMPTY on a push trigger, and `gh release download ""` does not fail** — it silently
+   resolves to whatever GitHub calls "Latest". This repo deliberately never updates that badge (every
+   release is published `--latest=false`; the signed S3 feed is the source of truth), so the empty tag
+   resolved to a **1.0.7** installer, whose binary still carries the pre-rename `aztec-accelerator.exe`
+   name — and the run failed hunting for `AztecAccelerator.exe`. Give any input a literal fallback
+   (`${{ inputs.x || 'default' }}`) whenever a workflow has more than one trigger.
+
+### A wrong diagnosis, corrected (worth more than the bug)
+
+The first time that failure appeared I concluded it was a filesystem race — "the installer exited 0 but the
+exe had not materialised yet" — and added a 60-second poll, reasoning by analogy to the genuine
+`--generate-certs-only` race (gotcha 2). The analogy was plausible, self-consistent, and **wrong**. The next
+run's log settled it in one line: it was installing `Aztec-Accelerator-1.0.7-...exe`. There was never a race;
+the wrong installer was being fed in, so the file could never appear. The poll has been reverted (its comment
+asserted an observation that never happened — a false claim in the codebase is worse than the missing
+guard), keeping only the directory dump, which is what made the real cause visible.
+
+Two takeaways. First: three consecutive green runs did NOT mean the harness was sound — the very next run
+failed on a path those three never exercised, so repetition builds confidence in the thing you varied, not
+in the thing you didn't. Second: a diagnosis that explains the symptom is not the same as a diagnosis
+supported by evidence; the cheap move (read one more line of the log) beat the plausible one (ship a fix for
+the mechanism I had recently been burned by).
+
 ### 3-strike reassessment (after gotchas 2, 3 and 4 all landed in the same arming preamble)
 
 Three consecutive failures, three DIFFERENT root causes, all in the same ~15 lines — and all of the same

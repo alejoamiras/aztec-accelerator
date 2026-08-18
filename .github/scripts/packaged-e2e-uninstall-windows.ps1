@@ -57,19 +57,13 @@ if ($inst.ExitCode -ne 0) { Write-Host "::error::installer exited $($inst.ExitCo
 
 # Address the app BY NAME under the per-user install root (installMode currentUser). Never a bare recursive
 # first-match: the install dir also carries the bundled `bb` sidecar.
-# POLL: the installer exiting 0 does NOT mean every file has materialised — observed a run where the exe was
-# absent immediately after `WaitForExit` returned success (three earlier runs won the same race). Same class
-# as the cert generation below: never treat a filesystem effect as complete just because the process exited.
-$exe = $null
-$deadline = (Get-Date).AddSeconds(60)
-do {
-  $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue |
-    Select-Object -First 1
-  if ($exe) { break }
-  Start-Sleep -Seconds 2
-} while ((Get-Date) -lt $deadline)
+$exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue |
+  Select-Object -First 1
 if (-not $exe) {
-  Write-Host "::error::installed AztecAccelerator.exe not found under %LOCALAPPDATA% within 60s of a successful install"
+  # Dump the tree: the one time this fired, the cause was the CALLER feeding a 1.0.7 installer (whose binary
+  # still carries the pre-rename `aztec-accelerator.exe` name), not anything about this install. Listing what
+  # actually landed is what makes that diagnosable instead of guessable.
+  Write-Host "::error::installed AztecAccelerator.exe not found under %LOCALAPPDATA% (wrong installer version?)"
   Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -EA SilentlyContinue | Select-Object FullName | Out-String | Write-Host
   exit 1
 }
