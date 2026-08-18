@@ -154,6 +154,30 @@ Both blocker claims are now first-hand measurements against the SHIPPED 2.0.0 bi
 image CI uses. The composed proof is genuinely infeasible without a production change, which is the goal's
 explicit STOP-and-surface condition rather than something to descope quietly.
 
+## Spike 3 — the OTHER P2 unknown, retired (run 32151746481)
+
+The composed-proof leg had two unknowns, and only one was owner-blocked. The second was decision-independent
+and had to be settled BEFORE the trust decision, not after: **Playwright/Chromium has never run on a Windows
+runner in this repo** (`playwright-cache/action.yml` is Linux-only by its own comment; the macOS leg works
+around it with a direct `bunx playwright install chromium`; no Windows job launches a browser anywhere). If a
+browser could not drive the installed app on `windows-latest`, then NEITHER trust option would be sufficient —
+we would have changed production behaviour and then hit a second wall.
+
+Probed over HTTP (`:59833`) deliberately, to isolate "can a browser reach the app at all on Windows" from the
+trust question. Not the composed proof, not wired into any gate.
+
+| Measurement | Result |
+|---|---|
+| `bunx playwright install chromium` on windows-latest | works |
+| Chromium headless launch | works |
+| `page.request.get("http://127.0.0.1:59833/health")` | **200**, real body (`version 2.0.0`, `bb_available: true`) |
+| `page.goto(...)` + read body text | navigates and renders the same payload |
+
+**There is no second blocker.** Chrome's Local Network Access gating (a named risk in the SDK docs) does not
+bite here: the page's origin IS the loopback address, i.e. same address space. So once trust is resolved by
+(A) or (B), the remaining work on the composed leg is the ordinary harness — install, seed trust, launch,
+swap the packed SDK, run the existing spec — with no unknown mechanism left in it.
+
 ## Codex round 5 — loop CLOSED
 
 Verdict: *"terminate — the fixes are correct; **no remaining findings**."* The round-4 collection fix is

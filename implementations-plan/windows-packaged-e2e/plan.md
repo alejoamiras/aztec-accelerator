@@ -115,6 +115,20 @@ Windows is the only OS with a native uninstall hook whose ownership logic has ne
   Needs decision (A) / (B) / (C). (A) is a change to a security-sensitive PRODUCTION predicate, which is
   outside this arc's scope ("two CI legs, not a framework") and outside the agent's authority — hence
   STOP-and-surface rather than a quiet descope to a weaker proof.
+
+  **The other P2 unknown is RETIRED (spike 3)**: Playwright/Chromium had never run on a Windows runner in
+  this repo, and if a browser could not reach the app there, no trust fix would have been sufficient.
+  Measured: chromium installs and launches on `windows-latest`, and both `page.request.get` and `page.goto`
+  reach `http://127.0.0.1:59833/health` (200, real body). Chrome's Local Network Access gating does not bite
+  because the page origin IS loopback. So after (A) or (B), the composed leg contains **no unknown
+  mechanism** — it is the ordinary harness (install → seed trust → launch → swap packed SDK → existing spec).
+
+  **Scoping (A) correctly** (from reading the call sites, `windows.rs`): `live_present` has FOUR callers, and
+  two of them — `install()` :214 and `trust_new_anchor()` :283 — verify the app's OWN write to CurrentUser.
+  Widening those would let a FAILED per-user add report success whenever a machine-wide copy exists. So (A)
+  is "add a wider predicate used ONLY by the launch gate (`is_ca_trusted`)", not "widen `live_present`".
+  Second consequence: `remove()` is `-user -delstore` only, so an LM anchor survives uninstall — the
+  uninstaller must report that rather than claim complete removal.
 - **P3 — DONE for P1** (reads 4 → 5); goes to 6 with P2.
 - **P4 — codex loop closed for P1** (rounds 1-4); live rc validation of the leg inside a real draft happens
   on the next genuine release dispatch, since the pipeline refuses non-main refs — the
