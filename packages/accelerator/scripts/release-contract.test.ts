@@ -71,6 +71,11 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).toContain("release-asset-manifest"); // the immutable SHA-256 asset manifest
     expect(WF).toContain("--draft=false"); // finalize flips draft → published
     expect(WF).toContain("digests/names differ from the gated manifest"); // finalize's byte re-verify
+    // finalize fetches the DRAFT's live digests by numeric release id — a draft 404s on
+    // GET /releases/tags/{tag}, so a by-tag fetch yields a 404 body that never matches the manifest and the
+    // release never publishes. [mut: revert the fetch to `releases/tags/$TAG` → 404 on the draft → this fails]
+    expect(WF).toMatch(/RID=\$\(gh release view "\$TAG" --json databaseId/);
+    expect(WF).toContain('gh api "repos/$GH_REPO/releases/$RID"');
   });
 
   test("promote pre-flight verifies a published, non-draft, non-prerelease stable with a signed feed", () => {

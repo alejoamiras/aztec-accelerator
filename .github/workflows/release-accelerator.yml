@@ -1154,8 +1154,13 @@ jobs:
           echo "Gated manifest:"; cat /tmp/want.txt
           # GitHub computes asset digests asynchronously after upload — poll until all are present (fail
           # closed on a missing digest rather than false-green).
+          # A DRAFT release is NOT returned by GET /releases/tags/{tag} (404 even with the git tag pushed and
+          # contents:write) — resolve its numeric id via `gh release view` (which DOES see drafts) and fetch by
+          # id, which carries the per-asset `.digest`. (Same draft-visibility gotcha as the packaged-E2E fetch.)
+          RID=$(gh release view "$TAG" --json databaseId --jq .databaseId)
+          test -n "$RID" || { echo "::error::could not resolve the draft release id for $TAG"; exit 1; }
           for attempt in $(seq 1 10); do
-            gh api "repos/$GH_REPO/releases/tags/$TAG" \
+            gh api "repos/$GH_REPO/releases/$RID" \
               --jq '.assets[] | (.digest // "MISSING") + "  " + .name' \
               | sed 's/^sha256://' | sort > /tmp/have.txt
             if ! grep -q '^MISSING' /tmp/have.txt; then break; fi
