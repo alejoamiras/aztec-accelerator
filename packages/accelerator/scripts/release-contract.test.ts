@@ -139,6 +139,49 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).toMatch(/Flip the S3 feed[\s\S]{0,120}?if: \$\{\{ !inputs\.dry_run \}\}/);
   });
 
+  test("blocker-1 failure-atomicity: authoritative PUT (fatal) split from best-effort invalidation (non-fatal)", () => {
+    // The S3 PUT commits the promote; the CloudFront invalidation only accelerates propagation. They MUST be
+    // separate steps AND the invalidation must be non-fatal: if a transient invalidation error after the PUT
+    // failed the job, `promote` would go RED (reading as "feed unflipped" when it IS flipped) and the
+    // downstream verify-live-feed gate — implicit success() on `promote` — would be SKIPPED, leaving the flip
+    // unconfirmed. So promote-success must equal PUT-success. Both steps retry; the PUT is fatal on
+    // exhaustion (safe — the feed is unchanged, nothing downstream ran), the invalidation warns + continues.
+    expect(WF).toContain("Flip the S3 feed to this version (authoritative PUT)");
+    expect(WF).toContain("Invalidate CloudFront (best-effort — never fails a committed promote)");
+    // Scope each assert to its own step body so PUT-fatal and invalidation-non-fatal are provable in
+    // isolation (and can't false-catch verify-live-feed's own `exit 1`).
+    const putStep =
+      WF.split("Flip the S3 feed to this version (authoritative PUT)")[1]?.split(
+        "Invalidate CloudFront (best-effort",
+      )[0] ?? "";
+    const invStep =
+      WF.split("Invalidate CloudFront (best-effort")[1]?.split(
+        "# Enforce the live-feed check",
+      )[0] ?? "";
+    // PUT: retried, and FATAL on exhaustion. [mut: drop the `exit 1` / retry → the flip stops being atomic]
+    expect(putStep, "PUT step body found").toContain("aws s3 cp feed/latest.json");
+    expect(putStep, "PUT retries").toContain("for attempt in 1 2 3 4 5; do");
+    expect(putStep, "PUT is fatal on exhaustion").toContain("exit 1");
+    expect(putStep).toContain("feed unchanged, promote aborted");
+    // Invalidation: retried, then WARN + continue — never fatal. [mut: add `exit 1` to the invalidation
+    // failure branch, or re-merge it into the PUT step → a post-PUT invalidation hiccup skips verify-live-feed]
+    expect(invStep, "invalidation step body found").toContain("create-invalidation");
+    expect(invStep, "invalidation retries").toContain("for attempt in 1 2 3; do");
+    expect(
+      invStep,
+      "a failed invalidation must NOT be fatal — no `exit 1` in the step body",
+    ).not.toContain("exit 1");
+    expect(invStep, "invalidation exhaustion warns (non-fatal)").toContain(
+      "::warning::CloudFront invalidation failed after 3 attempts",
+    );
+    // codex High: verify-live-feed must run after ANY attempted promote via its OWN status function, so a
+    // PUT whose CLI errored AFTER S3 committed (feed live but `promote` RED) can't skip live verification —
+    // the live feed is the source of truth. [mut: revert to the implicit success() on `promote` → fails]
+    expect(WF, "verify-live-feed runs on its own always() status function").toMatch(
+      /Verify live updater feed[\s\S]{0,800}?if: \$\{\{ always\(\) && !cancelled\(\) && needs\.validate\.result == 'success' && inputs\.mode == 'promote-only'/,
+    );
+  });
+
   test("downstream wiring: verify-live-feed needs promote; bump-source only on organic-GA promote", () => {
     // [mut: point verify-live-feed back at `release`, or drop the bump_source guard → fails]
     expect(WF).toContain("needs: [validate, promote]");

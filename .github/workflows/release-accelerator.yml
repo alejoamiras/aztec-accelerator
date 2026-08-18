@@ -1302,21 +1302,63 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }} # F-005: feed-only role (Put latest.json)
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Flip the S3 feed to this version + invalidate CloudFront
+      # blocker-1 (failure-atomicity): the S3 PUT is the AUTHORITATIVE promote act; the CloudFront
+      # invalidation is best-effort acceleration. They must NOT share a fate. If a transient invalidation
+      # error after the PUT commits failed the job, `promote` would go RED (reading as "feed unflipped"
+      # when it IS flipped) and the downstream `verify-live-feed` gate would be skipped via its implicit
+      # success() — the flip left unconfirmed, worst during a rollback. So the PUT is fatal + retried
+      # (safe: nothing downstream has run, so a final failure aborts with the feed unchanged — no partial
+      # state), and the invalidation is retried-then-warned (non-fatal). This makes promote-success
+      # equivalent to PUT-success, so verify-live-feed always runs after a committed PUT; it polls the
+      # public feed for ~600s > the 300s max-age, so it confirms propagation even if invalidation never
+      # fired.
+      - name: Flip the S3 feed to this version (authoritative PUT)
         if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           # Upload the EXACT verified bytes downloaded in pre-flight — never a re-synthesized feed.
           # Uploaded under /landing/ because CloudFront routes aztec-accelerator.dev → /landing/.
-          aws s3 cp feed/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
-            --content-type application/json \
-            --cache-control "max-age=300"
+          for attempt in 1 2 3 4 5; do
+            if aws s3 cp feed/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
+                 --content-type application/json \
+                 --cache-control "max-age=300"; then
+              echo "✅ S3 feed flipped to $VERSION (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::S3 PUT of latest.json failed after 5 attempts — feed unchanged, promote aborted"
+              exit 1
+            fi
+            echo "PUT attempt $attempt failed; retrying in $((attempt * 3))s"
+            sleep $((attempt * 3))
+          done
+
+      - name: Invalidate CloudFront (best-effort — never fails a committed promote)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
           # F-005: the viewer-request CloudFront function rewrites the URI PRE-cache, so the cached key is
           # `/landing/releases/latest.json`; invalidate that (keep the legacy path too, harmless).
-          aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --paths "/landing/releases/latest.json" "/releases/latest.json"
-          echo "✅ promoted: the auto-updater feed now serves $VERSION"
+          # The PUT above already committed, so a failed invalidation must NOT RED the job (that would skip
+          # verify-live-feed and hide a successful flip). Retry, then WARN and continue: verify-live-feed
+          # is the real gate.
+          for attempt in 1 2 3; do
+            if aws cloudfront create-invalidation \
+                 --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+                 --paths "/landing/releases/latest.json" "/releases/latest.json"; then
+              echo "✅ CloudFront invalidation created (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::warning::CloudFront invalidation failed after 3 attempts after a committed PUT; the feed IS flipped in S3 and propagates within the 300s max-age; verify-live-feed will confirm. Check CLOUDFRONT_DISTRIBUTION_ID if that gate times out."
+              break
+            fi
+            echo "invalidation attempt $attempt failed; retrying in $((attempt * 3))s"
+            sleep $((attempt * 3))
+          done
+          # `create-invalidation` returns while status is InProgress, so don't claim "now serves" here —
+          # verify-live-feed polls the public feed and is the authority on when it actually serves $VERSION.
+          echo "promote: S3 feed set to $VERSION; CloudFront invalidation requested (best-effort). verify-live-feed confirms live propagation."
 
   # Enforce the live-feed check that was previously done by hand: after `promote`
   # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
@@ -1327,9 +1369,14 @@ jobs:
   verify-live-feed:
     name: Verify live updater feed
     needs: [validate, promote]
-    # B6: verify only after a REAL promote (promote-only, not dry_run). A skipped `promote` (publish mode /
-    # dry_run) skips this via the dependency.
-    if: ${{ inputs.mode == 'promote-only' && !inputs.dry_run }}
+    # B6: verify only in a REAL promote (promote-only, not dry_run).
+    # blocker-1 (codex High): run this after ANY attempted promote via its OWN status function — NOT the
+    # implicit success() on `promote` — so live verification can't be skipped by a non-fatal invalidation
+    # NOR by a PUT whose CLI errored/timed-out AFTER S3 committed (feed live but `promote` RED). The live
+    # feed is the source of truth: if the PUT truly didn't land, this polls ~600s and fails RED; if it DID
+    # land despite a RED `promote`, this confirms GREEN. Gated to validate-green + promote-only + !dry_run
+    # so it never runs in publish mode.
+    if: ${{ always() && !cancelled() && needs.validate.result == 'success' && inputs.mode == 'promote-only' && !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
