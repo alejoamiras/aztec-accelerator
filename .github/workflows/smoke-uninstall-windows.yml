@@ -1,0 +1,62 @@
+name: Smoke — Windows full uninstall
+
+# Manual counterpart to the `Full uninstall (windows)` leg in `_e2e-packaged.yml`. Both run the SAME script
+# (`.github/scripts/packaged-e2e-uninstall-windows.ps1`), so this cannot drift from what the release gate
+# enforces — it only differs in where the installer comes from: an already-PUBLISHED release instead of a
+# draft's staged assets.
+#
+# Why this exists at all: `release-accelerator.yml` refuses to run from a non-main ref (F-005: gate side
+# effects on main) and is the only caller of `_e2e-packaged.yml`, so without this entry point the uninstall
+# logic could only ever be exercised AFTER it was merged and already release-blocking. It is also the cheap
+# way to re-check the real uninstaller against any published build (~4 min, no release side effects).
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Published release whose real Windows installer to install + uninstall"
+        required: false
+        type: string
+        default: accelerator-v2.0.0
+
+permissions:
+  contents: read
+
+jobs:
+  uninstall:
+    name: Full uninstall against a published installer
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Download the published Windows installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p app-artifact
+          gh release download "$TAG" --repo "$REPO" --pattern '*Windows-x86_64-setup.exe' --dir app-artifact
+          ls -l app-artifact
+
+      - name: Run the uninstall proof
+        shell: pwsh
+        run: .github/scripts/packaged-e2e-uninstall-windows.ps1 -AppArtifactDir app-artifact
+
+      # Mirrors the leg's cleanup: disarm the recovery task BEFORE any force-kill, or Task Scheduler treats
+      # the kill as a crash and relaunches the app mid-teardown.
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null | Out-Null
+          Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -EA SilentlyContinue
+          Get-Process -Name "AztecAccelerator" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+          exit 0
