@@ -94,6 +94,23 @@ proved the negative control cheaply, and — usefully — that the shipped 2.0.0
    gotcha, already documented in `accelerator.yml:786-790`: Actions appends `exit $LASTEXITCODE` to pwsh
    steps, so a trailing native non-zero fails an otherwise-passing step.
 
+4. **The `Run` KEY itself does not exist on a fresh runner profile** — `Set-ItemProperty` fails with
+   "Cannot find path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' because it does not exist".
+   `accelerator.yml`'s windows-build gets away with a bare `Set-ItemProperty` because earlier steps in that
+   job have already caused the key to exist. Create it with `New-Item -Force` first (a no-op on a real
+   user's machine, where it always exists).
+
+### 3-strike reassessment (after gotchas 2, 3 and 4 all landed in the same arming preamble)
+
+Three consecutive failures, three DIFFERENT root causes, all in the same ~15 lines — and all of the same
+species: environment assumptions that hold on a developer's Windows box but not on a fresh hosted runner.
+The process fault was fixing them one at a time (each cycle ~4 minutes of CI to learn one fact). Adaptation:
+after the third, audit the WHOLE script for the same class of assumption before pushing again — every native
+command whose non-zero exit is expected, every registry path assumed to pre-exist, every filesystem write
+assumed to be synchronous. That audit found no further instances (the remaining calls already use
+`-ErrorAction SilentlyContinue` or read `$LASTEXITCODE` explicitly). Worth remembering for the composed-proof
+leg, which will add a browser and a second listener to the same runner.
+
 ## Harness notes
 
 - `gh workflow run` cannot dispatch a `workflow_dispatch` workflow that exists only on a feature branch (404:

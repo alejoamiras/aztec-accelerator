@@ -82,6 +82,10 @@ Set-Content -Path $configFile -NoNewline -Value '{"config_version":2,"approved_o
 
 # Seed INTENT (= the user's "Start on Login" tick) as a STALE value, so the healed result proves the product
 # wrote it rather than CI having pre-written the expected string.
+# The Run KEY itself does not exist on a fresh runner profile (measured: Set-ItemProperty failed with
+# "Cannot find path ... because it does not exist"), so create it first. `-Force` is a no-op when it already
+# exists, which is the normal case on a real user's machine.
+New-Item -Path $runKey -Force -ErrorAction SilentlyContinue | Out-Null
 Set-ItemProperty -Path $runKey -Name $runValueName -Value "$env:LOCALAPPDATA\Aztec Stale\Aztec Accelerator.exe "
 schtasks /Delete /TN $taskName /F 2>$null | Out-Null
 
