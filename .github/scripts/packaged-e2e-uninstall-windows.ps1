@@ -19,6 +19,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# PowerShell 7.4+ defaults `$PSNativeCommandUseErrorActionPreference` to $true, which turns ANY non-zero exit
+# from a native command into a terminating error under `Stop`. This script deliberately shells out to tools
+# whose non-zero exits are EXPECTED and meaningful rather than fatal — `schtasks /Delete` on a task that does
+# not exist yet (the pre-arm cleanup) exits 1, and `schtasks /Query` exits non-zero as its "absent" answer,
+# which is precisely what the postconditions read. So decide on exit codes explicitly ($LASTEXITCODE), the
+# way the rest of this repo's pwsh does, instead of letting a native exit code throw.
+$PSNativeCommandUseErrorActionPreference = $false
 $runKey = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 $runValueName = "Aztec Accelerator"
 $taskName = "Aztec Accelerator Crash Recovery"
