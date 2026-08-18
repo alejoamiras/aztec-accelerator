@@ -355,10 +355,15 @@ jobs:
 
       - name: Cleanup
         if: always()
+        # Best-effort teardown of what the harness planted (the composed-proof gate is step 14, above). On a
+        # headless macOS runner `security remove-trusted-cert -d` (System domain) can block on an auth prompt
+        # with no one to answer it — it hung a PASSING run to the 55-min job timeout, cancelling an
+        # already-green leg. Bound the step and never let a stuck teardown fail it (the runner is ephemeral, so
+        # a lingering seed is harmless).
+        timeout-minutes: 3
+        continue-on-error: true
         run: |
           kill "$ACCEL_PID" 2>/dev/null || true
-          # Remove our out-of-band System-keychain seed — product uninstall does NOT (it only clears the
-          # app's own login-keychain anchor), so the harness cleans up what it planted.
           CA="$HOME/.aztec-accelerator/certs/ca.pem"
           if [ -f "$CA" ]; then
             sudo security remove-trusted-cert -d "$CA" 2>/dev/null || true
