@@ -18,6 +18,10 @@ const UPDATER_LINUX = fs.readFileSync(
   "utf8",
 );
 const PACKAGED = fs.readFileSync(path.join(REPO, ".github/workflows/_e2e-packaged.yml"), "utf8");
+const UNINSTALL_WIN = fs.readFileSync(
+  path.join(REPO, ".github/scripts/packaged-e2e-uninstall-windows.ps1"),
+  "utf8",
+);
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
   test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
@@ -244,14 +248,72 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
   test("draft-asset write is isolated to the no-code staging job; E2E jobs stay read-only", () => {
     // codex privilege isolation: a DRAFT release is only visible to a write token, but the E2E jobs execute the
     // installed app + a browser + the packed SDK. Only `stage-installers` (no checkout, no app code) holds
-    // contents:write to fetch+verify+re-upload the draft's installers; the 4 code-executing E2E jobs consume
+    // contents:write to fetch+verify+re-upload the draft's installers; the code-executing E2E jobs consume
     // the staged artifact at contents:read. [mut: elevate an E2E job to contents:write → the write count
-    //  exceeds 1 (and reads drop below 4) → this fails]
+    //  exceeds 1 (and reads drop below the job count) → this fails]
     expect(PACKAGED).toContain("stage-installers");
     // Count the actual job PERMISSION lines (6-space indent), not comment mentions of the words.
     const writes = (PACKAGED.match(/^ {6}contents: write\b/gm) || []).length;
     const reads = (PACKAGED.match(/^ {6}contents: read\b/gm) || []).length;
     expect(writes, "exactly one contents:write perm — the staging job only").toBe(1);
-    expect(reads, "the 4 code-executing E2E jobs stay read-only").toBe(4);
+    // linux composed / macos composed / linux upgrade-migration / linux uninstall / windows uninstall.
+    // Five, not six: there is deliberately NO windows composed-proof leg. The app only serves HTTPS when its
+    // own trust predicate passes, and that store is populated only by the interactive root-CA consent dialog
+    // — five headless seeding mechanisms were measured dead on hosted runners. That proof is a documented
+    // manual pre-GA check instead (packages/accelerator/README.md, "Windows composed proof").
+    expect(reads, "every code-executing E2E job stays read-only").toBe(5);
+  });
+
+  test("windows uninstall leg drives the REAL uninstaller and cannot pass vacuously", () => {
+    // The first end-to-end run of the NSIS PREUNINSTALL/POSTUNINSTALL pair against a real install (today's
+    // Windows CI drives those hooks only against a stub exe, or installs without ever uninstalling). Its
+    // whole value rests on two properties, so both are pinned:
+    //   1. it runs the REAL silent uninstaller, not `--prepare-uninstall` alone;
+    //   2. every artifact it asserts GONE is asserted PRESENT first — otherwise the leg would pass on a
+    //      runner where the app was never installed, which is exactly the failure mode that makes a
+    //      cleanup test worthless (codex: "a post-uninstall absent-assertion without a positive
+    //      precondition is worthless").
+    // [mut: drop the precondition block, or point the leg at --prepare-uninstall instead of uninstall.exe
+    //  → these fail]
+    expect(PACKAGED).toContain("Full uninstall (windows)");
+    // The leg delegates to a script so the SAME code is runnable outside the release pipeline (which refuses
+    // to run from a non-main ref, and is the only caller of this workflow) — otherwise this logic could
+    // first be exercised only AFTER it was merged and already release-blocking.
+    expect(PACKAGED).toContain("packaged-e2e-uninstall-windows.ps1");
+    expect(UNINSTALL_WIN).toMatch(/\$uninstaller\s*=\s*Join-Path \$installDir "uninstall\.exe"/);
+    expect(UNINSTALL_WIN).toMatch(/Start-Process -FilePath \$uninstaller -ArgumentList "\/S"/);
+    // Positive preconditions: the product must have armed the Run value and the crash-recovery task.
+    expect(UNINSTALL_WIN).toContain(
+      "precondition: the product did not heal the Run value to its own quoted path",
+    );
+    expect(UNINSTALL_WIN).toContain(
+      "precondition: the product did not arm the crash-recovery task",
+    );
+    // Retention is asserted alongside removal, BY BYTES — "still exists" would also pass if the uninstall
+    // truncated or rewrote the user's config (codex r2).
+    expect(UNINSTALL_WIN).toContain("config.json was deleted");
+    expect(UNINSTALL_WIN).toContain("config.json was MODIFIED by the uninstall");
+    // Absence oracles must be FAIL-CLOSED. `schtasks /Query` exit 1 is "does not exist"; any other non-zero
+    // is an error (access denied, scheduler fault) and must NOT be read as "gone". Likewise the Run value is
+    // checked by enumerating value names, not via -EA SilentlyContinue (which maps a read failure to $null).
+    // [mut: accept any non-zero as absent, or go back to the SilentlyContinue read → these fail]
+    expect(UNINSTALL_WIN).toContain("cannot conclude the task is gone");
+    expect(UNINSTALL_WIN).toMatch(/GetValueNames\(\) -contains \$runValueName/);
+    // "Uninstalled while running" is the leg's whole point, so the app must be provably alive at that moment
+    // and that exact process must be gone after.
+    // By NAME, not by pid: deleting a scheduled task does not terminate a process it already started, so a
+    // task-spawned instance could outlive both the task and our original pid (codex r3). [mut: narrow either
+    // side back to $proc.HasExited → this fails]
+    expect(UNINSTALL_WIN).toContain(
+      "precondition: no AztecAccelerator process is running before the uninstall",
+    );
+    expect(UNINSTALL_WIN).toContain("process(es) survived the uninstall");
+    // The task precondition parses the XML and compares Exec.Command, rather than substring-matching the
+    // whole document (where the path could sit in an argument or description).
+    // Array-wrapped and required to be exactly ONE action: `.Command` is a collection when the task has
+    // multiple <Exec> nodes, and `-ne` against a collection filters instead of returning a boolean, so a
+    // bare comparison passes silently (codex r4). [mut: drop the Count check → false-green returns]
+    expect(UNINSTALL_WIN).toMatch(/\$taskCommands = @\(\$taskDoc\.Task\.Actions\.Exec\.Command\)/);
+    expect(UNINSTALL_WIN).toMatch(/\$taskCommands\.Count -ne 1/);
   });
 });
