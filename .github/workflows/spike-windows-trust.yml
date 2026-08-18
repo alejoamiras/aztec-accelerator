@@ -1,141 +1,50 @@
-name: SPIKE — Windows trust inheritance (TEMPORARY, delete before merge)
+name: SPIKE — Windows uninstall proof + trust probe (TEMPORARY, delete before merge)
 
-# Measures ONE unproven premise blocking the Windows composed-proof E2E leg:
-# does `certutil -user -store Root` (what the shipped app's launch gate queries) SEE a CA imported into
-# LocalMachine\Root? Microsoft documents CurrentUser stores (except Personal) as inheriting LocalMachine
-# contents, and CurrentUser Root is a logical collection containing a .LocalMachine physical store — so
-# `-user` does not prove LocalMachine invisibility. CurrentUser\Root cannot be written silently on a hosted
-# runner (consent dialog), but LocalMachine\Root can (the runner is admin).
+# Two throwaway probes that cannot run any other way, because `release-accelerator.yml` refuses to run from a
+# non-main ref by design (F-005: gate all side effects on a main-ref check) and it is the ONLY caller of
+# `_e2e-packaged.yml`. Without this, the new Windows leg could first be exercised only AFTER it was merged
+# and already release-blocking.
 #
-# If the gate opens with only an LM seed, the composed proof works against the SHIPPED binary with ZERO
-# production change. If it does not, the fork needs an owner decision (extend the predicate to LM Root).
-# This workflow is a throwaway probe — it is deleted in the same PR that consumes its answer.
-
-# `push` on this one branch, not workflow_dispatch: a dispatch-only workflow must exist on the DEFAULT
-# branch to be triggerable, and a throwaway probe does not belong on main. Both the trigger and the file
-# are removed before this PR merges.
+#   1. `uninstall` — runs the EXACT script the release leg runs
+#      (.github/scripts/packaged-e2e-uninstall-windows.ps1) against the real PUBLISHED 2.0.0 installer.
+#   2. `trust` — measures whether `certutil -user -store Root` (what the shipped HTTPS launch gate queries)
+#      sees a LocalMachine-imported anchor. RESULT: it does not; see lessons/phase-1.md.
+#
+# Deleted in the PR that consumes the answers.
 on:
   push:
     branches: [worktree-windows-packaged-e2e]
-    paths: [".github/workflows/spike-windows-trust.yml"]
+    paths: [".github/workflows/spike-windows-trust.yml", ".github/scripts/packaged-e2e-uninstall-windows.ps1"]
 
 permissions:
   contents: read
 
 jobs:
-  probe:
-    name: Probe LocalMachine-Root inheritance
+  uninstall:
+    name: Uninstall proof against the published 2.0.0 installer
     runs-on: windows-latest
     timeout-minutes: 25
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
       - name: Download the real published Windows installer
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: accelerator-v2.0.0
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           mkdir -p app-artifact
-          gh release download "$TAG" --repo "$REPO" --pattern '*Windows-x86_64-setup.exe' --dir app-artifact
+          gh release download accelerator-v2.0.0 --repo "$REPO" --pattern '*Windows-x86_64-setup.exe' --dir app-artifact
           ls -l app-artifact
 
-      - name: Measure
+      # The SAME script the release leg invokes — this is what makes the probe meaningful rather than a
+      # parallel reimplementation that could drift from the thing being shipped.
+      - name: Run the uninstall proof
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $summary = @()
-          function Record($k, $v) { Write-Host "MEASURE ${k}: ${v}"; $script:summary += "$k = $v" }
-
-          $setup = Get-ChildItem -Path app-artifact -Recurse -Filter "*-setup.exe" | Select-Object -First 1
-          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA" -ErrorAction SilentlyContinue
-          $inst = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -PassThru
-          if (-not $inst.WaitForExit(180000)) { $inst.Kill(); Write-Error "installer hung"; exit 1 }
-          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue | Select-Object -First 1
-          if (-not $exe) { Write-Error "no installed exe"; exit 1 }
-          Record "installed_exe" $exe.FullName
-
-          # Generate the CA/leaf on disk WITHOUT touching any OS trust store (headless-safe).
-          # This is a GUI-subsystem binary: the call returns as soon as it detaches, and the certs land via a
-          # staged write + atomic rename, so the "generated" line can print BEFORE the final name exists.
-          # Poll for the file rather than testing once (measured: a single Test-Path 190ms later still lost).
-          $ca = Join-Path $env:USERPROFILE ".aztec-accelerator\certs\ca.pem"
-          & $exe.FullName --generate-certs-only
-          $deadline = (Get-Date).AddSeconds(30)
-          while (-not (Test-Path $ca) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-          if (-not (Test-Path $ca)) {
-            Write-Host "certs dir contents:"
-            Get-ChildItem -Path (Join-Path $env:USERPROFILE ".aztec-accelerator") -Recurse -EA SilentlyContinue |
-              Select-Object FullName | Out-String | Write-Host
-            Write-Error "no ca.pem generated within 30s"
-            exit 1
-          }
-          $caObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $ca
-          $serial = $caObj.SerialNumber.ToLower()
-          $thumb = $caObj.Thumbprint
-          Record "ca_serial" $serial
-          Record "ca_thumbprint" $thumb
-
-          # Baseline: the app's own predicate query BEFORE any import must NOT find it.
-          & C:\Windows\System32\certutil.exe -user -store Root $serial | Out-Null
-          Record "certutil_user_store_before_import_exit" $LASTEXITCODE
-
-          # THE MEASUREMENT: seed LocalMachine\Root (silent — runner is admin), then re-run the exact query
-          # the shipped app's trust predicate runs (`certutil -user -store Root <serial>`).
-          Import-Certificate -FilePath $ca -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-          & C:\Windows\System32\certutil.exe -user -store Root $serial | Out-Null
-          $userSeesLm = ($LASTEXITCODE -eq 0)
-          Record "certutil_user_store_after_LM_import_exit" $LASTEXITCODE
-          Record "USER_STORE_INHERITS_LOCALMACHINE" $userSeesLm
-          $psSees = [bool](Get-ChildItem Cert:\CurrentUser\Root -EA SilentlyContinue | Where-Object { $_.Thumbprint -eq $thumb })
-          Record "powershell_CurrentUser_Root_sees_it" $psSees
-
-          # Does the SHIPPED app's launch gate now open the HTTPS listener?
-          $aztecDir = Join-Path $env:USERPROFILE ".aztec-accelerator"
-          New-Item -ItemType Directory -Force -Path $aztecDir | Out-Null
-          Set-Content -Path (Join-Path $aztecDir "config.json") -NoNewline `
-            -Value '{"config_version":2,"https_enabled":true,"auto_approve_localhost":true}'
-          $env:AZTEC_ACCEL_NO_UPDATE = "1"
-          $proc = Start-Process -FilePath $exe.FullName -PassThru
-          $httpsUp = $false
-          for ($i = 0; $i -lt 30; $i++) {
-            try {
-              # NO -SkipCertificateCheck: this goes through schannel/CryptoAPI, so a 200 proves the OS itself
-              # chain-builds to the seeded anchor — the same store set Chromium's verifier consumes.
-              if ((Invoke-RestMethod -Uri "https://127.0.0.1:59834/health" -TimeoutSec 3).status -eq "ok") { $httpsUp = $true; break }
-            } catch { }
-            Start-Sleep -Seconds 2
-          }
-          Record "HTTPS_GATE_OPENED_WITH_LM_SEED_ONLY" $httpsUp
-          try { $h = Invoke-RestMethod -Uri "http://127.0.0.1:59833/health" -TimeoutSec 3; Record "http_health" ($h | ConvertTo-Json -Compress) } catch { Record "http_health" "unreachable" }
-
-          # Negative control: LocalMachine\Disallowed must make the predicate REJECT (the Disallowed store
-          # overrides Root). If the gate stays open, an LM-based design would be unsafe.
-          Get-Process -Name "AztecAccelerator" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-          Start-Sleep -Seconds 3
-          Import-Certificate -FilePath $ca -CertStoreLocation Cert:\LocalMachine\Disallowed | Out-Null
-          & C:\Windows\System32\certutil.exe -user -store Disallowed $serial | Out-Null
-          Record "certutil_user_store_Disallowed_sees_LM_disallowed_exit" $LASTEXITCODE
-          $proc2 = Start-Process -FilePath $exe.FullName -PassThru
-          $httpsUp2 = $false
-          for ($i = 0; $i -lt 12; $i++) {
-            try { if ((Invoke-RestMethod -Uri "https://127.0.0.1:59834/health" -TimeoutSec 3).status -eq "ok") { $httpsUp2 = $true; break } } catch { }
-            Start-Sleep -Seconds 2
-          }
-          Record "HTTPS_GATE_OPEN_WHILE_LM_DISALLOWED (should be False)" $httpsUp2
-
-          Write-Host "`n===== SPIKE RESULT ====="
-          $summary | ForEach-Object { Write-Host $_ }
-          $verdict = if ($userSeesLm -and $httpsUp -and -not $httpsUp2) { "GO: shipped binary works with an LM seed; no production change needed" }
-                     elseif ($userSeesLm -and $httpsUp) { "PARTIAL: gate opens but the Disallowed negative control FAILED — unsafe as-is" }
-                     else { "NO-GO: LM seed does not satisfy the shipped predicate; owner decision required" }
-          Write-Host "VERDICT: $verdict"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Windows trust spike`n`n``````"
-          $summary | ForEach-Object { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $_ }
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "```````n`n**VERDICT:** $verdict"
-          exit 0
+        run: .github/scripts/packaged-e2e-uninstall-windows.ps1 -AppArtifactDir app-artifact
 
       - name: Cleanup
         if: always()

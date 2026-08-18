@@ -18,6 +18,10 @@ const UPDATER_LINUX = fs.readFileSync(
   "utf8",
 );
 const PACKAGED = fs.readFileSync(path.join(REPO, ".github/workflows/_e2e-packaged.yml"), "utf8");
+const UNINSTALL_WIN = fs.readFileSync(
+  path.join(REPO, ".github/scripts/packaged-e2e-uninstall-windows.ps1"),
+  "utf8",
+);
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
   test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
@@ -269,16 +273,22 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
     // [mut: drop the precondition block, or point the leg at --prepare-uninstall instead of uninstall.exe
     //  → these fail]
     expect(PACKAGED).toContain("Full uninstall (windows)");
-    expect(PACKAGED).toMatch(/\$uninstaller\s*=\s*Join-Path \$installDir "uninstall\.exe"/);
-    expect(PACKAGED).toMatch(/Start-Process -FilePath \$uninstaller -ArgumentList "\/S"/);
+    // The leg delegates to a script so the SAME code is runnable outside the release pipeline (which refuses
+    // to run from a non-main ref, and is the only caller of this workflow) — otherwise this logic could
+    // first be exercised only AFTER it was merged and already release-blocking.
+    expect(PACKAGED).toContain("packaged-e2e-uninstall-windows.ps1");
+    expect(UNINSTALL_WIN).toMatch(/\$uninstaller\s*=\s*Join-Path \$installDir "uninstall\.exe"/);
+    expect(UNINSTALL_WIN).toMatch(/Start-Process -FilePath \$uninstaller -ArgumentList "\/S"/);
     // Positive preconditions: the product must have armed the Run value and the crash-recovery task.
-    expect(PACKAGED).toContain(
+    expect(UNINSTALL_WIN).toContain(
       "precondition: the product did not heal the Run value to its own quoted path",
     );
-    expect(PACKAGED).toContain("precondition: the product did not arm the crash-recovery task");
+    expect(UNINSTALL_WIN).toContain(
+      "precondition: the product did not arm the crash-recovery task",
+    );
     // Retention is asserted alongside removal — an uninstall that eats the user's config is data loss.
-    expect(PACKAGED).toContain("config.json was deleted");
+    expect(UNINSTALL_WIN).toContain("config.json was deleted");
     // The no-resurrection check must outlast the crash-recovery PT1M relaunch trigger.
-    expect(PACKAGED).toMatch(/Start-Sleep -Seconds 75/);
+    expect(UNINSTALL_WIN).toMatch(/Start-Sleep -Seconds 75/);
   });
 });
