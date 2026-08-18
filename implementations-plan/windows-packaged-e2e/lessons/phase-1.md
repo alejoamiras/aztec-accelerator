@@ -72,6 +72,28 @@ keeps HTTPS closed with an LM-only seed, confirmed end-to-end (`:59834` never ca
 proved the negative control cheaply, and — usefully — that the shipped 2.0.0 app installs, runs, and serves
 `/health` on a hosted Windows runner with no virtual display, which de-risks the rest of the Windows work.
 
+## Windows-CI gotchas hit while building the uninstall leg
+
+1. **The release pipeline refuses a non-main ref** — `release-accelerator.yml`'s `Assert main ref` step
+   (F-005 / codex GATE-3 H4: gate all side effects on main) fails the run immediately, and it is the ONLY
+   caller of `_e2e-packaged.yml`. Consequence: a new leg in that workflow cannot be exercised at all until it
+   is merged, at which point it is already release-blocking. Fix: extract the leg body into
+   `.github/scripts/packaged-e2e-uninstall-windows.ps1` and give a branch-scoped probe workflow a second entry
+   point into the SAME script (against the already-published installer). The gate is not weakened — the
+   script is what ships, so the probe cannot drift from it.
+2. **A Tauri GUI-subsystem binary returns before its writes land.** `--generate-certs-only` printed
+   `generated CA + leaf at ...ca.pem`, yet a `Test-Path` 190ms later still failed: the certs land via a
+   staged write + atomic rename after the call detaches. Poll with a deadline, never test once.
+3. **PowerShell 7.4+ turns native non-zero exits into terminating errors.**
+   `$PSNativeCommandUseErrorActionPreference` defaults to `$true`, so under `$ErrorActionPreference = "Stop"`
+   a `schtasks /Delete` on a task that does not exist YET (the pre-arm cleanup) throws and kills the script
+   with no message of its own — it looked like a silent `exit 1` right after the certs step. This script
+   deliberately shells out to tools whose non-zero exit IS the answer (`schtasks /Query` absent = non-zero,
+   which the postconditions read), so it sets `$PSNativeCommandUseErrorActionPreference = $false` and decides
+   on `$LASTEXITCODE` explicitly — the same discipline the rest of the repo's pwsh uses. Related known
+   gotcha, already documented in `accelerator.yml:786-790`: Actions appends `exit $LASTEXITCODE` to pwsh
+   steps, so a trailing native non-zero fails an otherwise-passing step.
+
 ## Harness notes
 
 - `gh workflow run` cannot dispatch a `workflow_dispatch` workflow that exists only on a feature branch (404:
