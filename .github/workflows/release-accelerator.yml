@@ -1356,7 +1356,9 @@ jobs:
             echo "invalidation attempt $attempt failed; retrying in $((attempt * 3))s"
             sleep $((attempt * 3))
           done
-          echo "promote: the auto-updater feed now serves $VERSION (invalidation is best-effort)"
+          # `create-invalidation` returns while status is InProgress, so don't claim "now serves" here —
+          # verify-live-feed polls the public feed and is the authority on when it actually serves $VERSION.
+          echo "promote: S3 feed set to $VERSION; CloudFront invalidation requested (best-effort). verify-live-feed confirms live propagation."
 
   # Enforce the live-feed check that was previously done by hand: after `promote`
   # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
@@ -1367,9 +1369,14 @@ jobs:
   verify-live-feed:
     name: Verify live updater feed
     needs: [validate, promote]
-    # B6: verify only after a REAL promote (promote-only, not dry_run). A skipped `promote` (publish mode /
-    # dry_run) skips this via the dependency.
-    if: ${{ inputs.mode == 'promote-only' && !inputs.dry_run }}
+    # B6: verify only in a REAL promote (promote-only, not dry_run).
+    # blocker-1 (codex High): run this after ANY attempted promote via its OWN status function — NOT the
+    # implicit success() on `promote` — so live verification can't be skipped by a non-fatal invalidation
+    # NOR by a PUT whose CLI errored/timed-out AFTER S3 committed (feed live but `promote` RED). The live
+    # feed is the source of truth: if the PUT truly didn't land, this polls ~600s and fails RED; if it DID
+    # land despite a RED `promote`, this confirms GREEN. Gated to validate-green + promote-only + !dry_run
+    # so it never runs in publish mode.
+    if: ${{ always() && !cancelled() && needs.validate.result == 'success' && inputs.mode == 'promote-only' && !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

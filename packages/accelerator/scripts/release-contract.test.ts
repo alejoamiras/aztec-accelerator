@@ -174,6 +174,12 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(invStep, "invalidation exhaustion warns (non-fatal)").toContain(
       "::warning::CloudFront invalidation failed after 3 attempts",
     );
+    // codex High: verify-live-feed must run after ANY attempted promote via its OWN status function, so a
+    // PUT whose CLI errored AFTER S3 committed (feed live but `promote` RED) can't skip live verification —
+    // the live feed is the source of truth. [mut: revert to the implicit success() on `promote` → fails]
+    expect(WF, "verify-live-feed runs on its own always() status function").toMatch(
+      /Verify live updater feed[\s\S]{0,800}?if: \$\{\{ always\(\) && !cancelled\(\) && needs\.validate\.result == 'success' && inputs\.mode == 'promote-only'/,
+    );
   });
 
   test("downstream wiring: verify-live-feed needs promote; bump-source only on organic-GA promote", () => {
