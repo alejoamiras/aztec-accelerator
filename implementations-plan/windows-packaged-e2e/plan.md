@@ -100,12 +100,27 @@ Windows is the only OS with a native uninstall hook whose ownership logic has ne
 
 ## Phases
 
-- **P0** (done): recon + this plan + `stage-installers` Windows pattern.
-- **P1** (unblocked, in progress): `uninstall-windows` leg — real install, arm autostart/crash-recovery, real
-  `uninstall.exe /S`, broad assertions. Absorbs backlog #61.
-- **P2** (gated on the fork): `packaged-e2e-windows` composed-proof leg.
-- **P3**: contract-test counts + pins, mutation-proven.
-- **P4**: live `2.0.1-rc.N` validation until green; codex rounds until a round is clean; docs/lessons/index.
+- **P0 — DONE**: recon + this plan + `stage-installers` Windows pattern.
+- **P1 — DONE + PROVEN**: `uninstall-windows` leg. Green three times on a hosted runner against the REAL
+  published 2.0.0 installer (as first written, after the codex round-2 hardening, and after round 3).
+  Absorbs backlog #61. Contract-pinned and mutation-proven; write-isolation now 1 write / 5 reads.
+- **P2 — BLOCKED (owner)**: `packaged-e2e-windows` composed-proof leg. The fork above was MEASURED, not
+  assumed: `certutil -user -store Root` does not see a LocalMachine-imported anchor, so the shipped gate
+  keeps `:59834` closed. Needs decision (A) / (B) / (C).
+- **P3 — DONE for P1** (reads 4 → 5); goes to 6 with P2.
+- **P4 — codex loop closed for P1** (rounds 1-4); live rc validation of the leg inside a real draft happens
+  on the next genuine release dispatch, since the pipeline refuses non-main refs — the
+  `smoke-uninstall-windows.yml` manual smoke covers it in the meantime by running the identical script.
+
+## Validation route (revised — the original plan was wrong)
+
+The plan assumed live proof would come from `2.0.1-rc.N` dispatches. It cannot, on a branch:
+`release-accelerator.yml` asserts a main ref before doing anything (F-005), and it is the ONLY caller of
+`_e2e-packaged.yml`. So a new leg there is unrunnable until merged — at which point it is already
+release-blocking, which is precisely the risk the live proof was meant to retire. Resolution: the leg body
+lives in a script, and `smoke-uninstall-windows.yml` (manual, `workflow_dispatch`) runs that same script
+against a published installer. That is what produced the three green proofs. The rc dispatch remains the
+final in-situ check, but it is no longer the ONLY way to learn whether the leg works.
 
 ## Codex loop log
 
