@@ -57,8 +57,22 @@ if ($inst.ExitCode -ne 0) { Write-Host "::error::installer exited $($inst.ExitCo
 
 # Address the app BY NAME under the per-user install root (installMode currentUser). Never a bare recursive
 # first-match: the install dir also carries the bundled `bb` sidecar.
-$exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue | Select-Object -First 1
-if (-not $exe) { Write-Host "::error::installed AztecAccelerator.exe not found under %LOCALAPPDATA%"; exit 1 }
+# POLL: the installer exiting 0 does NOT mean every file has materialised — observed a run where the exe was
+# absent immediately after `WaitForExit` returned success (three earlier runs won the same race). Same class
+# as the cert generation below: never treat a filesystem effect as complete just because the process exited.
+$exe = $null
+$deadline = (Get-Date).AddSeconds(60)
+do {
+  $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue |
+    Select-Object -First 1
+  if ($exe) { break }
+  Start-Sleep -Seconds 2
+} while ((Get-Date) -lt $deadline)
+if (-not $exe) {
+  Write-Host "::error::installed AztecAccelerator.exe not found under %LOCALAPPDATA% within 60s of a successful install"
+  Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -EA SilentlyContinue | Select-Object FullName | Out-String | Write-Host
+  exit 1
+}
 $installDir = $exe.Directory.FullName
 $uninstaller = Join-Path $installDir "uninstall.exe"
 if (-not (Test-Path $uninstaller)) { Write-Host "::error::no uninstall.exe in $installDir"; exit 1 }
