@@ -18,14 +18,6 @@ on:
         required: false
         type: string
         default: accelerator-v2.0.0
-  # TEMPORARY (removed in the last commit before merge): a workflow_dispatch workflow is not triggerable
-  # until it exists on the default branch, so this is the only way to verify script changes on the branch
-  # that makes them. Scoped to this branch and to the two files that can change the proof's behaviour.
-  push:
-    branches: [worktree-windows-packaged-e2e]
-    paths:
-      - ".github/workflows/smoke-uninstall-windows.yml"
-      - ".github/scripts/packaged-e2e-uninstall-windows.ps1"
 
 permissions:
   contents: read

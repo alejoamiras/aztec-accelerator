@@ -128,6 +128,28 @@ intact after `| Out-Null`; `GetValueNames()` on the `RegistryKey` from `Get-Item
 redundant because `HasExited` self-updates — deleted. It re-confirmed that deleting the 75s resurrection
 wait was right.
 
+## Codex round 5 — loop CLOSED
+
+Verdict: *"terminate — the fixes are correct; **no remaining findings**."* The round-4 collection fix is
+sound (`@(...)` normalises zero/one/many; count + non-blank + exact-path all fail closed).
+
+Two answers worth keeping, both decided on mechanism rather than deference:
+- **Reverting the installer poll was right.** `/S` suppresses UI; it does NOT make NSIS extraction
+  asynchronous. Sections execute inside the installer process and this per-user installer has no elevation
+  handoff, so once `WaitForExit` returns true with exit code 0 the files exist. The UNINSTALLER is the
+  genuinely different case — it is documented to run from a temp copy — which is why its 60s settle loop
+  stays. So the two loops are not inconsistent: one guards a real documented behaviour, the other guarded a
+  mechanism that does not exist.
+- **No script-level version validation.** Artifact identity belongs to the CALLERS: the smoke pins its
+  default tag, and the draft gate uses the validated release tag plus manifest-verified bytes. A real check
+  would need an expected-version parameter, plumbing through both callers, and normalisation across tag,
+  filename and embedded version; a filename-only check would buy almost nothing. Rejected as ceremony.
+
+Loop summary: **5 rounds, 4 of which found something real** — 3 HIGH + 3 MEDIUM false-green paths (r2), a
+two-way pid-oracle gap with a Microsoft citation (r3), a PowerShell collection-comparison trap (r4),
+terminate (r5). Two of codex's suggestions were rejected with reasons (foreign-ownership case; deleting the
+heal poll), and one of its deletions was adopted enthusiastically (the 75s resurrection wait).
+
 ## Windows-CI gotchas hit while building the uninstall leg
 
 1. **The release pipeline refuses a non-main ref** — `release-accelerator.yml`'s `Assert main ref` step
