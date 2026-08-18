@@ -1,0 +1,140 @@
+name: SPIKE — can CurrentUser\Root be seeded headlessly? (TEMPORARY)
+
+# The Windows composed-proof leg is blocked on ONE claim: that a CA cannot be added to CurrentUser\Root on a
+# hosted runner because CryptoAPI raises a consent dialog that hangs forever. That claim is INHERITED from
+# `tests/trust_windows.rs:1-9` and a comment in `updater-smoke-windows.ps1:156-161` — it has never been
+# measured in THIS environment, and the whole "needs an owner decision" conclusion rests on it.
+#
+# Measure it three ways, each with a HARD timeout so a hang costs seconds, not the job:
+#   1. certutil -user -addstore Root      (the exact call the product makes)
+#   2. Import-Certificate -> Cert:\CurrentUser\Root  (the PowerShell path)
+#   3. X509Store(Root, CurrentUser).Add()  (the .NET path)
+# After each, re-run the product's own predicate query (`certutil -user -store Root <serial>`) to see whether
+# the anchor became visible to the SHIPPED gate.
+#
+# If any path seeds silently, the composed proof needs NO production change and NO owner decision.
+# Deleted once its answer is recorded.
+
+on:
+  push:
+    branches: [worktree-windows-packaged-e2e]
+    paths: [".github/workflows/spike-cu-root.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe CurrentUser Root seeding
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Download the real published Windows installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p app-artifact
+          gh release download accelerator-v2.0.0 --repo "$REPO" --pattern '*Windows-x86_64-setup.exe' --dir app-artifact
+
+      - name: Measure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $results = @()
+          function Record($k, $v) { Write-Host "MEASURE ${k}: ${v}"; $script:results += "$k = $v" }
+
+          $setup = Get-ChildItem -Path app-artifact -Recurse -Filter "*-setup.exe" | Select-Object -First 1
+          Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA "Aztec Accelerator") -EA SilentlyContinue
+          $inst = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -PassThru
+          if (-not $inst.WaitForExit(180000)) { $inst.Kill(); Write-Error "installer hung"; exit 1 }
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { Write-Error "no installed exe"; exit 1 }
+
+          & $exe.FullName --generate-certs-only
+          $ca = Join-Path $env:USERPROFILE ".aztec-accelerator\certs\ca.pem"
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not (Test-Path $ca) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if (-not (Test-Path $ca)) { Write-Error "no ca.pem"; exit 1 }
+          $caObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $ca
+          $serial = $caObj.SerialNumber.ToLower()
+          Record "ca_serial" $serial
+
+          # The product's own predicate query. Re-run after every attempt below.
+          function Predicate-Sees {
+            & C:\Windows\System32\certutil.exe -user -store Root $serial 2>$null | Out-Null
+            return ($LASTEXITCODE -eq 0)
+          }
+          Record "predicate_before_any_attempt" (Predicate-Sees)
+
+          # ── 1. certutil -user -addstore Root, the EXACT call the product makes ──
+          $p = Start-Process -FilePath "C:\Windows\System32\certutil.exe" `
+                 -ArgumentList "-user", "-addstore", "Root", "`"$ca`"" -PassThru -NoNewWindow
+          if ($p.WaitForExit(45000)) {
+            Record "certutil_addstore_exit" $p.ExitCode
+            Record "certutil_addstore_hung" $false
+          } else {
+            $p.Kill()
+            Record "certutil_addstore_hung" $true
+          }
+          Record "predicate_after_certutil" (Predicate-Sees)
+
+          # ── 2. Import-Certificate (cmdlet ⇒ needs a job to be interruptible) ──
+          $j = Start-Job -ScriptBlock {
+            param($caPath)
+            Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\CurrentUser\Root -ErrorAction Stop | Out-Null
+            "ok"
+          } -ArgumentList $ca
+          if (Wait-Job $j -Timeout 45) {
+            Record "import_certificate_result" (Receive-Job $j -EA SilentlyContinue)
+            Record "import_certificate_state" $j.State
+          } else {
+            Stop-Job $j; Record "import_certificate_hung" $true
+          }
+          Remove-Job $j -Force -EA SilentlyContinue
+          Record "predicate_after_import_certificate" (Predicate-Sees)
+
+          # ── 3. .NET X509Store ──
+          $j2 = Start-Job -ScriptBlock {
+            param($caPath)
+            $c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $caPath
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store "Root", "CurrentUser"
+            $store.Open("ReadWrite")
+            $store.Add($c)
+            $store.Close()
+            "ok"
+          } -ArgumentList $ca
+          if (Wait-Job $j2 -Timeout 45) {
+            Record "x509store_add_result" (Receive-Job $j2 -EA SilentlyContinue)
+            Record "x509store_add_state" $j2.State
+          } else {
+            Stop-Job $j2; Record "x509store_add_hung" $true
+          }
+          Remove-Job $j2 -Force -EA SilentlyContinue
+          Record "predicate_after_x509store" (Predicate-Sees)
+
+          $seeded = Predicate-Sees
+          Write-Host "`n===== SPIKE RESULT ====="
+          $results | ForEach-Object { Write-Host $_ }
+          $verdict = if ($seeded) {
+            "GO: CurrentUser\Root CAN be seeded headlessly -> composed proof needs NO production change"
+          } else {
+            "NO-GO: no headless path seeds the store the shipped predicate reads"
+          }
+          Write-Host "VERDICT: $verdict"
+          exit 0
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null | Out-Null
+          Get-Process -Name "AztecAccelerator" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+          exit 0
