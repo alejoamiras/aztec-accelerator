@@ -1084,7 +1084,9 @@ jobs:
       ${{ always() && !cancelled() && !inputs.auth_probe && inputs.mode == 'publish'
       && needs.validate.result == 'success' && needs.release.result == 'success' }}
     permissions:
-      contents: read
+      # Ceiling for the reusable workflow: only its `stage-installers` job uses write (to see the DRAFT's
+      # assets); the code-executing E2E jobs downgrade to `contents: read` per-job (codex privilege isolation).
+      contents: write
     uses: ./.github/workflows/_e2e-packaged.yml
     with:
       # Pin the gate's harness/packed-SDK checkout to the DISPATCHED commit, not the moving `refs/heads/main`
