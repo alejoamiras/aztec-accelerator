@@ -154,6 +154,47 @@ Both blocker claims are now first-hand measurements against the SHIPPED 2.0.0 bi
 image CI uses. The composed proof is genuinely infeasible without a production change, which is the goal's
 explicit STOP-and-surface condition rather than something to descope quietly.
 
+## Spike 4 — the GroupPolicy store, and the definitive close (runs 32152308959, 32153100430)
+
+`CurrentUser\Root` is a LOGICAL collection over several PHYSICAL stores, so before accepting the blocker it
+was worth asking whether a store OTHER than the protected `.Default` one could be seeded:
+
+| Physical store | Path | Result |
+|---|---|---|
+| `.Default` | `HKCU\Software\Microsoft\SystemCertificates\Root` | protected-root filtered — defeats certutil/Import-Certificate/X509Store |
+| `.LocalMachine` | inherited from the machine store | measured invisible to the predicate (spike 1) |
+| `.GroupPolicy` | `HKCU\Software\Policies\Microsoft\SystemCertificates\Root` | **this spike** — per-user (no admin), policy-sourced, so NOT subject to the consent UI |
+
+First attempt returned `0x80070002` (ERROR_FILE_NOT_FOUND) with nothing written. That error reads as "the key
+does not exist", not "policy stores are filtered" — a specific, testable hypothesis rather than a new invented
+mechanism, so it earned one retry: create `...\Root\Certificates` first, then re-run.
+
+The retry confirmed the hypothesis **and closed the path**:
+
+| Measurement | Result |
+|---|---|
+| `gp_key_created` | True |
+| `gp_addstore_exit` | **0** — certutil succeeded once the key existed |
+| `gp_registry_entries` | **1** — the cert really is in the GroupPolicy store |
+| `PREDICATE_SEES_GROUPPOLICY_CERT` | **False** |
+| `HTTPS_GATE_OPENED` / browser TLS | False / `ECONNREFUSED 127.0.0.1:59834` |
+
+So the write succeeds, the registry entry exists, and `certutil -user -store Root <serial>` STILL does not see
+it. The predicate reads exactly one physical store, and only the interactive consent path populates it.
+
+### Final tally — five distinct mechanisms, all measured dead
+
+1. `certutil -user -addstore Root` — **hangs** (the exact call the product makes)
+2. `Import-Certificate -> Cert:\CurrentUser\Root` — succeeds, **invisible** to the predicate
+3. `.NET X509Store("Root","CurrentUser").Add()` — **hangs**
+4. LocalMachine\Root import — succeeds, **invisible** to the predicate
+5. GroupPolicy store write — succeeds, entry present, **invisible** to the predicate
+
+Combined with spike 3 (browser + loopback on Windows both work), the picture is complete: the ONLY thing
+between here and a working composed proof is the trust predicate itself, and no amount of CI cleverness gets
+around it. That makes this a genuine architectural decision — (A) launch-gate predicate widening,
+(B) pre-trusted runner image, or (C) documented manual check — not a harness problem to out-engineer.
+
 ## Spike 3 — the OTHER P2 unknown, retired (run 32151746481)
 
 The composed-proof leg had two unknowns, and only one was owner-blocked. The second was decision-independent
