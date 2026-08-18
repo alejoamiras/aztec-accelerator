@@ -1,0 +1,139 @@
+name: SPIKE — GroupPolicy Root store (TEMPORARY)
+
+# A FOURTH seeding path, materially different from the three already measured as dead.
+#
+# `CurrentUser\Root` is a LOGICAL collection over several PHYSICAL stores:
+#   .Default       HKCU\Software\Microsoft\SystemCertificates\Root      <- protected-root filtered; this is
+#                                                                          what defeated certutil -addstore,
+#                                                                          Import-Certificate and X509Store
+#   .LocalMachine  inherited from the machine store                     <- measured: invisible to the predicate
+#   .GroupPolicy   HKCU\Software\Policies\Microsoft\SystemCertificates\Root
+#
+# The GroupPolicy store is per-USER (HKCU, so no admin), is POLICY-sourced (so it is not subject to the
+# interactive root-consent UI that filters .Default), and certutil can target it with -GroupPolicy.
+#
+# If `certutil -user -store Root <serial>` — the EXACT query the shipped predicate runs — sees a cert placed
+# there, then the composed proof needs NO production change and NO self-hosted runner.
+#
+# Measures, in order: seed -> predicate query -> does the shipped app actually bind :59834 -> does a real
+# Chromium complete a TLS handshake to it without any ignore-certificate flags.
+
+on:
+  push:
+    branches: [worktree-windows-packaged-e2e]
+    paths: [".github/workflows/spike-gp-root.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe GroupPolicy Root seeding
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Download the real published Windows installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p app-artifact
+          gh release download accelerator-v2.0.0 --repo "$REPO" --pattern '*Windows-x86_64-setup.exe' --dir app-artifact
+
+      - name: Install chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bunx playwright install chromium
+
+      - name: Measure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          function Record($k, $v) { Write-Host "MEASURE ${k}: ${v}" }
+
+          $setup = Get-ChildItem -Path app-artifact -Recurse -Filter "*-setup.exe" | Select-Object -First 1
+          Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA "Aztec Accelerator") -EA SilentlyContinue
+          $inst = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -PassThru
+          if (-not $inst.WaitForExit(180000)) { $inst.Kill(); Write-Error "installer hung"; exit 1 }
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { Write-Error "no installed exe"; exit 1 }
+
+          & $exe.FullName --generate-certs-only
+          $ca = Join-Path $env:USERPROFILE ".aztec-accelerator\certs\ca.pem"
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not (Test-Path $ca) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if (-not (Test-Path $ca)) { Write-Error "no ca.pem"; exit 1 }
+          $caObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $ca
+          $serial = $caObj.SerialNumber.ToLower()
+          Record "ca_serial" $serial
+
+          function Predicate-Sees {
+            & C:\Windows\System32\certutil.exe -user -store Root $serial 2>$null | Out-Null
+            return ($LASTEXITCODE -eq 0)
+          }
+          Record "predicate_before" (Predicate-Sees)
+
+          # THE MEASUREMENT: seed the GroupPolicy physical store (HKCU, policy-sourced, no consent UI).
+          $p = Start-Process -FilePath "C:\Windows\System32\certutil.exe" `
+                 -ArgumentList "-user", "-GroupPolicy", "-addstore", "Root", "`"$ca`"" -PassThru -NoNewWindow
+          if ($p.WaitForExit(45000)) {
+            Record "gp_addstore_exit" $p.ExitCode
+            Record "gp_addstore_hung" $false
+          } else { $p.Kill(); Record "gp_addstore_hung" $true }
+
+          $gpKey = "HKCU:\Software\Policies\Microsoft\SystemCertificates\Root\Certificates"
+          Record "gp_registry_entries" (@(Get-ChildItem -Path $gpKey -EA SilentlyContinue).Count)
+          Record "PREDICATE_SEES_GROUPPOLICY_CERT" (Predicate-Sees)
+
+          # Does the SHIPPED app now open the HTTPS listener?
+          $aztecDir = Join-Path $env:USERPROFILE ".aztec-accelerator"
+          Set-Content -Path (Join-Path $aztecDir "config.json") -NoNewline `
+            -Value '{"config_version":2,"https_enabled":true,"auto_approve_localhost":true}'
+          $env:AZTEC_ACCEL_NO_UPDATE = "1"
+          Start-Process -FilePath $exe.FullName -PassThru | Out-Null
+          $httpsUp = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try { if ((Invoke-RestMethod -Uri "https://127.0.0.1:59834/health" -TimeoutSec 3).status -eq "ok") { $httpsUp = $true; break } } catch { }
+            Start-Sleep -Seconds 2
+          }
+          Record "HTTPS_GATE_OPENED" $httpsUp
+
+          # And does a REAL browser complete the TLS handshake with no ignore flags?
+          @'
+          const { chromium } = require("playwright");
+          (async () => {
+            const b = await chromium.launch({ headless: true });
+            const p = await b.newPage();
+            let out = {};
+            try {
+              const r = await p.request.get("https://127.0.0.1:59834/health", { timeout: 15000 });
+              out.status = r.status(); out.body = (await r.text()).slice(0, 120);
+            } catch (e) { out.error = String(e).slice(0, 200); }
+            await b.close();
+            console.log("BROWSER_TLS " + JSON.stringify(out));
+          })();
+          '@ | Set-Content -Path tls.cjs -Encoding utf8
+          node tls.cjs
+          exit 0
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null | Out-Null
+          Get-Process -Name "AztecAccelerator" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+          exit 0
