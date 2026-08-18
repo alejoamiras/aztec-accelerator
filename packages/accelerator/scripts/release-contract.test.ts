@@ -244,14 +244,41 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
   test("draft-asset write is isolated to the no-code staging job; E2E jobs stay read-only", () => {
     // codex privilege isolation: a DRAFT release is only visible to a write token, but the E2E jobs execute the
     // installed app + a browser + the packed SDK. Only `stage-installers` (no checkout, no app code) holds
-    // contents:write to fetch+verify+re-upload the draft's installers; the 4 code-executing E2E jobs consume
+    // contents:write to fetch+verify+re-upload the draft's installers; the code-executing E2E jobs consume
     // the staged artifact at contents:read. [mut: elevate an E2E job to contents:write → the write count
-    //  exceeds 1 (and reads drop below 4) → this fails]
+    //  exceeds 1 (and reads drop below the job count) → this fails]
     expect(PACKAGED).toContain("stage-installers");
     // Count the actual job PERMISSION lines (6-space indent), not comment mentions of the words.
     const writes = (PACKAGED.match(/^ {6}contents: write\b/gm) || []).length;
     const reads = (PACKAGED.match(/^ {6}contents: read\b/gm) || []).length;
     expect(writes, "exactly one contents:write perm — the staging job only").toBe(1);
-    expect(reads, "the 4 code-executing E2E jobs stay read-only").toBe(4);
+    // linux composed / macos composed / linux upgrade-migration / linux uninstall / windows uninstall.
+    // Goes to 6 when the windows composed-proof leg lands.
+    expect(reads, "every code-executing E2E job stays read-only").toBe(5);
+  });
+
+  test("windows uninstall leg drives the REAL uninstaller and cannot pass vacuously", () => {
+    // The first end-to-end run of the NSIS PREUNINSTALL/POSTUNINSTALL pair against a real install (today's
+    // Windows CI drives those hooks only against a stub exe, or installs without ever uninstalling). Its
+    // whole value rests on two properties, so both are pinned:
+    //   1. it runs the REAL silent uninstaller, not `--prepare-uninstall` alone;
+    //   2. every artifact it asserts GONE is asserted PRESENT first — otherwise the leg would pass on a
+    //      runner where the app was never installed, which is exactly the failure mode that makes a
+    //      cleanup test worthless (codex: "a post-uninstall absent-assertion without a positive
+    //      precondition is worthless").
+    // [mut: drop the precondition block, or point the leg at --prepare-uninstall instead of uninstall.exe
+    //  → these fail]
+    expect(PACKAGED).toContain("Full uninstall (windows)");
+    expect(PACKAGED).toMatch(/\$uninstaller\s*=\s*Join-Path \$installDir "uninstall\.exe"/);
+    expect(PACKAGED).toMatch(/Start-Process -FilePath \$uninstaller -ArgumentList "\/S"/);
+    // Positive preconditions: the product must have armed the Run value and the crash-recovery task.
+    expect(PACKAGED).toContain(
+      "precondition: the product did not heal the Run value to its own quoted path",
+    );
+    expect(PACKAGED).toContain("precondition: the product did not arm the crash-recovery task");
+    // Retention is asserted alongside removal — an uninstall that eats the user's config is data loss.
+    expect(PACKAGED).toContain("config.json was deleted");
+    // The no-resurrection check must outlast the crash-recovery PT1M relaunch trigger.
+    expect(PACKAGED).toMatch(/Start-Sleep -Seconds 75/);
   });
 });

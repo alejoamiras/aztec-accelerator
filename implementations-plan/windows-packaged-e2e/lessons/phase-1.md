@@ -45,6 +45,33 @@ app's existing predicate may already be satisfied by an anchor imported into Loc
 `(CU.Root || LM.Root) && !(CU.Disallowed || LM.Disallowed)`, preferring thumbprint over serial for identity,
 and make the uninstaller NOT claim to remove administrator-managed LocalMachine trust — report it separately.
 
+## Spike result — codex's hypothesis MEASURED and DISPROVEN (run 32144187291, 2026-08-18)
+
+Probed the REAL published 2.0.0 Windows installer on `windows-latest`:
+
+| Measurement | Value |
+|---|---|
+| `certutil -user -store Root <serial>` BEFORE any import | `-2146893807` (= `0x80092004` CRYPT_E_NOT_FOUND) — correct baseline |
+| same query AFTER importing the CA into **LocalMachine\Root** | `-2146893807` — **still not found** |
+| `USER_STORE_INHERITS_LOCALMACHINE` | **False** |
+| `Get-ChildItem Cert:\CurrentUser\Root` sees the LM cert | **True** |
+| `HTTPS_GATE_OPENED_WITH_LM_SEED_ONLY` (app binds `:59834`) | **False** |
+| HTTP `/health` (sanity: the app itself runs fine) | `{"status":"ok","version":"2.0.0","bb_available":true,...}` |
+| `HTTPS_GATE_OPEN_WHILE_LM_DISALLOWED` (negative control) | False |
+
+**The precise finding** — sharper than either of us predicted: PowerShell's `Cert:\CurrentUser\Root`
+provider DOES enumerate a LocalMachine-imported anchor (the logical-collection view codex cited), but
+`certutil -user -store Root` — the exact call the shipped predicate makes (`trust/windows.rs:59-66,155-177`)
+— does NOT. It opens the PHYSICAL CurrentUser store. So the inheritance is real at the CryptoAPI
+logical-store layer and invisible at the tool layer the product happens to use. The shipped app therefore
+keeps HTTPS closed with an LM-only seed, confirmed end-to-end (`:59834` never came up while `:59833` served
+`/health` normally).
+
+**Verdict: NO-GO for a zero-production-change composed proof.** This is exactly the goal's
+"STOP and surface" trigger, so it goes to the owner rather than being descoped silently. Note the spike also
+proved the negative control cheaply, and — usefully — that the shipped 2.0.0 app installs, runs, and serves
+`/health` on a hosted Windows runner with no virtual display, which de-risks the rest of the Windows work.
+
 ## Harness notes
 
 - `gh workflow run` cannot dispatch a `workflow_dispatch` workflow that exists only on a feature branch (404:
