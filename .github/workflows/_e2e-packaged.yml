@@ -586,9 +586,18 @@ jobs:
 
           # Cert MATERIAL on disk (headless-safe: generates the CA/leaf/key, never touches the OS trust store,
           # which is the same call the linux/macos legs use). This is what `--prepare-uninstall` must delete.
-          & $exe.FullName --generate-certs-only
+          # POLL, don't test once: this is a GUI-subsystem binary, so the call returns as soon as it detaches
+          # and the certs land via a staged write + atomic rename — a single immediate Test-Path loses the race.
           $certsDir = Join-Path $aztecDir "certs"
-          if (-not (Test-Path $certsDir)) { Write-Error "precondition: --generate-certs-only produced no certs dir"; exit 1 }
+          $caFile = Join-Path $certsDir "ca.pem"
+          & $exe.FullName --generate-certs-only
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not (Test-Path $caFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if (-not (Test-Path $caFile)) {
+            Get-ChildItem -Path $aztecDir -Recurse -EA SilentlyContinue | Select-Object FullName | Out-String | Write-Host
+            Write-Error "precondition: --generate-certs-only produced no ca.pem within 30s"
+            exit 1
+          }
 
           # A config file that must SURVIVE the uninstall (documented retention: config + bb cache are never
           # touched — README "Your config and approved origins are never touched").

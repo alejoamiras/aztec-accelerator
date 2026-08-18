@@ -58,9 +58,20 @@ jobs:
           Record "installed_exe" $exe.FullName
 
           # Generate the CA/leaf on disk WITHOUT touching any OS trust store (headless-safe).
-          & $exe.FullName --generate-certs-only
+          # This is a GUI-subsystem binary: the call returns as soon as it detaches, and the certs land via a
+          # staged write + atomic rename, so the "generated" line can print BEFORE the final name exists.
+          # Poll for the file rather than testing once (measured: a single Test-Path 190ms later still lost).
           $ca = Join-Path $env:USERPROFILE ".aztec-accelerator\certs\ca.pem"
-          if (-not (Test-Path $ca)) { Write-Error "no ca.pem generated"; exit 1 }
+          & $exe.FullName --generate-certs-only
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not (Test-Path $ca) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if (-not (Test-Path $ca)) {
+            Write-Host "certs dir contents:"
+            Get-ChildItem -Path (Join-Path $env:USERPROFILE ".aztec-accelerator") -Recurse -EA SilentlyContinue |
+              Select-Object FullName | Out-String | Write-Host
+            Write-Error "no ca.pem generated within 30s"
+            exit 1
+          }
           $caObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $ca
           $serial = $caObj.SerialNumber.ToLower()
           $thumb = $caObj.Thumbprint
