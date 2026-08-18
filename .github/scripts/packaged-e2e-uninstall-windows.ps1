@@ -134,9 +134,15 @@ try {
   Write-Host $xmlText
   exit 1
 }
-$taskCommand = $taskDoc.Task.Actions.Exec.Command
-if ([string]::IsNullOrWhiteSpace($taskCommand) -or $taskCommand.Trim('"') -ne $exe.FullName) {
-  Write-Host "::error::precondition: the crash-recovery task runs '$taskCommand', not the installed exe"
+# Array-wrap and demand EXACTLY ONE action: with multiple <Exec> nodes `.Command` is a collection, and `-ne`
+# against a collection FILTERS it instead of returning a boolean — two identical commands would yield an
+# empty (falsy) result and sail through. Requiring one command also means "the task runs our exe" cannot be
+# satisfied by our exe merely being one action among several.
+$taskCommands = @($taskDoc.Task.Actions.Exec.Command)
+if ($taskCommands.Count -ne 1 -or
+    [string]::IsNullOrWhiteSpace($taskCommands[0]) -or
+    $taskCommands[0].Trim('"') -ne $exe.FullName) {
+  Write-Host "::error::precondition: expected exactly one crash-recovery action running the installed exe; got $($taskCommands.Count): $($taskCommands -join ' | ')"
   exit 1
 }
 # Byte-exact config snapshot: "still exists" would also pass if uninstall truncated or rewrote it.

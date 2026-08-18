@@ -307,6 +307,10 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
     expect(UNINSTALL_WIN).toContain("process(es) survived the uninstall");
     // The task precondition parses the XML and compares Exec.Command, rather than substring-matching the
     // whole document (where the path could sit in an argument or description).
-    expect(UNINSTALL_WIN).toMatch(/\$taskDoc\.Task\.Actions\.Exec\.Command/);
+    // Array-wrapped and required to be exactly ONE action: `.Command` is a collection when the task has
+    // multiple <Exec> nodes, and `-ne` against a collection filters instead of returning a boolean, so a
+    // bare comparison passes silently (codex r4). [mut: drop the Count check → false-green returns]
+    expect(UNINSTALL_WIN).toMatch(/\$taskCommands = @\(\$taskDoc\.Task\.Actions\.Exec\.Command\)/);
+    expect(UNINSTALL_WIN).toMatch(/\$taskCommands\.Count -ne 1/);
   });
 });
