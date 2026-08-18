@@ -122,10 +122,21 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 # A task merely EXISTING under that name proves little (a foreign task could hold the name). Bind the
-# precondition to OUR installed exe, so the removal assertion below is about the task we actually armed.
-if (($taskXml -join "`n") -notlike "*$($exe.FullName)*") {
-  Write-Host "::error::precondition: the crash-recovery task does not reference the installed exe"
-  Write-Host ($taskXml -join "`n")
+# precondition to OUR installed exe. Parse the XML rather than substring-matching the whole document: the
+# path could otherwise appear in an argument or description and still satisfy a naive `-like`, which would
+# make "bound to our exe" a claim the check does not actually support. Fail closed if the XML will not parse
+# — falling back to a weaker match is exactly the fail-open pattern this pass removed elsewhere.
+$xmlText = ($taskXml -join "`n").TrimStart([char]0xFEFF, ' ', "`t", "`r", "`n")
+try {
+  [xml]$taskDoc = $xmlText
+} catch {
+  Write-Host "::error::precondition: could not parse the crash-recovery task XML"
+  Write-Host $xmlText
+  exit 1
+}
+$taskCommand = $taskDoc.Task.Actions.Exec.Command
+if ([string]::IsNullOrWhiteSpace($taskCommand) -or $taskCommand.Trim('"') -ne $exe.FullName) {
+  Write-Host "::error::precondition: the crash-recovery task runs '$taskCommand', not the installed exe"
   exit 1
 }
 # Byte-exact config snapshot: "still exists" would also pass if uninstall truncated or rewrote it.
@@ -137,9 +148,12 @@ Write-Host "armed by the product: healed Run value + crash-recovery task (bound 
 #    `$EXEDIR != $INSTDIR` holds because Windows copies uninstall.exe to a temp dir for a real uninstall. ──
 # "Uninstalled while running" is the whole point of this leg, so prove the app is ALIVE right now — health
 # was sampled earlier, and an app that crashed in between would let a broken running-app teardown pass.
-$proc.Refresh()
-if ($proc.HasExited) {
-  Write-Host "::error::precondition: the app exited before the uninstall (nothing proves running-app teardown)"
+# Check by NAME, not just our PID: the crash-recovery task is armed at this point and may legitimately have
+# started a second instance that won the port race, letting our original process bow out benignly. What must
+# hold is "an app is running", not "this exact pid is running".
+$aliveBefore = @(Get-Process -Name "AztecAccelerator" -ErrorAction SilentlyContinue)
+if ($aliveBefore.Count -eq 0) {
+  Write-Host "::error::precondition: no AztecAccelerator process is running before the uninstall (nothing proves running-app teardown)"
   exit 1
 }
 
@@ -187,12 +201,18 @@ if (-not (Test-Path $configFile)) {
   if ($configHashAfter -ne $configHashBefore) { $failures += "config.json was MODIFIED by the uninstall" }
 }
 
-# The app was provably alive when the uninstaller started, so THAT process must now be gone.
+# An app was provably running when the uninstaller started, so NO app may be running now. This must be a
+# by-name check, not just our pid: deleting a scheduled task does not terminate a process that task already
+# started (Microsoft documents this for `schtasks /delete`), so a task-spawned instance could outlive both
+# the task and our original process and slip past a pid-only assertion.
 # A "did anything come back?" sleep is deliberately absent: a missed scheduled start can be delayed by
-# minutes, so no bounded wait proves the absence of a relaunch — it would look like evidence without being
-# any. The relaunch trigger is proven dead by asserting the task itself is gone, above.
-$proc.Refresh()
-if (-not $proc.HasExited) { $failures += "the running app survived the uninstall (pid $($proc.Id))" }
+# minutes, so no bounded wait proves the absence of a FUTURE relaunch — it would look like evidence without
+# being any. Future triggers are proven dead by asserting the task itself is gone, above; this check covers
+# the already-started case that task-absence does not subsume.
+$aliveAfter = @(Get-Process -Name "AztecAccelerator" -ErrorAction SilentlyContinue)
+if ($aliveAfter.Count -gt 0) {
+  $failures += "$($aliveAfter.Count) AztecAccelerator process(es) survived the uninstall (pids: $($aliveAfter.Id -join ', '))"
+}
 
 if ($failures.Count -gt 0) {
   foreach ($f in $failures) { Write-Host "::error::$f" }

@@ -298,9 +298,15 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
     expect(UNINSTALL_WIN).toMatch(/GetValueNames\(\) -contains \$runValueName/);
     // "Uninstalled while running" is the leg's whole point, so the app must be provably alive at that moment
     // and that exact process must be gone after.
+    // By NAME, not by pid: deleting a scheduled task does not terminate a process it already started, so a
+    // task-spawned instance could outlive both the task and our original pid (codex r3). [mut: narrow either
+    // side back to $proc.HasExited → this fails]
     expect(UNINSTALL_WIN).toContain(
-      "precondition: the app exited before the uninstall (nothing proves running-app teardown)",
+      "precondition: no AztecAccelerator process is running before the uninstall",
     );
-    expect(UNINSTALL_WIN).toContain("the running app survived the uninstall");
+    expect(UNINSTALL_WIN).toContain("process(es) survived the uninstall");
+    // The task precondition parses the XML and compares Exec.Command, rather than substring-matching the
+    // whole document (where the path could sit in an argument or description).
+    expect(UNINSTALL_WIN).toMatch(/\$taskDoc\.Task\.Actions\.Exec\.Command/);
   });
 });

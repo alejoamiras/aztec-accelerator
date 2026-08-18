@@ -104,6 +104,30 @@ gone — which is now a fail-closed assertion. Runtime drops by 75s as a side ef
 
 **Also folded**: Defender exclusion narrowed from all of `%LOCALAPPDATA%` to the exact install directory.
 
+## Codex round 3 (resumed session — judge the result, not the prior reasoning)
+
+Verdict: *"Findings 1-8 are substantially closed; no remaining HIGH findings, but one MEDIUM process-oracle
+gap remains."* Both remaining findings folded:
+
+- **MEDIUM — the exact-PID oracle was too narrow, in BOTH directions.** Microsoft documents that
+  `schtasks /delete` does **not** interrupt a program the task already started, so a task-spawned instance
+  can outlive both the task and our original process and sail past a pid-only postcondition (false green).
+  Symmetrically, before the uninstall the armed recovery task may legitimately start a second instance that
+  wins the port race, letting our original process bow out benignly (false red). Both sides are now
+  by-NAME: "at least one AztecAccelerator process exists" before, "none" after. This is the assertion that
+  task-absence genuinely does not subsume — confirmed-absent task kills FUTURE triggers, not a running one.
+- **LOW — the task binding was weaker than its own message claimed.** Substring-matching the whole XML would
+  also match the path appearing in an argument or description, so "bound to our exe" overstated it. Now
+  parses the XML and compares `Task.Actions.Exec.Command` to the installed exe, failing closed if the XML
+  will not parse (a silent fallback to substring matching would reintroduce exactly the fail-open pattern
+  round 2 removed).
+
+Codex also confirmed, against docs, the things I had reasoned about but not verified: `$LASTEXITCODE` is
+intact after `| Out-Null`; `GetValueNames()` on the `RegistryKey` from `Get-Item` throws on read failure
+(which is the point); `.ExitCode` is valid after a timed `WaitForExit` returns true; and `Refresh()` was
+redundant because `HasExited` self-updates — deleted. It re-confirmed that deleting the 75s resurrection
+wait was right.
+
 ## Windows-CI gotchas hit while building the uninstall leg
 
 1. **The release pipeline refuses a non-main ref** — `release-accelerator.yml`'s `Assert main ref` step
