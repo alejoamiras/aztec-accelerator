@@ -288,12 +288,13 @@ jobs:
           test -n "$APP" || { echo "::error::.app not found in DMG"; find /Volumes/AztecAccelerator -type f; exit 1; }
           cp -R "$APP" /Applications/
           hdiutil detach /Volumes/AztecAccelerator || true
-          # Scope to OUR copied .app's MacOS/ — /Applications also holds macOS system apps (Safari, …), so a
-          # broad `-path '*.app/Contents/MacOS/*'` picks a SYSTEM binary (which lacks --generate-certs-only).
-          # The executable sits at .app/Contents/MacOS/<bin> (depth 4 — the old `-maxdepth 3` never reached it).
+          # Our .app's Contents/MacOS/ holds BOTH the main app (AztecAccelerator — the renamed cargo [[bin]],
+          # the one that has --generate-certs-only) AND the bundled `bb` prover sidecar, so a first-executable
+          # `find | head -1` grabbed `bb` (whose clap parser rejects the flag, exit 109). Address the main
+          # binary BY NAME. The .app dir is <productName>.app ("Aztec Accelerator.app"); the binary is the bin.
           APP_NAME=$(basename "$APP")
-          BIN=$(find "/Applications/$APP_NAME/Contents/MacOS" -maxdepth 1 -type f -perm -u+x | head -1)
-          test -n "$BIN" || { echo "::error::app binary not found in /Applications/$APP_NAME/Contents/MacOS"; ls -la "/Applications/$APP_NAME/Contents/MacOS" 2>/dev/null; exit 1; }
+          BIN="/Applications/$APP_NAME/Contents/MacOS/AztecAccelerator"
+          test -x "$BIN" || { echo "::error::main app binary not found at $BIN"; ls -la "/Applications/$APP_NAME/Contents/MacOS" 2>/dev/null; exit 1; }
           echo "APP_BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Generate certs (headless bootstrap)
