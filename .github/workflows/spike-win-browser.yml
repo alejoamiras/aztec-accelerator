@@ -1,0 +1,115 @@
+name: SPIKE — can a browser drive the installed app on Windows? (TEMPORARY)
+
+# The composed-proof leg has TWO unknowns. One (trust seeding) is measured and owner-blocked. This probes the
+# OTHER, which is decision-independent: Playwright/Chromium has never run on a Windows runner in this repo
+# (`.github/actions/playwright-cache` is Linux-only by its own comment; the macOS leg works around it with a
+# direct `bunx playwright install chromium`; no Windows job anywhere launches a browser).
+#
+# If a browser cannot drive the installed app on windows-latest, then NEITHER trust option (A: widen the
+# predicate, B: pre-trusted self-hosted runner) is sufficient — we would fix trust and then discover a second
+# blocker. Retiring this now makes the pending decision fully informed and the post-decision work small.
+#
+# Deliberately probes over HTTP (:59833). This is NOT the composed proof and is not wired into any gate —
+# it isolates "can a browser on Windows reach the installed app at all" from the trust question. The real
+# leg must still prove HTTPS + native bb.
+
+on:
+  push:
+    branches: [worktree-windows-packaged-e2e]
+    paths: [".github/workflows/spike-win-browser.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe Playwright + loopback reachability on Windows
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Download the real published Windows installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p app-artifact
+          gh release download accelerator-v2.0.0 --repo "$REPO" --pattern '*Windows-x86_64-setup.exe' --dir app-artifact
+
+      # UNKNOWN 1: does the browser install at all on a Windows runner? (the cache action is Linux-only)
+      - name: Install Chromium
+        id: browser
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bunx playwright install chromium
+          echo "installed=yes" >> "$GITHUB_OUTPUT"
+
+      - name: Install + launch the app, then drive it from a real browser
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $setup = Get-ChildItem -Path app-artifact -Recurse -Filter "*-setup.exe" | Select-Object -First 1
+          Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA "Aztec Accelerator") -EA SilentlyContinue
+          $inst = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -PassThru
+          if (-not $inst.WaitForExit(180000)) { $inst.Kill(); Write-Error "installer hung"; exit 1 }
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "AztecAccelerator.exe" -EA SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { Write-Error "no installed exe"; exit 1 }
+
+          $env:AZTEC_ACCEL_NO_UPDATE = "1"
+          Start-Process -FilePath $exe.FullName -PassThru | Out-Null
+          $healthy = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try { if ((Invoke-RestMethod -Uri "http://127.0.0.1:59833/health" -TimeoutSec 3).status -eq "ok") { $healthy = $true; break } } catch { }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $healthy) { Write-Error "app did not serve /health"; exit 1 }
+          Write-Host "MEASURE app_http_health: ok"
+
+          # UNKNOWN 2: can a real Chromium page reach the app's loopback listener on Windows? This is the
+          # part with no precedent in the repo — Chrome's Local Network Access gating and Windows loopback
+          # behaviour are exactly the "loopback/browser reality" the goal's hard limit names.
+          @'
+          const { chromium } = require("playwright");
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+            let out = { launched: true };
+            try {
+              const res = await page.request.get("http://127.0.0.1:59833/health", { timeout: 15000 });
+              out.status = res.status();
+              out.body = (await res.text()).slice(0, 200);
+            } catch (e) { out.error = String(e).slice(0, 300); }
+            try {
+              await page.goto("http://127.0.0.1:59833/health", { timeout: 15000 });
+              out.navigated = true;
+              out.pageText = (await page.textContent("body"))?.slice(0, 200);
+            } catch (e) { out.navError = String(e).slice(0, 300); }
+            await browser.close();
+            console.log("PROBE_RESULT " + JSON.stringify(out));
+          })();
+          '@ | Set-Content -Path probe.cjs -Encoding utf8
+
+          node probe.cjs
+          exit 0
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          schtasks /Delete /TN "Aztec Accelerator Crash Recovery" /F 2>$null | Out-Null
+          Get-Process -Name "AztecAccelerator" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+          exit 0
