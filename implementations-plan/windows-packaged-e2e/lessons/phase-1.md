@@ -128,6 +128,32 @@ intact after `| Out-Null`; `GetValueNames()` on the `RegistryKey` from `Get-Item
 redundant because `HasExited` self-updates — deleted. It re-confirmed that deleting the 75s resurrection
 wait was right.
 
+## Spike 2 — the LAST inherited assumption, now measured (run 32148985152)
+
+The P2 blocker rested on two claims. Spike 1 measured one (LocalMachine is invisible to the predicate). The
+other — "CurrentUser\Root cannot be written headlessly" — was INHERITED from `tests/trust_windows.rs:1-9`
+and a comment in `updater-smoke-windows.ps1:156-161`, never measured in this environment. Since the entire
+"needs an owner decision" conclusion rested on it, it had to be tested, not cited. All three seeding paths,
+each with a hard 45s timeout so a hang costs seconds:
+
+| Path | Outcome | Predicate (`certutil -user -store Root <serial>`) sees it? |
+|---|---|---|
+| `certutil -user -addstore Root` — the EXACT call the product makes | **HUNG** (killed at 45s) | No |
+| `Import-Certificate -CertStoreLocation Cert:\CurrentUser\Root` | **completed, reported "ok"** | **No** |
+| `.NET X509Store("Root","CurrentUser").Add()` | **HUNG** (killed at 45s) | No |
+
+**VERDICT: NO-GO — no headless path seeds the store the shipped predicate reads.**
+
+The `Import-Certificate` row is the interesting one and sharpens the earlier finding: it does not hang and
+reports success, yet the anchor never becomes visible to `certutil -user -store Root`. That is
+protected-root filtering exactly as `v2-release-train/plan.md:241-270` predicted — a write that "succeeds"
+without landing in the physical store the product queries. Anyone re-attempting this should note that a
+green-looking `Import-Certificate` is NOT evidence the seed worked; only the predicate query is.
+
+Both blocker claims are now first-hand measurements against the SHIPPED 2.0.0 binary on the exact runner
+image CI uses. The composed proof is genuinely infeasible without a production change, which is the goal's
+explicit STOP-and-surface condition rather than something to descope quietly.
+
 ## Codex round 5 — loop CLOSED
 
 Verdict: *"terminate — the fixes are correct; **no remaining findings**."* The round-4 collection fix is

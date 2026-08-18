@@ -104,9 +104,17 @@ Windows is the only OS with a native uninstall hook whose ownership logic has ne
 - **P1 — DONE + PROVEN**: `uninstall-windows` leg. Green three times on a hosted runner against the REAL
   published 2.0.0 installer (as first written, after the codex round-2 hardening, and after round 3).
   Absorbs backlog #61. Contract-pinned and mutation-proven; write-isolation now 1 write / 5 reads.
-- **P2 — BLOCKED (owner)**: `packaged-e2e-windows` composed-proof leg. The fork above was MEASURED, not
-  assumed: `certutil -user -store Root` does not see a LocalMachine-imported anchor, so the shipped gate
-  keeps `:59834` closed. Needs decision (A) / (B) / (C).
+- **P2 — BLOCKED (owner), infeasibility now fully measured**: `packaged-e2e-windows` composed-proof leg.
+  BOTH claims behind the blocker are first-hand measurements against the shipped 2.0.0 binary on the CI
+  runner image, not inherited from prior art:
+  1. `certutil -user -store Root` does NOT see a LocalMachine-imported anchor (though
+     `Cert:\CurrentUser\Root` does) — so an LM seed leaves the gate closed, verified end-to-end.
+  2. NO headless path seeds CurrentUser\Root: `certutil -addstore` hangs, `.NET X509Store.Add()` hangs, and
+     `Import-Certificate` *succeeds without landing* in the store the predicate reads (protected-root
+     filtering). A green `Import-Certificate` is not evidence of a seed.
+  Needs decision (A) / (B) / (C). (A) is a change to a security-sensitive PRODUCTION predicate, which is
+  outside this arc's scope ("two CI legs, not a framework") and outside the agent's authority — hence
+  STOP-and-surface rather than a quiet descope to a weaker proof.
 - **P3 — DONE for P1** (reads 4 → 5); goes to 6 with P2.
 - **P4 — codex loop closed for P1** (rounds 1-4); live rc validation of the leg inside a real draft happens
   on the next genuine release dispatch, since the pipeline refuses non-main refs — the
