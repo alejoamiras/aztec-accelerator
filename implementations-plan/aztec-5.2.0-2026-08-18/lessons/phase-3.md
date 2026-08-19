@@ -50,3 +50,16 @@
 LESSONS_FILE=implementations-plan/aztec-5.2.0-2026-08-18/lessons/phase-3.md
 
 LESSONS_FILE=implementations-plan/aztec-5.2.0-2026-08-18/lessons/phase-3.md
+
+## Addendum — 2026-08-19 afternoon apt-mirror outage (post-convergence CI churn)
+The converged head hit a GitHub-runner apt/mirror degradation (~15:20 UTC onward): the
+playwright-cache composite's `install-deps` (apt) stalls past any timeout across many jobs; the
+browser CACHE itself hits fine. githubstatus shows no incident (probe-ops memory holds). Two real
+hardenings shipped while diagnosing: (1) retry loop for install-deps (`4feb541`); (2) orphan-reap
+between retries (`9fc7705`) — `timeout` kills only the node wrapper, the spawned `apt-get`
+survives holding the dpkg/lists lock, and retries then die instantly with "Could not get lock …
+held by (apt-get)"; reap + `dpkg --configure -a` fixed the retry mechanics (verified: attempts
+now run full-length). The outage itself is external: three consecutive rounds infra-blocked →
+stopped hot-retrying per policy; a 45-min-cooldown auto-rerun is armed. All SUBSTANTIVE gates
+passed on earlier heads (sandbox e2e incl. native path, Windows pin builds, tarball consumer,
+WebDriver 3-OS) and codex approved the converged diff — the remaining red is purely the apt step.
