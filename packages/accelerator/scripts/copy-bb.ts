@@ -105,6 +105,11 @@ export const WINDOWS_BB_CHECKSUMS: Record<string, WindowsBbPin> = {
     provenance: "manual-review",
     note: "v5.0.1 asset; matches the GitHub release asset digest. Change-detector only (SEC-02) — carried over from main's 5.0.1 cycle and re-verified by the Windows CI gates.",
   },
+  "5.2.0": {
+    sha256: "17fe17e1cb1109328a266e8ceef28ec3d830073e734b4e93bfb27a20d4a9d2fe",
+    provenance: "manual-review",
+    note: "v5.2.0 asset, fetched 2026-08-19; two-channel verified: downloaded-file sha256sum EQUALS the GitHub API asset digest (asset id RA_kwDOJAQCos4e3ffa, 5970432 bytes). Reproduce: curl -fsSL -o bb.tar.gz https://github.com/AztecProtocol/aztec-packages/releases/download/v5.2.0/barretenberg-amd64-windows.tar.gz && sha256sum bb.tar.gz. Change-detector only (SEC-02).",
+  },
 };
 
 export function windowsBbReleaseTag(version: string): string {
