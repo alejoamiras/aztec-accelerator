@@ -45,11 +45,18 @@ JSON
 # on 5.0.1 → 5.2.0) and never the workspace manifest (which skews whenever the script is pointed
 # at a previously-built tarball). Fails fast, with the reason, if the pin is absent — e.g. if the
 # F13 deps-vs-peers decision is ever revisited and @aztec/stdlib leaves `dependencies`.
+# shellcheck disable=SC2016  # single quotes are deliberate: the node program must not shell-expand
 AZTEC_PIN="$(tar -xzOf "$TARBALL" package/package.json | node -e '
   const manifest = JSON.parse(require("fs").readFileSync(0, "utf8"));
   const pin = (manifest.dependencies ?? {})["@aztec/stdlib"];
   if (!pin) {
     console.error("FATAL: tarball manifest has no dependencies[\"@aztec/stdlib\"] — the exact-host pin cannot be derived");
+    process.exit(1);
+  }
+  // F13 invariant: the SDK ships EXACT pins. A range/alias here (^5.2.0, npm:...) could still
+  // resolve to a singleton while silently weakening the exact-pin contract this gate proves.
+  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pin)) {
+    console.error(`FATAL: tarball pins @aztec/stdlib as "${pin}" — not an exact semver; the F13 exact-pin invariant is broken`);
     process.exit(1);
   }
   console.log(pin);
