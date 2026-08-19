@@ -34,6 +34,10 @@ jobs:
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'
+              # bunfig.toml gates the @aztec min-age excludes parity test (scripts/
+              # bunfig-aztec-excludes.test.ts, runs in Unit Tests via test:scripts) — a
+              # bunfig-only exemption edit must not skip the guard that reviews it.
+              - 'bunfig.toml'
               - '.github/workflows/sdk.yml'
               - '.github/workflows/_e2e.yml'
               - '.github/actions/setup-aztec/**'

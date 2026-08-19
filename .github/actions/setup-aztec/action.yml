@@ -61,7 +61,7 @@ runs:
         # tree is cached, the install step is skipped by its `cache-hit` guard and any fix applied
         # THERE never runs; the cache just keeps serving the breakage. Bump this salt whenever the
         # install recipe changes so the remedy is actually exercised.
-        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7
+        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7-npm12-aztecexempt-allowscripts6
 
     - name: Install Aztec CLI
       if: inputs.skip_cli != 'true' && steps.cache-aztec.outputs.cache-hit != 'true'
@@ -86,6 +86,34 @@ runs:
         # outage. If a bad release ever survives past it, pin instead by pre-creating the version
         # directory's package.json with `{"overrides":{"snappy":"<good>"}}` before this runs.
         export npm_config_min_release_age=7
+        # @aztec exemption (2026-08-19, aztec-5.2.0 bump): the quarantine above blocks even the
+        # EXACT-pinned @aztec version being installed when it is <7 days old (verified: npm 11.16
+        # ETARGETs a same-day release), which would hold every e2e leg red for a week after each
+        # Aztec release. Mirror bunfig's owner-approved @aztec exemption here: first-party
+        # exact-pinned packages skip the age gate; every third-party transitive (the snappy class
+        # this quarantine exists for) keeps the full 7 days. `min-release-age-exclude` ships in
+        # npm 12 (Node 24 bundles npm 11, which has no exclude in any form) — pin the upgrade.
+        npm install -g npm@12.0.2
+        export npm_config_min_release_age_exclude='@aztec/*'
+        # npm 12 blocks dependency install scripts by default (allowScripts). Reviewed minimal
+        # allowlist — exactly the six script-bearing packages in aztec 5.2.0's tree (npm <12 ran
+        # ALL install scripts, so this is strictly narrower than the pre-upgrade behavior):
+        # bcrypto is REQUIRED (plain node-gyp rebuild, no prebuilds — blocking it kills
+        # `aztec start` with "Cannot find module 'bcrypto.node'", proven on PR #467); the others
+        # are prebuild-resolvers/postinstalls (leveldown, lmdb, msgpackr-extract, protobufjs,
+        # unrs-resolver). Review this list when the blocked-packages warning names new entries.
+        # Mechanism: a userconfig FILE, NOT the flag/env form — npm 12 rejects --allow-scripts on
+        # project-scoped installs (EALLOWSCRIPTS; the installer uses `npm install --prefix`). A
+        # step-scoped temp file (not $HOME/.npmrc) keeps the approvals from leaking into later job
+        # steps or surviving on a non-ephemeral runner, and entries are VERSION-PINNED to the
+        # reviewed identities (npm's recommendation): a future version bump of any of the six
+        # fails closed with a named blocked-packages warning → re-review, update the pin here.
+        NPMRC_ALLOW="$(mktemp)"
+        trap 'rm -f "$NPMRC_ALLOW"' EXIT
+        for p in bcrypto@5.5.2 leveldown@6.1.1 lmdb@3.5.6 msgpackr-extract@3.0.4 protobufjs@7.6.5 unrs-resolver@1.12.2; do
+          echo "allow-scripts[]=$p" >> "$NPMRC_ALLOW"
+        done
+        export NPM_CONFIG_USERCONFIG="$NPMRC_ALLOW"
         curl -fsSL "https://install.aztec.network/${{ steps.detect.outputs.version }}/install" \
           | VERSION=${{ steps.detect.outputs.version }} bash
         ls -la ~/.aztec/versions/${{ steps.detect.outputs.version }}/bin/
@@ -124,7 +152,9 @@ runs:
         # The remaining fix is a VERSION BUMP, which is deliberately not done here: this repo bumps
         # @aztec through `aztec-stable.yml` (workflow_dispatch, `merge_mode: none` so the PR stays open
         # for review) precisely so a dependency bump is a reviewed decision rather than a side effect.
-        # `npm view @aztec/stdlib dist-tags` reports latest = 5.1.0 against the pinned 5.0.1.
+        # (At the time of that 2026-08 incident, `npm view @aztec/stdlib dist-tags` reported
+        # latest = 5.1.0 against the then-pinned 5.0.1 — when triaging, compare dist-tags against the
+        # CURRENT pin in packages/sdk/package.json, not those historical numbers.)
         #
         # What this step still earns: a ~2-minute failure naming the cause, instead of a 12-minute
         # "Aztec node failed to respond" timeout with ERR_MODULE_NOT_FOUND buried in a post-mortem log

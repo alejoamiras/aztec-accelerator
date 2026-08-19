@@ -151,7 +151,19 @@ async function main() {
 
   console.log("\nNext steps:");
   console.log(
-    "  1. bun install   (add --minimum-release-age=0 ONLY if the version is <7 days old — local lockfile regen, never CI)",
+    "  1. bun install   (a <7-day-old @aztec release is exempted via bunfig.toml's minimumReleaseAgeExcludes;",
+  );
+  console.log(
+    "     if a NEW @aztec transitive trips the min-age gate, add that exact name to the excludes list —",
+  );
+  console.log(
+    "     @aztec/-scoped names only, prune departed ones; scripts/bunfig-aztec-excludes.test.ts enforces both",
+  );
+  console.log(
+    "     directions. NEVER --minimum-release-age=0: that regen lifts the 7-day quarantine for every",
+  );
+  console.log(
+    "     third-party package in the tree — the snappy class the quarantine exists for.)",
   );
   console.log(
     "  2. bun run --cwd packages/playground typecheck:scripts   (catch @aztec API breaks in the deploy/fund scripts)",
