@@ -55,7 +55,10 @@ AZTEC_PIN="$(tar -xzOf "$TARBALL" package/package.json | node -e '
   }
   // F13 invariant: the SDK ships EXACT pins. A range/alias here (^5.2.0, npm:...) could still
   // resolve to a singleton while silently weakening the exact-pin contract this gate proves.
-  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pin)) {
+  // Canonical semver.org expression (no ranges; rejects empty identifiers and leading zeros —
+  // npm treats malformed specs like "5.2.0-alpha..x" as mutable TAGS, the opposite of a pin).
+  const EXACT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+  if (!EXACT_SEMVER.test(pin)) {
     console.error(`FATAL: tarball pins @aztec/stdlib as "${pin}" — not an exact semver; the F13 exact-pin invariant is broken`);
     process.exit(1);
   }
