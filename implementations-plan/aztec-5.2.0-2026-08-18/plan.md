@@ -124,7 +124,7 @@ the installer's internal resolutions (validated locally in step 3, enforced by t
   exit 0.
 - Layers: lint · integration (installer, local).
 
-## Phase 3 — Commit, PR, CI green
+## Phase 3 ✓ — Commit, PR, CI green — GREEN 2026-08-19: PR #467, all 4 required Status checks SUCCESS (2 CI rounds + flake reruns; see lessons/phase-3.md)
 
 1. Stage exactly the canonical bump set + this cycle's additions:
    `packages/sdk/package.json packages/playground/package.json bun.lock
