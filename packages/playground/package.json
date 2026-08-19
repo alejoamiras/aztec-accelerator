@@ -15,7 +15,7 @@
     "test:e2e:packaged": "bunx playwright test --project=packaged-e2e --workers=1",
     "test:e2e:production-smoke": "bash scripts/test-production-smoke.sh",
     "test:e2e:smoke": "bunx playwright test --project=smoke --workers=1",
-    "test:live": "bun test --preload ./src/test-setup.ts src/aztec.test.ts",
+    "test:live": "bun test src/aztec.test.ts",
     "test:unit": "bun test",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.e2e.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
