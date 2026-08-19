@@ -109,6 +109,7 @@ runs:
         # reviewed identities (npm's recommendation): a future version bump of any of the six
         # fails closed with a named blocked-packages warning → re-review, update the pin here.
         NPMRC_ALLOW="$(mktemp)"
+        trap 'rm -f "$NPMRC_ALLOW"' EXIT
         for p in bcrypto@5.5.2 leveldown@6.1.1 lmdb@3.5.6 msgpackr-extract@3.0.4 protobufjs@7.6.5 unrs-resolver@1.12.2; do
           echo "allow-scripts[]=$p" >> "$NPMRC_ALLOW"
         done
