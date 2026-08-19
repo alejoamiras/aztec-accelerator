@@ -61,7 +61,7 @@ runs:
         # tree is cached, the install step is skipped by its `cache-hit` guard and any fix applied
         # THERE never runs; the cache just keeps serving the breakage. Bump this salt whenever the
         # install recipe changes so the remedy is actually exercised.
-        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7
+        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7-npm12-aztecexempt
 
     - name: Install Aztec CLI
       if: inputs.skip_cli != 'true' && steps.cache-aztec.outputs.cache-hit != 'true'
@@ -86,6 +86,15 @@ runs:
         # outage. If a bad release ever survives past it, pin instead by pre-creating the version
         # directory's package.json with `{"overrides":{"snappy":"<good>"}}` before this runs.
         export npm_config_min_release_age=7
+        # @aztec exemption (2026-08-19, aztec-5.2.0 bump): the quarantine above blocks even the
+        # EXACT-pinned @aztec version being installed when it is <7 days old (verified: npm 11.16
+        # ETARGETs a same-day release), which would hold every e2e leg red for a week after each
+        # Aztec release. Mirror bunfig's owner-approved @aztec exemption here: first-party
+        # exact-pinned packages skip the age gate; every third-party transitive (the snappy class
+        # this quarantine exists for) keeps the full 7 days. `min-release-age-exclude` ships in
+        # npm 12 (Node 24 bundles npm 11, which has no exclude in any form) — pin the upgrade.
+        npm install -g npm@12.0.2
+        export npm_config_min_release_age_exclude='@aztec/*'
         curl -fsSL "https://install.aztec.network/${{ steps.detect.outputs.version }}/install" \
           | VERSION=${{ steps.detect.outputs.version }} bash
         ls -la ~/.aztec/versions/${{ steps.detect.outputs.version }}/bin/
