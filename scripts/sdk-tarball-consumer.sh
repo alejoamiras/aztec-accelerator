@@ -39,9 +39,15 @@ make_host() {
 JSON
 }
 
-echo "=== exact host (5.0.1): the decisive F13 case + tarball resolution ==="
+# "Exact host" means: the host pins the SAME @aztec/stdlib version the SDK ships with. Derive it
+# from the SDK manifest instead of hardcoding — a hardcoded version silently manufactures the very
+# skew this gate exists to catch after every @aztec bump (found the hard way on 5.0.1 → 5.2.0).
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+AZTEC_PIN="$(node -p "require('$ROOT/packages/sdk/package.json').dependencies['@aztec/stdlib']")"
+
+echo "=== exact host ($AZTEC_PIN): the decisive F13 case + tarball resolution ==="
 EXACT="$WORK/exact-host"
-make_host "$EXACT" "5.0.1"
+make_host "$EXACT" "$AZTEC_PIN"
 cat > "$EXACT/tsconfig.json" <<'JSON'
 {
   "compilerOptions": {
