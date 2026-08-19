@@ -102,12 +102,17 @@ runs:
         # `aztec start` with "Cannot find module 'bcrypto.node'", proven on PR #467); the others
         # are prebuild-resolvers/postinstalls (leveldown, lmdb, msgpackr-extract, protobufjs,
         # unrs-resolver). Review this list when the blocked-packages warning names new entries.
-        # Mechanism: user-level .npmrc, NOT the flag/env form — npm 12 rejects --allow-scripts on
-        # project-scoped installs (EALLOWSCRIPTS; the installer uses `npm install --prefix`).
-        # The runner is ephemeral, so writing $HOME/.npmrc is scoped to this job.
-        for p in bcrypto leveldown lmdb msgpackr-extract protobufjs unrs-resolver; do
-          echo "allow-scripts[]=$p" >> "$HOME/.npmrc"
+        # Mechanism: a userconfig FILE, NOT the flag/env form — npm 12 rejects --allow-scripts on
+        # project-scoped installs (EALLOWSCRIPTS; the installer uses `npm install --prefix`). A
+        # step-scoped temp file (not $HOME/.npmrc) keeps the approvals from leaking into later job
+        # steps or surviving on a non-ephemeral runner, and entries are VERSION-PINNED to the
+        # reviewed identities (npm's recommendation): a future version bump of any of the six
+        # fails closed with a named blocked-packages warning → re-review, update the pin here.
+        NPMRC_ALLOW="$(mktemp)"
+        for p in bcrypto@5.5.2 leveldown@6.1.1 lmdb@3.5.6 msgpackr-extract@3.0.4 protobufjs@7.6.5 unrs-resolver@1.12.2; do
+          echo "allow-scripts[]=$p" >> "$NPMRC_ALLOW"
         done
+        export NPM_CONFIG_USERCONFIG="$NPMRC_ALLOW"
         curl -fsSL "https://install.aztec.network/${{ steps.detect.outputs.version }}/install" \
           | VERSION=${{ steps.detect.outputs.version }} bash
         ls -la ~/.aztec/versions/${{ steps.detect.outputs.version }}/bin/

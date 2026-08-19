@@ -19,9 +19,10 @@
    narrower). Mechanism: **user-level .npmrc lines** — npm 12 rejects `--allow-scripts`/env on
    project-scoped installs (`EALLOWSCRIPTS`); ephemeral runner makes $HOME/.npmrc job-scoped.
    Validated locally: zero residual blocked scripts, bcrypto.node builds + loads, snappy clean.
-   **Cache salt bumped a second time** — the failed runs' post-cache steps saved the broken
-   (bcrypto-less) tree under the round-1 salt; without the bump, re-runs would cache-hit the
-   breakage (the exact failure mode the salt comment documents).
+   **Cache salt bumped a second time** — because the install recipe changed again (the salt
+   comment's rule). Correction from the codex post-impl audit: the original rationale ("failed
+   runs cached the broken tree") was wrong — actions/cache's post-save skips on failed jobs, so
+   round 1 likely cached nothing; the bump is still correct, for the recipe-change reason.
 2. **Tarball Consumer** — "exact-host resolved 10 copies of @aztec/stdlib". The harness
    hardcoded the exact host at `5.0.1` (script postdates the updater's file list), so the bump
    manufactured the skew the singleton gate exists to catch. Fix (`57d3fd7`): derive the host
