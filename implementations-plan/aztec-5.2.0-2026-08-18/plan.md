@@ -201,8 +201,9 @@ actionlint's filter covers `.github/actions/**`, so all four run for real).
    it against real testnet.)
 7. Version-banner note: the UI's SDK-vs-node compare is string-based; `5.2.0` vs
    `5.2.0-nightly.20260815` may render amber. Informational — log what it shows, don't fail on it.
-8. Smoke green → mark the PR ready; hand to owner for merge (Ask A3: owner posts their
-   independently computed Windows-asset sha256 as a PR comment before merging).
+8. Smoke green → mark the PR ready; hand to owner for merge. (A3 as resolved: the agent's
+   two-channel digest verification — file hash == API digest — is already documented in the pin
+   note; no owner comment required.)
 
 **Phase assumptions**: testnet stays on the 5.2.0 line during the smoke (F5, re-verified step 1);
 sponsored-FPC fee path is the only funding dependency (F8); headless server accepts localhost
@@ -330,24 +331,31 @@ origins without config (F9).
 - I7: The Aztec installer honors ambient `npm_config_*` overrides under npm 12 exactly as it does
   under npm 11 (validated locally in Phase 2.3 before any push).
 
-**Asks (for the approval gate — none silently assumed)**
-- A1: `@aztec-foundation/aztec-standards` — hold at 5.0.1 (updater default; recommended) or
-  hand-pin `5.1.0-rc.1`? Arbiters: CI's local-network token-flow spec (vs the 5.2.0 sandbox) and
-  Phase 4.6's manual token flow vs testnet — NOT the Playwright smoke (it has no token flow). If
-  the token flow fails, try `5.1.0-rc.1` as the first remedy and record it in lessons.
-- A2: If the FPC moved (expected) — OR is deployed-but-underfunded (the read-only preflight
-  proves deployment, NOT Fee Juice balance; an underfunded FPC surfaces as fee-payment failures
-  in the smoke/token flow) — redeploy+fund (`deploy-sponsored-fpc.ts --salt 0x0`, or
-  `--fund-only` for top-up) needs your funded Sepolia `L1_PRIVATE_KEY`, run by you (or by me only
-  while you're present and supply the env interactively). Confirm you'll be available, or the
-  plan parks at "Phase 4 blocked-on-owner" after Phases 1–3.
-- A3: Merge protocol: PR goes ready only after the smoke gate; before merging, YOU independently
-  run the one-command digest check from the pin note and post the result as a PR comment (the
-  ruleset enforces nothing here — this comment is the human half of F-008).
-- A4: Approve the Phase-2 scope addition (`.github/actions/setup-aztec/action.yml`: npm@12.0.2 +
-  `@aztec/*` min-age exclude + cache-salt bump). Alternative: skip Phase 2 and wait until ~Aug 25
-  for CI to pass naturally — rejected by default as it contradicts the "keep going" decision, but
-  it's your call since it edits CI infra.
+**Asks — RESOLVED at the approval gate (owner, 2026-08-19)**
+- A1 ✔ HOLD at 5.0.1 ("I think it should work with 5.0.1 still. Let's give it a try. We can
+  update afterwards."). Arbiters: CI's local-network token-flow spec (vs the 5.2.0 sandbox) and
+  Phase 4.6's manual token flow vs testnet — NOT the Playwright smoke (no token flow there). If
+  the token flow fails on aztec-standards compat, try `5.1.0-rc.1` as the first remedy and record
+  it in lessons.
+- A2 ✔→⚠ Owner directed "check all the available worktrees for a .env". Searched 2026-08-19: NO
+  real `.env` exists on this machine — all worktrees, both clones, all of `~/Projects` env files,
+  `~/.agents` hold only `.env.example` templates without values. The key likely lives on the
+  owner's other machine (the 5.0.1-era FPC funding). Standing resolution: if Phase 4.2/4.6 needs
+  deploy or funding, the owner drops the key into `packages/playground/scripts/.env`
+  (verified gitignored: `.gitignore:6`) and the agent runs `deploy-sponsored-fpc.ts --salt 0x0`
+  (or `--fund-only`) WITHOUT ever printing the value; until then that step parks as
+  blocked-on-owner. Fee-payment failures ≠ compat failures — disambiguate before touching A1's
+  remedy.
+- A3 ✔ FLIPPED to the agent ("please do it yourself"): the agent performs the verification via
+  two independent channels — download-to-file `sha256sum` AND the GitHub API-reported asset
+  digest, which MUST be equal — and documents both in the pin note. No owner PR comment required;
+  the owner's review at merge is discretionary.
+- A4 ✔ (answered in chat; proceeding): the CI file carries a SECOND, independent 7-day npm
+  quarantine for the Aztec sandbox installer — empirically shown to reject same-day 5.2.0 — so
+  without the edit the e2e legs stay red until ~Aug 25. Proceeding on the strength of the owner's
+  standing min-age decision ("if not excluded, let's include it"); the edit is worktree-branch
+  only, PR-reviewed, reversible. Owner veto at PR review reverts to the wait-to-Aug-25
+  alternative.
 
 ## Decision ledger (light)
 
@@ -365,6 +373,10 @@ origins without config (F9).
   SDK e2e command, F1/I1/I4 corrections + I6/I7/F10, lockfile-criterion tightening, A3
   strengthening, A1 arbiter correction, provenance→change-detector rewording. Rejected: nothing
   material.
+- **APPROVAL (owner, 2026-08-19)**: conditional approve — A1 hold at 5.0.1; A2 key-search
+  directed (result: not on this machine → park-if-needed with gitignored `.env` drop-point); A3
+  flipped to agent two-channel verification; A4 answered + proceeding under the standing min-age
+  decision. Plan is APPROVED for implementation with these dispositions.
 - Codex round 2 (same session, rev 2): conditional approve, 3 blockers — all adopted:
   (1) allowScripts branch made fail-closed (minimal per-package allowlist only, via plan
   revision); (2) Bun exclude mechanism settled EMPIRICALLY (exact names work on 1.3.14, wildcard
@@ -401,7 +413,11 @@ pin entry + installer exemption must move together to be green and revertable as
 `_aztec-update.yml` same-commit guard is the precedent). Within the PR, separate commits: bump ·
 setup-aztec change · any drift fixes · code-review fixes.
 
-## Seeds (DRAFT — finalized after approval)
+## Seeds (FINAL — approved scope, 2026-08-19)
+
+No scope changes at approval affect the seeds: A1/A3/A4 dispositions are already encoded in
+plan.md (the seeds' source of truth), and the /goal's blocked-on-owner clause covers the A2
+key-not-on-this-machine outcome verbatim.
 
 Artifact URL: https://claude.ai/code/artifact/3634bcb6-385b-4e6d-af23-cc04fa4ca176
 (source: `eli5.html` in this dir — redeploying that same file updates the same URL)
