@@ -43,10 +43,20 @@ runs:
         restore-keys: |
           ${{ runner.os }}-playwright-
 
-    # System deps (apt) — reliable, run ONCE and separately from the browser.
+    # System deps (apt). Historically reliable, but 2026-08-19 (PR #467) the single
+    # `timeout 300` expired twice in a row on the Local Network E2E runner while every
+    # sibling job's copy passed — an apt/mirror stall, same shape as the CDN hang below.
+    # Same remedy: kill a stalled attempt FAST and retry with a fresh connection.
     - name: Install Playwright system deps
       shell: bash
-      run: timeout 300 bunx playwright install-deps chromium
+      run: |
+        for i in 1 2 3; do
+          if timeout 150 bunx playwright install-deps chromium; then exit 0; fi
+          echo "::warning::playwright install-deps attempt $i stalled/failed; retrying"
+          sleep 10
+        done
+        echo "::error::playwright install-deps failed after 3 attempts"
+        exit 1
 
     - name: Install Playwright browser (headless shell)
       shell: bash
