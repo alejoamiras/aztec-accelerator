@@ -56,3 +56,24 @@ Three optional editorial cleanups, all APPLIED: header rev reference fixed; Secu
 wording tightened to "the final resolved @aztec/* graph, not arbitrary future package names";
 pin verification command changed to download-to-file (`curl -fsSL -o … && sha256sum …`) with
 required equality against the GitHub API digest.
+
+---
+
+# POST-IMPLEMENTATION audit (new session `01a01a71-b616-7d42-990f-968783af923e`, 2026-08-19)
+
+Ran after `/code-review max --fix` (commit `ae8dd4c`, 7 of 9 findings applied, 2 report-only).
+
+## Round 1 — verdict: conditional approve
+| Sev | Finding | Disposition |
+|---|---|---|
+| Med (condition) | `sdk.yml` changes filter omitted `bunfig.toml` → a bunfig-only exemption edit could skip the parity guard | ADOPTED (`d9ebd28`): filter entry + comment |
+| Low | $HOME/.npmrc allowScripts approvals persistent + name-only (self-hosted-runner hazard; future versions auto-approved) | ADOPTED (`d9ebd28`): step-scoped mktemp userconfig via NPM_CONFIG_USERCONFIG + version-pinned six identities; revalidated locally (bcrypto builds+loads, zero blocked) |
+| Low | Tarball pin guard checked presence, not exactness | ADOPTED (`d9ebd28` shape guard → `96348a4` canonical semver.org regex; verified accepts 5.2.0, rejects `^5.2.0` / `5.2.0-alpha..x` / `01.2.3` / npm-alias) |
+| Low | lessons/phase-3 cache-save rationale wrong (post-save skips on failed jobs) | ADOPTED (`d9ebd28`): rationale corrected, salt bump stands on the recipe-change rule |
+
+## Round 2 (resume, fix diff `ae8dd4c..d9ebd28`) — verdict: conditional approve
+Two smalls: canonical semver validation; EXIT trap for the temp userconfig. Both ADOPTED (`96348a4`).
+
+## Round 3 (resume, diff `d9ebd28..96348a4`) — verdict: **approve**
+"No remaining material findings… no new trust widening or correctness regression found."
+**Fix loop CONVERGED in 2 rounds** (< the 3-round scope-smell threshold).
