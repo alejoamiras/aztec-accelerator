@@ -20,7 +20,7 @@
 
 ---
 
-## Phase 1 — Bump + Windows pin (one local gate)
+## Phase 1 ✓ — Bump + Windows pin (one local gate) — GREEN 2026-08-19, commit `2780336`
 
 *(Codex: former Phases 1+2 merged — observing the missing-pin report and running the full suite
 twice added no confidence.)*
@@ -83,7 +83,7 @@ Windows Build Smoke is the enforcing proof).
 - Pass: both exit 0; pin-check reports a reviewed pin; lockfile diff fully explained.
 - Layers: lint · typecheck · unit.
 
-## Phase 2 — CI min-age exemption for the Aztec CLI installer (codex finding, verified)
+## Phase 2 ✓ — CI min-age exemption for the Aztec CLI installer — GREEN 2026-08-19, commit `2e78bcc` (npm-leg validation + control; full path proves in Phase-3 CI)
 
 **Why**: `setup-aztec/action.yml` runs the Aztec CLI installer with
 `npm_config_min_release_age=7` (post-snappy-outage quarantine of the installer's UNLOCKED
