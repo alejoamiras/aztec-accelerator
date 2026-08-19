@@ -49,8 +49,6 @@
 
 LESSONS_FILE=implementations-plan/aztec-5.2.0-2026-08-18/lessons/phase-3.md
 
-LESSONS_FILE=implementations-plan/aztec-5.2.0-2026-08-18/lessons/phase-3.md
-
 ## Addendum — 2026-08-19 afternoon apt-mirror outage (post-convergence CI churn)
 The converged head hit a GitHub-runner apt/mirror degradation (~15:20 UTC onward): the
 playwright-cache composite's `install-deps` (apt) stalls past any timeout across many jobs; the
@@ -63,3 +61,9 @@ now run full-length). The outage itself is external: three consecutive rounds in
 stopped hot-retrying per policy; a 45-min-cooldown auto-rerun is armed. All SUBSTANTIVE gates
 passed on earlier heads (sandbox e2e incl. native path, Windows pin builds, tarball consumer,
 WebDriver 3-OS) and codex approved the converged diff — the remaining red is purely the apt step.
+
+## Final outcome (2026-08-19 ~17:45 UTC)
+Post-cooldown rerun: apt mirrors recovered; EVERY job green including the previously cancelled
+WebDriver legs. **All five Status checks SUCCESS on head `9fc7705`** — the converged,
+codex-approved diff is fully CI-green. PR #467 stays draft pending the Phase-4 live smoke
+(owner-gated FPC funding).
