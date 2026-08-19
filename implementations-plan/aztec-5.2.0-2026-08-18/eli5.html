@@ -230,24 +230,23 @@
   </ul>
 
   <div class="asks">
-    <h2>Your call — four decisions to approve</h2>
+    <h2>Decisions — recorded at approval (2026-08-19)</h2>
     <ol>
-      <li><strong>Token library:</strong> hold it at 5.0.1 and let the tests arbitrate
-      (recommended), or hand-pin its 5.1.0 release candidate?</li>
-      <li><strong>Fee-sponsor contingency:</strong> if the address moved (likely), the
-      deploy-and-fund step needs your Sepolia key with you present. Will you be available, or
-      should the plan park at "phases 1–3 done, phase 4 blocked" until you are?</li>
-      <li><strong>Merge protocol:</strong> before merging, you run the one-command checksum
-      verification yourself and post the result as a PR comment — the human half of the Windows
-      pin. OK?</li>
-      <li><strong>CI quarantine exemption (phase 2):</strong> approve editing one CI file to
-      exempt Aztec packages from the test-installer's quarantine? Alternative: skip it and wait
-      until ~Aug 25 for the window to pass naturally.</li>
+      <li><strong>Token library:</strong> held at 5.0.1 per your call ("let's give it a try");
+      the token-flow tests arbitrate, and its 5.1.0-rc.1 is the first remedy if they fail.</li>
+      <li><strong>Fee-sponsor contingency:</strong> you pointed at a worktree <code>.env</code> —
+      searched every worktree, both clones, and all project env files: the key is not on this
+      machine (only <code>.example</code> templates). If the deploy/fund step is needed, drop the
+      key into <code>packages/playground/scripts/.env</code> (gitignored, verified) and the step
+      runs without the value ever being printed; until then it parks as blocked-on-owner.</li>
+      <li><strong>Checksum verification:</strong> flipped to the agent per your call — verified
+      through two independent channels (downloaded-file hash and GitHub's API-reported digest,
+      required to match), documented in the pinned entry.</li>
+      <li><strong>CI quarantine exemption:</strong> proceeding — it's the same decision you
+      already made for the repo's own quarantine, applied to CI's second, separate one (which
+      provably rejects same-day releases). One reviewed, reversible file edit; veto at PR review
+      reverts to waiting until ~Aug 25.</li>
     </ol>
-    <p>Plus the standard gate: confirm scope (bump PR merged = done; no publish, no deploy, no
-    release), the light tier, the validation layers, and single-PR delivery. Reply
-    <em>approve</em>, <em>conditional approve (with conditions)</em>, or <em>reject (with
-    findings)</em>.</p>
   </div>
 
   <h2>Implementation seeds</h2>
