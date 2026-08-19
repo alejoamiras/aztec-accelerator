@@ -146,7 +146,9 @@ runs:
         # The remaining fix is a VERSION BUMP, which is deliberately not done here: this repo bumps
         # @aztec through `aztec-stable.yml` (workflow_dispatch, `merge_mode: none` so the PR stays open
         # for review) precisely so a dependency bump is a reviewed decision rather than a side effect.
-        # `npm view @aztec/stdlib dist-tags` reports latest = 5.1.0 against the pinned 5.0.1.
+        # (At the time of that 2026-08 incident, `npm view @aztec/stdlib dist-tags` reported
+        # latest = 5.1.0 against the then-pinned 5.0.1 — when triaging, compare dist-tags against the
+        # CURRENT pin in packages/sdk/package.json, not those historical numbers.)
         #
         # What this step still earns: a ~2-minute failure naming the cause, instead of a 12-minute
         # "Aztec node failed to respond" timeout with ERR_MODULE_NOT_FOUND buried in a post-mortem log
