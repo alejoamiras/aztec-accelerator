@@ -400,3 +400,246 @@ fn harden_existing(path: &Path, is_dir: bool) -> io::Result<()> {
         apply_and_verify_owner_only(handle, is_dir)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Temp root for one test's artifacts: a real `TempDir`, so cleanup happens on drop even on
+    /// failure and parallel test binaries never share a name.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("aa-win-acl-{tag}-"))
+            .tempdir()
+            .expect("temp dir for win_acl test")
+    }
+
+    /// Open a path the way the readback helpers need (no reparse traversal), so a test can run
+    /// `verify_owner_only` / `verify_owner_sid` against an object it did not just create. Sharing
+    /// is fully open — an exclusive open would race antivirus/indexer handles and flake CI.
+    fn open_for_readback(path: &Path, is_dir: bool) -> HANDLE {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
+        if is_dir {
+            flags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+        unsafe {
+            let handle = CreateFileW(
+                wide(path).as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                flags,
+                std::ptr::null_mut(),
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE, "open {path:?} for readback");
+            handle
+        }
+    }
+
+    /// Read the SD back and assert its DACL carries `SE_DACL_PROTECTED` — i.e. inherited parent
+    /// ACEs were stripped, so "owner-only" cannot be silently widened by a future parent change.
+    fn assert_dacl_protected(handle: HANDLE) {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorControl, SE_DACL_PROTECTED};
+        unsafe {
+            let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+            let rc = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            assert_eq!(rc, 0, "GetSecurityInfo for SD control");
+            let _sd_guard = LocalFreeGuard(sd);
+            let mut control: u16 = 0;
+            let mut revision: u32 = 0;
+            let ok = GetSecurityDescriptorControl(sd as _, &mut control, &mut revision);
+            assert_ne!(ok, 0, "GetSecurityDescriptorControl");
+            assert_ne!(
+                control & SE_DACL_PROTECTED,
+                0,
+                "DACL must be PROTECTED (inherited ACEs stripped)"
+            );
+        }
+    }
+
+    /// True iff every ALLOW ACE on the object carries the `INHERITED_ACE` flag — this is what
+    /// distinguishes "privilege flowed from the hardened parent" from "an equivalent explicit ACE".
+    fn all_allow_aces_inherited(handle: HANDLE) -> bool {
+        use windows_sys::Win32::Security::INHERITED_ACE;
+        unsafe {
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+            let rc = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            assert_eq!(rc, 0, "GetSecurityInfo for ACE flags");
+            let _sd_guard = LocalFreeGuard(sd);
+            assert!(!dacl.is_null());
+            let count = (*dacl).AceCount as u32;
+            assert!(count > 0, "child has no ACEs — inheritance did not flow");
+            for i in 0..count {
+                let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+                assert_ne!(GetAce(dacl, i, &mut ace), 0, "GetAce {i}");
+                let header = &*(ace as *const ACE_HEADER);
+                assert_eq!(header.AceType, ACCESS_ALLOWED_ACE_TYPE);
+                if (header.AceFlags as u32) & INHERITED_ACE == 0 {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn secure_create_dir_and_file_are_owner_only_and_usable() {
+        let root = scratch("basic");
+        let dir = root.path().join("secured");
+        secure_create_dir(&dir).expect("secured dir (readback already asserted owner-only)");
+
+        // The parent's PROTECTED-DACL property itself, read back off a second handle.
+        let parent_handle = open_for_readback(&dir, true);
+        let _phg = HandleGuard(parent_handle);
+        assert_dacl_protected(parent_handle);
+        drop(_phg);
+
+        // A child created by plain std INSIDE the secured dir must INHERIT the owner-only ACE —
+        // this is what makes the whole subtree private at creation, not just the top dir. The
+        // assertion is on the INHERITED flag specifically, not merely on an equal-by-coincidence
+        // explicit ACE.
+        //
+        // Deliberately NO owner assertion here: a std-created child's owner is the creating
+        // TOKEN's default owner, which on an elevated context (e.g. the windows-latest runner)
+        // is Administrators, not the current user. Ownership is a `secure_create_*` guarantee;
+        // inheritance guarantees the DACL, and that is what is asserted.
+        let child = dir.join("inherited.txt");
+        std::fs::write(&child, b"secret").unwrap();
+        let sid = current_user_sid().unwrap();
+        let handle = open_for_readback(&child, false);
+        let hg = HandleGuard(handle);
+        unsafe {
+            verify_owner_only(handle, &sid).expect("inherited DACL is owner-only");
+        }
+        assert!(
+            all_allow_aces_inherited(handle),
+            "child ACEs must carry INHERITED_ACE — privilege must come from the parent"
+        );
+        drop(hg);
+
+        // Container inheritance: a plain child DIRECTORY must inherit too (CONTAINER_INHERIT_ACE),
+        // and privacy must reach a grandchild file THROUGH it — this is what pins
+        // SUB_CONTAINERS_AND_OBJECTS_INHERIT rather than an object-inherit-only regression that
+        // would leave every nested directory world-readable-by-parent.
+        let child_dir = dir.join("inherited-dir");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let sid2 = current_user_sid().unwrap();
+        let cd_handle = open_for_readback(&child_dir, true);
+        let cdg = HandleGuard(cd_handle);
+        unsafe {
+            verify_owner_only(cd_handle, &sid2).expect("child DIR inherits owner-only");
+        }
+        assert!(
+            all_allow_aces_inherited(cd_handle),
+            "child-DIR ACEs must carry INHERITED_ACE"
+        );
+        drop(cdg);
+        let grandchild = child_dir.join("deep.txt");
+        std::fs::write(&grandchild, b"deeper").unwrap();
+        let gc_handle = open_for_readback(&grandchild, false);
+        let gcg = HandleGuard(gc_handle);
+        unsafe {
+            verify_owner_only(gc_handle, &sid2).expect("grandchild owner-only through child dir");
+        }
+        assert!(all_allow_aces_inherited(gc_handle));
+        drop(gcg);
+
+        // The explicit-create file path: owner-only applied to the EMPTY file before bytes land.
+        let file = root.path().join("explicit.bin");
+        let mut f = secure_create_file(&file).expect("secured file");
+        std::io::Write::write_all(&mut f, b"payload").unwrap();
+        drop(f);
+        assert_eq!(std::fs::read(&file).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn pre_planted_paths_are_rejected_not_adopted() {
+        let root = scratch("preplant");
+
+        // A file already at the target path: CREATE_NEW must fail closed.
+        let file = root.path().join("planted.bin");
+        std::fs::write(&file, b"attacker").unwrap();
+        assert!(
+            secure_create_file(&file).is_err(),
+            "secure_create_file must reject an existing path"
+        );
+
+        // A directory already at the target path: CreateDirectoryW must fail closed.
+        let dir = root.path().join("planted-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            secure_create_dir(&dir).is_err(),
+            "secure_create_dir must reject an existing path"
+        );
+    }
+
+    #[test]
+    fn harden_existing_rejects_a_reparse_instead_of_securing_the_link() {
+        let root = scratch("reparse");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("link");
+        // A dir symlink IS a reparse point. Creating one needs SeCreateSymbolicLinkPrivilege:
+        // GitHub's windows runners hold it (admin, UAC disabled) so CI must NEVER skip — a setup
+        // regression there has to fail loudly. Only a local, privilege-less session may skip.
+        if let Err(e) = std::os::windows::fs::symlink_dir(&real, &link) {
+            const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+            let privilege_missing = e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD);
+            if !(privilege_missing && std::env::var_os("GITHUB_ACTIONS").is_none()) {
+                panic!("symlink_dir failed ({e}); the reparse test could not be set up");
+            }
+            eprintln!("skipping: symlink_dir unavailable without SeCreateSymbolicLinkPrivilege");
+            return;
+        }
+
+        // harden_existing opens WITH FILE_FLAG_OPEN_REPARSE_POINT, so the handle IS the reparse;
+        // reject_if_reparse must refuse it rather than ACL the link while accesses follow it.
+        let err = harden_existing_dir(&link).expect_err("reparse must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        // And the same refusal applies to the create path when the reparse appears first:
+        // CreateDirectoryW sees it as an existing object.
+        assert!(secure_create_dir(&link).is_err());
+    }
+
+    #[test]
+    fn harden_existing_file_takes_on_a_plain_file_and_is_idempotent() {
+        let root = scratch("harden");
+        let file = root.path().join("plain.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        harden_existing_file(&file).expect("plain file hardens cleanly");
+        // Second pass over an already-hardened object must stay Ok (idempotent belt).
+        harden_existing_file(&file).expect("re-hardening is idempotent");
+
+        let sid = current_user_sid().unwrap();
+        let handle = open_for_readback(&file, false);
+        let _hg = HandleGuard(handle);
+        unsafe {
+            verify_owner_only(handle, &sid).expect("hardened file is owner-only");
+        }
+    }
+}
