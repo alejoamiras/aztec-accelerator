@@ -49,7 +49,7 @@ Nothing here is accepted as truth. Each row gets a verdict in Phase 1/2:
 |---|---|---|
 | #343 | Pin bb artifact integrity once upstream signs (SEC-02) | upstream-blocked — confirm still true |
 | #344 | macOS Keychain negative-binding manual smoke (SEC-09) | manual runbook owed |
-| #345 | Updater memory-DoS: preflight size cap defeated by manifest tampering | needs independent download-path bound — re-assess merit |
+| #345 | Updater memory-DoS: preflight size cap defeated by manifest tampering | re-assessed (codex-corrected): trigger = control of the SIGNED URL's content (release-infra/CDN compromise), no key needed; integrity unaffected. KEEP low-priority hardening | ✔ |
 | #351 | Dedupe loopback-literal sets across 3 matchers | refactor, low |
 | #352 | `/health` unknown-version sentinel → Option | refactor, low |
 

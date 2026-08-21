@@ -32,7 +32,7 @@ reports' quality is real; nothing needed refuting as false.
 | 07-31 F-11 | CONFIRMED-FIXED body facet (50MiB + 30s deadline + inflight shed + permit placement); disconnect-abort rides bb Guard drop chain; phase-ordering facet superseded by A1 ordering |
 | 07-31 F-12/F-13 | CONFIRMED-FIXED (fuse.* mount proof w/ kernel mnt_id; hardcoded System32-first resolvers) |
 | 07-09 F-003/F-010/F-011/F-016 | CONFIRMED-FIXED (0700/0600-at-syscall + Windows DACLs; systemd serializer fail-closed; trailing-dot rejection; no ca.key write path + Zeroizing) |
-| #345 | Re-assessed: reachable only with the Ed25519 key compromised (at which point memory-DoS is moot) — keep as low-priority hardening |
+| #345 | Re-assessed: trigger = control of the SIGNED URL's content (release-infra/CDN compromise) — no Ed25519 key needed to force the buffering DoS; integrity unaffected (minisign rejects post-buffer). Keep as low-priority hardening |
 
 ## Stage 2 — fresh cluster audit (coverage + result)
 

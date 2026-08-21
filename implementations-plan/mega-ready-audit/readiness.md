@@ -42,7 +42,7 @@ not functional ones.
 
 ## Accepted residuals (correctly tracked, no action)
 
-#343 (needs upstream bb signing) · #345 (plugin streaming cap; key-compromise-gated) · F-09
+#343 (needs upstream bb signing) · #345 (plugin streaming cap; trigger = release-infra/CDN control of the signed URL) · F-09
 (needs upstream revocation story) · never-armed-copy uninstall residual · until-next-login
 launchd gap · headless localhost auto-approve (documented model).
 
