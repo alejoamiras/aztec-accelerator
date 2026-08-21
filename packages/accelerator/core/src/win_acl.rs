@@ -521,6 +521,11 @@ mod tests {
         // this is what makes the whole subtree private at creation, not just the top dir. The
         // assertion is on the INHERITED flag specifically, not merely on an equal-by-coincidence
         // explicit ACE.
+        //
+        // Deliberately NO owner assertion here: a std-created child's owner is the creating
+        // TOKEN's default owner, which on an elevated context (e.g. the windows-latest runner)
+        // is Administrators, not the current user. Ownership is a `secure_create_*` guarantee;
+        // inheritance guarantees the DACL, and that is what is asserted.
         let child = dir.join("inherited.txt");
         std::fs::write(&child, b"secret").unwrap();
         let sid = current_user_sid().unwrap();
@@ -528,7 +533,6 @@ mod tests {
         let hg = HandleGuard(handle);
         unsafe {
             verify_owner_only(handle, &sid).expect("inherited DACL is owner-only");
-            verify_owner_sid(handle, &sid).expect("owner is the current user");
         }
         assert!(
             all_allow_aces_inherited(handle),
