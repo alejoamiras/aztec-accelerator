@@ -405,21 +405,22 @@ fn harden_existing(path: &Path, is_dir: bool) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// Temp root for one test's artifacts. Under %TEMP% (per-user), so no admin and no cross-test
-    /// interference; the name carries the pid + a counter so parallel test binaries never collide.
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("aa-win-acl-{}-{}-{}", tag, std::process::id(), n));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// Temp root for one test's artifacts: a real `TempDir`, so cleanup happens on drop even on
+    /// failure and parallel test binaries never share a name.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("aa-win-acl-{tag}-"))
+            .tempdir()
+            .expect("temp dir for win_acl test")
     }
 
     /// Open a path the way the readback helpers need (no reparse traversal), so a test can run
-    /// `verify_owner_only` / `verify_owner_sid` against an object it did not just create.
+    /// `verify_owner_only` / `verify_owner_sid` against an object it did not just create. Sharing
+    /// is fully open — an exclusive open would race antivirus/indexer handles and flake CI.
     fn open_for_readback(path: &Path, is_dir: bool) -> HANDLE {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
         let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
         if is_dir {
             flags |= FILE_FLAG_BACKUP_SEMANTICS;
@@ -428,7 +429,7 @@ mod tests {
             let handle = CreateFileW(
                 wide(path).as_ptr(),
                 windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
-                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null_mut(),
                 OPEN_EXISTING,
                 flags,
@@ -439,14 +440,87 @@ mod tests {
         }
     }
 
+    /// Read the SD back and assert its DACL carries `SE_DACL_PROTECTED` — i.e. inherited parent
+    /// ACEs were stripped, so "owner-only" cannot be silently widened by a future parent change.
+    fn assert_dacl_protected(handle: HANDLE) {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorControl, SE_DACL_PROTECTED};
+        unsafe {
+            let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+            let rc = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            assert_eq!(rc, 0, "GetSecurityInfo for SD control");
+            let _sd_guard = LocalFreeGuard(sd);
+            let mut control: u16 = 0;
+            let mut revision: u32 = 0;
+            let ok = GetSecurityDescriptorControl(sd as _, &mut control, &mut revision);
+            assert_ne!(ok, 0, "GetSecurityDescriptorControl");
+            assert_ne!(
+                control & SE_DACL_PROTECTED,
+                0,
+                "DACL must be PROTECTED (inherited ACEs stripped)"
+            );
+        }
+    }
+
+    /// True iff every ALLOW ACE on the object carries the `INHERITED_ACE` flag — this is what
+    /// distinguishes "privilege flowed from the hardened parent" from "an equivalent explicit ACE".
+    fn all_allow_aces_inherited(handle: HANDLE) -> bool {
+        use windows_sys::Win32::Security::INHERITED_ACE;
+        unsafe {
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+            let rc = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            assert_eq!(rc, 0, "GetSecurityInfo for ACE flags");
+            let _sd_guard = LocalFreeGuard(sd);
+            assert!(!dacl.is_null());
+            let count = (*dacl).AceCount as u32;
+            assert!(count > 0, "child has no ACEs — inheritance did not flow");
+            for i in 0..count {
+                let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+                assert_ne!(GetAce(dacl, i, &mut ace), 0, "GetAce {i}");
+                let header = &*(ace as *const ACE_HEADER);
+                assert_eq!(header.AceType, ACCESS_ALLOWED_ACE_TYPE);
+                if (header.AceFlags as u32) & INHERITED_ACE == 0 {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
     #[test]
     fn secure_create_dir_and_file_are_owner_only_and_usable() {
         let root = scratch("basic");
-        let dir = root.join("secured");
+        let dir = root.path().join("secured");
         secure_create_dir(&dir).expect("secured dir (readback already asserted owner-only)");
 
+        // The parent's PROTECTED-DACL property itself, read back off a second handle.
+        let parent_handle = open_for_readback(&dir, true);
+        let _phg = HandleGuard(parent_handle);
+        assert_dacl_protected(parent_handle);
+        drop(_phg);
+
         // A child created by plain std INSIDE the secured dir must INHERIT the owner-only ACE —
-        // this is what makes the whole subtree private at creation, not just the top dir.
+        // this is what makes the whole subtree private at creation, not just the top dir. The
+        // assertion is on the INHERITED flag specifically, not merely on an equal-by-coincidence
+        // explicit ACE.
         let child = dir.join("inherited.txt");
         std::fs::write(&child, b"secret").unwrap();
         let sid = current_user_sid().unwrap();
@@ -456,10 +530,14 @@ mod tests {
             verify_owner_only(handle, &sid).expect("inherited DACL is owner-only");
             verify_owner_sid(handle, &sid).expect("owner is the current user");
         }
+        assert!(
+            all_allow_aces_inherited(handle),
+            "child ACEs must carry INHERITED_ACE — privilege must come from the parent"
+        );
         drop(hg);
 
         // The explicit-create file path: owner-only applied to the EMPTY file before bytes land.
-        let file = root.join("explicit.bin");
+        let file = root.path().join("explicit.bin");
         let mut f = secure_create_file(&file).expect("secured file");
         std::io::Write::write_all(&mut f, b"payload").unwrap();
         drop(f);
@@ -471,7 +549,7 @@ mod tests {
         let root = scratch("preplant");
 
         // A file already at the target path: CREATE_NEW must fail closed.
-        let file = root.join("planted.bin");
+        let file = root.path().join("planted.bin");
         std::fs::write(&file, b"attacker").unwrap();
         assert!(
             secure_create_file(&file).is_err(),
@@ -479,7 +557,7 @@ mod tests {
         );
 
         // A directory already at the target path: CreateDirectoryW must fail closed.
-        let dir = root.join("planted-dir");
+        let dir = root.path().join("planted-dir");
         std::fs::create_dir_all(&dir).unwrap();
         assert!(
             secure_create_dir(&dir).is_err(),
@@ -490,13 +568,18 @@ mod tests {
     #[test]
     fn harden_existing_rejects_a_reparse_instead_of_securing_the_link() {
         let root = scratch("reparse");
-        let real = root.join("real");
+        let real = root.path().join("real");
         std::fs::create_dir_all(&real).unwrap();
-        let link = root.join("link");
-        // A dir symlink IS a reparse point. Creating one needs SeCreateSymbolicLinkPrivilege
-        // (present on CI runners; developer-mode/user sessions may lack it) — skip rather than
-        // fail where the OS refuses, since the property under test needs the reparse to exist.
-        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+        let link = root.path().join("link");
+        // A dir symlink IS a reparse point. Creating one needs SeCreateSymbolicLinkPrivilege:
+        // GitHub's windows runners hold it (admin, UAC disabled) so CI must NEVER skip — a setup
+        // regression there has to fail loudly. Only a local, privilege-less session may skip.
+        if let Err(e) = std::os::windows::fs::symlink_dir(&real, &link) {
+            const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+            let privilege_missing = e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD);
+            if !(privilege_missing && std::env::var_os("GITHUB_ACTIONS").is_none()) {
+                panic!("symlink_dir failed ({e}); the reparse test could not be set up");
+            }
             eprintln!("skipping: symlink_dir unavailable without SeCreateSymbolicLinkPrivilege");
             return;
         }
@@ -514,7 +597,7 @@ mod tests {
     #[test]
     fn harden_existing_file_takes_on_a_plain_file_and_is_idempotent() {
         let root = scratch("harden");
-        let file = root.join("plain.txt");
+        let file = root.path().join("plain.txt");
         std::fs::write(&file, b"data").unwrap();
 
         harden_existing_file(&file).expect("plain file hardens cleanly");
