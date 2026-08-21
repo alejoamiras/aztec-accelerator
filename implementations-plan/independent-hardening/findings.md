@@ -29,32 +29,39 @@ Namespace: IH-SEC-N (security), IH-BUG-N (correctness). No prior-audit artifacts
 ## Candidates
 
 ### IH-SEC-1 (Low, inherent) — unauthenticated localhost service: port-squat witness capture
-`candidate` · confidence high (design-level)
+**CONFIRMED LIVE (Phase 2)** · confidence high
 While the accelerator is NOT running, any local process (any user on multi-user machines — TCP
 binds are system-global) can hold 127.0.0.1:59833/59834. The SDK's probe accepts any responder
 whose `/health` matches `{status:"ok",api_version:1}` (collision resistance, not authentication —
 the code says so itself), then POSTs the private witness. Same-user malware needs no squat at all.
 HTTPS does not help against same-user attackers (leaf key on disk; CA installable by user).
 **Not fixable without client-cert/pinning redesign; document as trust boundary.**
-Phase 2: demonstrate squat-and-capture live against headless server.
+PoC: `poc/ih-sec-1-squat.py` — squatter answered the health shape check and captured the
+witness POST byte-for-byte (`WITNESS CAPTURED BYTE-FOR-BYTE`, 2026-08-21 run).
 
 ### IH-SEC-2 (Info, documented tradeoff) — absent Origin header ⇒ auto-approved /prove
-`candidate` · confidence high
-auth.rs:29-33. Non-browser local callers bypass origin authz by omitting Origin. Documented as
-inherent (Origin is a browser mechanism). Combined with Host-guard this is "any local process may
-prove" — consistent with IH-SEC-1's boundary. No action; keep documented.
+**CONFIRMED LIVE**: no-Origin POST /prove passed authz on headless server (reached prove stage,
+500 bb-not-found); `http://LOCALHOST:9999` variant also passed (case-insensitive localhost
+auto-approve); `evil.localhost` correctly denied; `null`/garbage → 400 invalid_origin.
+Design-consistent; no action.
 
 ### IH-SEC-3 (Info) — CORS `allow_origin(Any)` lets any website read /health minimal body + /prove errors
-`candidate` · confidence med
-server.rs:351-358. Fingerprinting mitigated by SEC-05 tiering (minimal body for unapproved).
-/prove error variants echo attacker-chosen inputs (InvalidVersion echoes requested version,
-OriginDenied echoes origin) — no obvious secret leakage pre-approval. Phase 2: verify no
-pre-authentication info leak via error bodies/timing cross-origin.
+**PARTIALLY VERIFIED LIVE**: unapproved Origin gets minimal `{api_version,status}` only
+(fingerprint starvation working). /prove error bodies pre-approval echo only attacker-chosen
+inputs (origin, requested version). No secret leakage found. No action.
 
 ### IH-BUG-1 (Info, comment/code divergence) — host.rs strips ALL trailing dots, comment says one
-`candidate` · confidence high
-host.rs:36 `trim_end_matches('.')` vs doc "strip one trailing dot". `Host: 127.0.0.1..:59833`
-accepted. Still a loopback literal → no security impact; fix comment or tighten to strip_once.
+**CONFIRMED LIVE**: `Host: 127.0.0.1..:59833` → 200. Still a loopback literal → no security
+impact; fix comment or tighten to strip_once.
+
+## Phase-2 attack matrix summary (headless server, deny-by-default, 2026-08-21)
+- Host guard: 8/10 malicious variants → 403 invalid_host; `[::1]`/uppercase/multi-dot accepted
+  (all loopback-by-design). Hex/decimal IP, userinfo, wrong-port, rebinding names all rejected.
+- Body limits: declared oversize → 413; malformed/conflicting Content-Length → 400.
+- Version header traversal string → 400 invalid_version (type-level grammar holds at runtime).
+- Remote-controlled download path observed live (`x-aztec-version: 1.0.0` triggered a GitHub
+  fetch; client timed out at 4s) — bounded by cache cap + digest verification (static).
+- TLS listener (59834): desktop-app-only, not exercised live this phase — static review only.
 
 ### Verified-clean notes (explicitly checked, no finding)
 - Dual-listener port confusion: each listener gates on its own expected_port (router_for_port);
