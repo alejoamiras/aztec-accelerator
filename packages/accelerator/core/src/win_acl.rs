@@ -536,6 +536,33 @@ mod tests {
         );
         drop(hg);
 
+        // Container inheritance: a plain child DIRECTORY must inherit too (CONTAINER_INHERIT_ACE),
+        // and privacy must reach a grandchild file THROUGH it — this is what pins
+        // SUB_CONTAINERS_AND_OBJECTS_INHERIT rather than an object-inherit-only regression that
+        // would leave every nested directory world-readable-by-parent.
+        let child_dir = dir.join("inherited-dir");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let sid2 = current_user_sid().unwrap();
+        let cd_handle = open_for_readback(&child_dir, true);
+        let cdg = HandleGuard(cd_handle);
+        unsafe {
+            verify_owner_only(cd_handle, &sid2).expect("child DIR inherits owner-only");
+        }
+        assert!(
+            all_allow_aces_inherited(cd_handle),
+            "child-DIR ACEs must carry INHERITED_ACE"
+        );
+        drop(cdg);
+        let grandchild = child_dir.join("deep.txt");
+        std::fs::write(&grandchild, b"deeper").unwrap();
+        let gc_handle = open_for_readback(&grandchild, false);
+        let gcg = HandleGuard(gc_handle);
+        unsafe {
+            verify_owner_only(gc_handle, &sid2).expect("grandchild owner-only through child dir");
+        }
+        assert!(all_allow_aces_inherited(gc_handle));
+        drop(gcg);
+
         // The explicit-create file path: owner-only applied to the EMPTY file before bytes land.
         let file = root.path().join("explicit.bin");
         let mut f = secure_create_file(&file).expect("secured file");
