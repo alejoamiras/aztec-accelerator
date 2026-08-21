@@ -400,3 +400,132 @@ fn harden_existing(path: &Path, is_dir: bool) -> io::Result<()> {
         apply_and_verify_owner_only(handle, is_dir)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Temp root for one test's artifacts. Under %TEMP% (per-user), so no admin and no cross-test
+    /// interference; the name carries the pid + a counter so parallel test binaries never collide.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aa-win-acl-{}-{}-{}", tag, std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Open a path the way the readback helpers need (no reparse traversal), so a test can run
+    /// `verify_owner_only` / `verify_owner_sid` against an object it did not just create.
+    fn open_for_readback(path: &Path, is_dir: bool) -> HANDLE {
+        let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
+        if is_dir {
+            flags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+        unsafe {
+            let handle = CreateFileW(
+                wide(path).as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
+                0,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                flags,
+                std::ptr::null_mut(),
+            );
+            assert_ne!(handle, INVALID_HANDLE_VALUE, "open {path:?} for readback");
+            handle
+        }
+    }
+
+    #[test]
+    fn secure_create_dir_and_file_are_owner_only_and_usable() {
+        let root = scratch("basic");
+        let dir = root.join("secured");
+        secure_create_dir(&dir).expect("secured dir (readback already asserted owner-only)");
+
+        // A child created by plain std INSIDE the secured dir must INHERIT the owner-only ACE —
+        // this is what makes the whole subtree private at creation, not just the top dir.
+        let child = dir.join("inherited.txt");
+        std::fs::write(&child, b"secret").unwrap();
+        let sid = current_user_sid().unwrap();
+        let handle = open_for_readback(&child, false);
+        let hg = HandleGuard(handle);
+        unsafe {
+            verify_owner_only(handle, &sid).expect("inherited DACL is owner-only");
+            verify_owner_sid(handle, &sid).expect("owner is the current user");
+        }
+        drop(hg);
+
+        // The explicit-create file path: owner-only applied to the EMPTY file before bytes land.
+        let file = root.join("explicit.bin");
+        let mut f = secure_create_file(&file).expect("secured file");
+        std::io::Write::write_all(&mut f, b"payload").unwrap();
+        drop(f);
+        assert_eq!(std::fs::read(&file).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn pre_planted_paths_are_rejected_not_adopted() {
+        let root = scratch("preplant");
+
+        // A file already at the target path: CREATE_NEW must fail closed.
+        let file = root.join("planted.bin");
+        std::fs::write(&file, b"attacker").unwrap();
+        assert!(
+            secure_create_file(&file).is_err(),
+            "secure_create_file must reject an existing path"
+        );
+
+        // A directory already at the target path: CreateDirectoryW must fail closed.
+        let dir = root.join("planted-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            secure_create_dir(&dir).is_err(),
+            "secure_create_dir must reject an existing path"
+        );
+    }
+
+    #[test]
+    fn harden_existing_rejects_a_reparse_instead_of_securing_the_link() {
+        let root = scratch("reparse");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        // A dir symlink IS a reparse point. Creating one needs SeCreateSymbolicLinkPrivilege
+        // (present on CI runners; developer-mode/user sessions may lack it) — skip rather than
+        // fail where the OS refuses, since the property under test needs the reparse to exist.
+        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+            eprintln!("skipping: symlink_dir unavailable without SeCreateSymbolicLinkPrivilege");
+            return;
+        }
+
+        // harden_existing opens WITH FILE_FLAG_OPEN_REPARSE_POINT, so the handle IS the reparse;
+        // reject_if_reparse must refuse it rather than ACL the link while accesses follow it.
+        let err = harden_existing_dir(&link).expect_err("reparse must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        // And the same refusal applies to the create path when the reparse appears first:
+        // CreateDirectoryW sees it as an existing object.
+        assert!(secure_create_dir(&link).is_err());
+    }
+
+    #[test]
+    fn harden_existing_file_takes_on_a_plain_file_and_is_idempotent() {
+        let root = scratch("harden");
+        let file = root.join("plain.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        harden_existing_file(&file).expect("plain file hardens cleanly");
+        // Second pass over an already-hardened object must stay Ok (idempotent belt).
+        harden_existing_file(&file).expect("re-hardening is idempotent");
+
+        let sid = current_user_sid().unwrap();
+        let handle = open_for_readback(&file, false);
+        let _hg = HandleGuard(handle);
+        unsafe {
+            verify_owner_only(handle, &sid).expect("hardened file is owner-only");
+        }
+    }
+}
