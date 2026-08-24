@@ -43,7 +43,7 @@ runs:
         restore-keys: |
           ${{ runner.os }}-playwright-
 
-    # System deps (apt). Historically reliable, but 2026-08-19 (PR #467) a single
+    # System deps (apt). Historically reliable, but a runner apt/mirror stall once let a single
     # `timeout 300` expired repeatedly during a runner apt/mirror stall — same shape as
     # the CDN hang below, same remedy: kill a stalled attempt and retry. CAVEAT learned
     # the hard way that day: `timeout` kills only the node wrapper; the spawned `apt-get`

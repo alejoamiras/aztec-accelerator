@@ -152,7 +152,7 @@ actionlint's filter covers `.github/actions/**`, so all four run for real).
   (the aztec-standards@5.0.1 × @aztec 5.2.0 compat arbiter — Ask A1).
 - Layers: full CI — lint · typecheck · unit · integration · e2e (local sandbox + built app).
 
-## Phase 4 — Live testnet proving smoke (pre-merge gate)
+## Phase 4 ✓ — Live testnet proving smoke — GREEN 2026-08-24 (FPC third-party-deployed+funded, owner key unused; Playwright smoke ✓, SDK e2e 10/10 phase-trail ✓, token flow 4/4 ✓ — see lessons/phase-4.md)
 
 1. Node pre-flight: `AZTEC_NODE_URL=https://v5.testnet.rpc.aztec-labs.com bun test
    packages/playground/src/aztec.test.ts` — live-node block asserts reachable + nodeVersion

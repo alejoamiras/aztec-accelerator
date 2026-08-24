@@ -41,8 +41,8 @@ JSON
 
 # "Exact host" means: the host pins the SAME @aztec/stdlib version the SDK ships with. Derive it
 # from the TARBALL UNDER TEST — the artifact's own manifest — never a hardcode (which silently
-# manufactures the very skew this gate exists to catch after every @aztec bump; found the hard way
-# on 5.0.1 → 5.2.0) and never the workspace manifest (which skews whenever the script is pointed
+# manufactures the very skew this gate exists to catch after every @aztec bump) and never the
+# workspace manifest (which skews whenever the script is pointed
 # at a previously-built tarball). Fails fast, with the reason, if the pin is absent — e.g. if the
 # F13 deps-vs-peers decision is ever revisited and @aztec/stdlib leaves `dependencies`.
 # shellcheck disable=SC2016  # single quotes are deliberate: the node program must not shell-expand

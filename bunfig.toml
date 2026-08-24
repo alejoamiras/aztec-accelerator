@@ -10,7 +10,7 @@
 [install]
 minimumReleaseAge = 604800 # 7 days, in seconds
 
-# @aztec/* exemption (owner decision 2026-08-18, aztec-5.2.0 bump): @aztec is this product's
+# @aztec/* exemption (owner decision 2026-08-18): @aztec is this product's
 # first-party upstream, versions are exact-pinned, and every bump lands as a human-reviewed PR —
 # but Aztec releases are consumed same-day, inside the window above. Residual risk accepted: for
 # these packages specifically there is no 7-day observation window; a compromised @aztec publish

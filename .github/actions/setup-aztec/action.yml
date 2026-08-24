@@ -86,7 +86,7 @@ runs:
         # outage. If a bad release ever survives past it, pin instead by pre-creating the version
         # directory's package.json with `{"overrides":{"snappy":"<good>"}}` before this runs.
         export npm_config_min_release_age=7
-        # @aztec exemption (2026-08-19, aztec-5.2.0 bump): the quarantine above blocks even the
+        # @aztec exemption (owner decision 2026-08-19): the quarantine above blocks even the
         # EXACT-pinned @aztec version being installed when it is <7 days old (verified: npm 11.16
         # ETARGETs a same-day release), which would hold every e2e leg red for a week after each
         # Aztec release. Mirror bunfig's owner-approved @aztec exemption here: first-party
@@ -99,7 +99,7 @@ runs:
         # allowlist — exactly the six script-bearing packages in aztec 5.2.0's tree (npm <12 ran
         # ALL install scripts, so this is strictly narrower than the pre-upgrade behavior):
         # bcrypto is REQUIRED (plain node-gyp rebuild, no prebuilds — blocking it kills
-        # `aztec start` with "Cannot find module 'bcrypto.node'", proven on PR #467); the others
+        # `aztec start` with "Cannot find module 'bcrypto.node'"); the others
         # are prebuild-resolvers/postinstalls (leveldown, lmdb, msgpackr-extract, protobufjs,
         # unrs-resolver). Review this list when the blocked-packages warning names new entries.
         # Mechanism: a userconfig FILE, NOT the flag/env form — npm 12 rejects --allow-scripts on
@@ -114,7 +114,7 @@ runs:
           echo "allow-scripts[]=$p" >> "$NPMRC_ALLOW"
         done
         export NPM_CONFIG_USERCONFIG="$NPMRC_ALLOW"
-        # Patch the installer's foundry `mv` to a dereferencing copy (2026-08-24, PR #467):
+        # Patch the installer's foundry `mv` to a dereferencing copy:
         # foundryup was rewritten in Rust and now populates FOUNDRY_DIR/bin with SYMLINKS into
         # its versions/ store (activate_bin: std::os::unix::fs::symlink — verified in
         # foundry-rs/foundryup src/install.rs). The aztec installer's `mv "$temp/bin/$binary"`
