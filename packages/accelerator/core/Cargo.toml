@@ -1,6 +1,13 @@
 [package]
 name = "accelerator-core"
-version = "1.0.5-rc.1"
+# Internal path dependency — not published (`publish = false`) and never independently released.
+# The shipped launchers inject their own release-patched versions into every user-visible surface
+# (`--version`, `/health.version`, updater identity): `release-accelerator.yml` patches
+# `src-tauri/Cargo.toml`, `server/Cargo.toml` and `tauri.conf.json` at build time. Core's own copy
+# (read only by `HeadlessState::default()` as a test/default placeholder) is intentionally 0.0.0 —
+# do NOT bump it.
+version = "0.0.0"
+publish = false
 description = "GUI-agnostic core of the Aztec Accelerator: HTTP proving server, bb cache, version resolution, origin authorization."
 edition = "2021"
 rust-version = "1.77.2"
