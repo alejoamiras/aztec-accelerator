@@ -15,7 +15,11 @@
 //! - **Memory hygiene**: the token handle is `CloseHandle`d; the `SetEntriesInAclW` ACL and every
 //!   `GetSecurityInfo` security descriptor are `LocalFree`d exactly once on every path (RAII guards); the
 //!   SID is copied out of the token buffer (never aliased/freed separately).
-#![cfg(windows)]
+//!
+//! Windows-gating lives ONLY at the module declaration (`lib.rs`: `#[cfg(windows)] pub mod win_acl;`)
+//! — the authoritative gate. This file deliberately carries no inner `#![cfg(windows)]`: a duplicated
+//! gate made clippy (x86_64-pc-windows-gnu) warn "duplicated attribute" and risk exactly the
+//! detached-cfg confusion the repo has been bitten by before (IH-BUG-2).
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;

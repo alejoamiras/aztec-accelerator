@@ -27,13 +27,25 @@ pub(crate) fn host_is_trusted(authority: &str, expected_port: u16) -> bool {
     let Ok(parsed) = authority.parse::<axum::http::uri::Authority>() else {
         return false;
     };
+    // The http crate's Authority parser silently DISCARDS junk between a closing `]` and the port
+    // — `"[::1]..:59833"` parses Ok with host `[::1]` — so the bracketed form must be checked on
+    // the RAW authority string or the dotted-quad and IPv6 surfaces diverge (IH-BUG-1).
+    if let Some(i) = authority.find(']') {
+        if !authority[i + 1..].starts_with(':') {
+            return false;
+        }
+    }
     // Exact port required — no "port absent" loophole (drops the weaker invariant; real clients
     // send `127.0.0.1:59833`/`:59834`), and no wrong-port (`:59834` on the HTTP listener).
     if parsed.port_u16() != Some(expected_port) {
         return false;
     }
-    // Normalise: lowercase, strip one trailing dot (`localhost.`), strip IPv6 brackets (`[::1]`→`::1`).
-    let host = parsed.host().trim_end_matches('.').to_ascii_lowercase();
+    // Normalise: lowercase, strip at most ONE trailing dot (`localhost.` — the DNS root form a
+    // real resolver can emit), strip IPv6 brackets (`[::1]`→`::1`). `trim_end_matches` would strip
+    // ALL trailing dots, silently widening the allowlist to forms no real client sends (IH-BUG-1).
+    let host = parsed.host();
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let host = host.to_ascii_lowercase();
     let host = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
@@ -88,9 +100,23 @@ mod tests {
         // Configurable host + IPv6 loopback the cert also covers.
         assert!(host_is_trusted("localhost:59833", HTTP));
         assert!(host_is_trusted("[::1]:59834", HTTPS));
-        // Case-insensitive + trailing dot.
+        // Case-insensitive + ONE trailing dot (DNS root form).
         assert!(host_is_trusted("LocalHost:59833", HTTP));
         assert!(host_is_trusted("localhost.:59833", HTTP));
+    }
+
+    #[test]
+    fn rejects_multi_dot_trailing_forms() {
+        // IH-BUG-1: strip at most one trailing dot — `trim_end_matches` used to accept
+        // `Host: 127.0.0.1..:59833` (accepted live, 2026-08-21 attack matrix). The bracketed
+        // sibling is rejected by the raw `]`+port check, since Authority::parse would otherwise
+        // discard the dots before normalization ever sees them.
+        assert!(!host_is_trusted("127.0.0.1..:59833", HTTP));
+        assert!(!host_is_trusted("localhost..:59833", HTTP));
+        assert!(!host_is_trusted("[::1]..:59833", HTTP));
+        // Post-`]` junk beyond dots — the raw check is what rejects these (parse would discard it).
+        assert!(!host_is_trusted("[::1].:59833", HTTP));
+        assert!(!host_is_trusted("[::1]x:59833", HTTP));
     }
 
     #[test]

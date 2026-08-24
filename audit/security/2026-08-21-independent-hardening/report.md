@@ -30,9 +30,30 @@ process — any user on multi-user machines — can bind the port, answer `/heal
 Demonstrated byte-for-byte capture (`poc/ih-sec-1-squat.py`). The health check is collision
 resistance, not authentication (the code documents this itself). Same-user malware needs no squat;
 HTTPS does not change the same-user calculus (leaf key user-readable; CA installable by the user).
-**Recommendation**: document as an explicit trust boundary in README/security docs. A real fix
-(shared secret minted at first-run, or SDK-side pinning of the accelerator's leaf cert) is a
-protocol change — worth a roadmap item, not a patch.
+
+**RESOLUTION 2026-08-21 — accepted as a documented trust boundary.**
+Residual exposure, stated plainly: *if the accelerator app is down and a dApp proves anyway,
+the plaintext witness goes to whatever answers on 59833.* Rated Low because it requires downtime
+plus a hostile local process; it remains true until one of the two levers below ships.
+
+Future levers, recorded for when either becomes worth its cost (both were evaluated and
+deliberately deferred):
+
+1. **httpsOnly-by-default in the SDK** — the browser fix. TLS is the only server-auth mechanism
+   the web platform offers, so this is the ONLY real mitigation for dApp consumers. Cost: Node/Bun
+   users without `NODE_EXTRA_CA_CERTS=~/.aztec-accelerator/certs/ca.pem` get offline→WASM until
+   they wire the CA (browsers need nothing — the CA is already in their trust store). Declined for
+   now because that friction lands on real users to close a Low-severity, narrow-window risk.
+2. **Session-auth challenge-response** — works only where files are readable (headless operators'
+   tooling, future Node CLI consumers). Core would write an owner-only per-run session key;
+   clients verify `HMAC(key, nonce)` on `/health` before trusting the endpoint. **Not implementable
+   for browsers** — page JS cannot read the filesystem, so there is no client-side enforcer for
+   the primary consumer. Deferred because no such non-browser consumer exists today; building
+   crypto for a hypothetical caller is the over-engineering trap.
+
+A third observation for whoever revisits this: the SDK already pins HTTPS once seen healthy and
+refuses downgrade without opt-in (`accelerator-transport.ts::allowsHttpDowngrade`) — the residual
+window is exactly "accelerator fully down", not "HTTPS briefly unavailable".
 
 ### IH-SEC-2 · Info (documented tradeoff) — absent Origin ⇒ auto-approved /prove
 Confirmed live. Local non-browser callers bypass origin authz by omitting Origin; localhost

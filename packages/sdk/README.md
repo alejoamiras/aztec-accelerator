@@ -311,6 +311,26 @@ Starting with Chrome 142 (October 2025), requests from a public website to loopb
 
 Note this is about the destination address space, not the scheme — enabling HTTPS mode on the accelerator does **not** bypass the prompt.
 
+## Security: local service discovery is shape-matched, not authenticated
+
+The SDK discovers the accelerator by probing fixed loopback ports and accepting any `/health`
+response matching `{"status":"ok","api_version":1}`. That is a **shape check, not server
+authentication**: while the accelerator app is *not running*, any local process can bind the port,
+answer the probe, and receive whatever your dApp sends to `/prove` (the witness data). This
+inherits from the unauthenticated-localhost-service model every browser extension and dev tool
+shares; it is documented as an accepted trust boundary in the project's
+[security report](../../audit/security/2026-08-21-independent-hardening/report.md).
+
+Practical guidance for integrators:
+
+- **Run the accelerator** — the attack window exists only while no instance holds the ports.
+- **Prefer the encrypted path**: when HTTPS mode is enabled in the accelerator app, its TLS
+  certificate chains to a name-constrained local CA that only the accelerator can sign for, so the
+  HTTPS endpoint cannot be impersonated by another *user* on a shared machine (same-user malware
+  is out of scope for any localhost service).
+- The SDK pins HTTPS once seen healthy and never silently downgrades to plaintext without explicit
+  opt-in (`allowInsecureDowngrade`).
+
 ## Version Compatibility
 
 The SDK auto-detects its Aztec version from `@aztec/stdlib` in its dependencies and sends it as the `x-aztec-version` header on prove requests. The accelerator uses this to select (or download) the correct `bb` binary — no manual version matching needed.
