@@ -61,7 +61,7 @@ runs:
         # tree is cached, the install step is skipped by its `cache-hit` guard and any fix applied
         # THERE never runs; the cache just keeps serving the breakage. Bump this salt whenever the
         # install recipe changes so the remedy is actually exercised.
-        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7-npm12-aztecexempt-allowscripts6-fseed
+        key: ${{ runner.os }}-aztec-${{ steps.detect.outputs.version }}-minage7-npm12-aztecexempt-allowscripts6-cpl
 
     - name: Install Aztec CLI
       if: inputs.skip_cli != 'true' && steps.cache-aztec.outputs.cache-hit != 'true'
@@ -114,23 +114,27 @@ runs:
           echo "allow-scripts[]=$p" >> "$NPMRC_ALLOW"
         done
         export NPM_CONFIG_USERCONFIG="$NPMRC_ALLOW"
-        # Pre-seed the bundled foundry binaries (2026-08-24, PR #467): upstream foundryup
-        # updated and its `-i <version>` no longer populates the temp bin dir the aztec
-        # installer's `mv` guards expect — foundryup exits 0, the guards silently skip, and
-        # `install_native_symlinks` fails closed ("expected bundled binary 'forge' missing").
-        # The installer only ever `mkdir -p`s the version dir, so seeding forge/cast/anvil/
-        # chisel from this action's OWN pinned foundry-toolchain (v1.4.1 — the exact lineage
-        # the aztec 5.2.0 manifest declares) beforehand satisfies the symlink check while the
-        # installer's foundry leg degrades to a no-op. Remove when upstream fixes their
-        # installer against current foundryup.
-        INTERNAL_BIN=~/.aztec/versions/${{ steps.detect.outputs.version }}/internal-bin
-        mkdir -p "$INTERNAL_BIN"
-        for tool in forge cast anvil chisel; do
-          src="$(command -v "$tool")" || { echo "::error::foundry-toolchain did not provide $tool"; exit 1; }
-          cp "$src" "$INTERNAL_BIN/$tool"
-        done
-        curl -fsSL "https://install.aztec.network/${{ steps.detect.outputs.version }}/install" \
-          | VERSION=${{ steps.detect.outputs.version }} bash
+        # Patch the installer's foundry `mv` to a dereferencing copy (2026-08-24, PR #467):
+        # foundryup was rewritten in Rust and now populates FOUNDRY_DIR/bin with SYMLINKS into
+        # its versions/ store (activate_bin: std::os::unix::fs::symlink — verified in
+        # foundry-rs/foundryup src/install.rs). The aztec installer's `mv "$temp/bin/$binary"`
+        # therefore moves a symlink whose target it then `rm -rf`s with the temp dir, and
+        # `install_native_symlinks` fails closed on the dangling link ("expected bundled binary
+        # 'forge' missing"). `cp -L` dereferences at copy time, landing the real binary before
+        # cleanup. Fail-open by design: if the pattern is gone, upstream changed the script
+        # (possibly fixing this) — run it unpatched and let its own loud symlink check decide.
+        # Remove when upstream handles current foundryup. Do NOT pre-seed internal-bin instead:
+        # the installer's mv CLOBBERS seeded files with the doomed symlinks (proven on CI).
+        INSTALL_SCRIPT="$(mktemp)"
+        trap 'rm -f "$NPMRC_ALLOW" "$INSTALL_SCRIPT"' EXIT
+        curl -fsSL "https://install.aztec.network/${{ steps.detect.outputs.version }}/install" -o "$INSTALL_SCRIPT"
+        if grep -q 'mv "\$temp_foundry_dir/bin/\$binary"' "$INSTALL_SCRIPT"; then
+          sed -i 's|mv "\$temp_foundry_dir/bin/\$binary"|cp -L "$temp_foundry_dir/bin/$binary"|' "$INSTALL_SCRIPT"
+          echo "patched installer: foundry mv -> cp -L (foundryup symlink layout)"
+        else
+          echo "::warning::installer foundry-mv pattern not found — running unpatched (upstream changed; its symlink check will catch real breakage)"
+        fi
+        VERSION=${{ steps.detect.outputs.version }} bash "$INSTALL_SCRIPT"
         ls -la ~/.aztec/versions/${{ steps.detect.outputs.version }}/bin/
 
     # The installer can produce a tree whose `snappy` cannot resolve a platform binding, and the only
