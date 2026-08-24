@@ -29,7 +29,7 @@ Namespace: IH-SEC-N (security), IH-BUG-N (correctness). No prior-audit artifacts
 ## Candidates
 
 ### IH-SEC-1 (Low, inherent) — unauthenticated localhost service: port-squat witness capture
-**CONFIRMED LIVE (Phase 2)** · confidence high
+**CONFIRMED LIVE (Phase 2)** · confidence high · **CLOSED AS DOCUMENTED 2026-08-21** — accepted trust boundary; both future levers recorded in the security report
 While the accelerator is NOT running, any local process (any user on multi-user machines — TCP
 binds are system-global) can hold 127.0.0.1:59833/59834. The SDK's probe accepts any responder
 whose `/health` matches `{status:"ok",api_version:1}` (collision resistance, not authentication —
@@ -51,8 +51,8 @@ Design-consistent; no action.
 inputs (origin, requested version). No secret leakage found. No action.
 
 ### IH-BUG-1 (Info, comment/code divergence) — host.rs strips ALL trailing dots, comment says one
-**CONFIRMED LIVE**: `Host: 127.0.0.1..:59833` → 200. Still a loopback literal → no security
-impact; fix comment or tighten to strip_once.
+**CONFIRMED LIVE**: `Host: 127.0.0.1..:59833` → 200. **FIXED** in `ih-hygiene` PR: strip-once +
+raw `]`+port check (Authority::parse silently discards post-bracket junk); multi-dot forms → 403.
 
 ## Phase-2 attack matrix summary (headless server, deny-by-default, 2026-08-21)
 - Host guard: 8/10 malicious variants → 403 invalid_host; `[::1]`/uppercase/multi-dot accepted

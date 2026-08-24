@@ -17,13 +17,22 @@ Harmless today, but this is exactly the cfg-hygiene class the repo has been bitt
 (a detached cfg silently changing what compiles). Fix: drop one of the two gates and add a
 comment stating which is authoritative.
 
-### IH-BUG-3 · Low — remote-controlled version download can stall a prove request indefinitely-ish
-Live observation: `POST /prove` with `x-aztec-version: 1.0.0` (uncached) triggered a GitHub
-download inside the request path; the client observed no response within a 4 s window while the
-fetch ran. Bounded in aggregate (cache-size cap, digest verification, single-flight via lease),
-but any approved origin can force the server onto network fetches of attacker-chosen well-formed
-versions, extending that request's latency by seconds-to-minutes and consuming bandwidth.
-Not a DoS of other requests (inflight cap + separate download phase), purely latency/bandwidth.
+### IH-BUG-3 · Low — remote-controlled version download stalls a prove request
+**AMENDED 2026-08-21 (post-report):** the original "indefinitely-ish" wording was wrong — the
+downloader's shared HTTP client already bounds every fetch at **300 s total / 30 s connect**
+(`versions/release_metadata.rs::http_client`). Worst case is therefore a ~5-minute stall inside
+the requesting `/prove`, not unbounded latency. Closed as documented: no code change warranted;
+the bound protects legitimate slow downloads of large bb archives.
+Live observation that prompted the finding: `POST /prove` with `x-aztec-version: 1.0.0`
+(uncached) triggered a GitHub download inside the request path; the client observed no response
+within a 4 s window while the fetch ran. Bounded in aggregate (cache-size cap, digest
+verification, single-flight via lease), but any approved origin can force the server onto network
+fetches of attacker-chosen well-formed versions, extending that request's latency by
+seconds-to-minutes and consuming bandwidth. Not a DoS of other requests (inflight cap + separate
+download phase), purely latency/bandwidth — and bounded as above.
+
+**STATUS 2026-08-21**: IH-BUG-1 and IH-BUG-2 FIXED in the `ih-hygiene` PR; IH-BUG-3 closed as
+documented (amendment above).
 Consider a configurable allowlist of downloadable versions or a short download budget per request.
 
 ## Verified-clean correctness checks
