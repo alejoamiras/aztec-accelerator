@@ -20,11 +20,12 @@ comment stating which is authoritative.
 ### IH-BUG-3 · Low — remote-controlled version download stalls a prove request
 **AMENDED 2026-08-21 (post-report):** the original "indefinitely-ish" wording was wrong — the
 downloader's shared HTTP client already bounds fetches at **300 s total / 30 s connect**
-(`versions/release_metadata.rs::http_client`). Worst case is therefore roughly **10 minutes**
-(tarball download + release-metadata/digest fetch are sequential, each individually bounded), not
-unbounded. Two caveats keep this from being called a hard guarantee: the fallback
+(`versions/release_metadata.rs::http_client`). The **configured** client bound is roughly
+**10 minutes** end-to-end (tarball download + release-metadata/digest fetch are sequential, each
+individually bounded) — a latency ceiling, not a hard guarantee: the fallback
 `unwrap_or_else(|_| reqwest::Client::new())` when the builder fails drops those explicit
-deadlines, and the bound exists to protect legitimate slow downloads of large bb archives.
+deadlines entirely, and the bounds exist to protect legitimate slow downloads of large bb
+archives rather than to cap attacker-controlled stall time.
 Closed as documented: no code change warranted.
 Live observation that prompted the finding: `POST /prove` with `x-aztec-version: 1.0.0`
 (uncached) triggered a GitHub download inside the request path; the client observed no response
