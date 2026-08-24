@@ -56,7 +56,8 @@ raw `]`+port check (Authority::parse silently discards post-bracket junk); multi
 
 ## Phase-2 attack matrix summary (headless server, deny-by-default, 2026-08-21)
 - Host guard: 8/10 malicious variants → 403 invalid_host; `[::1]`/uppercase/multi-dot accepted
-  (all loopback-by-design). Hex/decimal IP, userinfo, wrong-port, rebinding names all rejected.
+  (all loopback-by-design — PRE-FIX behavior; multi-dot since rejected by the `ih-hygiene` PR).
+  Hex/decimal IP, userinfo, wrong-port, rebinding names all rejected.
 - Body limits: declared oversize → 413; malformed/conflicting Content-Length → 400.
 - Version header traversal string → 400 invalid_version (type-level grammar holds at runtime).
 - Remote-controlled download path observed live (`x-aztec-version: 1.0.0` triggered a GitHub

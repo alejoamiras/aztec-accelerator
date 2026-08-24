@@ -114,6 +114,9 @@ mod tests {
         assert!(!host_is_trusted("127.0.0.1..:59833", HTTP));
         assert!(!host_is_trusted("localhost..:59833", HTTP));
         assert!(!host_is_trusted("[::1]..:59833", HTTP));
+        // Post-`]` junk beyond dots — the raw check is what rejects these (parse would discard it).
+        assert!(!host_is_trusted("[::1].:59833", HTTP));
+        assert!(!host_is_trusted("[::1]x:59833", HTTP));
     }
 
     #[test]
