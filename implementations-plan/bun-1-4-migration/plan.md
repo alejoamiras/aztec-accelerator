@@ -22,8 +22,10 @@
 
 ---
 
-## Phase 1 — 1.3-compatible wave (codex: NOT "no behavior change" — logger destination in tests
-and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
+## Phase 1 ✓ — 1.3-compatible wave — GREEN 2026-08-25, linker RETAINED (outcome i): commits
+`65fa9a7`/`3d60271`/`c80cb41`/`f4680a5`; gate `bun run test` exit 0 + `lint:actions` exit 0 +
+guards 4/4 under scratch 1.3.14; 4a lockfile-invariant, 4c probe all-resolve, 4f ~4× install
+speedup / disk neutral — evidence in lessons/phase-1.md
 
 1. **Pin `_publish-sdk.yml`** (`latest` → the repo pin) — the publish pipeline builds the
    published artifact under a floating bun TODAY; highest-priority single edit.
