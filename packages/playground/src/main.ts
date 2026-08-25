@@ -21,6 +21,7 @@ import {
 } from "./diagnostics";
 import { showResult, stepToPhase } from "./results";
 import { $, $btn, appendLog, formatDuration, setStatus, startClock } from "./ui";
+import { sameMajor } from "./version";
 
 let deploying = false;
 
@@ -253,10 +254,12 @@ async function init(): Promise<void> {
     if (nodeVersion) {
       nodeEl.textContent = nodeVersion;
       appendLog(`Aztec node version: ${nodeVersion}`);
-      if (nodeVersion !== AZTEC_SDK_VERSION) {
+      if (sameMajor(AZTEC_SDK_VERSION, nodeVersion) === false) {
         appendLog(`Version mismatch: SDK ${AZTEC_SDK_VERSION} ≠ node ${nodeVersion}`, "warn");
         sdkEl.classList.add("text-amber-500/80");
         nodeEl.classList.add("text-amber-500/80");
+      } else if (sameMajor(AZTEC_SDK_VERSION, nodeVersion) && nodeVersion !== AZTEC_SDK_VERSION) {
+        appendLog(`SDK ${AZTEC_SDK_VERSION} / node ${nodeVersion}: same major, compatible`);
       }
     }
   }
