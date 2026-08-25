@@ -39,13 +39,20 @@ describe("bun version pin", () => {
         if (!use) return;
         steps++;
         const indent = use[1]?.length ?? 0;
+        // The pin must sit under the step's `with:` mapping specifically — an `env:` key of the
+        // same name is valid YAML that setup-bun ignores entirely.
+        let inWith = false;
         let pinned = false;
         for (let j = i + 1; j < lines.length; j++) {
           const l = lines[j] ?? "";
           if (new RegExp(`^\\s{0,${indent}}-\\s`).test(l)) break;
-          if (/^\s*bun-version-file\s*:\s*\.bun-version\s*$/.test(l)) pinned = true;
+          const key = l.match(/^(\s*)([A-Za-z_-]+)\s*:\s*$/);
+          if (key && (key[1]?.length ?? 0) > indent) inWith = key[2] === "with";
+          if (inWith && /^\s*bun-version-file\s*:\s*\.bun-version\s*$/.test(l)) pinned = true;
         }
-        expect(pinned, `${file}:${i + 1} — setup-bun step without bun-version-file in its with-block`).toBe(true);
+        expect(pinned, `${file}:${i + 1} — setup-bun step without bun-version-file under its with: mapping`).toBe(
+          true,
+        );
       });
     }
     expect(steps, "sweep is vacuous — no setup-bun steps found").toBeGreaterThan(20);

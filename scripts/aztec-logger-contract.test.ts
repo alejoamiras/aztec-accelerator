@@ -29,9 +29,10 @@ describe("@aztec/foundation logger JEST_WORKER_ID contract", () => {
     expect(m?.[1], "JEST_WORKER_ID condition is NEGATED — the bypass polarity flipped").toBe("");
     expect((m?.[2] ?? "").trim(), "JEST_WORKER_ID condition is no longer a bare truthy check").toBe("");
     const consequent = m?.[3] ?? "";
-    expect(consequent, "Jest branch no longer uses pino.destination — the sync no-worker contract broke").toContain(
-      "pino.destination",
-    );
+    expect(
+      /pino\.destination\(\s*2\s*\)/.test(consequent),
+      "Jest branch no longer calls pino.destination(2) — the sync stderr-fd contract broke",
+    ).toBe(true);
     expect(consequent, "Jest branch unexpectedly builds a transport (worker) — the bypass is gone").not.toContain(
       "pino.transport",
     );
