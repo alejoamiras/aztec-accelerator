@@ -8,6 +8,12 @@
 # (`bun install --frozen-lockfile`, what CI runs) are unaffected — they install
 # exactly what bun.lock pins.
 [install]
+# Isolated linker (owner-approved, bun-1-4-migration plan): packages materialize as
+# symlinks into node_modules/.bun instead of a hoisted copy-tree. NOT the "global store"
+# from the 1.4 announcement — the shared download cache is unchanged and already CI-cached.
+# Retained only with the measured benefit + resolution proofs recorded in the plan; the
+# release-gating swap-sdk flow is the known layout-sensitive consumer (probe-tested).
+linker = "isolated"
 minimumReleaseAge = 604800 # 7 days, in seconds
 
 # @aztec/* exemption (owner decision 2026-08-18): @aztec is this product's
