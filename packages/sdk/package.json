@@ -41,7 +41,8 @@
     "@aztec/pxe": "5.2.0",
     "@aztec/simulator": "5.2.0",
     "@aztec/wallets": "5.2.0",
-    "@types/ms": "^2.1.0"
+    "@types/ms": "^2.1.0",
+    "vite-plugin-node-polyfills": "^0.28"
   },
   "publishConfig": {
     "access": "public"

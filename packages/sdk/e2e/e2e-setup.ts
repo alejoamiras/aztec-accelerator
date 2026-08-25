@@ -1,3 +1,6 @@
+// Shared shims (logger worker-transport bypass + expect compat) — import side effects only.
+import "../src/test-setup.ts";
+
 /**
  * E2E test setup — runs once before all test files via preload.
  *
@@ -7,16 +10,7 @@
  * Throws immediately if required services are unavailable.
  */
 
-import { expect } from "bun:test";
 import { configure, getConsoleSink, parseLogLevel } from "@logtape/logtape";
-
-// Patch expect for @aztec/foundation compatibility
-if (!(expect as any).addEqualityTesters) {
-  (expect as any).addEqualityTesters = () => {};
-}
-if ((globalThis as any).expect && !(globalThis as any).expect.addEqualityTesters) {
-  (globalThis as any).expect.addEqualityTesters = () => {};
-}
 
 // Configure LogTape
 const logLevel = parseLogLevel(process.env.LOG_LEVEL || "warning");

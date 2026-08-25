@@ -175,6 +175,11 @@ export default defineConfig(({ mode, command }) => {
     },
     resolve: {
       alias: {
+        // Build-only, NOT dev: rollup needs the absolute paths, while the dev server must see the
+        // bare specifiers (an aliased absolute path skips prebundling and the CJS shim then dies
+        // in the interop wrapper — "Cannot access '__vite__cjsImport0…' before initialization").
+        // Dev-mode resolvability from TRANSFORMED ../sdk sources comes from the sdk declaring the
+        // plugin itself: the injected imports resolve from the importing file's package.
         ...(command === "build" && {
           "vite-plugin-node-polyfills/shims/buffer": require.resolve(
             "vite-plugin-node-polyfills/shims/buffer",
