@@ -20,10 +20,15 @@ describe("@aztec/foundation logger JEST_WORKER_ID contract", () => {
   const loggerPath = join(dirname(entry), "pino-logger.js");
   const src = readFileSync(loggerPath, "utf8");
 
-  test("the Jest branch exists and takes the sync non-worker destination", () => {
-    const m = src.match(/if\s*\([^)]*JEST_WORKER_ID[^)]*\)\s*(\{[\s\S]*?\n\s*\})/);
+  test("the Jest branch exists, is positively gated, and takes the sync non-worker destination", () => {
+    // The condition must be the bare truthy read — a negated (`!JEST_WORKER_ID`) or
+    // equality-restricted (`=== "x"`) rewrite would invert/narrow the bypass while still
+    // matching a loose contains-check.
+    const m = src.match(/if\s*\(\s*(!?)\s*process\.env\.JEST_WORKER_ID\s*([^)]*)\)\s*(\{[\s\S]*?\n\s*\})/);
     expect(m, `no JEST_WORKER_ID conditional found in ${loggerPath}`).toBeTruthy();
-    const consequent = m?.[1] ?? "";
+    expect(m?.[1], "JEST_WORKER_ID condition is NEGATED — the bypass polarity flipped").toBe("");
+    expect((m?.[2] ?? "").trim(), "JEST_WORKER_ID condition is no longer a bare truthy check").toBe("");
+    const consequent = m?.[3] ?? "";
     expect(consequent, "Jest branch no longer uses pino.destination — the sync no-worker contract broke").toContain(
       "pino.destination",
     );

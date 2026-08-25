@@ -24,17 +24,30 @@ describe("bun version pin", () => {
     expect(content).toMatch(/^\d+\.\d+\.\d+\n?$/);
   });
 
-  test("every setup-bun site uses bun-version-file, never an inline bun-version", () => {
-    let sites = 0;
+  test("every setup-bun step carries bun-version-file in ITS with-block; no inline bun-version", () => {
+    // Association, not co-occurrence: a new unpinned setup-bun step alongside 23 pinned ones must
+    // fail, so each step is checked for a pin within its own `with:` block (bounded by the next
+    // step's `- ` at equal-or-lower indent).
+    let steps = 0;
     for (const file of files) {
       const lines = readFileSync(file, "utf8").split("\n");
       lines.forEach((line, i) => {
         if (/^\s*bun-version\s*:/.test(line)) {
           expect(true, `${file}:${i + 1} — inline bun-version reintroduced; use bun-version-file`).toBe(false);
         }
-        if (/^\s*bun-version-file\s*:\s*\.bun-version\s*$/.test(line)) sites++;
+        const use = line.match(/^(\s*)-\s+uses:\s*oven-sh\/setup-bun@/);
+        if (!use) return;
+        steps++;
+        const indent = use[1]?.length ?? 0;
+        let pinned = false;
+        for (let j = i + 1; j < lines.length; j++) {
+          const l = lines[j] ?? "";
+          if (new RegExp(`^\\s{0,${indent}}-\\s`).test(l)) break;
+          if (/^\s*bun-version-file\s*:\s*\.bun-version\s*$/.test(l)) pinned = true;
+        }
+        expect(pinned, `${file}:${i + 1} — setup-bun step without bun-version-file in its with-block`).toBe(true);
       });
     }
-    expect(sites, "sweep is vacuous — no setup-bun sites found").toBeGreaterThan(20);
+    expect(steps, "sweep is vacuous — no setup-bun steps found").toBeGreaterThan(20);
   });
 });
