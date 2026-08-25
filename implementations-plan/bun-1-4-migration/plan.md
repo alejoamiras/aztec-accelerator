@@ -388,3 +388,11 @@ A+B the max review ran and its confirmed findings were applied (`026a724`); for 
 (C, D) the per-arc protocol is amended: inline self-review by the implementing session + the
 codex xhigh fix loop (ChatGPT account) replace the max-effort multi-agent review. A Claude-side
 multi-agent review runs only on explicit owner request.
+
+## Delivery deviation (2026-08-25, recorded)
+
+GO path collapsed Arc A/B's independent-merge rationale (the split existed for the NO-GO
+contingency; the post-impl fix commits interleave both arcs' surfaces). Delivery is now:
+**PR-1 = Arcs A+B consolidated** (per-concern revertability preserved at commit granularity),
+**PR-2 = Arc C** stacked on it, **PR-3 = Arc D** branched from PR-1's head as a sibling. The
+four-arc CONTENT is unchanged — only PR packaging consolidated.
