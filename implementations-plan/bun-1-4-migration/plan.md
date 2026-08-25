@@ -139,7 +139,17 @@ min-age (~08-28)
 - Full local gate && `lint:actions`; Arc B PR CI fully green; lockfile commit review recorded.
 - Layers: full CI.
 
-## Phase 4 — Post-bump tooling adoptions (each its own commit; gated on Phase 3 green)
+## Phase 4 ✓ — Post-bump tooling adoptions — GREEN 2026-08-25: PR #477 (bun14-arc-c). Adopted:
+sdk `test:unit --parallel` (14.7s→8.5s, 42%), `{retry:1}` on six pure-connectivity live tests
+(proving tests deliberately retry-free — phase-trail = silent-fallback discriminator, codex
+blocker), `serve`→`serve-static.ts` + 5-point contract test, `--no-orphans` ×2. CUT with
+measurements: lint-chain parallel (520ms total), chain-level test parallel. Gates (all local —
+stacked PRs off-main get no Actions runs, gates hand-run): full chain exit 0 under 1.4.0 +
+actionlint ✓; desktop-UI 68/68 (7.0s, serve-static in situ); sdk live e2e 10/10 33.4s (testnet +
+headless accelerator, zero skips); playground smoke 2/2 (accelerated 19.5s / local 29.0s).
+Packaged-e2e leg: structurally release-context-only (sole caller `release-accelerator.yml`) —
+runs inside the next release dispatch; its swap script is A+B surface already validated by the
+clean-topology probe + #475's green App suite. Codex loop: conditional → approve (R2).
 
 1. `bun run --parallel` for the lint chain (3 live CI jobs) + local `test:unit`/`test:typecheck`
    chains; playground's 3-tsc chain kept parallel only if one CI timing run shows no regression.
@@ -163,8 +173,13 @@ min-age (~08-28)
   live-testnet smoke under 1.4 (headless accelerator + `test:e2e:smoke` + sdk `test:e2e`).
 - Layers: full CI · release-path integration · e2e live network.
 
-## Phase 5 / Arc D — ky removal from the published SDK (standalone; codex CRITICAL rescope;
-owner-requested feature, full contract honored)
+## Phase 5 / Arc D ✓ — ky removal — GREEN 2026-08-25: PR #476 (bun14-arc-d). `TransportHttpError`
+internal contract 1:1 for ky's `HTTPError` (status ALWAYS preserved; unreadable/oversize/malformed
+non-2xx bodies never demote to network-failure — 6 adversarial F14 tests + 4 media-type-essence
+tests + real-socket header-vs-body budget test). `public-contract.test.ts` untouched; ky out of
+published deps. Gates (local, same off-main caveat): full chain exit 0 (sdk units 136/136);
+sdk live e2e 10/10 29.9s (fetch transport on the live path, testnet + accelerator); playground
+mocked 8/8 (ky-free bundle in-browser). Codex loop: approve (R3).
 
 Scope (fable cond. 1 + codex): `accelerator-transport.ts` AND `accelerator-prover.ts` (lines ~420+:
 `instanceof HTTPError` gates network-vs-HTTP classification, HTTPS downgrade control, status
