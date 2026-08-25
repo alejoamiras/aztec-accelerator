@@ -34,3 +34,33 @@ registration in the playground. Consequences:
   the bump lands — decided at Phase 3 with the ledger updated.
 
 LESSONS_FILE=implementations-plan/bun-1-4-migration/lessons/phase-2.md
+
+## Spike results (2026-08-25) — VERDICT: GO
+Binary: scratch 1.4.0 (`bun --version` = 1.4.0 recorded per run).
+1. **Fresh-install gate**: pristine worktree + `bun install --frozen-lockfile` (lockfile
+   untouched) + FULL `bun run test` → **exit 0** (76 tests/9 files) + `lint:actions` exit 0.
+   THE GATE EARNED ITS KEEP: first pristine run failed TS2688 — `@types/node` was an UNDECLARED
+   transitive consumed via hoisting; 1.4's isolated linker (correctly, stricter than 1.3.14's)
+   stops exposing it at root, and the migration worktree had masked it via tsc typeRoots walking
+   up to the root clone's hoisted node_modules. Fix: declared `@types/node@20.19.37` (the exact
+   version the hoisted root had been exposing; already in the lock — no new resolution, min-age
+   moot). Verified in the failing scenario: fresh worktree typecheck exit 0.
+2. **bb.js Worker (decisive)**: SDK e2e under 1.4.0 vs live testnet + headless accelerator —
+   **10/10 pass** including proving.test.ts's WASM fallback leg (constructs bb.js's node
+   `worker_threads.Worker`). The #40268 bug does not bite this pattern (no happy-dom in that
+   context; plain-Worker repro also passes). **GO.**
+3. **TLS**: openssl IP-SAN self-signed + `Bun.serve({tls})` + `fetch https://127.0.0.1` with ca →
+   200 ✓. The accelerator-leaf semantics survive 1.4's tightening.
+4. **--parallel three-way**: baseline / `--parallel` / `--parallel --no-isolate` per suite —
+   pass/fail counts IDENTICAL in all modes (playground incl. a canary asserting preload effects
+   per worker: addEqualityTesters patched, JEST_WORKER_ID present, document registered). The
+   apparent baseline "fails" (sdk 3, accelerator 5) were spike-harness artifacts: bare `bun test`
+   swept sdk's e2e/ (fail-fast guard without services — the real e2e is 10/10 with services) and
+   accelerator's @playwright/test specs (excluded by its real `test:unit`). Both modes adoptable;
+   Phase 4 will use `--parallel` (implied isolate proved equivalent here, but `--no-isolate` is
+   the conservative choice consistent with preload-time global mutation — decide per suite at
+   adoption with one more per-suite confirmation).
+5. **Upstream**: nothing to file — oven-sh/bun#40268 already fixed by #40271 (see earlier
+   section).
+
+LESSONS_FILE=implementations-plan/bun-1-4-migration/lessons/phase-2.md

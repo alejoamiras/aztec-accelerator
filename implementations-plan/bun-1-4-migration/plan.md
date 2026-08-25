@@ -87,7 +87,10 @@ speedup / disk neutral — evidence in lessons/phase-1.md
   Either way: Arc A PR CI fully green.
 - Layers: lint · typecheck · unit · install-topology integration.
 
-## Phase 2 — Empirical spike (scratch 1.4.0; evidence + upstream report; gates Phase 3)
+## Phase 2 ✓ — Empirical spike — **VERDICT: GO** (2026-08-25): fresh-install gate exit 0 after
+catching the undeclared @types/node (fixed, verified in the failing scenario); bb.js WASM leg
+10/10 under 1.4 vs testnet; TLS IP-SAN 200; --parallel three-way identical; upstream already
+fixed (#40268/#40271, nothing to file) — evidence in lessons/phase-2.md
 
 1. **Fresh-install gate (codex HIGH)**: in a pristine clone/worktree, scratch-1.4.0
    `bun install --frozen-lockfile` — clean install under the 1.4 PM, then full `bun run test`.
@@ -313,7 +316,11 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
   grep), resolved isolated-linker-aware; linker exit rule (measure, cut-on-failure, never strand
   the publish pin; Arc A commit order fixed); ledger/assumption hygiene (F9–F12 explicit,
   F15→BUN_TEST_WORKER_ID, A2→ledger, @types/bun manifest step named, Arc D branches from B).
-- Phase-2 GO/NO-GO: pending evidence.
+- Phase-2 GO/NO-GO: **GO** (2026-08-25) — bb.js WASM-fallback leg 10/10 under scratch 1.4.0
+  against live testnet (the decisive execution; no `internal:worker/messaging` signature
+  anywhere in its output); fresh-install + TLS + parallel evidence in lessons/phase-2.md. Bonus
+  catch: undeclared `@types/node` (hoisting-masked) fixed ahead of Phase 3.
+- @types/bun: still inside min-age until ~2026-08-28 — trailing commit after aging (Phase 3.2).
 
 ## Post-implementation (self-contained)
 
