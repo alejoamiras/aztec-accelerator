@@ -2,9 +2,12 @@ import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import type { CircuitSimulator } from "@aztec/simulator/client";
 import { type PrivateExecutionStep, serializePrivateExecutionSteps } from "@aztec/stdlib/kernel";
 import { ChonkProofWithPublicInputs } from "@aztec/stdlib/proofs";
-import { HTTPError } from "ky";
 import sdkPkg from "../../package.json" with { type: "json" };
-import { AcceleratorTransport, isRecognizedHealthBody } from "./accelerator-transport.js";
+import {
+  AcceleratorTransport,
+  isRecognizedHealthBody,
+  TransportHttpError,
+} from "./accelerator-transport.js";
 import { AcceleratorHttpError, parseServerError } from "./errors.js";
 import { logger } from "./logger.js";
 // q7e3-F-02: published types now live in ./types.ts (a neutral module); index.ts re-exports them.
@@ -424,7 +427,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     } catch (err) {
       // Network-level failure: no HTTP response at all (TLS handshake/cert failure, connection
       // refused, timeout). The HTTPS listener/trust may have changed since /health pinned it.
-      if (!(err instanceof HTTPError)) {
+      if (!(err instanceof TransportHttpError)) {
         // The endpoint was reconfigured while this proof was in flight — do NOT touch the new endpoint
         // (don't demote its pin, don't POST the witness to it). Degrade to WASM (codex High).
         if (this.#transport.generation !== attemptGen) {
@@ -498,7 +501,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             // A network-level retry failure (no HTTP response) still degrades to WASM; an HTTP error the
             // accelerator returned goes through the SAME F14 classifier as the primary path — so a
             // misconfiguration surfaced only on the HTTP retry is not silently masked either.
-            if (!(retryErr instanceof HTTPError)) {
+            if (!(retryErr instanceof TransportHttpError)) {
               logger.warn("HTTP retry failed at the network layer, falling back to WASM", {
                 error: String(retryErr),
               });
@@ -521,9 +524,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           "Local proof completed after transport failure",
         );
       }
-      // `err` is an HTTPError the accelerator returned — F14: recognised conditions degrade to WASM, a
-      // caller misconfiguration / unrecognised status throws a typed `AcceleratorHttpError` (never a raw
-      // `ky` error, which is not part of the SDK's public surface).
+      // The accelerator ANSWERED with a non-2xx — F14: recognised conditions degrade to WASM, a
+      // caller misconfiguration / unrecognised status throws a typed `AcceleratorHttpError` (never the
+      // internal transport error, which is not part of the SDK's public surface).
       return this.#fallbackOrThrowHttp(err, executionSteps);
     }
 
@@ -559,7 +562,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     this.#onPhase?.("proved", { durationMs });
 
     // F-11 (audit 2026-07-31-9c4cb0c): read under a byte cap AND a body deadline. `res.json()` had
-    // neither — ky's timeout stops counting at headers, so a `200` followed by an endless body hung
+    // neither — the request timeout bounds time-to-headers, so a `200` followed by an endless body hung
     // this promise forever and buffered without limit. An over-cap or stalled body now throws, which
     // the caller already handles as a prove failure (and degrades to WASM).
     const proof = await this.#transport.readProveBody(res);
@@ -602,7 +605,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    * recovered via {@link parseServerError} (a JSON content-type gives an object; both are handled).
    */
   async #fallbackOrThrowHttp(
-    err: HTTPError,
+    err: TransportHttpError,
     executionSteps: PrivateExecutionStep[],
   ): Promise<ChonkProofWithPublicInputs> {
     const status = err.response.status;
