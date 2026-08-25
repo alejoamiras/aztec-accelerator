@@ -6,6 +6,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendDir = join(__dirname, "src-tauri", "frontend");
 // F-012: the pages load bundled `assets/*.js` built from `frontend-src/` — build them before serving.
 const buildFrontend = join(__dirname, "scripts", "build-frontend.ts");
+const serveStatic = join(__dirname, "scripts", "serve-static.ts");
 
 export default defineConfig({
   use: {
@@ -13,7 +14,8 @@ export default defineConfig({
     headless: true,
   },
   webServer: {
-    command: `bun ${JSON.stringify(buildFrontend)} && bunx serve -l 3456 --no-clipboard .`,
+    // --no-orphans: if Playwright's teardown kills only the outer bun, descendants die with it.
+    command: `bun ${JSON.stringify(buildFrontend)} && bun --no-orphans ${JSON.stringify(serveStatic)} . 3456`,
     port: 3456,
     reuseExistingServer: true,
     cwd: frontendDir,

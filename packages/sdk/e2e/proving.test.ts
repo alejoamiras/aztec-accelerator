@@ -80,42 +80,51 @@ describe("AcceleratorProver", () => {
       logger.info("Accelerator status", { available: status.available });
     });
 
-    test("should deploy account through the NATIVE accelerator path (not WASM fallback)", async () => {
-      expect(wallet).toBeDefined();
+    test(
+      "should deploy account through the NATIVE accelerator path (not WASM fallback)",
+      async () => {
+        expect(wallet).toBeDefined();
 
-      // Positive native-path proof: the prover emits "transmit" only on the native /prove path and
-      // "fallback" only on the WASM path. A mined tx alone does NOT prove native bb ran (a silent
-      // fallback would also mine), so we assert the phase trail discriminates them.
-      const phases: string[] = [];
-      prover.setOnPhase((p) => phases.push(p));
-      try {
-        const deployed = await deploySchnorrAccount(wallet, feePaymentMethod, "accelerated");
-        expect(deployed).toBeDefined();
-      } finally {
-        prover.setOnPhase(null);
-      }
-      expect(phases).toContain("transmit"); // native /prove round-trip to :59833
-      expect(phases).not.toContain("fallback"); // never silently fell back to WASM
-    }, 600_000);
+        // Positive native-path proof: the prover emits "transmit" only on the native /prove path and
+        // "fallback" only on the WASM path. A mined tx alone does NOT prove native bb ran (a silent
+        // fallback would also mine), so we assert the phase trail discriminates them.
+        const phases: string[] = [];
+        prover.setOnPhase((p) => phases.push(p));
+        try {
+          const deployed = await deploySchnorrAccount(wallet, feePaymentMethod, "accelerated");
+          expect(deployed).toBeDefined();
+        } finally {
+          prover.setOnPhase(null);
+        }
+        expect(phases).toContain("transmit"); // native /prove round-trip to :59833
+        expect(phases).not.toContain("fallback"); // never silently fell back to WASM
+        // One retry: live proving's first attempt can hit cold wallet-init timeouts.
+      },
+      { timeout: 600_000, retry: 1 },
+    );
   });
 
   describe("Local (WASM)", () => {
-    test("should deploy account with local proving (WASM fallback path)", async () => {
-      expect(wallet).toBeDefined();
+    test(
+      "should deploy account with local proving (WASM fallback path)",
+      async () => {
+        expect(wallet).toBeDefined();
 
-      // Force WASM fallback by pointing at an unreachable port
-      prover.setAcceleratorConfig({ port: 1 });
+        // Force WASM fallback by pointing at an unreachable port
+        prover.setAcceleratorConfig({ port: 1 });
 
-      const phases: string[] = [];
-      prover.setOnPhase((p) => phases.push(p));
-      try {
-        const deployed = await deploySchnorrAccount(wallet, feePaymentMethod, "local/WASM");
-        expect(deployed).toBeDefined();
-      } finally {
-        prover.setOnPhase(null);
-      }
-      // Confirms the fallback path actually engaged (and the discriminator above is meaningful).
-      expect(phases).toContain("fallback");
-    }, 600_000);
+        const phases: string[] = [];
+        prover.setOnPhase((p) => phases.push(p));
+        try {
+          const deployed = await deploySchnorrAccount(wallet, feePaymentMethod, "local/WASM");
+          expect(deployed).toBeDefined();
+        } finally {
+          prover.setOnPhase(null);
+        }
+        // Confirms the fallback path actually engaged (and the discriminator above is meaningful).
+        expect(phases).toContain("fallback");
+      },
+      { timeout: 600_000, retry: 1 },
+    );
   });
 });

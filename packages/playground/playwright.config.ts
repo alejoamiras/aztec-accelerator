@@ -6,7 +6,8 @@ export default defineConfig({
     headless: true,
   },
   webServer: {
-    command: "bun run dev",
+    // --no-orphans: Vite must not outlive the bun wrapper when Playwright tears down.
+    command: "bun --no-orphans run dev",
     port: 5173,
     reuseExistingServer: true,
   },

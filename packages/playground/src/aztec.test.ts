@@ -56,11 +56,15 @@ describe("checkAztecNode", () => {
 // cwd: bunfig's preloaded happydom.ts carries the expect.addEqualityTesters patch that
 // @aztec/foundation's field module needs at import time under bun:test.
 describe.skipIf(!process.env.AZTEC_NODE_URL)("checkAztecNode (live node)", () => {
-  test("real node answers the node_getNodeInfo probe", async () => {
-    const result = await checkAztecNode();
-    expect(result.reachable).toBe(true);
-    expect(result.nodeVersion).toBeDefined();
-  });
+  test(
+    "real node answers the node_getNodeInfo probe",
+    async () => {
+      const result = await checkAztecNode();
+      expect(result.reachable).toBe(true);
+      expect(result.nodeVersion).toBeDefined();
+    },
+    { retry: 1 },
+  );
 });
 
 // ── checkAccelerator ──
