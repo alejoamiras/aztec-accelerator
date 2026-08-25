@@ -759,10 +759,16 @@ export class AcceleratorTransport {
     );
     if (!response.ok) {
       // Content-type decides the pre-read shape, mirroring what parseServerError distinguishes:
-      // the server's text/plain JSON-string bodies stay STRINGS, a JSON content-type parses to an
+      // the server's text/plain JSON-string bodies stay STRINGS, a JSON media type parses to an
       // object; an unreadable body is undefined — the status alone then drives classification.
+      // Match on the media-type ESSENCE (parameters stripped, case-folded) and accept `+json`
+      // suffixes — a substring test would misread `text/plain; note=application/json`.
       const raw = await readTextBounded(response);
-      const isJson = (response.headers.get("content-type") ?? "").includes("application/json");
+      const essence = (response.headers.get("content-type") ?? "")
+        .split(";")[0]
+        ?.trim()
+        .toLowerCase();
+      const isJson = essence === "application/json" || (essence?.endsWith("+json") ?? false);
       let data: unknown = raw;
       if (raw !== undefined && isJson) {
         try {
