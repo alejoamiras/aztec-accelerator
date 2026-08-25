@@ -25,7 +25,7 @@ echo "Packed ${ABS}"
 # (packages/playground/node_modules/@alejoamiras/aztec-accelerator -> ../../../sdk — there is no hoisted root
 # copy); replace that symlink IN PLACE with the EXTRACTED packed tarball, so the playground resolves the
 # packed code with no bun re-resolution. The tarball ships no node_modules, so link the workspace SDK's own
-# node_modules into it — the packed code resolves its deps (@aztec/*, ky, ...) through the exact pinned graph
+# node_modules into it — the packed code resolves its deps (@aztec/*, ...) through the exact pinned graph
 # the workspace SDK uses (one graph). A failure here aborts the leg — never silently fall back to the
 # workspace SDK (that would defeat the packed-SDK gate).
 REPO_ROOT="$(pwd)"
@@ -55,7 +55,7 @@ case "${RESOLVED}" in
     ;;
 esac
 # And the packed code must reach its own deps through the linked graph.
-for dep in ky @aztec/bb-prover; do
+for dep in @logtape/logtape @aztec/bb-prover; do
   bun -e "Bun.resolveSync('${dep}', '${REPO_ROOT}/${DEST}')" || {
     echo "::error::packed SDK cannot resolve its dependency '${dep}' from ${DEST}"
     exit 1

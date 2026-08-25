@@ -31,7 +31,6 @@
     "@aztec/noir-noirc_abi": "5.2.0",
     "@aztec/stdlib": "5.2.0",
     "@logtape/logtape": "^2.0",
-    "ky": "^2.0.2",
     "ms": "^2.1.3"
   },
   "devDependencies": {
