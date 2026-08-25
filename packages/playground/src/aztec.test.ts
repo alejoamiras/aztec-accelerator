@@ -52,7 +52,9 @@ describe("checkAztecNode", () => {
 
 // Real-node integration check: mocks missed the 5.0.0 GET-/status-405 change that broke
 // the deployed playground — this closes that loop against an actual node when one is
-// configured (AZTEC_NODE_URL=https://... bun test src/aztec.test.ts).
+// configured (AZTEC_NODE_URL=https://... bun run test:live). Must run with this package as
+// cwd: bunfig's preloaded happydom.ts carries the expect.addEqualityTesters patch that
+// @aztec/foundation's field module needs at import time under bun:test.
 describe.skipIf(!process.env.AZTEC_NODE_URL)("checkAztecNode (live node)", () => {
   test("real node answers the node_getNodeInfo probe", async () => {
     const result = await checkAztecNode();

@@ -1,0 +1,268 @@
+<title>Aztec 5.2.0 Upgrade</title>
+<style>
+  :root {
+    --paper: #FAFBFC;
+    --ink: #1A2333;
+    --muted: #5A6678;
+    --accent: #0E6E77;
+    --accent-soft: #E3F0F1;
+    --amber: #9A6A00;
+    --amber-bg: #FFF6E3;
+    --amber-edge: #E3C170;
+    --card: #F2F4F7;
+    --edge: #D9DEE6;
+    --mono-bg: #EEF1F5;
+    --good: #1E7A46;
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #10151D;
+      --ink: #E6EAF1;
+      --muted: #98A2B3;
+      --accent: #4FB3BC;
+      --accent-soft: #14262B;
+      --amber: #E0B45C;
+      --amber-bg: #221B0C;
+      --amber-edge: #6E5A28;
+      --card: #171E29;
+      --edge: #2A3442;
+      --mono-bg: #1A2230;
+      --good: #57B87E;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #10151D;
+    --ink: #E6EAF1;
+    --muted: #98A2B3;
+    --accent: #4FB3BC;
+    --accent-soft: #14262B;
+    --amber: #E0B45C;
+    --amber-bg: #221B0C;
+    --amber-edge: #6E5A28;
+    --card: #171E29;
+    --edge: #2A3442;
+    --mono-bg: #1A2230;
+    --good: #57B87E;
+  }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Charter, Georgia, "Times New Roman", serif;
+    line-height: 1.65;
+    margin: 0;
+    padding: 3rem 1.25rem 5rem;
+  }
+  main { max-width: 68ch; margin: 0 auto; }
+  h1, h2, h3 {
+    font-family: "Avenir Next", "Segoe UI", -apple-system, "Helvetica Neue", sans-serif;
+    font-weight: 600;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
+  h1 { font-size: 2rem; margin: 0 0 0.4rem; }
+  h2 { font-size: 1.25rem; margin: 3rem 0 0.9rem; color: var(--accent); }
+  h3 { font-size: 1.02rem; margin: 0 0 0.35rem; }
+  .kicker {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 1.6rem;
+  }
+  .lede { font-size: 1.08rem; }
+  p { margin: 0.85rem 0; }
+  code, pre {
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85em;
+  }
+  code { background: var(--mono-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre {
+    background: var(--mono-bg);
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .phases { display: flex; flex-direction: column; gap: 1rem; margin: 1.4rem 0; }
+  .phase {
+    background: var(--card);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 1rem 1.2rem;
+  }
+  .phase .num {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .gate { color: var(--muted); font-size: 0.92rem; margin-bottom: 0; }
+  .gate strong { color: var(--good); font-weight: 600; }
+  .asks {
+    background: var(--amber-bg);
+    border: 1px solid var(--amber-edge);
+    border-left: 3px solid var(--amber);
+    border-radius: 0 6px 6px 0;
+    padding: 1.1rem 1.3rem;
+    margin: 1.4rem 0;
+  }
+  .asks h2 { color: var(--amber); margin-top: 0.2rem; }
+  .asks ol { padding-left: 1.2rem; margin: 0.6rem 0 0.2rem; }
+  .asks li { margin: 0.7rem 0; }
+  .asks li::marker { font-family: "Avenir Next", "Segoe UI", sans-serif; font-weight: 600; color: var(--amber); }
+  ul { padding-left: 1.2rem; }
+  li { margin: 0.45rem 0; }
+  .seed-label {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.78rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin: 1.6rem 0 0.5rem;
+  }
+  .seed-label.rec { color: var(--good); }
+  .seed-label.alt { color: var(--muted); }
+  .warn {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.92rem;
+    color: var(--amber);
+    font-weight: 600;
+  }
+  .footnote { color: var(--muted); font-size: 0.9rem; margin-top: 3rem; border-top: 1px solid var(--edge); padding-top: 1rem; }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+<main>
+  <p class="kicker">Blueprint · light tier · draft for approval · 2026-08-18</p>
+  <h1>Aztec 5.2.0 Upgrade</h1>
+  <p class="lede">Aztec released version 5.2.0 of its packages <em>today</em>, and the public
+  testnet is already running it. This plan moves the whole project — SDK, playground, and the
+  desktop accelerator's build pins — from 5.0.1 to 5.2.0, lands it as one reviewed pull request,
+  and proves it works against the real network before anything merges. Release notes say the
+  TypeScript surface we use has no breaking changes; the plan verifies that instead of trusting it.</p>
+
+  <h2>Why the light tier</h2>
+  <p>Of the six risk dimensions, only <strong>external coupling</strong> scores high (npm publish
+  timing, testnet state, GitHub release assets, a lagging third-party package). Novelty, blast
+  radius, irreversibility, migration cost, and security sensitivity are all low-to-moderate: this
+  is the fourth upgrade cycle, the repo has purpose-built tooling for exactly this, and CI fails
+  closed on the risky parts. One high nominally suggests the mid tier; precedent and tooling make
+  light defensible, and a full codex audit ran anyway — it caught one genuinely blocking problem
+  (phase 2 below), which is the audit system working as intended.</p>
+
+  <h2>The four phases</h2>
+  <div class="phases">
+    <div class="phase">
+      <p class="num">Phase 1</p>
+      <h3>Run the upgrade and pin the Windows binary</h3>
+      <p>The repo's own updater script rewrites every version pin and cache marker in one pass.
+      Because 5.2.0 came out today, it trips our 7-day "quarantine" on freshly published packages —
+      per your decision, Aztec's own packages get a permanent, documented exemption (they're the
+      product's first-party upstream; the quarantine stays for everything else). The Windows
+      proving binary gets its checksum recorded by hand with a full paper trail — never
+      automatically, by design.</p>
+      <p class="gate"><strong>Proves itself by:</strong> the full local test suite (lint,
+      type-checks, ~200 unit tests) green, plus a line-by-line review of the dependency lockfile.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 2 — found by the codex audit</p>
+      <h3>Unblock the test infrastructure's own quarantine</h3>
+      <p>Our CI has a <em>second</em>, separate freshness quarantine: the step that installs the
+      Aztec test network for end-to-end tests. Verified by experiment: it refuses a same-day
+      release, so every e2e test would fail until Aug 25. The fix mirrors your decision in that
+      spot — exempt Aztec's own packages there too (needs a newer npm that supports exemptions),
+      keeping the quarantine for everything else. It touches one CI file and gets validated on
+      this machine before anything is pushed.</p>
+      <p class="gate"><strong>Proves itself by:</strong> the Aztec test-network installer
+      completing locally under the new settings, plus the CI linter.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 3</p>
+      <h3>Open the pull request, let CI grind</h3>
+      <p>One PR carries everything, staged in clean separate commits. The full CI wall — three
+      test pipelines across macOS, Linux, and Windows, about 20–25 minutes — must go green,
+      including the Windows build that only passes if the hand-pinned checksum is right. The PR
+      stays in draft so nothing can merge before phase 4.</p>
+      <p class="gate"><strong>Proves itself by:</strong> all four required CI status checks green
+      on the PR.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 4</p>
+      <h3>Prove it on the real testnet, then hand you the merge</h3>
+      <p>Automated checks against the live network: a browser test that deploys an account in both
+      accelerated and fallback modes, the SDK's own end-to-end suite (which asserts the fast native
+      path actually ran, not the silent fallback), and a manual token-transfer run. One known
+      snag may appear here — the shared fee-sponsor contract (see context below). When everything
+      is green, the PR flips to "ready" and the merge is yours.</p>
+      <p class="gate"><strong>Proves itself by:</strong> live-network tests green including the
+      accelerated path, token flow completing on testnet — or an explicit, logged "blocked,
+      needs owner" state.</p>
+    </div>
+  </div>
+
+  <h2>Context you need for the decisions</h2>
+  <ul>
+    <li><strong>The 7-day quarantine.</strong> The repo refuses to install any package version
+    published less than 7 days ago — real protection against supply-chain attacks, which have hit
+    npm within minutes of a hijacked publish. Exempting Aztec's own packages is a considered
+    trade: they're the platform this product is built on, versions are pinned exactly, and every
+    upgrade arrives as a human-reviewed PR. The honest cost: for Aztec packages specifically, we
+    lose the one-week observation window.</li>
+    <li><strong>The Windows checksum.</strong> Windows builds download a proving binary from
+    Aztec's GitHub release. Its fingerprint is recorded by a person, never a script, so a tampered
+    file can't slip in unnoticed. My recorded fingerprint is honestly a <em>change detector</em> —
+    the real safety comes from you re-computing it independently before merging (one command,
+    included in the code comment).</li>
+    <li><strong>The fee-sponsor contract.</strong> The playground pays testnet fees through a
+    shared sponsor contract whose address is derived from its compiled code. Upgrades usually
+    recompile it, moving the address — then someone has to deploy and fund the new one on testnet,
+    which needs your funded Sepolia key. That step is yours alone; the plan stops and asks rather
+    than touching keys.</li>
+    <li><strong>The token library that lags.</strong> The playground's token demo uses a
+    third-party package that tracks Aztec releases late — it has no 5.2.0 yet. The plan holds it
+    at 5.0.1 and lets the token-flow tests be the judge of whether that mix works.</li>
+  </ul>
+
+  <div class="asks">
+    <h2>Decisions — recorded at approval (2026-08-19)</h2>
+    <ol>
+      <li><strong>Token library:</strong> held at 5.0.1 per your call ("let's give it a try");
+      the token-flow tests arbitrate, and its 5.1.0-rc.1 is the first remedy if they fail.</li>
+      <li><strong>Fee-sponsor contingency:</strong> you pointed at a worktree <code>.env</code> —
+      searched every worktree, both clones, and all project env files: the key is not on this
+      machine (only <code>.example</code> templates). If the deploy/fund step is needed, drop the
+      key into <code>packages/playground/scripts/.env</code> (gitignored, verified) and the step
+      runs without the value ever being printed; until then it parks as blocked-on-owner.</li>
+      <li><strong>Checksum verification:</strong> flipped to the agent per your call — verified
+      through two independent channels (downloaded-file hash and GitHub's API-reported digest,
+      required to match), documented in the pinned entry.</li>
+      <li><strong>CI quarantine exemption:</strong> proceeding — it's the same decision you
+      already made for the repo's own quarantine, applied to CI's second, separate one (which
+      provably rejects same-day releases). One reviewed, reversible file edit; veto at PR review
+      reverts to waiting until ~Aug 25.</li>
+    </ol>
+  </div>
+
+  <h2>Implementation seeds</h2>
+  <p>Draft until you approve — they're finalized against the approved scope and re-delivered as
+  paste-ready blocks. Both drive an autonomous implementation session inside the plan's worktree.</p>
+  <p class="warn">Use exactly one per session — setting one replaces the other.</p>
+
+  <p class="seed-label rec">Recommended · /goal (completion is visible in the transcript)</p>
+  <pre><code>/goal All four phases marked ✓ in implementations-plan/aztec-5.2.0-2026-08-18/plan.md (the phase headers in the file, not the chat), each ✓ backed by its phase's validation gate as defined in plan.md reported passing in the transcript; for each phase LESSONS_FILE=implementations-plan/aztec-5.2.0-2026-08-18/lessons/phase-N.md printed in the transcript; /code-review max --fix complete with fixes committed separately; the codex post-impl fix loop converged (a resumed codex pass reporting no new material findings, quoted in the transcript); the PR exists and is marked ready with all four required Status checks green (gh pr view output in the transcript); bun run test and bun run lint:actions both exit 0 in the transcript. If Phase 4 blocks on the FPC redeploy (owner-gated Sepolia key), the goal is instead: Phases 1–3 ✓, the blocked state logged in lessons/phase-4.md, and the owner ping surfaced in the transcript.</code></pre>
+
+  <p class="seed-label alt">Alternative · /loop 15m (interval-driven fallback)</p>
+  <pre><code>/loop 15m Drive implementations-plan/aztec-5.2.0-2026-08-18 forward. Never idle waiting for my input. Each firing: (1) Reality check: read plan.md + lessons/ (authoritative), git status, git log --oneline -5; if the PR exists, gh pr view --json statusCheckRollup (no --watch). (2) Waiting on CI is fine — confirm it progresses (gh run watch &lt;id&gt; up to 10 min); use waits to review the diff or prep the next phase. (3) No task in hand? Take the next pending plan.md step. After each meaningful edit run bun run test for the touched surface; commit and push. (4) Stuck or facing a decision I'd normally make? /codex xhigh, reach a defensible call, act, log consult+verdict in lessons/phase-N.md. Hard limits stay hard: never merge, never publish, never touch the Sepolia key (FPC redeploy is owner-only — log blocked and continue elsewhere), never expand scope. (5) Same step failed 5 times? Stop retrying, reassess with codex. (6) Phase green means ITS VALIDATION GATE in plan.md passed — run it, paste the result, mark ✓ in plan.md, write lessons/phase-N.md, print LESSONS_FILE=implementations-plan/aztec-5.2.0-2026-08-18/lessons/phase-N.md. (7) All phases ✓? Run plan.md's Post-implementation section (code-review max --fix → separate commit → codex xhigh audit with the no-over-engineering rule → resumed-codex fix loop to convergence), mark the PR ready, write the wrap-up report, surface and stop.</code></pre>
+
+  <p class="footnote">Full technical plan: <code>implementations-plan/aztec-5.2.0-2026-08-18/plan.md</code>
+  in the repo (with recon, the codex audit trail, and per-phase lessons alongside). Codex audit:
+  three rounds — two rounds of conditional-approve findings (all verified against the repo and
+  folded in, including one genuine CI blocker found by experiment), final verdict
+  <strong>approve</strong>.</p>
+</main>

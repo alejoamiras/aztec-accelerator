@@ -43,10 +43,27 @@ runs:
         restore-keys: |
           ${{ runner.os }}-playwright-
 
-    # System deps (apt) — reliable, run ONCE and separately from the browser.
+    # System deps (apt). Historically reliable, but a runner apt/mirror stall once let a single
+    # `timeout 300` expired repeatedly during a runner apt/mirror stall — same shape as
+    # the CDN hang below, same remedy: kill a stalled attempt and retry. CAVEAT learned
+    # the hard way that day: `timeout` kills only the node wrapper; the spawned `apt-get`
+    # survives, keeps the dpkg/lists lock, and every retry then dies instantly with
+    # "Could not get lock … held by process <pid> (apt-get)". So between attempts, reap
+    # the orphaned apt/dpkg (this job owns the whole ephemeral VM) and repair dpkg state.
     - name: Install Playwright system deps
       shell: bash
-      run: timeout 300 bunx playwright install-deps chromium
+      run: |
+        for i in 1 2 3; do
+          if timeout 180 bunx playwright install-deps chromium; then exit 0; fi
+          echo "::warning::playwright install-deps attempt $i stalled/failed; reaping orphaned apt and retrying"
+          sudo pkill -9 apt-get 2>/dev/null || true
+          sudo pkill -9 dpkg 2>/dev/null || true
+          sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock || true
+          sudo dpkg --configure -a || true
+          sleep 15
+        done
+        echo "::error::playwright install-deps failed after 3 attempts"
+        exit 1
 
     - name: Install Playwright browser (headless shell)
       shell: bash
