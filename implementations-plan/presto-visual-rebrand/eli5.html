@@ -1,0 +1,196 @@
+<title>Presto Rebrand Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Figtree:wght@400..700&family=Fragment+Mono&display=swap">
+<style>
+:root{
+  --paper:#FFFAF1; --card:#FFFFFF; --ink:#241B33; --dim:#6E6580; --line:#ECE3D4;
+  --cobalt:#3B4FE0; --cobalt-deep:#2F40C4; --cobalt-soft:rgba(59,79,224,.08);
+  --gold-soft:rgba(255,197,61,.22); --gold-text:#7A5A00;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#191226; --card:#221A33; --ink:#F1EBE0; --dim:#9D93B0; --line:#372C4E;
+    --cobalt:#8B99FF; --cobalt-deep:#A5B0FF; --cobalt-soft:rgba(139,153,255,.13);
+    --gold-soft:rgba(255,208,102,.15); --gold-text:#FFD87E;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#191226; --card:#221A33; --ink:#F1EBE0; --dim:#9D93B0; --line:#372C4E;
+  --cobalt:#8B99FF; --cobalt-deep:#A5B0FF; --cobalt-soft:rgba(139,153,255,.13);
+  --gold-soft:rgba(255,208,102,.15); --gold-text:#FFD87E;
+}
+*{box-sizing:border-box}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:Figtree,system-ui,sans-serif;
+  font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased}
+main{max-width:760px; margin:0 auto; padding:3rem 1.25rem 4rem}
+h1,h2,h3{font-family:"Bricolage Grotesque",system-ui,sans-serif; font-weight:800; line-height:1.15;
+  letter-spacing:-.015em; text-wrap:balance; margin:0}
+h1{font-size:2.1rem}
+h1 .sp{color:var(--cobalt)}
+h2{font-size:1.35rem; margin-top:2.6rem; margin-bottom:.8rem}
+h3{font-size:1.02rem; font-weight:700}
+p{margin:.8em 0}
+.dim{color:var(--dim)}
+code,pre{font-family:"Fragment Mono",ui-monospace,Menlo,monospace; font-size:.85rem}
+pre{background:var(--card); border:1px solid var(--line); padding:1rem; border-radius:12px;
+  overflow-x:auto; white-space:pre-wrap; overflow-wrap:anywhere}
+.phase{margin:1.1rem 0; padding:1rem 1.2rem; border-left:3px solid var(--cobalt);
+  background:var(--card); border-radius:0 12px 12px 0}
+.phase p{margin:.35em 0}
+.gate{color:var(--dim); font-size:.9rem}
+.approval{background:var(--cobalt-soft); padding:1.1rem 1.3rem; border-left:3px solid var(--cobalt);
+  border-radius:0 12px 12px 0; margin:1.4rem 0}
+.approval ul{margin:.5rem 0 0; padding-left:1.2rem}
+.approval li{margin:.35rem 0}
+.ask{background:var(--gold-soft); color:inherit; padding:1.1rem 1.3rem; border-radius:12px; margin:1.4rem 0}
+.ask b.t{color:var(--gold-text)}
+.warning{color:var(--gold-text); font-weight:700; margin:1rem 0}
+.recommended{border-left-color:#189E62}
+.muted{color:var(--dim); font-size:.9rem}
+a{color:var(--cobalt-deep)}
+ul{padding-left:1.25rem}
+li{margin:.3rem 0}
+.verdicts{display:flex; flex-direction:column; gap:.5rem; margin:.8rem 0}
+.verdicts div{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.6rem .9rem; font-size:.92rem}
+</style>
+<main>
+  <h1>Presto visual rebrand <span class="sp">✦</span> the plan</h1>
+  <p>This plan repaints the whole product as <b>Presto</b>: the landing page, the playground, all five
+  desktop app windows, the icons and the animated tray icon, new fonts, light and dark themes, and
+  "Presto" in the copy people read. It deliberately changes <b>nothing operational</b>: the app still
+  installs, updates, and identifies itself as "Aztec Accelerator" under the hood (installer names,
+  domains, certificates, npm, registry keys). The rename of all that machinery is a separate future
+  project. Nothing merges or deploys: everything lands on a preview branch you can run locally, and
+  opening the pull request stays your explicit call.</p>
+
+  <h2>Why this size of plan (tier: mid)</h2>
+  <p class="dim">On the risk rubric (novelty, blast radius, irreversibility, migrations, external
+  coupling, security sensitivity) this scores zero highs: it is a reversible reskin on a branch that
+  triggers no CI. It still spans three packages plus Rust asset plumbing and about 500 tests that
+  must stay green, so it got the mid treatment: one plan plus a competing outline, two independent
+  reviewers, and a final fresh review.</p>
+
+  <h2>What the reviewers said</h2>
+  <div class="verdicts">
+    <div><b>Codex (round 1):</b> rejected the first draft. Four real problems: one consent sentence
+    was factually wrong on Linux, an animation state was modeled as a failure when the product
+    actually recovers, the "nothing operational changes" guard had gaps, and two validation commands
+    would not have run. All four are fixed in this version.</div>
+    <div><b>Independent Claude reviewer (round 1):</b> conditional approve. It read the actual icon
+    file bytes and caught that the planned icon tooling would have written a subtly wrong format, so
+    the plan now uses Tauri's own official icon generator. Also: keep the native speed slider and
+    restyle it, and clean up the old-brand source files. All adopted.</div>
+    <div><b>Final fresh review (three rounds):</b> a brand-new reviewer with the full decision
+    trail rejected twice more on ever-narrower execution details (this headless machine has no
+    display for the end-to-end run, a theme-switch call could race page load, a test was scheduled
+    before its third data source existed, dark-mode fallbacks for very old macOS), each fixed in
+    the plan, and then gave a clean <b>approve</b>: "no new security, gate-ordering, reuse, or
+    executability blocker."</div>
+  </div>
+
+  <h2>The phases</h2>
+  <div class="phase">
+    <h3>Phase 1: toolbox and app brand assets</h3>
+    <p>Pin the two new build tools, draw the new icon artwork, regenerate every app and tray icon
+    with Tauri's official generator plus a small script for the 24 animated tray frames, and bundle
+    the three Presto fonts inside the app with their licenses.</p>
+    <p class="gate">Proves itself by: the full lint plus unit test suite, a new test that checks
+    every generated icon is the right size and format, and the Rust build still compiling against
+    the new files.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 2: the desktop app</h3>
+    <p>All five windows get the Presto look (colors, fonts, real icons instead of emoji), light and
+    dark themes that follow your OS, and Presto naming in titles, tray, and copy. Consent screens
+    keep every safety property they have today, and the certificate wording stays accurate per
+    operating system.</p>
+    <p class="gate">Proves itself by: lint, unit tests (TypeScript and Rust), the 65 mocked UI
+    tests, the identity guard test passing untouched, and a manual pass of every window in both
+    light and dark.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 3: the playground</h3>
+    <p>Presto theme, and the ASCII proving animation is replaced by the spark-orbit dial from the
+    brand book. If the accelerator is unavailable the dial shows "proving in your browser" and keeps
+    going, because that is what the product actually does.</p>
+    <p class="gate">Proves itself by: lint, unit tests including a new suite for the dial, the
+    mocked browser tests, and a production build that includes the new social preview image.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 4: the landing page</h3>
+    <p>The full Presto landing from the brand book: new hero with the live race, the "Why presto?"
+    section, four feature tiles, the trimmed banner, the footer that also disclaims the Aztec
+    Foundation, a working mobile menu, and a social preview card so links stop rendering bare.</p>
+    <p class="gate">Proves itself by: lint, the landing tests (now including a type check the
+    package never had), and a clean production build.</p>
+  </div>
+  <div class="phase">
+    <h3>Phase 5: the sweep and the real end-to-end run</h3>
+    <p>A committed test greps the whole repo for leftover old-brand colors and fonts, and verifies
+    every frozen identifier is still byte-identical. Then the real compiled app runs through the 17
+    WebDriver tests on this machine.</p>
+    <p class="gate">Proves itself by: the sweep test, the full suite, and the WebDriver run all
+    green. If this machine cannot build the WebDriver flavor, that gets your explicit sign-off and
+    becomes the first CI check when you open the PR.</p>
+  </div>
+
+  <h2>Human context</h2>
+  <p>Two things make this plan safe to run autonomously. First, pushing the branch triggers no CI at
+  all, so nothing costs money or leaks anywhere while work is in progress. Second, an existing test
+  literally pins the frozen identity values, and the plan adds a stronger sweep on top: if the
+  rebrand ever accidentally touched something operational, tests fail loudly.</p>
+  <p>One honest wrinkle you should know about: until the future operational rename, a person can
+  meet both names. The site says Presto, but the installer they download, the app list entry, and
+  the certificate prompt still say Aztec Accelerator. That is the one open question below.</p>
+
+  <h2>Open question (needs your call)</h2>
+  <div class="ask">
+    <p><b class="t">Bridging copy at the name seams.</b> Both reviewers flagged that unexplained
+    name mismatches on trust prompts teach users bad habits. Pick one:</p>
+    <ul>
+      <li><b>(a) No bridging copy.</b> Cleanest look, mismatch unexplained.</li>
+      <li><b>(b) Recommended: one plain sentence at the three seams.</b> Download section
+      ("Installs as 'Aztec Accelerator' until our full rename"), the certificate row in the app,
+      and the update prompt. Honest, cheap, easy to delete after the real rename.</li>
+      <li><b>(c) Only in Settings</b>, next to Manage certificate.</li>
+    </ul>
+  </div>
+
+  <div class="approval">
+    <h2 style="margin-top:0">Approval decision needed from you</h2>
+    <ul>
+      <li>Confirm scope: everything visual, nothing operational, extras included (social card,
+      mobile menu).</li>
+      <li>Confirm tier <code>mid</code> and the validation plan: fast checks every phase, the real
+      end-to-end suite once at the end.</li>
+      <li>Confirm delivery: preview branch only, no PR until you flip; at flip time you choose one
+      PR or three stacked ones.</li>
+      <li>Answer the bridging-copy question above (a, b, or c).</li>
+      <li>Note: no security-hardening pass is scheduled for this plan (it changes no trust logic);
+      the standing pre-release hardening recommendation is unchanged.</li>
+      <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
+    </ul>
+  </div>
+
+  <section>
+    <h2>Implementation seeds (final, post-approval)</h2>
+    <p class="dim">Two ways to run the autonomous implementation session, which must be started
+    inside the plan's worktree (<code>agent-worktree resume presto-visual-rebrand</code>).
+    <code>/goal</code> keeps working until the finish line holds and survives resume, and every
+    finish condition here is visible in the transcript, so it is the right pick.</p>
+    <p class="warning">Use exactly ONE per session. They do not compose: setting one replaces the
+    other.</p>
+    <div class="phase recommended">
+      <h3>Recommended: /goal</h3>
+      <pre><code>/goal All five phases marked ✓ in implementations-plan/presto-visual-rebrand/plan.md (the phase headers in the file), each ✓ backed by its phase's validation gate as defined in plan.md reported passing in the transcript (P1: bun install committed + frontend:build + bun run test + accelerator test:unit + cargo test; P2: frontend:build + bun run test + both cargo test runs + test:e2e:ui with tauri-identity.test.ts unmodified + dual-theme manual pass recorded in lessons; P3: bun run test + playground test:e2e + playground build; P4: bun run test + landing test (with typecheck) + landing build; P5: frontend:build + bun run test + test:e2e:ui + test:e2e:webdriver or its deferred-with-consent record); for each phase LESSONS_FILE=implementations-plan/presto-visual-rebrand/lessons/phase-N.md printed in the transcript; /code-review max --fix complete with fixes committed separately; the codex fix loop converged (a resumed codex pass reporting no new material findings, quoted in the transcript); NO pull request opened (pushes to worktree-presto-visual-rebrand only); the wrap-up report with preview instructions and PR flip options delivered in the transcript; bun run test exits 0 in the transcript.</code></pre>
+    </div>
+    <h3>Alternative: /loop</h3>
+    <pre><code>/loop 15m Drive implementations-plan/presto-visual-rebrand forward. Never idle waiting for my input. Each firing: (1) read plan.md + lessons/ (authoritative), git status, git log --oneline -5; no PRs exist by design, do NOT open one. (2) No task in hand? Pick the next pending step from plan.md and start it; after each meaningful edit run bun run lint + the touched package's unit tests; commit per surface with P-N markers; push the branch. (3) Stuck or facing a decision? Call /codex xhigh with full context, decide together, act, log the consult in lessons/phase-N.md; hard limits stay hard (no PR, no merge, no publish, no scope beyond plan.md; the bridging-copy decision is recorded in plan.md before implementation starts). (4) Same step failed 5 times? Stop retrying, reassess with codex. (5) Phase gate green (exact commands in plan.md)? Paste the result, mark ✓ in plan.md, print LESSONS_FILE=..., advance. (6) All phases ✓? Execute plan.md's Post-implementation section (code-review then codex loop then STOP before PRs then wrap-up report with preview instructions), then surface and stop.</code></pre>
+    </h3>
+  </section>
+
+  <p class="muted">Full technical plan: <code>implementations-plan/presto-visual-rebrand/plan.md</code>
+  in the worktree branch <code>worktree-presto-visual-rebrand</code> · lessons land in
+  <code>implementations-plan/presto-visual-rebrand/lessons/</code></p>
+</main>
