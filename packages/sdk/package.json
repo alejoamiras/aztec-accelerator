@@ -22,7 +22,7 @@
     "test:e2e": "bun test --preload ./e2e/e2e-setup.ts e2e/",
     "test:e2e:remote": "AZTEC_NODE_URL=https://v5.testnet.rpc.aztec-labs.com bun test --preload ./e2e/e2e-setup.ts e2e/remote-network.test.ts",
     "test:lint": "tsc --noEmit --emitDeclarationOnly false",
-    "test:unit": "bun test src/"
+    "test:unit": "bun test --parallel src/"
   },
   "dependencies": {
     "@aztec/bb-prover": "5.2.0",

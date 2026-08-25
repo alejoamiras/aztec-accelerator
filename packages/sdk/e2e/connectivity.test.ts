@@ -13,25 +13,35 @@ const logger = getLogger(["aztec-accelerator", "sdk", "e2e", "connectivity"]);
 
 describe("Service Connectivity", () => {
   describe("Aztec Node", () => {
-    test("should return node info", async () => {
-      const node = createAztecNodeClient(config.nodeUrl);
-      const nodeInfo = await node.getNodeInfo();
+    test(
+      "should return node info",
+      async () => {
+        const node = createAztecNodeClient(config.nodeUrl);
+        const nodeInfo = await node.getNodeInfo();
 
-      expect(nodeInfo).toBeDefined();
-      expect(nodeInfo.l1ChainId).toBeDefined();
-      logger.info("Got node info", { chainId: nodeInfo.l1ChainId });
-    });
+        expect(nodeInfo).toBeDefined();
+        expect(nodeInfo.l1ChainId).toBeDefined();
+        logger.info("Got node info", { chainId: nodeInfo.l1ChainId });
+        // One retry: real-network round-trip; absorbs cold-node/RPC blips (mirrors the Playwright
+        // projects' retry budget for this class).
+      },
+      { retry: 1 },
+    );
   });
 
   describe.skipIf(!config.acceleratorUrl)("Accelerator", () => {
-    test("should return health status", async () => {
-      const response = await fetch(`${config.acceleratorUrl}/health`);
-      expect(response.ok).toBe(true);
+    test(
+      "should return health status",
+      async () => {
+        const response = await fetch(`${config.acceleratorUrl}/health`);
+        expect(response.ok).toBe(true);
 
-      const data = await response.json();
-      expect(data.available_versions).toBeDefined();
-      expect(Array.isArray(data.available_versions)).toBe(true);
-      logger.info("Accelerator healthy", { versions: data.available_versions });
-    });
+        const data = await response.json();
+        expect(data.available_versions).toBeDefined();
+        expect(Array.isArray(data.available_versions)).toBe(true);
+        logger.info("Accelerator healthy", { versions: data.available_versions });
+      },
+      { retry: 1 },
+    );
   });
 });

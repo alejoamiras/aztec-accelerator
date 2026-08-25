@@ -2,9 +2,10 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "types": ["node"],
-    // The repo root hoists a second (newer) vite for another workspace; force every
-    // `import "vite"` in this graph onto the playground's own pinned copy so plugin
-    // types (vite-plugin-node-polyfills) and defineConfig agree.
+    // Vite's plugin packages resolve their `vite` peer from the isolated store
+    // (node_modules/.bun/vite@…) while this graph's own imports resolve the playground's
+    // package-level copy — same version, two file trees, so tsc sees two declarations and
+    // their private properties conflict. Force every `import "vite"` onto one copy.
     "paths": { "vite": ["./node_modules/vite"] }
   },
   "include": ["e2e", "playwright.config.ts", "vite.config.ts"],
