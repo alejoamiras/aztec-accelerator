@@ -894,4 +894,44 @@ describe("AcceleratorTransport", () => {
       expect(probe.body).toBeUndefined();
     });
   });
+
+  describe("header deadline does not tax the body budget (real socket)", () => {
+    let pollutedFetch: typeof globalThis.fetch;
+    beforeEach(() => {
+      // Earlier describes install fetch mocks; this one needs the real network stack.
+      pollutedFetch = globalThis.fetch;
+      globalThis.fetch = Bun.fetch as unknown as typeof globalThis.fetch;
+    });
+    afterEach(() => {
+      globalThis.fetch = pollutedFetch;
+    });
+
+    test("slow headers followed by a slow-but-in-budget body is still healthy", async () => {
+      // Headers at ~1.2s (inside the 2s header deadline), then the body dribbles for ~1.2s more
+      // (inside the SEPARATE 2s body deadline). Total ~2.4s: a request-scoped timer would abort the
+      // body read at 2.0s and mark the endpoint unhealthy — the header timer must stop counting the
+      // moment headers settle. Real server: mocked fetch bypasses the abort-signal machinery.
+      const healthJson = JSON.stringify({ status: "ok", api_version: 1 });
+      await using server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: async () => {
+          await Bun.sleep(1200);
+          const encoder = new TextEncoder();
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const mid = Math.floor(healthJson.length / 2);
+              controller.enqueue(encoder.encode(healthJson.slice(0, mid)));
+              await Bun.sleep(1200);
+              controller.enqueue(encoder.encode(healthJson.slice(mid)));
+              controller.close();
+            },
+          });
+          return new Response(stream, { headers: { "content-type": "application/json" } });
+        },
+      });
+      const t = new AcceleratorTransport("127.0.0.1", server.port, server.port + 1);
+      expect(await t.isProtocolHealthy("http")).toBe(true);
+    }, 15_000);
+  });
 });

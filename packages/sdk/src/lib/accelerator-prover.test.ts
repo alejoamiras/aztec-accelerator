@@ -1306,6 +1306,98 @@ describe("AcceleratorProver", () => {
       serSpy.mockRestore();
     });
 
+    test("stalled body on the HTTP downgrade retry keeps HTTP classification (typed throw)", async () => {
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      mockFetch({
+        "http://127.0.0.1:59833/health": healthyBody,
+        "https://127.0.0.1:59834/health": healthyBody,
+        "https://127.0.0.1:59834/prove": () => {
+          throw new TypeError("TLS handshake failed");
+        },
+        "http://127.0.0.1:59833/prove": () => stalledBody(418),
+      });
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { allowInsecureDowngrade: true },
+      });
+      const err = await prover.createChonkProof([fakeStep]).catch((e) => e);
+      expect(err).toBeInstanceOf(AcceleratorHttpError);
+      expect(err.status).toBe(418);
+      expect(wasmSpy).not.toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    }, 15_000);
+
+    test("over-cap body on the HTTP downgrade retry keeps HTTP classification (typed throw)", async () => {
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      mockFetch({
+        "http://127.0.0.1:59833/health": healthyBody,
+        "https://127.0.0.1:59834/health": healthyBody,
+        "https://127.0.0.1:59834/prove": () => {
+          throw new TypeError("TLS handshake failed");
+        },
+        "http://127.0.0.1:59833/prove": () =>
+          new Response(`"${"A".repeat(128 * 1024)}"`, {
+            status: 418,
+            headers: { "content-type": "text/plain" },
+          }),
+      });
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { allowInsecureDowngrade: true },
+      });
+      const err = await prover.createChonkProof([fakeStep]).catch((e) => e);
+      expect(err).toBeInstanceOf(AcceleratorHttpError);
+      expect(err.status).toBe(418);
+      expect(wasmSpy).not.toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
+    test("error-body shape follows content-type: text/plain string carries the code end-to-end", async () => {
+      // The server's production shape (Rust pins text/plain carrying a JSON string): the code must
+      // survive to the typed error, proving the pre-read kept the STRING shape parseServerError's
+      // string branch expects.
+      mockFetch({
+        "/health": healthyBody,
+        "/prove": () =>
+          new Response(JSON.stringify({ error: "some_unknown_fault", message: "boom" }), {
+            status: 500,
+            headers: { "content-type": "text/plain" },
+          }),
+      });
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const err = await prover.createChonkProof([fakeStep]).catch((e) => e);
+      expect(err).toBeInstanceOf(AcceleratorHttpError);
+      expect(err.status).toBe(500);
+      expect(err.code).toBe("some_unknown_fault");
+      expect(err.message).toBe("boom");
+      expect(wasmSpy).not.toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
+    test("error-body shape follows content-type: application/json object carries the code end-to-end", async () => {
+      mockFetch({
+        "/health": healthyBody,
+        "/prove": () => Response.json({ error: "some_unknown_fault" }, { status: 500 }),
+      });
+      const serSpy = mockSerializer();
+      const wasmSpy = mockWasmProver();
+      const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+      const err = await prover.createChonkProof([fakeStep]).catch((e) => e);
+      expect(err).toBeInstanceOf(AcceleratorHttpError);
+      expect(err.status).toBe(500);
+      expect(err.code).toBe("some_unknown_fault");
+      expect(wasmSpy).not.toHaveBeenCalled();
+      wasmSpy.mockRestore();
+      serSpy.mockRestore();
+    });
+
     test("malformed body on the HTTP downgrade retry keeps HTTP classification (typed throw)", async () => {
       const serSpy = mockSerializer();
       const wasmSpy = mockWasmProver();

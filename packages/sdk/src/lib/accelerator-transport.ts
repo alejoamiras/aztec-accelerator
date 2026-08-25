@@ -18,9 +18,9 @@ const PROBE_RETRY_DELAY_MS = 1_000;
  */
 const HTTPS_GRACE_MS = 250;
 /**
- * Deadline + byte cap for reading a `/health` BODY. Ky's `timeout` only bounds time-to-headers — a
- * responder that returns `200` and then stalls (or streams forever) would otherwise hang the probe
- * indefinitely and buffer unbounded bytes (post-impl codex High). The real body is <2 KB.
+ * Deadline + byte cap for reading a `/health` BODY. The request timeout only bounds time-to-headers
+ * — a responder that returns `200` and then stalls (or streams forever) would otherwise hang the
+ * probe indefinitely and buffer unbounded bytes (post-impl codex High). The real body is <2 KB.
  */
 const HEALTH_BODY_TIMEOUT_MS = 2_000;
 const HEALTH_BODY_MAX_BYTES = 64 * 1024;
@@ -175,6 +175,29 @@ export class TransportHttpError extends Error {
   }
 }
 
+/**
+ * `fetch` with a HEADER deadline only: the timer is cleared the moment the response settles, so
+ * the body-read budget belongs exclusively to the bounded readers. A signal that keeps ticking
+ * after headers would silently shrink the body readers' independent deadline by however long the
+ * headers took.
+ */
+async function fetchHeaderBounded(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(
+    () => ctrl.abort(new DOMException("header deadline", "TimeoutError")),
+    timeoutMs,
+  );
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function isRecognizedHealthBody(body: unknown): boolean {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
   const b = body as Record<string, unknown>;
@@ -197,6 +220,24 @@ async function readJsonBounded(
   maxBytes: number = HEALTH_BODY_MAX_BYTES,
   timeoutMs: number = HEALTH_BODY_TIMEOUT_MS,
 ): Promise<unknown> {
+  const text = await readTextBounded(response, maxBytes, timeoutMs);
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The bounded-read MECHANICS behind {@link readJsonBounded}, returning the raw text — the error
+ * pre-read needs the undecoded shape (content-type decides string vs object, matching what
+ * `parseServerError` distinguishes). Same single-implementation rule: policy varies, mechanics
+ * don't. */
+async function readTextBounded(
+  response: Response,
+  maxBytes: number = HEALTH_BODY_MAX_BYTES,
+  timeoutMs: number = HEALTH_BODY_TIMEOUT_MS,
+): Promise<string | undefined> {
   try {
     const stream = response.body;
     if (!stream) {
@@ -211,7 +252,7 @@ async function readJsonBounded(
       ]).finally(() => clearTimeout(timer));
       // Measure ENCODED bytes, not UTF-16 code units (codex Low).
       if (new TextEncoder().encode(text).length > maxBytes) return undefined;
-      return JSON.parse(text);
+      return text;
     }
     const reader = stream.getReader();
     // A CONTIGUOUS buffer grown geometrically, not an array of chunks. Retaining one `Uint8Array`
@@ -275,7 +316,7 @@ async function readJsonBounded(
     }
     if (timedOut) return undefined; // partial body from a deadline cancel — never "healthy"
     const merged = buffer.subarray(0, total);
-    return JSON.parse(new TextDecoder().decode(merged));
+    return new TextDecoder().decode(merged);
   } catch {
     return undefined;
   }
@@ -542,15 +583,18 @@ export class AcceleratorTransport {
     const httpsUrl = `https://${this.#host}:${this.#httpsPort}/health`;
 
     const fire = (url: string, protocol: AcceleratorProtocol): Promise<ProbeResult> =>
-      fetch(url, {
-        // Bounds time-to-headers; a non-2xx still RESOLVES (the caller maps it to `reason:
-        // "error"`), and fetch never retries on its own.
-        signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
-        // A 307/308 is a downgrade vector: fetch preserves the method AND body across those,
-        // so an https->http redirect would carry the request off the endpoint we validated —
-        // and in strict mode, off HTTPS entirely (post-impl codex High). Never follow.
-        redirect: "error",
-      }).then(async (response) => ({ response, protocol, body: await readJsonBounded(response) }));
+      fetchHeaderBounded(
+        url,
+        {
+          // A 307/308 is a downgrade vector: fetch preserves the method AND body across those,
+          // so an https->http redirect would carry the request off the endpoint we validated —
+          // and in strict mode, off HTTPS entirely (post-impl codex High). Never follow.
+          redirect: "error",
+        },
+        // Bounds time-to-headers only; a non-2xx still RESOLVES (the caller maps it to `reason:
+        // "error"`), and nothing here retries on its own.
+        HEALTH_PROBE_TIMEOUT_MS,
+      ).then(async (response) => ({ response, protocol, body: await readJsonBounded(response) }));
 
     const probe = () => {
       // Strict mode: probe HTTPS ONLY — never even *construct* an http URL (contract compliance).
@@ -664,10 +708,11 @@ export class AcceleratorTransport {
         ? `https://${this.#host}:${this.#httpsPort}/health`
         : `http://${this.#host}:${this.#port}/health`;
     try {
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
-        redirect: "error",
-      });
+      const response = await fetchHeaderBounded(
+        url,
+        { redirect: "error" },
+        HEALTH_PROBE_TIMEOUT_MS,
+      );
       if (!response.ok) return false;
       return isRecognizedHealthBody(await readJsonBounded(response));
     } catch {
@@ -697,19 +742,37 @@ export class AcceleratorTransport {
     aztecVersion: string | undefined,
     url?: string,
   ): Promise<Response> {
-    const response = await fetch(url ?? `${this.baseUrl}/prove`, {
-      method: "POST",
-      body,
-      signal: AbortSignal.timeout(PROVE_TIMEOUT_MS),
-      // Never follow a redirect with the witness in the body: 307/308 preserve method + body, so a
-      // redirect here would forward it to an endpoint we never validated (post-impl codex High).
-      redirect: "error",
-      headers: {
-        "content-type": "application/octet-stream",
-        ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
+    const response = await fetchHeaderBounded(
+      url ?? `${this.baseUrl}/prove`,
+      {
+        method: "POST",
+        body,
+        // Never follow a redirect with the witness in the body: 307/308 preserve method + body, so a
+        // redirect here would forward it to an endpoint we never validated (post-impl codex High).
+        redirect: "error",
+        headers: {
+          "content-type": "application/octet-stream",
+          ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
+        },
       },
-    });
-    if (!response.ok) throw new TransportHttpError(response, await readJsonBounded(response));
+      PROVE_TIMEOUT_MS,
+    );
+    if (!response.ok) {
+      // Content-type decides the pre-read shape, mirroring what parseServerError distinguishes:
+      // the server's text/plain JSON-string bodies stay STRINGS, a JSON content-type parses to an
+      // object; an unreadable body is undefined — the status alone then drives classification.
+      const raw = await readTextBounded(response);
+      const isJson = (response.headers.get("content-type") ?? "").includes("application/json");
+      let data: unknown = raw;
+      if (raw !== undefined && isJson) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          data = undefined;
+        }
+      }
+      throw new TransportHttpError(response, data);
+    }
     return response;
   }
 
