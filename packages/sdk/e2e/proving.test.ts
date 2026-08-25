@@ -98,9 +98,10 @@ describe("AcceleratorProver", () => {
         }
         expect(phases).toContain("transmit"); // native /prove round-trip to :59833
         expect(phases).not.toContain("fallback"); // never silently fell back to WASM
-        // One retry: live proving's first attempt can hit cold wallet-init timeouts.
+        // NO retry here, deliberately: the phase-trail asserts are the silent-fallback
+        // discriminator — a retry could mask an intermittent path-selection regression.
       },
-      { timeout: 600_000, retry: 1 },
+      { timeout: 600_000 },
     );
   });
 
@@ -123,8 +124,9 @@ describe("AcceleratorProver", () => {
         }
         // Confirms the fallback path actually engaged (and the discriminator above is meaningful).
         expect(phases).toContain("fallback");
+        // NO retry — same discriminator rationale as the native-path test above.
       },
-      { timeout: 600_000, retry: 1 },
+      { timeout: 600_000 },
     );
   });
 });

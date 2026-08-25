@@ -19,10 +19,13 @@
 
 ## Adopted set
 1. sdk `test:unit` → `bun test --parallel src/`.
-2. `{ retry: 1 }` on the seven live-network round-trip tests (sdk e2e connectivity ×2, proving ×2
-   with `{timeout, retry}` object form, remote-network ×3, playground live-node probe ×1) — same
-   flake class Playwright projects already budget retries for. NOT touched:
-   `release-contract.test.ts` (unit-tests retry logic itself).
+2. `{ retry: 1 }` on the SIX pure-connectivity live-network tests (sdk e2e connectivity ×2,
+   remote-network ×3, playground live-node probe ×1) — same flake class Playwright projects
+   already budget retries for. The two PROVING tests carry NO retry (codex Arc-C blocker,
+   adopted): their phase-trail asserts are the silent-fallback discriminator, and a retry could
+   mask an intermittent path-selection regression — exactly the bug class the discriminator
+   exists to catch. (Initial draft had eight placements and mis-counted them as seven; both
+   corrected.) NOT touched: `release-contract.test.ts` (unit-tests retry logic itself).
 3. `serve` devDep DELETED → `packages/accelerator/scripts/serve-static.ts` (Bun.serve dir routes,
    loopback-only) + `serve-static.test.ts` contract test (5/5 first run: index, Content-Type,
    ETag/304, raw-socket traversal rejection — fetch normalizes `../` so the test speaks raw HTTP
