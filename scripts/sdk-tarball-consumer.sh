@@ -39,9 +39,35 @@ make_host() {
 JSON
 }
 
-echo "=== exact host (5.0.1): the decisive F13 case + tarball resolution ==="
+# "Exact host" means: the host pins the SAME @aztec/stdlib version the SDK ships with. Derive it
+# from the TARBALL UNDER TEST — the artifact's own manifest — never a hardcode (which silently
+# manufactures the very skew this gate exists to catch after every @aztec bump) and never the
+# workspace manifest (which skews whenever the script is pointed
+# at a previously-built tarball). Fails fast, with the reason, if the pin is absent — e.g. if the
+# F13 deps-vs-peers decision is ever revisited and @aztec/stdlib leaves `dependencies`.
+# shellcheck disable=SC2016  # single quotes are deliberate: the node program must not shell-expand
+AZTEC_PIN="$(tar -xzOf "$TARBALL" package/package.json | node -e '
+  const manifest = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  const pin = (manifest.dependencies ?? {})["@aztec/stdlib"];
+  if (!pin) {
+    console.error("FATAL: tarball manifest has no dependencies[\"@aztec/stdlib\"] — the exact-host pin cannot be derived");
+    process.exit(1);
+  }
+  // F13 invariant: the SDK ships EXACT pins. A range/alias here (^5.2.0, npm:...) could still
+  // resolve to a singleton while silently weakening the exact-pin contract this gate proves.
+  // Canonical semver.org expression (no ranges; rejects empty identifiers and leading zeros —
+  // npm treats malformed specs like "5.2.0-alpha..x" as mutable TAGS, the opposite of a pin).
+  const EXACT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+  if (!EXACT_SEMVER.test(pin)) {
+    console.error(`FATAL: tarball pins @aztec/stdlib as "${pin}" — not an exact semver; the F13 exact-pin invariant is broken`);
+    process.exit(1);
+  }
+  console.log(pin);
+')"
+
+echo "=== exact host ($AZTEC_PIN): the decisive F13 case + tarball resolution ==="
 EXACT="$WORK/exact-host"
-make_host "$EXACT" "5.0.1"
+make_host "$EXACT" "$AZTEC_PIN"
 cat > "$EXACT/tsconfig.json" <<'JSON'
 {
   "compilerOptions": {
