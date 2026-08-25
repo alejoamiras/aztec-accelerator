@@ -25,6 +25,29 @@ Also: chose the phased outline over the monolith; pushed the split FURTHER (bump
 from adoptions) — adopted as the Phase 3/4 boundary. Flagged the dropped ETag-parity recon check —
 restored in Phase 4.4.
 
-## Round 2 — fresh-context final pass on rev 2
+## Round 2 — fresh-context final pass on rev 2 (NEW session `codex-H5tnT7Tl`, per mid protocol)
 
-(recorded when complete)
+**Verdict**: conditional approve ×6 consolidation gaps — all folded into rev 3:
+NO-GO bound to the bb.js-leg execution (pino repro can never qualify); Arc D classification
+invariant (unreadable bounded non-2xx bodies keep HTTP status — never demote to network failure,
+which would trigger HTTPS demotion — + adversarial stalled/oversize/malformed tests both paths;
+"tests construct HTTPError" corrected); serve-static needs its OWN contract test (packaged-e2e
+runs the playground's Vite server, never serve-static — the A2 rationale was factually wrong);
+JEST_WORKER_ID not cosmetic (process-global; undici/Playwright branch on it → containment scope +
+consumer inventory + branch-semantics guard resolved isolated-linker-aware); isolated-linker exit
+rule (measure, cut-on-failure, never strand the publish pin; Arc A commit order); ledger/assumption
+hygiene (F9–F12 explicit, F15→BUN_TEST_WORKER_ID, A2→ledger, @types/bun manifest step, Arc D
+branches from B: topology A → B → {C, D}).
+
+## Round 3 (resume) — rev 3 consistency check
+
+**Verdict**: conditional ×3 (all consistency): NO-GO provenance INTO the /goal seed text; Phase-1
+gate reconciled with the exit rule (two valid outcomes, 4a–4f evidence); stale rev-2/serve-static/
+phase-range/ledger/file-inventory wording purged. Applied.
+
+## Round 4 (resume) — final
+
+**Verdict**: **approve** — "Rev 3 is internally consistent. The terminal conditions,
+retain-or-cut linker gate, Arc D classification invariant, serve-static coverage, JEST
+containment, assumptions, and branch topology now align without material loopholes. No further
+conditions."

@@ -1,16 +1,18 @@
-# Plan — Bun 1.3.14 → 1.4 migration + bun-native adoption (rev 2, post dual-audit)
+# Plan — Bun 1.3.14 → 1.4 migration + bun-native adoption (rev 3, post dual-audit + final pass)
 
-- **Tier**: `/blueprint mid` (owner-confirmed). Dual audit complete: codex conditional-approve ×7
-  conditions, fable conditional-approve ×4 — ALL adopted in this revision (see ledger +
-  audit-codex.md / audit-fable.md).
+- **Tier**: `/blueprint mid` (owner-confirmed). Dual audit round 1: codex conditional ×7, fable
+  conditional ×4 — every condition addressed in rev 2 (adopted as stated or reshaped where the
+  final pass found the translation lossy; the ledger + audit files carry the per-finding
+  dispositions). Final fresh-context pass on rev 2: conditional ×6 consolidation gaps — folded
+  into THIS rev 3.
 - **Success criterion** (owner, 2026-08-25): repo runs Bun 1.4 in CI and locally where empirical
   gates allow; bun-native adoptions land where proportionate; the publish pipeline stops floating
   `latest`.
 - **Owner strategy**: attempt-now-fallback-staged; upstream Worker bug filed either way (A3:
   agent drafts, owner files).
 - **Validation layers** (owner): full PR CI + release-path exercise (resolved A2: **packaged-e2e
-  leg, mandatory for Arc C** — it exercises swap-sdk + serve-static together) + live-testnet smoke
-  under 1.4.
+  leg, mandatory for Arc C** — it exercises swap-sdk; serve-static is covered by its OWN contract
+  test, packaged-e2e never touches it) + live-testnet smoke under 1.4.
 - **eli5_mode**: artifact. Source `eli5.html` here; URL in Seeds at publish.
 - **Worktree/branch**: `bun-1-4-migration` / `worktree-bun-1-4-migration`, base `b605075`.
 - **Local toolchain reality** (fable cond. 4): this machine's global bun is ALREADY 1.4.0; bun does
@@ -34,12 +36,19 @@ and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
    removes the floating-`latest` publish exposure; it does not add provenance. Accepted residual,
    unchanged from today, recorded in Security.
 3. **Worker-crash prophylaxis**: `process.env.JEST_WORKER_ID ??= "1";` (codex: `??=`, NOT `=` —
-   bun's `--parallel` assigns real distinct worker IDs that must survive) first-line in the three
-   preloads, comment naming the contract. **Plus a guard test** (fable cond. 4):
-   `scripts/aztec-logger-contract.test.ts` (~15 lines, sibling of `bunfig-aztec-excludes.test.ts`)
-   greps the INSTALLED `@aztec/foundation` pino-logger for the `JEST_WORKER_ID` branch — the
-   tripwire for aztec renaming/removing it on a future @aztec bump. Sunset: remove env+guard when
-   bun's Worker bug is fixed upstream AND the guard would otherwise be the only consumer.
+   bun's `--parallel` assigns real per-worker IDs that must survive) first-line in the three
+   preloads, comment naming the contract. **Not cosmetic-only (final codex pass)**: the env is
+   process-global and other installed packages branch on it (undici; Playwright can reject
+   Jest-marked execution) — scope containment: the preloads run ONLY under `bun test` (bunfig
+   `[test].preload` + the e2e `--preload` flag), never under `bunx playwright test` or app
+   runtimes; Phase 1 includes a consumer inventory (grep installed deps for `JEST_WORKER_ID`
+   readers reachable under bun test) recorded in lessons. **Guard test** (fable cond. 4,
+   strengthened by the final pass): `scripts/aztec-logger-contract.test.ts` resolves
+   `@aztec/foundation`'s pino-logger FROM a declaring workspace (isolated-linker-aware — via
+   `Bun.resolveSync` from `packages/sdk`, not a hardcoded node_modules path) and verifies the
+   actual `JEST_WORKER_ID → pino.destination(2)` branch semantics, not a bare variable-name grep.
+   Sunset (A4): remove env+guard when bun's Worker bug is fixed upstream AND the guard would
+   otherwise be the only consumer.
 4. **Isolated linker** (`linker = "isolated"` in root bunfig), with CORRECTED claims (codex MED /
    fable LOW): the download cache (`~/.bun/install/cache`, already CI-cached) is a separate thing
    from the per-project materialization store (`node_modules/.bun`); the advertised 7× global-store
@@ -56,12 +65,24 @@ and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
       npm-installs in a scratch dir.)
    d. multi-worktree contention: two concurrent scratch-worktree installs, both green;
    e. cleanup check: `packages/playground/tsconfig.e2e.json`'s vite path override — verify it
-      became unnecessary (don't remove in this arc; note for Arc C if confirmed).
+      became unnecessary (don't remove in this arc; note for Arc C if confirmed);
+   f. **exit rule (final codex pass)**: measure install time AND disk versus the hoisted baseline
+      and record both; the 1.4c probe must resolve from the MATERIALIZED SDK's own module context
+      (not cwd / direct consumer imports). If resolution needs more than a small script fix, or
+      the measured benefits are immaterial, CUT the linker from Arc A — it must never strand the
+      urgent publish pin (Arc A's commit order: publish pin first, pin centralization second,
+      prophylaxis third, linker LAST and separable).
 
 **Validation gate** (binary: scratch 1.3.14)
 - `bun run test` && `bun run lint:actions` && `bun test scripts/bun-pin.test.ts
-  scripts/aztec-logger-contract.test.ts` && validations 4a–4d recorded in lessons.
-- Pass: all exit 0; 4a empty diff; 4c probe resolves every import; Arc A PR CI fully green.
+  scripts/aztec-logger-contract.test.ts` && validations 4a–4f recorded in lessons (4e's
+  vite-override finding and 4f's time+disk measurements included).
+- Pass — TWO valid outcomes (final pass: gate must match the exit rule):
+  (i) linker RETAINED: 4a empty diff, 4c probe resolves every import from the materialized SDK's
+  module context, 4f shows material benefit — all recorded; or
+  (ii) linker CUT: the cut recorded in the ledger with 4c/4f evidence, and Arc A's preceding
+  commits (publish pin, centralization, prophylaxis) still pass the full gate on their own.
+  Either way: Arc A PR CI fully green.
 - Layers: lint · typecheck · unit · install-topology integration.
 
 ## Phase 2 — Empirical spike (scratch 1.4.0; evidence + upstream report; gates Phase 3)
@@ -70,9 +91,11 @@ and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
    `bun install --frozen-lockfile` — clean install under the 1.4 PM, then full `bun run test`.
    (Phase-1-tree reuse alone would mask install/linker/min-age deltas.)
 2. **bb.js Worker question (decisive)**: SDK e2e WASM fallback leg under 1.4 (headless accelerator
-   + live testnet — the proven recipe). Green ⇒ bump unblocked. Crash ⇒ NO-GO, valid ONLY with the
-   exact `internal:worker/messaging` signature quoted in lessons (fable: a generic failure is
-   triage, not NO-GO).
+   + live testnet — the proven recipe), WITH `JEST_WORKER_ID` set so the pino path is bypassed.
+   Green ⇒ bump unblocked. Crash ⇒ NO-GO, valid ONLY when the exact `internal:worker/messaging`
+   signature is produced BY THIS bb.js-leg execution and quoted from ITS output in lessons (final
+   codex pass: the pino repro trivially produces the same signature — it can never justify NO-GO;
+   any other failure is triage, not NO-GO).
 3. **TLS semantics**: openssl IP-SAN self-signed cert + `Bun.serve({tls})` under 1.4 +
    `fetch("https://127.0.0.1:<port>", {tls:{ca}})` — the semantics our accelerator leaf depends on.
 4. **`--parallel` semantics (premise corrected — it IMPLIES `--isolate`; opt-out is
@@ -86,7 +109,7 @@ and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
 
 **Validation gate**
 - All five items' outputs recorded in lessons; GO/NO-GO in the ledger with evidence quotes.
-- A NO-GO passes THIS PHASE only — Phases 3–4 stay unmarked and the plan parks (codex: no
+- A NO-GO passes THIS PHASE only — Phases 3–5 stay unmarked and the plan parks (codex: no
   completion loophole; the seeds encode this).
 - Layers: install · integration · e2e live network · runtime semantics.
 
@@ -95,9 +118,11 @@ and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
 1. `.bun-version` → `1.4.0`.
 2. ONE isolated lockfile-regen commit: `bun install` (scratch 1.4.0), reviewed line-class by
    line-class. Expected: format/metadata churn only — EXCEPT `@types/bun`: **honor min-age (codex
-   HIGH — no exemption)**: `@types/bun@1.4.0` published 2026-08-21, eligible ~2026-08-28; bump it
-   in a trailing commit once aged (or same commit if the calendar has moved past eligibility).
-   I6 corrected accordingly: intentional movement of @types/bun (and transitively bun-types) only.
+   HIGH — no exemption)**: `@types/bun@1.4.0` published 2026-08-21, eligible ~2026-08-28. Once
+   aged: a trailing commit sets the root manifest to `"@types/bun": "^1.4.0"` AND regenerates the
+   lock (the manifest edit is the explicit step the final pass asked to be named; same commit as
+   the version flip only if the calendar already permits). I6 corrected: intentional movement of
+   @types/bun (and transitively bun-types) only.
 3. Comment hygiene: bunfig empirical notes re-stamped as re-verified on 1.4.0 (F-E3/F-E4).
 4. NOTHING ELSE — retries, parallelization, and adoptions all move AFTER a green bump (codex MED:
    a retry added in the bump commit can mask a runtime regression the bump itself caused).
@@ -113,9 +138,12 @@ and node_modules topology DO change; compatible-with-1.3.14 is the honest claim)
 2. `bun test` parallel flags per the Phase-2 adopt-list ONLY (mode included — likely
    `--parallel --no-isolate` if bare-parallel's isolation breaks preload semantics).
 3. `{retry: 1}` on exactly the four live-network surfaces; NEVER `release-contract.test.ts`.
-4. **`serve` → Bun.serve dir-serving** (~6-line `serve-static.ts`; delete the devDep) — verified by
-   the desktop-UI Playwright suite + the packaged-e2e leg (ETag/Content-Type parity — the recon
-   check codex flagged as dropped).
+4. **`serve` → Bun.serve dir-serving** (~6-line `serve-static.ts`; delete the devDep). Verified by
+   its OWN contract test (final codex pass: packaged-e2e runs the PLAYGROUND's Vite webServer and
+   never touches serve-static, and the desktop-UI suite asserts no header semantics — the prior
+   parity claim was wrong): new `serve-static.test.ts` asserting index + asset resolution,
+   Content-Type, ETag/304 behavior, traversal rejection, loopback-only binding. The desktop-UI
+   Playwright suite then proves the swap in situ.
 5. **`--no-orphans`** on the two Playwright webServer commands.
 6. CUT (both audits): the copy-bb `Bun.Archive` swap — Archive exposes no decompressed-output cap
    and validates after write; System32-tar path works, is Windows-only (least-covered platform),
@@ -133,10 +161,17 @@ owner-requested feature, full contract honored)
 Scope (fable cond. 1 + codex): `accelerator-transport.ts` AND `accelerator-prover.ts` (lines ~420+:
 `instanceof HTTPError` gates network-vs-HTTP classification, HTTPS downgrade control, status
 fallback — the F14 degrade-vs-throw taxonomy) AND `errors.ts` (`parseServerError` consumes ky's
-pre-parsed `err.data`) AND both test files that construct `HTTPError`.
+pre-parsed `err.data`) AND both test files that exercise `HTTPError` semantics through mocked
+fetch responses (they do not construct it directly — final-pass correction).
 Design: an INTERNAL response-error contract (private class or discriminated result) replacing
-`HTTPError` `instanceof` checks 1:1; bounded error-body reads (the F-11 body-cap discipline);
-explicit redirect + timeout parity with ky's `retry:0` behavior; `AbortSignal.timeout()` per call.
+`HTTPError` `instanceof` checks 1:1; `AbortSignal.timeout()` per call; explicit redirect + timeout
+parity with ky's `retry:0` behavior. **Classification invariant (final codex pass, security)**:
+a non-2xx RESPONSE stays classified as an HTTP error even when its body read stalls, exceeds the
+bound, or is malformed (`data`-equivalent becomes undefined; status is ALWAYS preserved) — body
+failure must never demote an HTTP response to a network failure, because network-failure
+classification is what activates HTTPS→HTTP demotion. Bounded body reads per the F-11 cap
+discipline. Adversarial tests for stalled/oversize/malformed non-2xx bodies on BOTH the primary
+and the downgrade-retry paths.
 Freeze the F14 semantics as the behavior net: prover + transport + errors suites must pass with
 assertions updated ONLY where they name ky's class; `public-contract.test.ts` untouched (zero
 public-API change). Remove `ky` from published dependencies.
@@ -161,8 +196,9 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
   5.2.0 lockfile-commit discipline; aztec's own JEST_WORKER_ID branch; the headless+testnet smoke
   recipe; existing preloads.
 - **New files**: `.bun-version`; `scripts/bun-pin.test.ts`; `scripts/aztec-logger-contract.test.ts`;
-  `packages/accelerator/scripts/serve-static.ts`; spike fixtures (uncommitted); Arc D's internal
-  error contract inside existing SDK modules (no new public module).
+  `packages/accelerator/scripts/serve-static.ts` + `serve-static.test.ts` (its contract test);
+  spike fixtures (uncommitted); Arc D's internal error contract inside existing SDK modules (no
+  new public module).
 - **Modified**: 21 workflows + 2 composites; root bunfig; 3 preloads; root package.json scripts;
   playwright configs ×2; accelerator package.json (−serve); Arc D: sdk transport/prover/errors +
   tests + package.json (−ky).
@@ -208,14 +244,20 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
 - F8 (corrected): download cache and materialization store are distinct; isolated linker's store
   is per-project (`node_modules/.bun`); CI cache paths unchanged; performance claims to be
   MEASURED, not assumed.
-- F9–F12: unchanged from rev 1 (cert SANs; no special dep specifiers; sdk unit fetch fully mocked
-  — F11 reworded: the e2e dual-probe is the only *self-signed/IP* bun-TLS client path; GitHub
-  fetches are ordinary hostname TLS).
+- F9: the accelerator leaf cert carries `IpAddress(127.0.0.1)`/`IpAddress(::1)`/
+  `DnsName(localhost)` SANs (`certs.rs:227-229`).
+- F10: no `github:`/`tarball:`/`file:`/`link:` dep specifiers and no `trustedDependencies` keys
+  anywhere in the tree.
+- F11: sdk unit tests mock `fetch` entirely; the e2e dual-probe is the only *self-signed/IP*
+  bun-TLS client path (GitHub/registry fetches are ordinary hostname TLS).
+- F12: bb.js's node factory constructs a real `worker_threads.Worker`; unit tests never reach it
+  (`createChonkProof` spyOn-mocked); the sdk e2e WASM leg does.
 - F13 (new, codex): setup-bun does no binary provenance verification.
 - F14 (new, both audits): ky's `HTTPError` is load-bearing in prover error taxonomy + errors.ts
   `err.data` — the removal is Arc-D-scale, not a transport-file swap.
 - F15 (new, codex): `bun test --parallel` implies `--isolate`; `--no-isolate` is the opt-out;
-  workers receive distinct IDs.
+  workers receive distinct IDs via `BUN_TEST_WORKER_ID` (and a Jest-compat `JEST_WORKER_ID`,
+  which is why the prophylaxis uses `??=`).
 - F16 (new, codex): `@types/bun@1.4.0` published 2026-08-21 — inside the 7-day window until
   ~2026-08-28.
 
@@ -235,9 +277,9 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
 **Asks (owner — none silently assumed)**
 - A1: NO-GO fallback pre-agreed (strategy answer); confirm at gate: Arc A merges alone, B–D park,
   plan status "parked-upstream" until a bun patch clears the spike.
-- A2 (RESOLVED default per audits): packaged-e2e leg is the mandatory release-path exercise for
-  Arc C; build-test-bundle alone is insufficient because serve-static + swap-sdk both live in that
-  path. Confirm.
+- (A2 moved to ledger — RESOLVED: packaged-e2e mandatory for Arc C as the swap-sdk release-path
+  exercise; serve-static gets its OWN contract test since packaged-e2e never touches it — the
+  earlier "both live in that path" rationale was wrong, per the final pass.)
 - A3: upstream issue — agent drafts repro+body in lessons; OWNER files under their account.
   Confirm.
 - A4 (new): the JEST_WORKER_ID sunset criteria (remove when upstream Worker fix ships and the
@@ -247,7 +289,8 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
 
 - Strategy / pinning / validation: owner at clarify (rev 1 entries stand).
 - Owner reversals: ky IN (now Arc D, full-contract scope), serve IN, `--parallel` empirical.
-- Dual audit round 1 (2026-08-25): codex conditional ×7, fable conditional ×4 — ALL adopted:
+- Dual audit round 1 (2026-08-25): codex conditional ×7, fable conditional ×4 — every condition
+  addressed (two reshaped where the final pass found rev 2's translation lossy):
   ky split to Arc D with F14 contract scope (codex CRITICAL, fable HIGH); linker validation
   redesigned onto the real hoist risk (fable HIGH); `--parallel implies --isolate` premise
   corrected + `??=` + three-way spike (codex HIGH, fable MED); supply-chain claim corrected — no
@@ -259,6 +302,15 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
   tsconfig vite-override check restored (codex).
 - Rejected in audits, upheld: monolith outline (both); pulling any out-of-scope item back in
   (fable: "nothing deserves pulling back in").
+- Final fresh-context pass (rev 2 → rev 3, session `codex-H5tnT7Tl`): conditional ×6, all folded —
+  NO-GO bound to the bb.js-leg execution specifically (the pino repro can never justify it);
+  Arc D classification invariant (unreadable bounded error bodies keep HTTP status — never demote
+  to network failure — + adversarial tests both paths; "tests construct HTTPError" corrected to
+  mocked-fetch exercise); serve-static gets its own contract test (packaged-e2e never touches it —
+  A2 rationale corrected); JEST_WORKER_ID consumer inventory + branch-semantics guard (not a name
+  grep), resolved isolated-linker-aware; linker exit rule (measure, cut-on-failure, never strand
+  the publish pin; Arc A commit order fixed); ledger/assumption hygiene (F9–F12 explicit,
+  F15→BUN_TEST_WORKER_ID, A2→ledger, @types/bun manifest step named, Arc D branches from B).
 - Phase-2 GO/NO-GO: pending evidence.
 
 ## Post-implementation (self-contained)
@@ -282,17 +334,19 @@ phased shape FURTHER apart — bump-only isolated from adoptions — adopted as 
   B–D park with ledger + lessons.
 - **Arc C** = Phase 4 (post-bump tooling: parallel, retry, serve, no-orphans) — packaged-e2e
   mandatory in its gate.
-- **Arc D** = Phase 5 (ky removal, standalone published-SDK PR — reviewable in one sitting on its
-  own).
+- **Arc D** = Phase 5 (ky removal, standalone published-SDK PR) — **branches from Arc B, not C**
+  (final codex pass: D has no dependency on C's optional tooling; stacking it on C would couple
+  the SDK change to adoption churn). `gh stack` topology: A → B → {C, D} as siblings on B.
 
 ## Seeds (DRAFT — finalized after approval)
 
-Artifact URL: (recorded at publish)
+Artifact URL: https://claude.ai/code/artifact/54480f30-f3f7-4982-8ac6-1417a5f33bdb
+(source: `eli5.html` in this dir — redeploying the same file updates the same URL)
 
 **Recommended: `/goal`** (NO-GO honesty per codex: Phases 3–5 stay unmarked on NO-GO)
 
 ```
-/goal EITHER (GO path) all five phases marked ✓ in implementations-plan/bun-1-4-migration/plan.md with each gate's output quoted in the transcript, LESSONS_FILE lines printed per phase, Arcs A–D PRs green on all required Status checks with /code-review max --fix applied and the per-arc codex loops converged (resumed passes quoting no new material findings), the packaged-e2e leg and live-testnet smoke green for Arc C, and bun run test + bun run lint:actions exit 0 under the scratch-pinned .bun-version binary; OR (NO-GO path) Phases 1–2 ✓ only, the ledger's NO-GO entry quoting the exact internal:worker/messaging crash signature, Arc A PR green and ready, Arcs B–D explicitly parked in plan.md status, and the upstream-issue repro drafted in lessons/phase-2.md. Phases 3–5 must NEVER be marked ✓ on the NO-GO path.
+/goal EITHER (GO path) all five phases marked ✓ in implementations-plan/bun-1-4-migration/plan.md with each gate's output quoted in the transcript, LESSONS_FILE lines printed per phase, Arcs A–D PRs green on all required Status checks with /code-review max --fix applied and the per-arc codex loops converged (resumed passes quoting no new material findings), the packaged-e2e leg and live-testnet smoke green for Arc C, and bun run test + bun run lint:actions exit 0 under the scratch-pinned .bun-version binary; OR (NO-GO path) Phases 1–2 ✓ only WITH Phase 2's gate output quoted in the transcript, the ledger's NO-GO entry quoting the exact internal:worker/messaging crash signature AS PRODUCED BY the Phase-2.2 bb.js WASM-fallback execution run with JEST_WORKER_ID set (pino bypassed) — a pino-path or any other failure NEVER qualifies — Arc A PR green and ready, Arcs B–D explicitly parked in plan.md status, and the upstream-issue repro drafted in lessons/phase-2.md. Phases 3–5 must NEVER be marked ✓ on the NO-GO path.
 ```
 
 **Alternative: `/loop 15m`** — blueprint template parameterized for this plan; hard limits: never

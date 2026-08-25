@@ -1,0 +1,247 @@
+<title>Bun 1.4 Migration</title>
+<style>
+  :root {
+    --paper: #FBFAF7;
+    --ink: #23201A;
+    --muted: #6B6459;
+    --accent: #8A4F0E;
+    --accent-soft: #F5EBDD;
+    --amber: #9A6A00;
+    --amber-bg: #FFF6E3;
+    --amber-edge: #E3C170;
+    --card: #F4F1EB;
+    --edge: #E0DAD0;
+    --good: #2E6B3E;
+    --bad: #8C2F2F;
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #17140F;
+      --ink: #EAE5DC;
+      --muted: #A39B8D;
+      --accent: #D99A4E;
+      --accent-soft: #2A2116;
+      --amber: #E0B45C;
+      --amber-bg: #241C0C;
+      --amber-edge: #6E5A28;
+      --card: #201C15;
+      --edge: #373127;
+      --good: #6FBF83;
+      --bad: #D98080;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #17140F;
+    --ink: #EAE5DC;
+    --muted: #A39B8D;
+    --accent: #D99A4E;
+    --accent-soft: #2A2116;
+    --amber: #E0B45C;
+    --amber-bg: #241C0C;
+    --amber-edge: #6E5A28;
+    --card: #201C15;
+    --edge: #373127;
+    --good: #6FBF83;
+    --bad: #D98080;
+  }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Charter, Georgia, "Times New Roman", serif;
+    line-height: 1.65;
+    margin: 0;
+    padding: 3rem 1.25rem 5rem;
+  }
+  main { max-width: 68ch; margin: 0 auto; }
+  h1, h2, h3 {
+    font-family: "Avenir Next", "Segoe UI", -apple-system, sans-serif;
+    font-weight: 600; line-height: 1.25; text-wrap: balance;
+  }
+  h1 { font-size: 2rem; margin: 0 0 0.4rem; }
+  h2 { font-size: 1.25rem; margin: 3rem 0 0.9rem; color: var(--accent); }
+  h3 { font-size: 1.02rem; margin: 0 0 0.35rem; }
+  .kicker {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.75rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 1.6rem;
+  }
+  .lede { font-size: 1.08rem; }
+  p { margin: 0.85rem 0; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em; }
+  code { background: var(--accent-soft); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre {
+    background: var(--card); border: 1px solid var(--edge); border-radius: 6px;
+    padding: 0.9rem 1rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .phases { display: flex; flex-direction: column; gap: 1rem; margin: 1.4rem 0; }
+  .phase {
+    background: var(--card); border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0; padding: 1rem 1.2rem;
+  }
+  .phase .num {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent);
+  }
+  .gate { color: var(--muted); font-size: 0.92rem; margin-bottom: 0; }
+  .gate strong { color: var(--good); font-weight: 600; }
+  .asks {
+    background: var(--amber-bg); border: 1px solid var(--amber-edge);
+    border-left: 3px solid var(--amber); border-radius: 0 6px 6px 0;
+    padding: 1.1rem 1.3rem; margin: 1.4rem 0;
+  }
+  .asks h2 { color: var(--amber); margin-top: 0.2rem; }
+  .asks ol { padding-left: 1.2rem; margin: 0.6rem 0 0.2rem; }
+  .asks li { margin: 0.7rem 0; }
+  ul { padding-left: 1.2rem; }
+  li { margin: 0.45rem 0; }
+  .cutlist { color: var(--muted); font-size: 0.95rem; }
+  .seed-label {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; margin: 1.6rem 0 0.5rem;
+  }
+  .seed-label.rec { color: var(--good); }
+  .seed-label.alt { color: var(--muted); }
+  .warn {
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    font-size: 0.92rem; color: var(--amber); font-weight: 600;
+  }
+  .footnote { color: var(--muted); font-size: 0.9rem; margin-top: 3rem; border-top: 1px solid var(--edge); padding-top: 1rem; }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+<main>
+  <p class="kicker">Blueprint · mid tier · rev 3 for approval · 2026-08-25</p>
+  <h1>Bun 1.4 Migration</h1>
+  <p class="lede">Bun 1.4 is a big release, and this repo runs on Bun for everything — installs,
+  scripts, tests, publishing. The plan moves us there in guarded stages, adopts the new
+  bun-native capabilities exactly where they pay for themselves, and refuses the rest. One hard
+  fact shapes everything: <strong>Bun 1.4.0 currently crashes a core piece of the Aztec libraries'
+  logging</strong> (we reproduced it, found a clean bypass, and will hand the Bun team a bug
+  report). A second, untestable-until-we-try risk decides whether the version flip lands now or
+  waits for Bun's fix.</p>
+
+  <h2>Why the mid tier</h2>
+  <p>Blast radius is high (the toolchain under every build and test, 23 pinned version sites, the
+  publish pipeline) and there's real external coupling (an upstream Bun bug, Aztec's internal
+  logger behavior). Novelty and irreversibility are low — everything is phased and revertable. Two
+  highs → mid: the plan got three independent adversarial reviews (a parallel codex + Claude audit
+  on the draft, then a fresh-context codex re-audit of the consolidated result). Sixteen material
+  findings were folded in across two revisions, including two the plan itself had gotten factually
+  wrong.</p>
+
+  <h2>The five phases</h2>
+  <div class="phases">
+    <div class="phase">
+      <p class="num">Phase 1 — works on today's Bun</p>
+      <h3>Stop the bleeding, centralize, prepare</h3>
+      <p>The SDK publish pipeline currently floats to "whatever Bun is newest" — it gets pinned
+      first. Then the 23 scattered version pins collapse into one <code>.bun-version</code> file
+      (guard-tested so nobody reintroduces an inline pin). The crash bypass goes in (one line in
+      three test-setup files, using a switch Aztec's own logger provides — with a tripwire test
+      that fires if Aztec ever removes that switch). Finally, Bun's new "isolated" install layout
+      — with a measured before/after and an explicit exit rule: if it costs more than a small fix
+      or the benefit is immaterial, it gets cut rather than dragging the urgent pin fix down.</p>
+      <p class="gate"><strong>Proves itself by:</strong> full test suite + CI green on today's Bun,
+      an empty lockfile diff, and a resolution probe on the one release script the new layout
+      could genuinely break.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 2 — the evidence spike</p>
+      <h3>Answer the unknowns with the real 1.4 binary</h3>
+      <p>Clean install and full suite under 1.4. Then the decisive question: a second worker-based
+      code path (inside the proving library, only reachable in live end-to-end runs) either works
+      under 1.4 — or crashes the same way the logger did. Green means the migration proceeds; a
+      crash (with the exact fingerprint, from that specific run) means we park the version flip
+      until Bun ships a fix, and everything from Phase 1 still lands. Also verified here: the
+      stricter TLS rules against our local HTTPS setup, and how the new parallel test modes
+      interact with our test bootstrap. The Bun bug report gets drafted for you to file.</p>
+      <p class="gate"><strong>Proves itself by:</strong> every question having a recorded answer
+      with output quoted — a "no-go" answer passes this phase too; what it blocks is the next
+      one.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 3 — the flip (only on a green spike)</p>
+      <h3>Version bump and nothing else</h3>
+      <p>One line: <code>.bun-version</code> → 1.4.0, plus one isolated lockfile refresh commit.
+      Deliberately boring so that if anything regresses later, this commit is trivially
+      bisectable and revertable. (One follow-up waits on our own supply-chain rule: the Bun types
+      package is itself younger than our 7-day quarantine — it gets bumped only once it ages out.
+      No exemptions, even for our own migration.)</p>
+      <p class="gate"><strong>Proves itself by:</strong> full CI green with every job now running
+      1.4.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 4 — tooling adoptions (after the flip is green)</p>
+      <h3>The speed and resilience features</h3>
+      <p>Parallel script running for the lint chain and local test chains; retry-once on exactly
+      the four tests that talk to the live network (and nowhere else); the tiny static-file server
+      that replaces a dev dependency (with its own contract test — the review caught that no
+      existing suite actually covers it); and a flag that prevents orphaned dev-server processes.
+      Each is its own commit, each independently revertable.</p>
+      <p class="gate"><strong>Proves itself by:</strong> full CI plus the packaged release-path
+      test plus a live-testnet proving smoke, all green.</p>
+    </div>
+    <div class="phase">
+      <p class="num">Phase 5 — the SDK cleanup (its own PR)</p>
+      <h3>Remove the HTTP library from the published SDK</h3>
+      <p>You asked for this one and the reviews agreed it's worth it — one fewer dependency that
+      every SDK consumer installs. But they also proved it's surgery, not a swap: the library's
+      error type silently drives the SDK's "is this a network failure or an HTTP failure?"
+      decision, which in turn controls a security-relevant fallback. The replacement preserves
+      that decision logic exactly — including the nasty edge where an error response's body can't
+      be read (it must still count as an HTTP failure, never a network one) — with adversarial
+      tests for precisely those edges, and zero change to the SDK's public API.</p>
+      <p class="gate"><strong>Proves itself by:</strong> the SDK's full test suites and live
+      end-to-end runs green, with the error-classification tests intact and the public-API
+      snapshot untouched.</p>
+    </div>
+  </div>
+
+  <h2>What we deliberately are NOT doing</h2>
+  <p class="cutlist">Test sharding, changed-file test selection, auto-fixing dependency tools
+  (against this repo's human-reviewed-bumps philosophy), Bun's new browser automation (our
+  Playwright suites are mature), its new parsers and terminal helpers (no such needs exist in this
+  repo), and — cut on review advice — swapping the Windows archive-extraction path (the current
+  code works, the new API can't yet enforce the same safety bounds, and the win was six lines).
+  The wildcard version of our supply-chain exclusion list still doesn't work in 1.4 (tested), so
+  the 31-name list stays.</p>
+
+  <div class="asks">
+    <h2>Your call — four confirmations</h2>
+    <ol>
+      <li><strong>No-go fallback:</strong> if the spike shows the second worker crash, Phase 1
+      merges alone and the rest parks until Bun ships a fix. (Matches the strategy you chose;
+      confirming it as the recorded plan.)</li>
+      <li><strong>Release-path check:</strong> the packaged end-to-end test is mandatory before
+      the Phase-4 changes merge. Confirm.</li>
+      <li><strong>The Bun bug report:</strong> I draft the minimal reproduction and the report
+      text; you file it under your account. Confirm.</li>
+      <li><strong>The crash bypass's lifespan:</strong> the one-line env bypass and its tripwire
+      test are removed once Bun fixes the underlying bug. Confirm that sunset rule.</li>
+    </ol>
+    <p>Plus the standard gate: scope, tier, validation layers, and the four-PR stacked delivery
+    (safe wave → bump → tooling, with the SDK cleanup branching separately). Reply
+    <em>approve</em>, <em>conditional approve (with conditions)</em>, or <em>reject (with
+    findings)</em>.</p>
+  </div>
+
+  <h2>Implementation seeds</h2>
+  <p>Draft until you approve; finalized against the approved scope afterward. The session must run
+  inside the plan's worktree.</p>
+  <p class="warn">Use exactly one per session — setting one replaces the other.</p>
+
+  <p class="seed-label rec">Recommended · /goal (completion is transcript-observable, both outcomes encoded)</p>
+  <pre><code>/goal EITHER (GO path) all five phases marked ✓ in implementations-plan/bun-1-4-migration/plan.md with each gate's output quoted in the transcript, LESSONS_FILE lines printed per phase, Arcs A–D PRs green on all required Status checks with /code-review max --fix applied and the per-arc codex loops converged (resumed passes quoting no new material findings), the packaged-e2e leg and live-testnet smoke green for Arc C, and bun run test + bun run lint:actions exit 0 under the scratch-pinned .bun-version binary; OR (NO-GO path) Phases 1–2 ✓ only WITH Phase 2's gate output quoted in the transcript, the ledger's NO-GO entry quoting the exact internal:worker/messaging crash signature AS PRODUCED BY the Phase-2.2 bb.js WASM-fallback execution run with JEST_WORKER_ID set (pino bypassed) — a pino-path or any other failure NEVER qualifies — Arc A PR green and ready, Arcs B–D explicitly parked in plan.md status, and the upstream-issue repro drafted in lessons/phase-2.md. Phases 3–5 must NEVER be marked ✓ on the NO-GO path.</code></pre>
+
+  <p class="seed-label alt">Alternative · /loop 15m</p>
+  <pre><code>/loop 15m Drive implementations-plan/bun-1-4-migration forward. Never idle waiting for my input. Each firing: (1) Reality check: read plan.md + lessons/ (authoritative), git status, git log --oneline -5; if PRs exist, gh pr view --json statusCheckRollup per arc (no --watch). (2) Waiting on CI is fine — confirm it progresses; use waits to prep the next phase. (3) No task in hand? Take the next pending plan.md step; run the fast layers (bun run test under the scratch-pinned .bun-version binary + bun run lint:actions) after each meaningful edit; commit; push arc branches (gh stack push / sync). (4) Decisions I'd normally take to the owner? /codex xhigh, converge, act, log consult+verdict in lessons/phase-N.md. Hard limits: never merge or publish; never file the upstream bun issue (draft only); never flip .bun-version past what the ledger's recorded spike verdict allows; never add min-age exemptions (@types/bun waits out its window); Phases 3–5 stay unmarked on a NO-GO. (5) Same step failed 5 times? Stop, reassess with codex. (6) Phase green = ITS gate in plan.md passed — run it, paste output, mark ✓, write lessons, print LESSONS_FILE=implementations-plan/bun-1-4-migration/lessons/phase-N.md. (7) All reachable phases ✓? Run plan.md's Post-implementation per arc (code-review max --fix → separate commits → codex xhigh with the no-over-engineering rule → resumed fix loop to convergence), mark arc PRs ready, write the wrap-up report, surface and stop.</code></pre>
+
+  <p class="footnote">Full technical plan: <code>implementations-plan/bun-1-4-migration/plan.md</code>
+  (with recon, both audit transcripts, and the decision ledger alongside). Audit trail: dual audit
+  (codex ×7 conditions, independent Claude auditor ×4) folded into rev 2; fresh-context codex
+  re-audit of the consolidation (×6 gaps, two of them factual corrections to the plan's own
+  claims) folded into rev 3; final confirmation pass recorded in <code>audit-codex.md</code>.</p>
+</main>
