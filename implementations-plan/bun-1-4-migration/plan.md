@@ -379,3 +379,12 @@ matrix in lessons/phase-2.md. NO-GO tail risk shrinks (e2e has no happy-dom; pla
 under 1.4.0); the prophylaxis stays for the 1.4.0 window (verified in-tree: playground 8/8 with
 the env) and A4's sunset trigger is now concrete (a bun release containing `b746c078`). Phase 3
 may target that release directly if shipped by then.
+
+## OWNER OVERRIDE (2026-08-25, mid-implementation)
+
+`/code-review max` is too token-expensive on this account (one full run was lost to a credits
+outage; the rerun stalled twice and re-fanned a line-by-line angle over a small diff). For Arcs
+A+B the max review ran and its confirmed findings were applied (`026a724`); for REMAINING arcs
+(C, D) the per-arc protocol is amended: inline self-review by the implementing session + the
+codex xhigh fix loop (ChatGPT account) replace the max-effort multi-agent review. A Claude-side
+multi-agent review runs only on explicit owner request.
