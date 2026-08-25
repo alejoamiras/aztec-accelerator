@@ -30,8 +30,12 @@ function externalUses(): { file: string; line: number; action: string; ref: stri
     for (const file of ymlFiles(dir)) {
       const lines = readFileSync(file, "utf8").split("\n");
       lines.forEach((raw, i) => {
-        const m = raw.match(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s*(#.*))?$/);
+        // Fail closed: any line that DECLARES uses: must parse — a trailing space or odd
+        // shape must fail the sweep, not silently drop the reference from it.
+        if (!/^\s*-?\s*uses\s*:/.test(raw)) return;
+        const m = raw.match(/^\s*-?\s*uses\s*:\s*([^\s#]+)\s*(#[^\n]*?)?\s*$/);
         const target = m?.[1];
+        expect(target, `${file}:${i + 1} — unparseable uses: declaration: ${JSON.stringify(raw)}`).toBeTruthy();
         if (!target) return;
         const comment = m?.[2] ?? "";
         if (target.startsWith("./")) return;
@@ -66,7 +70,7 @@ describe("third-party action pins", () => {
   test("every pin carries an exact release label (or is a named exception)", () => {
     for (const u of uses) {
       if (EXCEPTIONS.has(u.action)) {
-        expect(u.label, `${u.file}:${u.line} — exception ${u.action} must still be labeled`).not.toBe("");
+        expect(u.label, `${u.file}:${u.line} — exception ${u.action} must be labeled exactly "# v1"`).toBe("# v1");
         continue;
       }
       expect(LABEL_RE.test(u.label), `${u.file}:${u.line} — ${u.action} label "${u.label}" is not "# vX.Y.Z"`).toBe(
@@ -75,15 +79,21 @@ describe("third-party action pins", () => {
     }
   });
 
-  test("one SHA per action (no split-brain pins)", () => {
-    const byAction = new Map<string, Set<string>>();
+  test("one SHA and one label per action (no split-brain pins or drifting labels)", () => {
+    const shasByAction = new Map<string, Set<string>>();
+    const labelsByAction = new Map<string, Set<string>>();
     for (const u of uses) {
       const key = u.action.split("/").slice(0, 2).join("/");
-      if (!byAction.has(key)) byAction.set(key, new Set());
-      byAction.get(key)?.add(u.ref);
+      if (!shasByAction.has(key)) shasByAction.set(key, new Set());
+      if (!labelsByAction.has(key)) labelsByAction.set(key, new Set());
+      shasByAction.get(key)?.add(u.ref);
+      labelsByAction.get(key)?.add(u.label);
     }
-    for (const [action, shas] of byAction) {
+    for (const [action, shas] of shasByAction) {
       expect(shas.size, `${action} is pinned to ${shas.size} different SHAs: ${[...shas].join(", ")}`).toBe(1);
+    }
+    for (const [action, labels] of labelsByAction) {
+      expect(labels.size, `${action} carries ${labels.size} different labels: ${[...labels].join(", ")}`).toBe(1);
     }
   });
 });
