@@ -34,3 +34,15 @@
   exit 0 && guard tests 4/4.
 
 LESSONS_FILE=implementations-plan/bun-1-4-migration/lessons/phase-1.md
+
+## Post-impl loop, Arcs A+B (2026-08-25, session codex-CX6VVB1P)
+Review layer = inline self-review + salvaged findings from the killed max run (owner override):
+`026a724` (path filters for .bun-version+bunfig.toml everywhere; e2e-setup shim dedup).
+Codex xhigh loop: R1 REJECT — swap-sdk silently exercised workspace source under the isolated
+linker (the killed review's uncommitted fix implemented the remedy; validated + committed
+`d3733a9` with consumer-side fail-closed asserts) + two guard false-pass gaps; R2 conditional
+(with-mapping scoping, destination(2) exact — `7f85f50`); R3 conditional (block-scalar spoof —
+`19eb3dc`); R4 conditional (with-scalar spoof — `d3275b1`, negative fixtures 3/3); R5 **approve**
+("Converged... no material remaining failure"). Churn note: rounds 2-4 were adversarial YAML
+shapes vs one 40-line parser — surfaced to codex at R4; it chose convergence over an AST rewrite
+(noted as future-work if the guard ever grows).
