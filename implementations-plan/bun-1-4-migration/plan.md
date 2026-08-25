@@ -361,3 +361,12 @@ Use exactly ONE per session — they don't compose.
 existing report and, if absent, FILES the upstream issue directly (owner's gh auth), rather than
 draft-only. A1/A2/A4 confirmed as written. Seeds finalized against this scope (the /loop hard
 limit "never file the issue" is replaced by "file once, after a duplicate check; never re-file").
+
+**A3 RESOLVED (2026-08-25, same day)**: duplicate check found **oven-sh/bun#40268** — same crash,
+CLOSED/COMPLETED, fixed by PR #40271 (`b746c078`: worker_threads binds intrinsics, not mutable
+globals). Nothing to file. True trigger = happy-dom's global MessagePort replacement (pino was
+merely the first Worker constructor after registration); full corrected diagnosis + reduction
+matrix in lessons/phase-2.md. NO-GO tail risk shrinks (e2e has no happy-dom; plain Worker passes
+under 1.4.0); the prophylaxis stays for the 1.4.0 window (verified in-tree: playground 8/8 with
+the env) and A4's sunset trigger is now concrete (a bun release containing `b746c078`). Phase 3
+may target that release directly if shipped by then.
