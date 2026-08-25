@@ -10,6 +10,14 @@ inputs:
     description: "Save the cache after a miss. Use 'true' ONLY in the warm-on-main job; PR jobs restore-only so a PR cannot poison the shared cache."
     required: false
     default: "false"
+  package-dir:
+    description: >
+      Workspace package whose Playwright pin governs (e.g. packages/playground). Every bunx here
+      runs from this directory: the isolated linker keeps workspace deps OUT of the root
+      node_modules, and a root-context bunx silently FETCHES a remote playwright whose version
+      (and browser revision) can differ from the one the tests run.
+    required: false
+    default: "packages/playground"
 
 runs:
   using: composite
@@ -17,11 +25,11 @@ runs:
     - name: Resolve Playwright version
       id: pw
       shell: bash
+      working-directory: ${{ inputs.package-dir }}
       run: |
         set -euo pipefail
-        # Exact installed version — every caller runs `bun install` before this
-        # composite, so `playwright --version` is more robust than parsing
-        # bun.lock's text shape. `|| true` keeps a no-match from being swallowed
+        # Exact installed version from the CONSUMING package's own graph — every caller runs
+        # `bun install` before this composite. `|| true` keeps a no-match from being swallowed
         # by `set -e` so it reaches our explicit error below.
         v=$(bunx playwright --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -z "$v" ]; then
@@ -52,6 +60,7 @@ runs:
     # the orphaned apt/dpkg (this job owns the whole ephemeral VM) and repair dpkg state.
     - name: Install Playwright system deps
       shell: bash
+      working-directory: ${{ inputs.package-dir }}
       run: |
         for i in 1 2 3; do
           if timeout 180 bunx playwright install-deps chromium; then exit 0; fi
@@ -67,6 +76,7 @@ runs:
 
     - name: Install Playwright browser (headless shell)
       shell: bash
+      working-directory: ${{ inputs.package-dir }}
       run: |
         # The ~111 MB headless-shell bytes arrive in <1s, but cdn.playwright.dev
         # intermittently HANGS at 100% (post-download) for many minutes. A long

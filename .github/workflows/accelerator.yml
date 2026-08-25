@@ -551,6 +551,8 @@ jobs:
           restore-keys: ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - uses: ./.github/actions/playwright-cache
+        with:
+          package-dir: packages/accelerator
       - run: bun run --cwd packages/accelerator test:e2e:ui
 
   e2e:
