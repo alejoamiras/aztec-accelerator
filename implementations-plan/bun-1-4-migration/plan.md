@@ -354,3 +354,10 @@ merge/publish; never file the upstream issue (draft only — A3); never flip `.b
 what the ledger's recorded spike verdict allows; never add min-age exemptions (@types/bun waits).
 
 Use exactly ONE per session — they don't compose.
+
+## APPROVAL (owner, 2026-08-25)
+
+**Conditional approve** — one modification: A3 FLIPPED — the agent checks oven-sh/bun for an
+existing report and, if absent, FILES the upstream issue directly (owner's gh auth), rather than
+draft-only. A1/A2/A4 confirmed as written. Seeds finalized against this scope (the /loop hard
+limit "never file the issue" is replaced by "file once, after a duplicate check; never re-file").
