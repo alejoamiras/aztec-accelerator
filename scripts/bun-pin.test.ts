@@ -45,6 +45,7 @@ describe("bun version pin", () => {
         // sit deeper than that.
         let childIndent = -1;
         let inWith = false;
+        let withInputIndent = -1;
         let pinned = false;
         for (let j = i + 1; j < lines.length; j++) {
           const l = lines[j] ?? "";
@@ -53,10 +54,18 @@ describe("bun version pin", () => {
           if (key) {
             const kIndent = key[1]?.length ?? 0;
             if (childIndent === -1 && kIndent > indent) childIndent = kIndent;
-            if (kIndent === childIndent) inWith = key[2] === "with";
+            if (kIndent === childIndent) {
+              inWith = key[2] === "with";
+              withInputIndent = -1;
+            }
           }
-          const pin = l.match(/^(\s*)bun-version-file\s*:\s*\.bun-version\s*$/);
-          if (inWith && pin && (pin[1]?.length ?? 0) > childIndent) pinned = true;
+          if (!inWith) continue;
+          // The with-mapping's DIRECT inputs all share the indentation of its first entry; a pin
+          // nested deeper (e.g. inside a block scalar passed as some other input) is not an input.
+          const entry = l.match(/^(\s*)\S/);
+          const eIndent = entry?.[1]?.length ?? -1;
+          if (eIndent > childIndent && withInputIndent === -1) withInputIndent = eIndent;
+          if (eIndent === withInputIndent && /^\s*bun-version-file\s*:\s*\.bun-version\s*$/.test(l)) pinned = true;
         }
         expect(pinned, `${file}:${i + 1} — setup-bun step without bun-version-file under its with: mapping`).toBe(
           true,
