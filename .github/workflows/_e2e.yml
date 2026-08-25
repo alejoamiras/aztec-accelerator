@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -66,7 +66,7 @@ jobs:
       # F-015: pin the action to a master-history SHA (NOT the @stable-generated commit, which
       # upstream may GC) and select the channel explicitly via `toolchain:` — @stable was the
       # channel selector, so pinning the ref alone would break the toolchain resolution.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         if: inputs.build_accelerator
         with:
           toolchain: stable
@@ -76,7 +76,7 @@ jobs:
       # server/target. Cache that dir only. Use the SAME `shared-key` as the
       # other linux server builds (smoke / release-smoke / release build-headless
       # + setup-accelerator) so they cross-warm one shared server cache.
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: inputs.build_accelerator
         with:
           workspaces: packages/accelerator/server -> target
@@ -121,7 +121,7 @@ jobs:
 
       - name: Upload Aztec logs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: aztec-node-logs-sdk
           path: /tmp/aztec-node.log
@@ -130,7 +130,7 @@ jobs:
 
       - name: Upload accelerator logs
         if: failure() && inputs.build_accelerator
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: accelerator-logs
           path: /tmp/accelerator.log
