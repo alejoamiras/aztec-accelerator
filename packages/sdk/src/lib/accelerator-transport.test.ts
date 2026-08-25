@@ -894,4 +894,87 @@ describe("AcceleratorTransport", () => {
       expect(probe.body).toBeUndefined();
     });
   });
+
+  describe("TransportHttpError.data shape follows the media-type essence", () => {
+    let originalFetch: typeof globalThis.fetch;
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    const errorBody = JSON.stringify({ error: "some_code" });
+    const postProveAgainst = async (contentType: string): Promise<unknown> => {
+      globalThis.fetch = mock(
+        async () =>
+          new Response(errorBody, { status: 500, headers: { "content-type": contentType } }),
+      ) as unknown as typeof globalThis.fetch;
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      try {
+        await t.postProve(new Uint8Array([1]), undefined);
+        throw new Error("postProve unexpectedly succeeded");
+      } catch (e) {
+        return (e as { data: unknown }).data;
+      }
+    };
+
+    test("text/plain keeps the raw STRING (the server's production shape)", async () => {
+      expect(typeof (await postProveAgainst("text/plain"))).toBe("string");
+    });
+
+    test("a parameterized non-JSON type mentioning json stays a STRING", async () => {
+      expect(typeof (await postProveAgainst("Text/Plain; note=application/json"))).toBe("string");
+    });
+
+    test("application/json parses to an OBJECT", async () => {
+      expect(await postProveAgainst("application/json")).toEqual({ error: "some_code" });
+    });
+
+    test("a +json suffix type parses to an OBJECT", async () => {
+      expect(await postProveAgainst("application/problem+json; charset=utf-8")).toEqual({
+        error: "some_code",
+      });
+    });
+  });
+
+  describe("header deadline does not tax the body budget (real socket)", () => {
+    let pollutedFetch: typeof globalThis.fetch;
+    beforeEach(() => {
+      // Earlier describes install fetch mocks; this one needs the real network stack.
+      pollutedFetch = globalThis.fetch;
+      globalThis.fetch = Bun.fetch as unknown as typeof globalThis.fetch;
+    });
+    afterEach(() => {
+      globalThis.fetch = pollutedFetch;
+    });
+
+    test("slow headers followed by a slow-but-in-budget body is still healthy", async () => {
+      // Headers at ~1.2s (inside the 2s header deadline), then the body dribbles for ~1.2s more
+      // (inside the SEPARATE 2s body deadline). Total ~2.4s: a request-scoped timer would abort the
+      // body read at 2.0s and mark the endpoint unhealthy — the header timer must stop counting the
+      // moment headers settle. Real server: mocked fetch bypasses the abort-signal machinery.
+      const healthJson = JSON.stringify({ status: "ok", api_version: 1 });
+      await using server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: async () => {
+          await Bun.sleep(1200);
+          const encoder = new TextEncoder();
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const mid = Math.floor(healthJson.length / 2);
+              controller.enqueue(encoder.encode(healthJson.slice(0, mid)));
+              await Bun.sleep(1200);
+              controller.enqueue(encoder.encode(healthJson.slice(mid)));
+              controller.close();
+            },
+          });
+          return new Response(stream, { headers: { "content-type": "application/json" } });
+        },
+      });
+      const t = new AcceleratorTransport("127.0.0.1", server.port, server.port + 1);
+      expect(await t.isProtocolHealthy("http")).toBe(true);
+    }, 15_000);
+  });
 });

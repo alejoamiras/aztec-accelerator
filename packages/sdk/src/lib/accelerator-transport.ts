@@ -1,4 +1,3 @@
-import ky from "ky";
 import ms from "ms";
 import type { AcceleratorProtocol, AcceleratorStatus } from "./types.js";
 // q7e3-F-02: import shared types from the neutral module, not back from the prover (kills the 2-way edge).
@@ -19,9 +18,9 @@ const PROBE_RETRY_DELAY_MS = 1_000;
  */
 const HTTPS_GRACE_MS = 250;
 /**
- * Deadline + byte cap for reading a `/health` BODY. Ky's `timeout` only bounds time-to-headers — a
- * responder that returns `200` and then stalls (or streams forever) would otherwise hang the probe
- * indefinitely and buffer unbounded bytes (post-impl codex High). The real body is <2 KB.
+ * Deadline + byte cap for reading a `/health` BODY. The request timeout only bounds time-to-headers
+ * — a responder that returns `200` and then stalls (or streams forever) would otherwise hang the
+ * probe indefinitely and buffer unbounded bytes (post-impl codex High). The real body is <2 KB.
  */
 const HEALTH_BODY_TIMEOUT_MS = 2_000;
 const HEALTH_BODY_MAX_BYTES = 64 * 1024;
@@ -30,7 +29,7 @@ const PROVE_TIMEOUT_MS = ms("10 min");
 
 /**
  * Deadline + byte cap for reading a `/prove` BODY (F-11, audit 2026-07-31-9c4cb0c). `PROVE_TIMEOUT_MS`
- * above is ky's timeout, which stops counting once HEADERS arrive — so before this, an endpoint could
+ * above bounds time-to-headers — so before this, an endpoint could
  * answer `200` and then stream forever into an unbounded buffer.
  *
  * **The cap is derived, not sampled.** A single observed proof is a lower bound, not a protocol
@@ -157,6 +156,48 @@ export type ProtocolTransition =
  * (post-impl codex High: pin poisoning → witness exfiltration). Field-presence is NOT identity;
  * this shape check is collision resistance, not authentication — see the `httpsOnly` docs.
  */
+/**
+ * Non-2xx envelope for `/prove`: distinguishes "the accelerator ANSWERED with an HTTP error"
+ * from "no response at all" — the F14 classifier keys on exactly that split, and confusing the
+ * two can activate the plaintext downgrade retry. `data` carries the bounded pre-read error body
+ * (an object for JSON bodies; a string for the server's text/plain JSON-string bodies; undefined
+ * when the body stalled, overflowed the cap, or failed to parse — a body-read failure must never
+ * demote the classification to a network failure). Internal: exported for the prover, not from
+ * the package barrel.
+ */
+export class TransportHttpError extends Error {
+  constructor(
+    readonly response: Response,
+    readonly data: unknown,
+  ) {
+    super(`accelerator answered HTTP ${response.status}`);
+    this.name = "TransportHttpError";
+  }
+}
+
+/**
+ * `fetch` with a HEADER deadline only: the timer is cleared the moment the response settles, so
+ * the body-read budget belongs exclusively to the bounded readers. A signal that keeps ticking
+ * after headers would silently shrink the body readers' independent deadline by however long the
+ * headers took.
+ */
+async function fetchHeaderBounded(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(
+    () => ctrl.abort(new DOMException("header deadline", "TimeoutError")),
+    timeoutMs,
+  );
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function isRecognizedHealthBody(body: unknown): boolean {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
   const b = body as Record<string, unknown>;
@@ -179,6 +220,24 @@ async function readJsonBounded(
   maxBytes: number = HEALTH_BODY_MAX_BYTES,
   timeoutMs: number = HEALTH_BODY_TIMEOUT_MS,
 ): Promise<unknown> {
+  const text = await readTextBounded(response, maxBytes, timeoutMs);
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The bounded-read MECHANICS behind {@link readJsonBounded}, returning the raw text — the error
+ * pre-read needs the undecoded shape (content-type decides string vs object, matching what
+ * `parseServerError` distinguishes). Same single-implementation rule: policy varies, mechanics
+ * don't. */
+async function readTextBounded(
+  response: Response,
+  maxBytes: number = HEALTH_BODY_MAX_BYTES,
+  timeoutMs: number = HEALTH_BODY_TIMEOUT_MS,
+): Promise<string | undefined> {
   try {
     const stream = response.body;
     if (!stream) {
@@ -193,7 +252,7 @@ async function readJsonBounded(
       ]).finally(() => clearTimeout(timer));
       // Measure ENCODED bytes, not UTF-16 code units (codex Low).
       if (new TextEncoder().encode(text).length > maxBytes) return undefined;
-      return JSON.parse(text);
+      return text;
     }
     const reader = stream.getReader();
     // A CONTIGUOUS buffer grown geometrically, not an array of chunks. Retaining one `Uint8Array`
@@ -257,7 +316,7 @@ async function readJsonBounded(
     }
     if (timedOut) return undefined; // partial body from a deadline cancel — never "healthy"
     const merged = buffer.subarray(0, total);
-    return JSON.parse(new TextDecoder().decode(merged));
+    return new TextDecoder().decode(merged);
   } catch {
     return undefined;
   }
@@ -266,8 +325,9 @@ async function readJsonBounded(
 /**
  * Owns all network I/O to the local accelerator: endpoint/URL construction, the
  * dual HTTP/HTTPS `/health` probe + protocol negotiation, the short-lived status
- * cache, and the `/prove` POST. One HTTP client (`ky`) for both endpoints, so the
- * thrown-error surface is uniform.
+ * cache, and the `/prove` POST. Plain `fetch` for both endpoints; a non-2xx
+ * `/prove` answer throws {@link TransportHttpError}, so the thrown-error surface
+ * is uniform.
  *
  * The {@link AcceleratorProver} keeps the *domain* logic: parsing a `/health`
  * response into the {@link AcceleratorStatus} discriminated union, and reading a
@@ -514,7 +574,7 @@ export class AcceleratorTransport {
    *
    * Resolves with the winning {@link ProbeResult}; rejects only if BOTH probes fail twice (caller
    * maps that to `reason: "offline"`). `throwHttpErrors:false` so a non-2xx still *resolves* (caller
-   * maps it to `reason: "error"`); `retry:0` so `ky` doesn't stack its own retries.
+   * maps it to `reason: "error"`); nothing retries under the caller's retry logic.
    *
    * In strict {@link AcceleratorTransport.#httpsOnly} mode, only the HTTPS endpoint is ever probed
    * (no `http://` URL is constructed); an unreachable HTTPS ⇒ rejects ⇒ caller maps to `offline`.
@@ -523,15 +583,18 @@ export class AcceleratorTransport {
     const httpsUrl = `https://${this.#host}:${this.#httpsPort}/health`;
 
     const fire = (url: string, protocol: AcceleratorProtocol): Promise<ProbeResult> =>
-      ky(url, {
-        retry: 0,
-        throwHttpErrors: false,
-        timeout: HEALTH_PROBE_TIMEOUT_MS,
-        // A 307/308 is a downgrade vector: fetch preserves the method AND body across those,
-        // so an https->http redirect would carry the request off the endpoint we validated —
-        // and in strict mode, off HTTPS entirely (post-impl codex High). Never follow.
-        redirect: "error",
-      }).then(async (response) => ({ response, protocol, body: await readJsonBounded(response) }));
+      fetchHeaderBounded(
+        url,
+        {
+          // A 307/308 is a downgrade vector: fetch preserves the method AND body across those,
+          // so an https->http redirect would carry the request off the endpoint we validated —
+          // and in strict mode, off HTTPS entirely (post-impl codex High). Never follow.
+          redirect: "error",
+        },
+        // Bounds time-to-headers only; a non-2xx still RESOLVES (the caller maps it to `reason:
+        // "error"`), and nothing here retries on its own.
+        HEALTH_PROBE_TIMEOUT_MS,
+      ).then(async (response) => ({ response, protocol, body: await readJsonBounded(response) }));
 
     const probe = () => {
       // Strict mode: probe HTTPS ONLY — never even *construct* an http URL (contract compliance).
@@ -574,7 +637,7 @@ export class AcceleratorTransport {
     const delay = (msTimeout: number) => new Promise((r) => setTimeout(r, msTimeout));
 
     // Resolves to the HTTPS ProbeResult iff it's healthy, else null (on unhealthy OR rejected).
-    // Settlement is guaranteed: fire() bounds both headers (ky timeout) and body (readJsonBounded).
+    // Settlement is guaranteed: fire() bounds both headers (abort signal) and body (readJsonBounded).
     const httpsHealthy: Promise<ProbeResult | null> = httpsP.then(
       (r) => (this.#isHealthy(r) ? r : null),
       () => null,
@@ -632,7 +695,7 @@ export class AcceleratorTransport {
    * This exists for the `/prove` downgrade path, which must NEVER hand the witness to an endpoint it
    * has not itself validated. A healthy HTTPS probe says nothing about who is listening on the HTTP
    * port — a foreign responder there would otherwise receive the serialized witness the moment HTTPS
-   * failed (post-impl codex Critical). Bounded exactly like the dual probe: `ky` timeout for headers,
+   * failed (post-impl codex Critical). Bounded exactly like the dual probe: abort signal for headers,
    * {@link readJsonBounded} for the body.
    */
   async isProtocolHealthy(protocol: AcceleratorProtocol): Promise<boolean> {
@@ -645,12 +708,11 @@ export class AcceleratorTransport {
         ? `https://${this.#host}:${this.#httpsPort}/health`
         : `http://${this.#host}:${this.#port}/health`;
     try {
-      const response = await ky(url, {
-        retry: 0,
-        throwHttpErrors: false,
-        timeout: HEALTH_PROBE_TIMEOUT_MS,
-        redirect: "error",
-      });
+      const response = await fetchHeaderBounded(
+        url,
+        { redirect: "error" },
+        HEALTH_PROBE_TIMEOUT_MS,
+      );
       if (!response.ok) return false;
       return isRecognizedHealthBody(await readJsonBounded(response));
     } catch {
@@ -669,26 +731,55 @@ export class AcceleratorTransport {
   /**
    * POST serialized execution steps to `/prove` on the negotiated endpoint (`baseUrl`), or — when
    * `url` is given — to that EXACT url (the demotion retry passes an explicit `http://` url so it
-   * targets the endpoint THIS attempt was made against, not a since-reconfigured pin). Throws `ky`'s
-   * `HTTPError` on a non-2xx response (the caller maps `403` → origin denial).
+   * targets the endpoint THIS attempt was made against, not a since-reconfigured pin). Throws
+   * {@link TransportHttpError} on a non-2xx response (the caller maps `403` → origin denial),
+   * with the error body pre-read under the `/health` bounds — the status is preserved even when
+   * that body stalls, overflows, or is malformed, so a hostile error body can never re-route the
+   * classification to the network-failure path.
    */
   async postProve(
     body: Uint8Array<ArrayBuffer>,
     aztecVersion: string | undefined,
     url?: string,
   ): Promise<Response> {
-    return ky.post(url ?? `${this.baseUrl}/prove`, {
-      body,
-      timeout: PROVE_TIMEOUT_MS,
-      retry: 0,
-      // Never follow a redirect with the witness in the body: 307/308 preserve method + body, so a
-      // redirect here would forward it to an endpoint we never validated (post-impl codex High).
-      redirect: "error",
-      headers: {
-        "content-type": "application/octet-stream",
-        ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
+    const response = await fetchHeaderBounded(
+      url ?? `${this.baseUrl}/prove`,
+      {
+        method: "POST",
+        body,
+        // Never follow a redirect with the witness in the body: 307/308 preserve method + body, so a
+        // redirect here would forward it to an endpoint we never validated (post-impl codex High).
+        redirect: "error",
+        headers: {
+          "content-type": "application/octet-stream",
+          ...(aztecVersion ? { "x-aztec-version": aztecVersion } : {}),
+        },
       },
-    });
+      PROVE_TIMEOUT_MS,
+    );
+    if (!response.ok) {
+      // Content-type decides the pre-read shape, mirroring what parseServerError distinguishes:
+      // the server's text/plain JSON-string bodies stay STRINGS, a JSON media type parses to an
+      // object; an unreadable body is undefined — the status alone then drives classification.
+      // Match on the media-type ESSENCE (parameters stripped, case-folded) and accept `+json`
+      // suffixes — a substring test would misread `text/plain; note=application/json`.
+      const raw = await readTextBounded(response);
+      const essence = (response.headers.get("content-type") ?? "")
+        .split(";")[0]
+        ?.trim()
+        .toLowerCase();
+      const isJson = essence === "application/json" || (essence?.endsWith("+json") ?? false);
+      let data: unknown = raw;
+      if (raw !== undefined && isJson) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          data = undefined;
+        }
+      }
+      throw new TransportHttpError(response, data);
+    }
+    return response;
   }
 
   /**
@@ -696,8 +787,8 @@ export class AcceleratorTransport {
    * string — or `undefined` if the body is over-cap, stalls, is not JSON, or lacks a string `proof`
    * (F-11, audit 2026-07-31-9c4cb0c).
    *
-   * Before this, the caller read the body with a bare `res.json()`: `PROVE_TIMEOUT_MS` is ky's
-   * timeout and stops counting at HEADERS, so an endpoint answering `200` and then streaming forever
+   * Before this, the caller read the body with a bare `res.json()`: `PROVE_TIMEOUT_MS` bounds
+   * time-to-headers, so an endpoint answering `200` and then streaming forever
    * had no bound at all. The witness has already left the machine by this point, so the exposure here
    * is availability — but it is the dApp's tab that dies, and the fallback path never runs because
    * the promise simply never settles.
