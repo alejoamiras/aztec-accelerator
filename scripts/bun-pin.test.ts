@@ -40,15 +40,23 @@ describe("bun version pin", () => {
         steps++;
         const indent = use[1]?.length ?? 0;
         // The pin must sit under the step's `with:` mapping specifically — an `env:` key of the
-        // same name is valid YAML that setup-bun ignores entirely.
+        // same name (or `with:` text inside a block scalar) is valid YAML that setup-bun ignores.
+        // Mapping state toggles ONLY on keys at the step's exact child indentation; the pin must
+        // sit deeper than that.
+        let childIndent = -1;
         let inWith = false;
         let pinned = false;
         for (let j = i + 1; j < lines.length; j++) {
           const l = lines[j] ?? "";
           if (new RegExp(`^\\s{0,${indent}}-\\s`).test(l)) break;
           const key = l.match(/^(\s*)([A-Za-z_-]+)\s*:\s*$/);
-          if (key && (key[1]?.length ?? 0) > indent) inWith = key[2] === "with";
-          if (inWith && /^\s*bun-version-file\s*:\s*\.bun-version\s*$/.test(l)) pinned = true;
+          if (key) {
+            const kIndent = key[1]?.length ?? 0;
+            if (childIndent === -1 && kIndent > indent) childIndent = kIndent;
+            if (kIndent === childIndent) inWith = key[2] === "with";
+          }
+          const pin = l.match(/^(\s*)bun-version-file\s*:\s*\.bun-version\s*$/);
+          if (inWith && pin && (pin[1]?.length ?? 0) > childIndent) pinned = true;
         }
         expect(pinned, `${file}:${i + 1} — setup-bun step without bun-version-file under its with: mapping`).toBe(
           true,
