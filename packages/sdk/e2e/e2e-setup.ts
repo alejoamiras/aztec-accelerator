@@ -1,3 +1,6 @@
+// See packages/sdk/src/test-setup.ts — same @aztec logger worker-transport bypass, same sunset.
+process.env.JEST_WORKER_ID ??= "1";
+
 /**
  * E2E test setup — runs once before all test files via preload.
  *
