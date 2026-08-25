@@ -118,7 +118,10 @@ fixed (#40268/#40271, nothing to file) — evidence in lessons/phase-2.md
   completion loophole; the seeds encode this).
 - Layers: install · integration · e2e live network · runtime semantics.
 
-## Phase 3 — Bump-only wave (gated on GO; deliberately minimal for bisectability)
+## Phase 3 ✓ — Bump-only wave — GREEN 2026-08-25: `.bun-version`→1.4.0 (`82ca06b`, lockfile
+untouched); PR #475 ALL five Status checks SUCCESS on `eaf7a06` after five isolated-linker
+undeclared-dependency discoveries (lessons/phase-3.md); @types/bun trailing commit waits out
+min-age (~08-28)
 
 1. `.bun-version` → `1.4.0`.
 2. ONE isolated lockfile-regen commit: `bun install` (scratch 1.4.0), reviewed line-class by
