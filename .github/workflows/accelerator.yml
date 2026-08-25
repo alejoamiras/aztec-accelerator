@@ -37,6 +37,8 @@ jobs:
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'
+              - 'bunfig.toml'
+              - '.bun-version'
               - '.github/workflows/accelerator.yml'
               # The binary-name identity guard (tauri-identity.test.ts) greps these workflows —
               # edits to them must re-run the suite so a half-rename can't land silently.
@@ -59,6 +61,8 @@ jobs:
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'
+              - 'bunfig.toml'
+              - '.bun-version'
               - '.github/workflows/accelerator.yml'
               # test:scripts (this job) runs the binary-identity guard that greps these
               # workflows — a workflow-only PR must not skip the very test that pins it

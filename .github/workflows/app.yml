@@ -30,6 +30,8 @@ jobs:
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'
+              - 'bunfig.toml'
+              - '.bun-version'
               - '.github/workflows/app.yml'
               - '.github/workflows/_e2e-app.yml'
               - '.github/actions/setup-aztec/**'

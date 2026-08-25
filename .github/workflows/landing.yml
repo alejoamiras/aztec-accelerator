@@ -31,6 +31,8 @@ jobs:
               - 'biome.json'
               - 'package.json'
               - 'bun.lock'
+              - 'bunfig.toml'
+              - '.bun-version'
               - '.github/workflows/landing.yml'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
