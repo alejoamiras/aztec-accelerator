@@ -67,7 +67,26 @@ pre-flight instead and note it.
 - `bun run lint` exit 0; PR CI green on all required checks; merged to main.
 - Layers: lint · CI required checks.
 
-## Phase 2 ⛔ BLOCKED (owner action required) — pre-flight all green, publish rejected by npm
+## Phase 2 ✓ — GREEN 2026-08-26 on the second dispatch, after the owner rotated `NPM_TOKEN`
+
+Run [32995296830](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32995296830),
+`headSha=acb3d317d4d64ca2aeee2e7a8d0d7dd90365e39b` == the approved merge commit (asserted before
+watching). Pre-flight re-run in full first: registry still had no `5.2.0`, tag still absent, no
+in-flight npm mutation, HEAD unmoved at `acb3d31` (so the earlier tarball proof at that exact SHA
+still stood). All jobs green including `Publish to npm` and `Create git tag and GitHub release`.
+
+Verify bullets, all four passing:
+1. `npm view … dist-tags` → `{"nightlies":"4.2.0-nightly.20260413.1","latest":"5.0.1","testnet":"5.2.0"}`
+   — testnet moved, **`latest` untouched at 5.0.1** exactly as designed.
+2. `5.2.0` resolves (`dist.integrity = sha512-SjgdAEFcllcrbl0U6kZnbr3e16rHqjlAWoOXw1oUx0sLa5+1hiVylpeZn3/l0nMdtTso1ouGuDVF5ywLh1xOsQ==`)
+   and provenance is attached: `dist.attestations` present with `predicateType
+   https://slsa.dev/provenance/v1`.
+3. Tag `@alejoamiras/aztec-accelerator@5.2.0` → `acb3d317d4d64ca2aeee2e7a8d0d7dd90365e39b` (the
+   dispatch SHA); GitHub release `draft=false prerelease=false target=main assets=MIGRATION.md`,
+   and it does NOT hold the repo's Latest badge (the `--latest=false` invariant held).
+4. Playground live: `assets/index-CauoAjA1.js` serves `VITE_AZTEC_SDK_VERSION:"5.2.0"`.
+
+### First dispatch (failed, kept for the record)
 
 Run [32993796578](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32993796578),
 dispatched 2026-08-26 on `main`, `headSha=acb3d317…` == the Phase-1 merge commit (assert passed).
@@ -167,19 +186,24 @@ healthy (probe ops, not status flags, if in doubt).
   step 7 pass.
 - Layers: CI e2e (sandbox, native-bb) · registry state · live-site check.
 
-## Phase 3 ⛔ NOT STARTED — blocked upstream by Phase 2
+## Phase 3 ✓ — GREEN 2026-08-26: npm `latest` = 5.2.0, verified by a newcomer's install
 
-`promote-latest.yml` refuses any version not already on npm, and `5.2.0` was never published, so
-this phase is not merely unstarted but **structurally unreachable** until Phase 2 completes. No
-promote was dispatched; `latest` remains `5.0.1` — its correct, untouched pre-release value.
+Run [32995776080](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32995776080),
+all steps green (`Validate version format` · `Verify the version is already published` ·
+`Point npm latest at the version` → `+latest: @alejoamiras/aztec-accelerator@5.2.0`).
 
-**Terminal state of this release arc**: docs shipped (Phase 1 ✓), playground live on 5.2.0
-(Phase 2's `deploy-app` leg), npm publish blocked on an owner-only credential repair, promotion
-correctly not attempted. Resuming needs exactly one external action — see Phase 2's unblock note
-and `lessons/phase-2.md` — after which Phase 2 re-runs from pre-flight (derived version is still
-bare `5.2.0`) and Phase 3 proceeds as written below, unchanged.
+Gate outputs:
+- `dist-tags` → `{"nightlies":"4.2.0-nightly.20260413.1","latest":"5.2.0","testnet":"5.2.0"}`.
+  **Read-back lag**: the workflow's own `npm view` 0.4 s after the successful tag write still
+  showed `latest: '5.0.1'`, as did a local `npm view` a minute later — registry/CDN propagation,
+  not a failed promote (the write itself printed `+latest: …@5.2.0`). Confirmed with a
+  cache-bypassing packument fetch. **Do not treat a stale read-back as a failed promote**; compare
+  against the write's own output first, per the runbook's failed-promote triage.
+- Newcomer install: fresh temp dir, `npm init -y`, bare `npm install @alejoamiras/aztec-accelerator`
+  → installed **5.2.0**; ESM import → `exports OK: AcceleratorProver=function,
+  ACCELERATOR_API_VERSION=1`; exit 0. No rollback needed.
 
-### Original phase definition (unchanged — runs once Phase 2 clears)
+### Original phase definition (executed as written)
 
 1. `gh workflow run promote-latest.yml -f version=5.2.0` → confirm started → watch.
 2. Verify: `npm view @alejoamiras/aztec-accelerator dist-tags --json` → `latest=5.2.0`,
