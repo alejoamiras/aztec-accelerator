@@ -18,6 +18,7 @@ export const config: WebdriverIO.Config = {
   specs: [
     "./e2e-webdriver/smoke.spec.ts",
     "./e2e-webdriver/settings.spec.ts",
+    "./e2e-webdriver/theme.spec.ts",
     "./e2e-webdriver/trust-boundary.spec.ts",
     "./e2e-webdriver/auth-flow.spec.ts",
     "./e2e-webdriver/autostart.spec.ts",
