@@ -51,7 +51,7 @@ async function loadSettings() {
   const theme = config.theme || "system";
   const themeInput = document.querySelector(`#theme input[value="${theme}"]`);
   if (themeInput) themeInput.checked = true;
-  for (const input of document.querySelectorAll("#theme input")) input.disabled = false;
+  document.getElementById("theme").disabled = false;
 
   // codex r2 #6 / r3 #6: the autostart switch ships DISABLED (settings.html) and stays disabled until
   // its true state is CONFIRMED — so an unknown state is never presented as an actionable "off", and a

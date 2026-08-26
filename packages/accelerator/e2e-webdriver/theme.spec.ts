@@ -15,14 +15,36 @@ import { ensureSettingsWindow, readConfig } from "./helpers.ts";
 
 type Choice = "system" | "light" | "dark";
 
-/** Click the visible label — the radio itself is a clipped 1px target. */
+/**
+ * The control ships disabled and settings.js enables it once the stored value is known, so every
+ * read and every click has to wait for that. Waiting on existence alone would let assertions run
+ * against the pre-hydration default and let a click no-op, which passes accidentally for System.
+ */
+async function waitForHydration(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      await browser.execute(() => !document.querySelector<HTMLFieldSetElement>("#theme")?.disabled),
+    { timeout: 5000, timeoutMsg: "the appearance control never became enabled" },
+  );
+}
+
+/**
+ * Click the radio and wait for the round trip to land, rather than sleeping a guessed interval:
+ * the click goes to Rust, which persists config and then evaluates the repaint script back into
+ * this document.
+ */
 async function pick(choice: Choice): Promise<void> {
+  await waitForHydration();
   await browser.execute((value: string) => {
     const input = document.querySelector<HTMLInputElement>(`#theme input[value="${value}"]`);
     if (!input) throw new Error(`no appearance radio for "${value}"`);
     input.click();
   }, choice);
-  await browser.pause(400);
+  const expected = choice === "system" ? null : choice;
+  await browser.waitUntil(
+    async () => (await dataTheme()) === expected && readConfig().theme === choice,
+    { timeout: 5000, timeoutMsg: `appearance never settled on "${choice}"` },
+  );
 }
 
 const dataTheme = () => browser.execute(() => document.documentElement.getAttribute("data-theme"));
@@ -32,7 +54,7 @@ describe("Appearance", () => {
 
   before(async () => {
     await ensureSettingsWindow();
-    await browser.$("#theme").waitForExist({ timeout: 5000 });
+    await waitForHydration();
     original = ((readConfig().theme as Choice) ?? "system") as Choice;
   });
 
@@ -88,9 +110,11 @@ describe("Appearance", () => {
   it("should still show the chosen theme after a reload", async () => {
     // End state only. The post-load re-assert would produce this even with a stale init script, so
     // this does NOT by itself prove the cache is doing its job — see the test above for that.
+    // Neither test can prove the real property, the absence of a wrong-theme frame: WebDriver
+    // samples long after any such frame is gone.
     await pick("dark");
     await browser.refresh();
-    await browser.$("#theme").waitForExist({ timeout: 5000 });
+    await waitForHydration();
     expect(await dataTheme()).toBe("dark");
   });
 });

@@ -394,11 +394,13 @@ h2 {
   outline-offset: 2px;
 }
 /* Disabled until the stored value is known. Without this the pre-hydration state is visually
-   identical to the settled one, which invites the click it exists to prevent. */
-.seg:has(input:disabled) {
+   identical to the settled one, which invites the click it exists to prevent. Keyed off the
+   fieldset's own `:disabled` rather than `:has(input:disabled)`: `:has()` is Safari 15.4+ and this
+   sheet's floor is macOS 10.15 WebKit, where the affordance would have silently disappeared. */
+.seg:disabled {
   opacity: 0.5;
 }
-.seg input:disabled + span {
+.seg:disabled span {
   cursor: default;
 }
 

@@ -630,8 +630,8 @@ test("a failed set_theme reverts to the persisted choice instead of the clicked 
 test("the appearance control is not actionable until the stored value is known", async ({
   page,
 }) => {
-  // Hydration sits downstream of the whole bootstrap, so ANY slow request is a window in which a
-  // click would be silently reverted. Stalling get_system_info rather than autostart on purpose:
+  // Hydration sits downstream of the initial config+system-info pair, so a slow request in it is a
+  // window in which a click would be silently reverted. Stalling get_system_info on purpose:
   // an earlier version hydrated after the autostart await and passed a test that stalled only that,
   // while this sequence still lost the click.
   await page.addInitScript(() => {

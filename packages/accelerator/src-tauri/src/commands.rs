@@ -342,8 +342,9 @@ pub enum ThemeSource {
 ///
 /// Known residual: the cache is written by evaluating into each OPEN window, so it is not atomic
 /// with the config commit. A window built in that gap bakes the new theme but reads the old cached
-/// one, costing a single frame before the post-load re-assert corrects it. Distinguishing the two
-/// would need a revision marker, which is more machinery than a self-healing frame is worth.
+/// one, and shows it until the post-load re-assert lands — one paint on a fast load, longer if the
+/// document is slow. Distinguishing that from a genuinely stale cache would need a revision marker,
+/// which is more machinery than a self-healing transient is worth.
 pub fn theme_script(theme: config::Theme, source: ThemeSource) -> String {
     let value = match theme.data_attr() {
         Some(v) => format!("\"{v}\""),
