@@ -15,7 +15,7 @@ npm install @alejoamiras/aztec-accelerator
 bun add @alejoamiras/aztec-accelerator
 ```
 
-> The SDK's version mirrors the Aztec line it targets — SDK `X.Y.Z` is built against `@aztec/*` `X.Y.Z`. A bare install resolves npm `latest`, the release promoted as current-stable; the `testnet` dist-tag points at the newest release (`npm install @alejoamiras/aztec-accelerator@testnet`). The two are usually the same version, and differ while a newer line is being validated or if `latest` has been rolled back.
+> The SDK's version mirrors the Aztec line it targets — SDK `X.Y.Z` is built against `@aztec/*` `X.Y.Z`. A bare install resolves npm `latest`, the release promoted as current-stable; the `testnet` dist-tag points at the newest release on that track (`npm install @alejoamiras/aztec-accelerator@testnet`). The two are usually the same version, and differ while a newer line is being validated or if `latest` has been rolled back.
 
 The SDK ships its `@aztec/*` packages as exact-pinned **dependencies** (not peer dependencies), so it installs standalone. When your project already depends on the same exact `@aztec` version — the normal case for an Aztec dApp — npm/Bun dedupe them to a single `@aztec` graph.
 
