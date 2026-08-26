@@ -100,6 +100,7 @@ gh workflow run publish-testnet.yml -f skip_sdk_publish=true
 - [ ] `bun run --cwd packages/sdk test:lint` (typecheck) + `bun run --cwd packages/sdk test:unit` green; `bun run lint` clean (biome)
 - [ ] `@aztec/*` deps resolve to the intended version; `bun.lock` committed (`bun install --frozen-lockfile` passes). `packages/sdk/package.json`'s own `version` is a `0.0.0` placeholder, never hand-bumped.
 - [ ] Know the DERIVED publish version before dispatching. `scripts/get-sdk-publish-version.ts` takes the pinned `@aztec/stdlib` version as its base and returns it unchanged only when that exact string is unpublished; if the base is already on npm it appends a revision — `<base>-revision.N` for a stable base, `<base>.N` for a prerelease one (both keep the result valid semver). Run `bun scripts/get-sdk-publish-version.ts <base>` to see which. The two checks below apply to that DERIVED version, not the base.
+- [ ] `gh secret list | grep NPM_TOKEN` — if the timestamp is older than ~85 days, rotate BEFORE dispatching. Granular npm tokens expire on a 90-day lifetime and give no warning; the publish simply 404s. This has cost two releases (2026-05-27, 2026-08-26) and is the cheapest check on this list.
 - [ ] `npm view @alejoamiras/aztec-accelerator versions dist-tags --json` — confirms the derivation above, and that no other npm mutation is queued or in flight (`gh run list` for `publish-testnet.yml`, `_publish-sdk.yml`, `promote-latest.yml`; they share a non-cancelling concurrency group).
 - [ ] `git ls-remote origin 'refs/tags/@alejoamiras/aztec-accelerator@<derived-version>'` empty — the workflow's tag guard fires only AFTER npm publish, so a squatted tag would strand a published version without its release.
 - [ ] Consumer-fidelity proof at the dispatch commit — `sdk.yml`'s `tarball-consumer` job green at that SHA. It packs the REWRITTEN manifest; a bare `npm pack` does not (it ships `0.0.0` with source `exports`) and proves nothing about the published shape. To reproduce locally, mirror what CI does, from `packages/sdk` (the rewrite script's manifest argument defaults to a relative path):
@@ -134,6 +135,37 @@ gh workflow run promote-latest.yml -f version=<PREV_GOOD>
 - **What rollback does and does not fix.** Moving the tag back changes what NEW bare/`@latest` installs resolve. It does not downgrade anyone already installed, and it does not help range consumers (`^X.Y.Z`) — the published version stays eligible for their fresh or unlocked installs regardless of dist-tags, and a `X.Y.Z-revision.N` fix-forward is a semver *prerelease* their ranges will not match. Fix-forward for those consumers means the next real version.
 - **Append-only.** Never delete or re-publish a version to "undo" it; a colliding tag makes the publish step fail loud, and re-cutting the same version is a STOP-and-surface event.
 
+### Verifying a promote (two stale reads that fake a failure)
+
+**The registry read-back lags the write.** After a successful `npm dist-tag add`, `npm view` can
+still report the OLD tag for a while — on 2026-08-26 the promote workflow's own `npm view`, running
+0.4 s after its own successful `+latest: …@5.2.0`, still printed the previous version, and a local
+`npm view` a minute later agreed. Confirm with a read that bypasses caches instead:
+
+```bash
+curl -fsSL -H 'Cache-Control: no-cache' 'https://registry.npmjs.org/@alejoamiras%2faztec-accelerator' \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)["dist-tags"]))'
+```
+
+Never roll back on a stale read-back — that would undo a correct promote.
+
+**A local packument cache resolves the OLD `latest`.** A post-promote "fresh install" check on a
+machine that queried the package recently silently installs the PREVIOUS release and then fails on
+whatever the new version added — a convincing fake regression (it happened here: 5.0.1 installed
+minutes after 5.2.0 was promoted). Always revalidate:
+
+```bash
+cd "$(mktemp -d)" && npm init -y >/dev/null
+npm install @alejoamiras/aztec-accelerator --prefer-online --no-audit --no-fund
+node -p 'JSON.parse(require("fs").readFileSync("node_modules/@alejoamiras/aztec-accelerator/package.json","utf8")).version'
+node -e 'import("@alejoamiras/aztec-accelerator").then(m => console.log(typeof m.AcceleratorProver, m.ACCELERATOR_API_VERSION))'
+```
+
+Read the installed manifest from `node_modules/…` as above: the published `exports` map exposes
+only `"."`, so `require("@alejoamiras/aztec-accelerator/package.json")` correctly throws
+`ERR_PACKAGE_PATH_NOT_EXPORTED` — a verification script that reaches for an unexported subpath
+manufactures failures against a healthy package.
+
 ### After any FAILED publish or promote run
 
 Read the registry BEFORE classifying the failure — an npm command can fail after the registry accepted the change (a lost response, a failed trailing step):
@@ -142,9 +174,9 @@ Read the registry BEFORE classifying the failure — an npm command can fail aft
 npm view @alejoamiras/aztec-accelerator versions dist-tags --json
 ```
 
-**Failed publish.** Version absent + auth-shaped error (E401/E403/E404) → credential problem (this has happened: an expired `NPM_TOKEN` failed the upload *after* provenance was signed); rotate the secret, never blind-retry. Version present but a later leg failed → do NOT redispatch the publish (it would mint a revision suffix — `-revision.N` or `.N` per the derivation rule above); repair only the failed leg, and treat a missing tag/release as STOP-and-surface.
+**Failed publish.** Version absent + auth-shaped error (E401/E403/E404) → credential problem. npm answers **404, not 403**, for an unauthorized write to a scoped package, so "could not be found" here means permission, never a missing package — do not go looking for a naming or registry-config bug. Check the secret's AGE first: `gh secret list` prints last-updated timestamps (metadata only, no values). Both occurrences of this failure (2026-05-27, 2026-08-26) were `NPM_TOKEN` reaching the end of a 90-day granular-token lifetime — on the second, the secret was 91 days old and the last successful publish had been at day 83, which settled the diagnosis in one read-only call. Rotate the secret, never blind-retry. Version present but a later leg failed → do NOT redispatch the publish (it would mint a revision suffix — `-revision.N` or `.N` per the derivation rule above); repair only the failed leg, and treat a missing tag/release as STOP-and-surface.
 
-**Failed promote.** The tag move can succeed and the run still go red on a trailing step, so compare the observed `latest` against the version you requested: already the requested version → the mutation landed, do NOT re-dispatch (investigate the trailing failure only). Still the old version → the move did not land; safe to re-dispatch once the cause is understood. Anything else (a third version) → STOP and surface before any further mutation.
+**Failed promote.** The tag move can succeed and the run still go red on a trailing step. Judge by the *mutation's own output*, not by a read-back: a landed move prints `+latest: <pkg>@<version>` in the `Point npm latest at the version` step. Printed → the mutation landed, do NOT re-dispatch (investigate the trailing failure only). Not printed → the move did not land; safe to re-dispatch once the cause is understood. A read showing a THIRD version → STOP and surface before any further mutation. Note that a read showing the OLD version proves nothing on its own — see the lag below.
 
 ## Rollback Procedure (accelerator app)
 
