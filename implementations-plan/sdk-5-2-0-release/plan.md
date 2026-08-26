@@ -92,8 +92,12 @@ dispatched 2026-08-26 on `main`, `headSha=acb3d317…` == the Phase-1 merge comm
 - **Playground DID deploy** (`deploy-app` has no `needs:` edge on `publish-sdk` — recon fact 1):
   live bundle serves `VITE_AZTEC_SDK_VERSION:"5.2.0"`. The 5.2 playground half of the release is
   DONE; only the npm publish is blocked.
-- **Unblock**: owner rotates/repairs the `NPM_TOKEN` secret (see `lessons/phase-2.md` for the
-  read-only diagnostic checklist), then re-dispatch — the derived version is still bare `5.2.0`
+- **Cause identified (high confidence): the token expired.** `gh secret list` (metadata only)
+  shows `NPM_TOKEN` last updated 2026-05-27 — the previous rotation. This failure is day 91; the
+  last successful publish (2026-08-18) was day 83, consistent with a 90-day granular-token
+  lifetime. Nothing in the repo changed between those two dates.
+- **Unblock**: owner mints a fresh granular, package-scoped npm token and updates the `NPM_TOKEN`
+  secret, then re-dispatch — the derived version is still bare `5.2.0`
   because nothing was published.
 
 ### Original phase definition (unchanged — re-run from pre-flight on unblock)

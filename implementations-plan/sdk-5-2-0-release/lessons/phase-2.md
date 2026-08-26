@@ -42,7 +42,15 @@ npm owner ls @alejoamiras/aztec-accelerator       # does the token's identity st
 npm access list packages <scope-or-user>          # write access intact?
 ```
 
-Two plausible causes beyond simple expiry, both worth checking before minting a replacement:
+**Diagnosis narrowed to expiry by secret metadata** (read-only, no values exposed):
+`gh secret list` reports `NPM_TOKEN` last updated **2026-05-27T19:50:53Z** — the date of the
+previous incident's rotation. The failure is **day 91**; the last successful publish (2026-08-18,
+v2.0.0 GA / SDK 5.0.1-revision.1) was day 83. A 90-day granular-token lifetime fits exactly, and
+nothing about the repo changed in between. Prefer `gh secret list` over guesswork on any future
+credential failure: the age of the secret is often the whole diagnosis, costs one read-only call,
+and discloses nothing.
+
+Two other causes worth ruling out if the dates had NOT lined up:
 1. **Granular token expiry** — npm granular tokens carry a maximum lifetime and expire silently;
    the owner confirmed at approval that this is a granular, package-scoped token, which makes a
    time-based expiry the leading hypothesis.
