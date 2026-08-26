@@ -385,8 +385,11 @@ or (b) three stacked PRs (assets+app / playground / landing) cut from the commit
 `gh stack`. The flip is the owner's explicit call and is when CI first runs.
 
 ## Post-implementation (self-contained — the implementing session executes THIS section)
-1. After Phase 5's gate passes: `/code-review max --fix` on the full diff from the plan baseline
-   (`git merge-base origin/main HEAD`). Skim the applied fixes, commit them SEPARATELY
+1. After Phase 5's gate passes: `/code-review low --fix` on the full diff from the plan baseline
+   (`git merge-base origin/main HEAD`). Owner amendment 2026-08-26: the plan's original `max` was
+   killed as too token-expensive, and `medium` was killed too (it still fans out finder agents in
+   this build) — `low` is the executed level, chosen by the owner from the ladder
+   (low/medium/high/max/ultra). Skim the applied fixes, commit them SEPARATELY
    (`chore(review): apply code-review fixes`).
 2. Codex audit: `/codex xhigh` with (a) the net diff, (b) a summary of the code-review commits,
    (c) this plan.md + Decision ledger, (d) the adversarial/security ask ("what could go wrong? what

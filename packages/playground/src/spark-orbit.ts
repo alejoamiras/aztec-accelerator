@@ -126,11 +126,11 @@ export class SparkOrbitController {
   /** Current spark angle in degrees — monotonically non-decreasing across a run. */
   angle(): number {
     const held = Date.now() - this.#quadrantSince;
-    const p = this.#reduced
-      ? QUADRANT_CAP
-      : Math.min(QUADRANT_CAP, 1 - Math.exp(-held / QUADRANT_TAU_MS));
-    const q = this.#quadrant === 3 && this.#queue.current !== null ? 3 + p : this.#quadrant + p;
-    return this.#lap * 360 + q * 90;
+    // Quadrants 0-2 never cross their boundary without a phase (cap); ta-da may complete the
+    // lap so the spark lands exactly on top for the pop.
+    const cap = this.#quadrant === 3 ? 1 : QUADRANT_CAP;
+    const p = this.#reduced ? cap : Math.min(cap, 1 - Math.exp(-held / QUADRANT_TAU_MS));
+    return this.#lap * 360 + (this.#quadrant + p) * 90;
   }
 
   #enter(target: DialTarget): void {
