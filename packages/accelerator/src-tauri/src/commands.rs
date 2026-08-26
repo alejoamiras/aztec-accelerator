@@ -314,17 +314,6 @@ pub fn set_speed(
     mutate_config(&config, |cfg| cfg.speed = speed)
 }
 
-/// JS that pins `data-theme` on `<html>`, or clears it for [`Theme::System`].
-///
-/// Serves two callers with the same string: injected at window BUILD time via
-/// `initialization_script`, and evaluated again by `set_theme` on every open window so a change in
-/// Settings lands without reopening anything.
-///
-/// The build-time path is why this cannot just touch `document.documentElement`. Windows' WebView2
-/// runs document-created scripts before the document element exists, so a bare assignment would
-/// silently do nothing there; the observer applies the attribute the instant `<html>` appears, which
-/// is still ahead of first paint. Doing this at `on_page_load` instead would paint the OS palette
-/// first and visibly flip a frame later.
 /// Where the injected script gets the theme it applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeSource {
@@ -350,6 +339,11 @@ pub enum ThemeSource {
 /// `document.documentElement` cannot simply be assigned to: WebView2 runs document-created scripts
 /// before the element exists, so a bare assignment would silently no-op on Windows. The observer
 /// applies the attribute the instant `<html>` appears, still ahead of first paint.
+///
+/// Known residual: the cache is written by evaluating into each OPEN window, so it is not atomic
+/// with the config commit. A window built in that gap bakes the new theme but reads the old cached
+/// one, costing a single frame before the post-load re-assert corrects it. Distinguishing the two
+/// would need a revision marker, which is more machinery than a self-healing frame is worth.
 pub fn theme_script(theme: config::Theme, source: ThemeSource) -> String {
     let value = match theme.data_attr() {
         Some(v) => format!("\"{v}\""),

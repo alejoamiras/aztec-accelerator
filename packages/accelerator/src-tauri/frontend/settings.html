@@ -72,7 +72,9 @@
     </div>
     <!-- Radios, not a listbox: three fixed options that all fit, so the whole choice stays readable
          without opening anything and a click both expresses and applies the intent. `.seg` paints
-         them as a segmented control; the native inputs keep arrow-key roving and the group label. -->
+         them as a segmented control; the native inputs keep arrow-key roving and the group label.
+         Ship DISABLED like the autostart switch above: settings.js enables them only once the
+         stored value is known, so a click can never be silently undone by late hydration. -->
     <div class="row">
       <span class="row-text">
         <span id="theme-label">Appearance</span>
@@ -80,9 +82,9 @@
       </span>
       <fieldset class="seg" id="theme">
         <legend class="visually-hidden">Appearance</legend>
-        <label><input type="radio" name="theme" value="system" checked /><span>System</span></label>
-        <label><input type="radio" name="theme" value="light" /><span>Light</span></label>
-        <label><input type="radio" name="theme" value="dark" /><span>Dark</span></label>
+        <label><input type="radio" name="theme" value="system" disabled checked /><span>System</span></label>
+        <label><input type="radio" name="theme" value="light" disabled /><span>Light</span></label>
+        <label><input type="radio" name="theme" value="dark" disabled /><span>Dark</span></label>
       </fieldset>
     </div>
     <div class="speed-section">

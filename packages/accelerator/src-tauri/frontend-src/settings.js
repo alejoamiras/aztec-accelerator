@@ -45,11 +45,13 @@ async function loadSettings() {
 
   CPUS = sysInfo.cpu_count;
 
-  // Before the autostart await, not after: the radios are enabled from first paint, so hydrating
-  // downstream of an await would let a click during a slow query be overwritten by this stale value.
+  // Hydrate then enable, in that order. The radios ship disabled precisely so no click can land
+  // before the stored value is known — moving this earlier in the bootstrap only narrows the window,
+  // it does not close it, because every preceding await is a chance for the user to get there first.
   const theme = config.theme || "system";
   const themeInput = document.querySelector(`#theme input[value="${theme}"]`);
   if (themeInput) themeInput.checked = true;
+  for (const input of document.querySelectorAll("#theme input")) input.disabled = false;
 
   // codex r2 #6 / r3 #6: the autostart switch ships DISABLED (settings.html) and stays disabled until
   // its true state is CONFIRMED — so an unknown state is never presented as an actionable "off", and a

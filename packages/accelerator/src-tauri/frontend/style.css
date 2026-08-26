@@ -233,8 +233,9 @@ body {
    disclosure opens, the wizard when per-row results appear. Sizing the window for the tallest
    possible state would leave dead space in the common one, so these scroll instead. Renewal opts in
    too, as a floor under cross-platform font metrics rather than for a taller state — its consent
-   buttons must never end up unreachable. The authorize and update popups keep `overflow: hidden`
-   and manage their own inner scroll so their buttons stay pinned (F-014). */
+   buttons must never end up unreachable. Authorize and update-prompt keep `overflow: hidden`; the
+   authorize popup scrolls its origin list inside `.popup-scroll` so its buttons stay pinned
+   (F-014), and update-prompt has no growing region to scroll. */
 body.scrollable {
   overflow-y: auto;
   scrollbar-width: thin;
@@ -391,6 +392,14 @@ h2 {
 .seg input:focus-visible + span {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+/* Disabled until the stored value is known. Without this the pre-hydration state is visually
+   identical to the settled one, which invites the click it exists to prevent. */
+.seg:has(input:disabled) {
+  opacity: 0.5;
+}
+.seg input:disabled + span {
+  cursor: default;
 }
 
 /* A bordered container that HUGS its content and only scrolls past ~3 rows. A fixed height left

@@ -100,9 +100,9 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
         .on_navigation(is_local_asset_url)
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
         // The init script above resolves against `localStorage`, so a re-navigation paints the
-        // CURRENT theme rather than the one baked at build time. This re-assert is the repair path:
-        // it is the only place holding the live config, so it corrects a stored copy that drifted
-        // (a config edited between sessions) and rewrites it for the next navigation.
+        // cached theme rather than the one baked at build time. This is the repair path for when
+        // that cache is wrong: a config edited between sessions, or the write gap documented on
+        // `theme_script`. Re-reading config here settles it and refreshes the cache.
         .on_page_load(|window, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
