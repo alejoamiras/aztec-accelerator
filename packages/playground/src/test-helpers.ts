@@ -22,7 +22,7 @@ export function setupDOM(): void {
     <button id="deploy-btn" disabled></button>
     <button id="token-flow-btn" disabled></button>
     <div id="progress" class="hidden">
-      <pre id="ascii-art" class="ascii-art"></pre>
+      <div id="ascii-art" class="dial-host hidden"></div>
       <span id="ascii-elapsed"></span>
     </div>
     <section id="results" class="hidden"></section>

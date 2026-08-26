@@ -1,5 +1,4 @@
 import "./style.css";
-import { AsciiController } from "./ascii-animation";
 import {
   AZTEC_DISPLAY_URL,
   AZTEC_SDK_VERSION,
@@ -20,6 +19,7 @@ import {
   installWorkerDiagnostics,
 } from "./diagnostics";
 import { showResult, stepToPhase } from "./results";
+import { SparkOrbitController } from "./spark-orbit";
 import { $, $btn, appendLog, formatDuration, setStatus, startClock } from "./ui";
 import { sameMajor } from "./version";
 
@@ -34,10 +34,10 @@ async function checkServices(): Promise<void> {
   const accel = await checkAccelerator();
   updateAcceleratorLabel(accel);
   if (accel) {
-    appendLog("Native accelerator detected on localhost:59833", "success");
+    appendLog("Presto detected on localhost:59833", "success");
     $("accel-banner").classList.add("hidden");
   } else {
-    appendLog("Accelerator not detected, will fall back to WASM", "warn");
+    appendLog("Presto not detected, proving stays in-browser", "warn");
     if (!localStorage.getItem("accel-banner-dismissed")) {
       $("accel-banner").classList.remove("hidden");
     }
@@ -65,14 +65,14 @@ $("mode-local").addEventListener("click", () => {
   if (deploying) return;
   setUiMode("local");
   updateModeUI("local");
-  appendLog("Proving mode → WASM");
+  appendLog("Proving mode → in-browser");
 });
 
 $("mode-accelerated").addEventListener("click", () => {
   if (deploying) return;
   setUiMode("accelerated");
   updateModeUI("accelerated");
-  appendLog("Proving mode → Accelerated");
+  appendLog("Proving mode → Presto");
 });
 
 // ── Shared helpers ──
@@ -80,16 +80,16 @@ $("mode-accelerated").addEventListener("click", () => {
 /** Update the accelerator service label, CTA link, and button state. */
 function updateAcceleratorLabel(available: boolean): void {
   setStatus("accelerator-status", available);
-  $("accelerator-label").textContent = available ? "available" : "not detected, fallback: wasm";
+  $("accelerator-label").textContent = available ? "running" : "not detected, in-browser";
   $("accelerator-cta").classList.toggle("hidden", available);
 }
 
-/** Handle a prover phase: feed the animation and react to fallback. */
-function handleProverPhase(ascii: AsciiController, phase: string, _data?: unknown): void {
+/** Handle a prover phase: feed the dial and react to fallback. */
+function handleProverPhase(ascii: SparkOrbitController, phase: string, _data?: unknown): void {
   ascii.pushPhase(phase as Parameters<typeof ascii.pushPhase>[0]);
   if (phase === "fallback") {
     updateAcceleratorLabel(false);
-    appendLog("Accelerator offline, falling back to WASM (this will be slower)", "warn");
+    appendLog("Presto's offline, proving in-browser for now (slower)", "warn");
   }
 }
 
@@ -111,7 +111,7 @@ $("deploy-btn").addEventListener("click", async () => {
 
   $("progress").classList.remove("hidden");
 
-  const ascii = new AsciiController($("ascii-art"), document.getElementById("ascii-elapsed"));
+  const ascii = new SparkOrbitController($("ascii-art"), document.getElementById("ascii-elapsed"));
   ascii.start(state.uiMode);
 
   try {
@@ -156,7 +156,7 @@ $("token-flow-btn").addEventListener("click", async () => {
 
   $("progress").classList.remove("hidden");
 
-  const ascii = new AsciiController($("ascii-art"), document.getElementById("ascii-elapsed"));
+  const ascii = new SparkOrbitController($("ascii-art"), document.getElementById("ascii-elapsed"));
   ascii.start(state.uiMode);
 
   try {
@@ -206,7 +206,7 @@ async function initWallet(): Promise<void> {
     const networkLabel = $("network-label");
     if (state.proofsRequired) {
       networkLabel.textContent = "proofs enabled";
-      networkLabel.className = "text-amber-500/80 text-[10px] uppercase tracking-wider ml-auto";
+      networkLabel.className = "text-brand-warning text-[10px] uppercase tracking-wider ml-auto";
       appendLog("Ready. Deploy a test account to get started (proofs enabled)", "success");
     } else {
       networkLabel.textContent = "proofs simulated";
@@ -216,7 +216,7 @@ async function initWallet(): Promise<void> {
     }
   } else {
     $("wallet-state").textContent = "failed";
-    $("wallet-state").className = "text-red-400/80 ml-auto text-[10px] font-mono font-light";
+    $("wallet-state").className = "text-brand-danger ml-auto text-[10px] font-mono font-light";
     setStatus("wallet-dot", false);
   }
 }
@@ -256,8 +256,8 @@ async function init(): Promise<void> {
       appendLog(`Aztec node version: ${nodeVersion}`);
       if (sameMajor(AZTEC_SDK_VERSION, nodeVersion) === false) {
         appendLog(`Version mismatch: SDK ${AZTEC_SDK_VERSION} ≠ node ${nodeVersion}`, "warn");
-        sdkEl.classList.add("text-amber-500/80");
-        nodeEl.classList.add("text-amber-500/80");
+        sdkEl.classList.add("text-brand-warning");
+        nodeEl.classList.add("text-brand-warning");
       } else if (sameMajor(AZTEC_SDK_VERSION, nodeVersion) && nodeVersion !== AZTEC_SDK_VERSION) {
         appendLog(`SDK ${AZTEC_SDK_VERSION} / node ${nodeVersion}: same major, compatible`);
       }

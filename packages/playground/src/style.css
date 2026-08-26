@@ -1,111 +1,88 @@
 @import "tailwindcss";
 
+/* Presto tokens — light is home, dark is the designed twin. Utilities compile to var() refs, so
+   the dark blocks below re-assign the same custom properties and every utility follows. */
 @theme {
-  --color-brand-bg: #0b0a06;
-  --color-brand-surface: #131008;
-  --color-brand-surface-raised: #1a1610;
-  --color-brand-border: #2a2518;
-  --color-brand-text: #f0e8d0;
-  --color-brand-text-muted: #9a9080;
-  --color-brand-accent: #d4ff28;
-  --color-brand-accent-dim: #b8dd1e;
-  --color-brand-accent-on: #0e1400;
+  --color-brand-bg: #fffaf1;
+  --color-brand-surface: #ffffff;
+  --color-brand-surface-raised: #fff3dd;
+  --color-brand-border: #ece3d4;
+  --color-brand-text: #241b33;
+  --color-brand-text-muted: #6e6580;
+  --color-brand-accent: #3b4fe0;
+  --color-brand-accent-dim: #2f40c4;
+  --color-brand-accent-on: #ffffff;
+  --color-brand-gold: #ffc53d;
+  --color-brand-warning: #7a5a00;
+  --color-brand-danger: #b02d23;
+  --color-brand-go: #189e62;
+  --color-brand-go-text: #147a4c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-brand-bg: #191226;
+    --color-brand-surface: #221a33;
+    --color-brand-surface-raised: #2a2140;
+    --color-brand-border: #372c4e;
+    --color-brand-text: #f1ebe0;
+    --color-brand-text-muted: #9d93b0;
+    --color-brand-accent: #8b99ff;
+    --color-brand-accent-dim: #a5b0ff;
+    --color-brand-accent-on: #141026;
+    --color-brand-gold: #ffd066;
+    --color-brand-warning: #ffd87e;
+    --color-brand-danger: #ff6a5c;
+    --color-brand-go: #3fce8c;
+  --color-brand-go-text: #3fce8c;
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-brand-bg: #191226;
+  --color-brand-surface: #221a33;
+  --color-brand-surface-raised: #2a2140;
+  --color-brand-border: #372c4e;
+  --color-brand-text: #f1ebe0;
+  --color-brand-text-muted: #9d93b0;
+  --color-brand-accent: #8b99ff;
+  --color-brand-accent-dim: #a5b0ff;
+  --color-brand-accent-on: #141026;
+  --color-brand-gold: #ffd066;
+  --color-brand-warning: #ffd87e;
+  --color-brand-danger: #ff6a5c;
+  --color-brand-go: #3fce8c;
+  --color-brand-go-text: #3fce8c;
+}
+
+:root {
+  color-scheme: light dark;
 }
 
 @layer base {
   body {
-    font-family: "Inter", system-ui, -apple-system, sans-serif;
+    font-family: "Figtree", system-ui, -apple-system, sans-serif;
   }
 }
 
 /* ── Heading font ── */
 .font-display {
-  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
 }
 
 /* ── Monospace for terminal/log/code ── */
 .font-mono {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono",
+  font-family: "Fragment Mono", ui-monospace, SFMono-Regular, "SF Mono",
     Menlo, Consolas, monospace;
-}
-
-/* ── Dot grid background ── */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background-image: radial-gradient(circle, rgba(212, 255, 40, 0.04) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-
-/* ── Grain texture ── */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 45;
-  pointer-events: none;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-repeat: repeat;
-  background-size: 256px 256px;
-}
-
-/* ── Ambient glow ── */
-.app-layout {
-  position: relative;
-}
-
-.app-layout::before {
-  content: "";
-  position: absolute;
-  inset: -60px -40px;
-  z-index: -1;
-  pointer-events: none;
-  background: radial-gradient(
-    ellipse at 50% 20%,
-    rgba(212, 255, 40, 0.04) 0%,
-    transparent 55%
-  );
-  animation: ambient-pulse 8s ease-in-out infinite alternate;
-}
-
-@keyframes ambient-pulse {
-  from { opacity: 0.6; }
-  to { opacity: 1; }
 }
 
 /* ── Floating panels ── */
 .panel {
   position: relative;
-  background: rgba(19, 16, 8, 0.75);
-  backdrop-filter: blur(8px);
-  border-radius: 6px;
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 4px 12px rgba(0, 0, 0, 0.15),
-    inset 0 1px 0 rgba(212, 255, 40, 0.04);
-}
-
-.panel::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 8%;
-  right: 8%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(212, 255, 40, 0.12), transparent);
-  pointer-events: none;
-  border-radius: 6px 6px 0 0;
-}
-
-/* ── Title glow ── */
-.title-glow {
-  text-shadow:
-    0 0 15px rgba(212, 255, 40, 0.25),
-    0 0 40px rgba(212, 255, 40, 0.10);
+  background: var(--color-brand-surface);
+  border: 1px solid var(--color-brand-border);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px -14px color-mix(in srgb, var(--color-brand-text) 18%, transparent);
 }
 
 /* ── Status indicator LEDs ── */
@@ -114,22 +91,16 @@ body::after {
 }
 
 .status-unknown {
-  @apply bg-gray-700;
+  background-color: var(--color-brand-border);
 }
 
 .status-online {
-  background-color: var(--color-brand-accent);
-  box-shadow:
-    0 0 4px rgba(212, 255, 40, 0.50),
-    0 0 10px rgba(212, 255, 40, 0.20);
+  background-color: var(--color-brand-go);
   animation: led-breathe 3s ease-in-out infinite;
 }
 
 .status-offline {
-  @apply bg-red-400;
-  box-shadow:
-    0 0 4px oklch(from var(--color-red-400) l c h / 40%),
-    0 0 8px oklch(from var(--color-red-400) l c h / 15%);
+  background-color: var(--color-brand-danger);
 }
 
 @keyframes led-breathe {
@@ -139,90 +110,66 @@ body::after {
 
 /* ── Mode toggle buttons ── */
 .mode-btn {
-  @apply flex flex-col items-center py-2.5 px-2 text-xs font-medium uppercase tracking-wider
+  @apply flex flex-col items-center py-2.5 px-2 text-xs font-semibold
          border transition-all duration-150 border-brand-border text-brand-text-muted;
+  border-radius: 999px;
+  background: var(--color-brand-surface);
 }
 
 .mode-btn:not(:disabled):not(.mode-active):hover {
-  @apply border-brand-accent/30 text-brand-text;
-  box-shadow: 0 0 8px rgba(212, 255, 40, 0.06);
+  border-color: color-mix(in srgb, var(--color-brand-accent) 40%, var(--color-brand-border));
+  color: var(--color-brand-text);
 }
 
 /* ── Mode toggle active state ── */
 .mode-active {
-  border-color: rgba(212, 255, 40, 0.35);
-  color: var(--color-brand-accent);
-  background-color: rgba(212, 255, 40, 0.05);
-  box-shadow:
-    inset 0 0 20px rgba(212, 255, 40, 0.06),
-    0 0 12px rgba(212, 255, 40, 0.04);
+  border-color: var(--color-brand-accent);
+  color: var(--color-brand-accent-on);
+  background-color: var(--color-brand-accent);
 }
 
 /* ── Action buttons ── */
 .action-btn {
-  @apply w-full py-3 px-4 text-xs font-semibold uppercase tracking-widest
-         transition-all duration-150 border disabled:opacity-30
+  @apply w-full py-3 px-4 text-xs font-semibold
+         transition-all duration-150 border disabled:opacity-40
          disabled:cursor-not-allowed;
+  border-radius: 999px;
 }
 
 .action-btn-primary {
-  border-color: rgba(212, 255, 40, 0.25);
-  background: rgba(212, 255, 40, 0.06);
-  color: var(--color-brand-accent);
+  border-color: var(--color-brand-accent);
+  background: var(--color-brand-accent);
+  color: var(--color-brand-accent-on);
 }
 
 .action-btn-primary:not(:disabled):hover {
-  border-color: rgba(212, 255, 40, 0.4);
-  background: rgba(212, 255, 40, 0.1);
-  color: var(--color-brand-accent);
+  border-color: var(--color-brand-accent-dim);
+  background: var(--color-brand-accent-dim);
+  color: var(--color-brand-accent-on);
 }
 
 .action-btn-secondary {
   border-color: var(--color-brand-border);
-  background: rgba(26, 22, 16, 0.4);
+  background: var(--color-brand-surface);
   color: var(--color-brand-text-muted);
 }
 
 .action-btn-secondary:not(:disabled):hover {
-  border-color: rgba(212, 255, 40, 0.2);
+  border-color: color-mix(in srgb, var(--color-brand-accent) 35%, var(--color-brand-border));
   color: var(--color-brand-text);
 }
 
-/* ── Result card glow when filled ── */
+/* ── Result card highlight when filled ── */
 .result-filled {
-  border-color: rgba(212, 255, 40, 0.2) !important;
-  box-shadow:
-    0 0 16px rgba(212, 255, 40, 0.06),
-    inset 0 0 8px rgba(212, 255, 40, 0.03);
+  border-color: var(--color-brand-accent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand-accent) 12%, transparent);
 }
 
-.result-filled .text-gray-700 {
+.result-filled [id^="time-"] {
   color: var(--color-brand-accent);
 }
 
-/* ── Scan-line overlay with drift ── */
-.scanlines {
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(0, 0, 0, 0.03) 2px,
-    rgba(0, 0, 0, 0.03) 4px
-  );
-  animation: scanline-drift 8s linear infinite;
-}
-
-@keyframes scanline-drift {
-  from { background-position: 0 0; }
-  to { background-position: 0 4px; }
-}
-
-/* ── Log terminal depth ── */
-#log {
-  box-shadow: inset 0 8px 16px -8px rgba(0, 0, 0, 0.4);
-}
-
-/* ── Log scrollbar ── */
+/* ── Log terminal ── */
 #log::-webkit-scrollbar {
   width: 3px;
 }
@@ -242,9 +189,9 @@ body::after {
 
 /* ── Log line colors ── */
 .log-info { color: var(--color-brand-text-muted); }
-.log-warn { @apply text-amber-500/80; }
-.log-error { @apply text-red-400/80; }
-.log-success { color: rgba(212, 255, 40, 0.8); }
+.log-warn { color: var(--color-brand-warning); }
+.log-error { color: var(--color-brand-danger); }
+.log-success { color: var(--color-brand-go-text); }
 
 /* ── Log line hover highlight ── */
 #log > div {
@@ -253,7 +200,7 @@ body::after {
 }
 
 #log > div:hover {
-  background-color: rgba(26, 22, 16, 0.5);
+  background-color: color-mix(in srgb, var(--color-brand-surface-raised) 60%, transparent);
 }
 
 /* ── Step breakdown details/summary ── */
@@ -304,52 +251,117 @@ body::after {
 }
 
 .step-sim-row .step-dots {
-  border-bottom-color: rgba(42, 37, 24, 0.5);
+  border-bottom-color: color-mix(in srgb, var(--color-brand-border) 60%, transparent);
 }
 
-/* ── Emoji verification grid ── */
-.emoji-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  max-width: 200px;
-  margin: 0 auto;
-}
-
-.emoji-cell {
-  @apply text-2xl text-center p-1.5 rounded-sm;
-  border: 1px solid var(--color-brand-border);
-  background: rgba(19, 16, 8, 0.4);
-}
-
-/* ── Wallet selection cards ── */
-.wallet-choice-card:not(:disabled):hover {
-  border-color: rgba(212, 255, 40, 0.25);
-  color: var(--color-brand-accent);
-  box-shadow: 0 0 12px rgba(212, 255, 40, 0.08);
-}
-
-.wallet-choice-card:not(:disabled) {
-  cursor: pointer;
-}
-
-/* ── ASCII art animation ── */
-.ascii-art-container {
+/* ── Proving theater: the spark-orbit dial (built by spark-orbit.ts) ── */
+.dial-host {
   height: 224px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 6px;
 }
 
-.ascii-art {
-  @apply text-[10px] leading-[1.4] text-center whitespace-pre;
-  color: rgba(212, 255, 40, 0.5);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+.dial-host.hidden {
+  display: none;
 }
 
-/* ── Accelerator install banner ── */
+.dial-wrap {
+  position: relative;
+  width: 168px;
+  height: 168px;
+}
+
+.dial-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.dial-track {
+  stroke: var(--color-brand-border);
+  stroke-width: 2.4;
+}
+
+.dial-orb {
+  transition: transform 0.12s linear;
+}
+
+.dial-spark {
+  fill: var(--color-brand-gold);
+  animation: dial-breathe 2.4s ease-in-out infinite;
+}
+
+.dial-bolt {
+  fill: var(--color-brand-accent);
+  stroke: var(--color-brand-accent);
+  stroke-width: 4;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.dial-bolt-pop {
+  animation: dial-pop 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes dial-pop {
+  0% { transform: scale(0.75); }
+  60% { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+
+@keyframes dial-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.dial-label {
+  position: absolute;
+  font-family: "Fragment Mono", ui-monospace, monospace;
+  font-size: 9.5px;
+  color: var(--color-brand-text);
+  opacity: 0.35;
+  transition: opacity 0.25s;
+}
+
+.dial-label.on {
+  opacity: 1;
+  font-weight: 700;
+}
+
+.dial-label-0 { top: 2px; left: 50%; margin-left: -20px; }
+.dial-label-1 { right: 2px; top: 50%; margin-top: -7px; }
+.dial-label-2 { bottom: 2px; left: 50%; margin-left: -16px; }
+.dial-label-3 { left: 2px; top: 50%; margin-top: -7px; }
+
+.dial-phase {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-brand-text-muted);
+}
+
+/* In-browser mode: the run continues, the dial just says so — dimmed, never alarmed. */
+.dial-fallback .dial-spark {
+  fill: var(--color-brand-text-muted);
+}
+
+.dial-fallback .dial-track {
+  opacity: 0.6;
+}
+
+/* ── Presto install banner ── */
 .accel-banner {
-  border-left: 2px solid var(--color-brand-accent);
+  border-left: 3px solid var(--color-brand-accent);
+}
+
+/* ── Reduced motion: the dial renders statically (JS side) and CSS loops stop ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 /* ── Two-panel responsive layout ── */

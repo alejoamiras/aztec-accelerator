@@ -1,5 +1,5 @@
-import type { AnimationPhase } from "./ascii-animation";
 import type { StepTiming } from "./aztec";
+import type { AnimationPhase } from "./phase-queue";
 import { $, formatDuration } from "./ui";
 
 export function formatMs(ms: number): string {
@@ -175,7 +175,7 @@ export function showResult(
     tag === "token flow"
       ? "text-brand-accent/70"
       : tag === "cold"
-        ? "text-amber-500/70"
+        ? "text-brand-warning/70"
         : "text-brand-accent/70"
   }`;
 

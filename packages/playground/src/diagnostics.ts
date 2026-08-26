@@ -215,7 +215,7 @@ export function downloadDiagnostics(): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `aztec-accelerator-diagnostics-${Date.now()}.json`;
+  a.download = `presto-diagnostics-${Date.now()}.json`;
   a.click();
   URL.revokeObjectURL(url);
 }

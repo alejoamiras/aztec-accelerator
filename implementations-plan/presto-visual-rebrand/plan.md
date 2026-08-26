@@ -227,7 +227,7 @@ mocked UI e2e. In-phase: `bunx tauri dev` manual pass over all five windows, OS 
 (screenshots into lessons/; if dark does not propagate, implement the documented
 `onThemeChanged`→`data-theme` fallback IN THIS PHASE — light-only is not an outcome).
 
-### Phase 3 — Playground reskin + spark-orbit theater
+### Phase 3 — Playground reskin + spark-orbit theater ✓ (gate green 2026-08-26)
 `phase-queue.ts` extraction; `spark-orbit.ts` + tests (phaseToDial table incl. fallback-continues
 and idle-hold; reduced-motion via injected flag); delete `ascii-animation.ts` + test; rewire
 `main.ts`/`index.html`; `@theme` Presto + dark + `color-scheme` + literal conversion (incl. TS

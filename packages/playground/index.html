@@ -3,30 +3,30 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Aztec Accelerator — Playground</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 48 48' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M24,2 L46,24 L24,46 L2,24 Z M24,7.6 L7.6,24 L24,40.4 L40.4,24 Z' fill='%23d4ff28'/%3E%3Cpath d='M21.8,14.8 L27.1,14.8 L24.4,21.8 L27.9,21.8 L20.9,33.2 L23.6,25.3 L20.1,25.3 Z' fill='%23d4ff28'/%3E%3C/svg%3E" />
-  <meta name="description" content="Interactive demo comparing browser WASM proving vs native-speed accelerated proving on the Aztec network. Deploy accounts, run token flows, and see the speed difference live." />
-  <meta name="theme-color" content="#d4ff28" />
+  <title>Presto — Playground</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 48 48' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M26 5 L12 27 H21 L19 43 L36 19 H25 Z' fill='%233B4FE0' stroke='%233B4FE0' stroke-width='4' stroke-linejoin='round'/%3E%3Cpath d='M38 6 l1.7 3.6 3.6 1.7 -3.6 1.7 -1.7 3.6 -1.7-3.6 -3.6-1.7 3.6-1.7 Z' fill='%23FFC53D'/%3E%3C/svg%3E" />
+  <meta name="description" content="Interactive demo comparing in-browser proving with Presto's native-speed proving on the Aztec network. Deploy accounts, run token flows, and see the speed difference live." />
+  <meta name="theme-color" content="#FFFAF1" />
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#191226" />
   <link rel="canonical" href="https://playground.aztec-accelerator.dev" />
 
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://playground.aztec-accelerator.dev" />
-  <meta property="og:title" content="Aztec Accelerator — Playground" />
-  <meta property="og:description" content="Interactive demo comparing browser WASM vs native-speed accelerated proving on Aztec. Deploy accounts and run token flows live." />
+  <meta property="og:title" content="Presto — Playground" />
+  <meta property="og:description" content="Interactive demo comparing in-browser proving with Presto's native-speed proving on Aztec. Deploy accounts and run token flows live." />
+  <meta property="og:image" content="https://playground.aztec-accelerator.dev/og-image.png" />
 
   <!-- Twitter Card -->
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="Aztec Accelerator — Playground" />
-  <meta name="twitter:description" content="Interactive demo comparing browser WASM vs native-speed accelerated proving on Aztec. Try it live." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Presto — Playground" />
+  <meta name="twitter:description" content="Interactive demo comparing in-browser proving with Presto's native-speed proving on Aztec. Try it live." />
+  <meta name="twitter:image" content="https://playground.aztec-accelerator.dev/og-image.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;700;800&family=Inter:wght@400;500;700&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Figtree:wght@400..700&family=Fragment+Mono&display=swap" rel="stylesheet" />
 </head>
-<body class="bg-brand-bg text-brand-text min-h-screen antialiased selection:bg-brand-accent/30 selection:text-brand-accent">
-
-  <!-- Scan-line overlay -->
-  <div class="pointer-events-none fixed inset-0 z-50 scanlines"></div>
+<body class="bg-brand-bg text-brand-text min-h-screen antialiased selection:bg-brand-accent/25 selection:text-brand-text">
 
   <div class="relative z-10 flex flex-col min-h-screen">
 
@@ -35,16 +35,14 @@
       <div class="px-5 py-3 flex items-center gap-3">
         <a href="https://aztec-accelerator.dev" class="flex items-center gap-2 text-brand-accent hover:opacity-80 transition-opacity">
           <svg class="w-5 h-5" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M24,2 L46,24 L24,46 L2,24 Z M24,7.6 L7.6,24 L24,40.4 L40.4,24 Z" fill="currentColor"/>
-            <path d="M21.8,14.8 L27.1,14.8 L24.4,21.8 L27.9,21.8 L20.9,33.2 L23.6,25.3 L20.1,25.3 Z" fill="currentColor"/>
+            <path d="M26 5 L12 27 H21 L19 43 L36 19 H25 Z" fill="currentColor" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/>
           </svg>
         </a>
         <h1 class="font-display text-sm font-bold tracking-tight text-brand-text">
-          <span class="title-glow text-brand-accent">Aztec</span> Accelerator
+          presto<span class="text-brand-accent">✦</span><span class="text-brand-text-muted font-semibold">&thinsp;playground</span>
         </h1>
-        <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">Playground</span>
-        <span class="ml-auto text-[10px] text-brand-text-muted/50 font-mono tabular-nums" id="clock"></span>
-        <a href="https://github.com/alejoamiras/aztec-accelerator" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-brand-text-muted/50 hover:text-brand-text-muted transition-colors" title="GitHub">
+        <span class="ml-auto text-[10px] text-brand-text-muted/70 font-mono tabular-nums" id="clock"></span>
+        <a href="https://github.com/alejoamiras/aztec-accelerator" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-brand-text-muted/70 hover:text-brand-text-muted transition-colors" title="GitHub">
           <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           <span class="text-[10px] tracking-wide">GitHub</span>
         </a>
@@ -65,36 +63,36 @@
           <div class="px-4 py-3 space-y-2">
             <div class="flex items-center gap-3 text-xs">
               <span id="aztec-status" class="status-dot status-unknown"></span>
-              <span class="text-brand-text-muted/70 w-24">Aztec Node</span>
-              <span id="network-label" class="text-brand-text-muted/50 text-[10px] uppercase tracking-wider ml-auto"></span>
+              <span class="text-brand-text-muted w-24">Aztec Node</span>
+              <span id="network-label" class="text-brand-text-muted/70 text-[10px] uppercase tracking-wider ml-auto"></span>
             </div>
             <div class="flex items-center gap-1 text-xs pl-[22px]">
-              <span id="aztec-url" class="text-brand-text-muted/40 text-[10px] font-mono font-light">localhost:8080</span>
+              <span id="aztec-url" class="text-brand-text-muted/60 text-[10px] font-mono font-light">localhost:8080</span>
             </div>
             <div class="flex items-center gap-3 text-xs">
               <span id="accelerator-status" class="status-dot status-unknown"></span>
-              <span class="text-brand-text-muted/70 w-24">Accelerator</span>
-              <span id="accelerator-label" class="text-[10px] text-brand-text-muted/50 ml-auto">checking...</span>
+              <span class="text-brand-text-muted w-24">Presto</span>
+              <span id="accelerator-label" class="text-[10px] text-brand-text-muted/70 ml-auto">checking...</span>
             </div>
             <a id="accelerator-cta" href="https://aztec-accelerator.dev" target="_blank"
                class="hidden block text-[10px] text-brand-accent hover:text-brand-accent-dim transition-colors pl-[22px]">
-              Get the app &rarr;
+              Get Presto &rarr;
             </a>
             <div class="border-t border-brand-border/60 mt-2 pt-2 flex items-center gap-3 text-xs">
               <span id="wallet-dot" class="status-dot status-unknown"></span>
-              <span class="text-brand-text-muted/70 w-24">Wallet</span>
-              <span id="wallet-state" class="text-brand-text-muted/50 ml-auto text-[10px] font-mono font-light">not initialized</span>
+              <span class="text-brand-text-muted w-24">Wallet</span>
+              <span id="wallet-state" class="text-brand-text-muted/70 ml-auto text-[10px] font-mono font-light">not initialized</span>
             </div>
             <div id="versions-row" class="hidden border-t border-brand-border/40 mt-2 pt-1.5 space-y-1">
               <div class="flex items-center gap-3">
                 <span class="w-[11px] shrink-0"></span>
-                <span class="text-brand-text-muted/50 text-[10px] uppercase tracking-wider w-24 shrink-0">SDK</span>
-                <span id="version-sdk" class="text-[10px] text-brand-text-muted/40 font-mono font-light tabular-nums ml-auto"></span>
+                <span class="text-brand-text-muted/70 text-[10px] uppercase tracking-wider w-24 shrink-0">SDK</span>
+                <span id="version-sdk" class="text-[10px] text-brand-text-muted/60 font-mono font-light tabular-nums ml-auto"></span>
               </div>
               <div class="flex items-center gap-3">
                 <span class="w-[11px] shrink-0"></span>
-                <span class="text-brand-text-muted/50 text-[10px] uppercase tracking-wider w-24 shrink-0">Node</span>
-                <span id="version-node" class="text-[10px] text-brand-text-muted/40 font-mono font-light tabular-nums ml-auto"></span>
+                <span class="text-brand-text-muted/70 text-[10px] uppercase tracking-wider w-24 shrink-0">Node</span>
+                <span id="version-node" class="text-[10px] text-brand-text-muted/60 font-mono font-light tabular-nums ml-auto"></span>
               </div>
             </div>
           </div>
@@ -108,11 +106,11 @@
           <div id="proving-mode-container" class="p-3">
             <div class="grid grid-cols-2 gap-2">
               <button id="mode-local" class="mode-btn">
-                <span>WASM</span>
+                <span>In-browser</span>
                 <span class="mode-hint text-[9px] normal-case tracking-normal mt-1 opacity-60">slow</span>
               </button>
               <button id="mode-accelerated" class="mode-btn mode-active">
-                <span>Accelerated</span>
+                <span>Presto</span>
                 <span class="mode-hint text-[9px] normal-case tracking-normal mt-1 opacity-60">fastest</span>
               </button>
             </div>
@@ -141,24 +139,22 @@
 
         <div id="embedded-ui" class="hidden flex flex-col flex-1 overflow-hidden p-2 gap-2">
 
-          <!-- Accelerator install banner -->
+          <!-- Presto install banner -->
           <div id="accel-banner" class="hidden accel-banner panel px-4 py-2 flex items-center gap-3 text-xs">
-            <span class="text-brand-accent">&#9670;</span>
-            <span class="text-brand-text-muted">Your proofs are running in-browser. <a href="https://aztec-accelerator.dev" target="_blank" class="text-brand-accent hover:text-brand-accent-dim transition-colors">Get the Accelerator</a> to prove at full native speed.</span>
-            <button id="accel-banner-dismiss" class="ml-auto text-brand-text-muted/50 hover:text-brand-text transition-colors text-sm leading-none" aria-label="Dismiss">&times;</button>
+            <span class="text-brand-accent">✦</span>
+            <span class="text-brand-text-muted">Your proofs are running in-browser. <a href="https://aztec-accelerator.dev" target="_blank" class="text-brand-accent hover:text-brand-accent-dim transition-colors">Get Presto</a> to go full speed.</span>
+            <button id="accel-banner-dismiss" class="ml-auto text-brand-text-muted/70 hover:text-brand-text transition-colors text-sm leading-none" aria-label="Dismiss">&times;</button>
           </div>
 
-          <!-- ASCII ANIMATION -->
+          <!-- PROVING THEATER (spark-orbit dial) -->
           <div id="progress" class="hidden panel">
             <div class="border-b border-brand-border px-4 py-1.5">
               <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">proving</span>
             </div>
             <div class="p-3">
-              <div class="ascii-art-container">
-                <pre id="ascii-art" class="ascii-art"></pre>
-              </div>
+              <div id="ascii-art" class="dial-host hidden"></div>
               <div class="text-center mt-1 h-4">
-                <span id="ascii-elapsed" class="text-[10px] text-brand-text-muted/50 font-mono tabular-nums"></span>
+                <span id="ascii-elapsed" class="text-[10px] text-brand-text-muted/70 font-mono tabular-nums"></span>
               </div>
             </div>
           </div>
@@ -170,16 +166,16 @@
             </div>
             <div class="p-3">
               <div class="grid grid-cols-2 gap-2">
-                <div id="result-local" class="border border-brand-border p-4 text-center transition-colors rounded">
-                  <div class="text-[10px] uppercase tracking-[0.15em] text-brand-text-muted mb-2">WASM</div>
-                  <div id="time-local" class="text-3xl font-bold tabular-nums text-gray-700 font-mono">—</div>
-                  <div id="tag-local" class="mt-1.5 text-[10px] uppercase tracking-widest text-gray-700"></div>
+                <div id="result-local" class="border border-brand-border p-4 text-center transition-colors rounded-xl">
+                  <div class="text-[10px] uppercase tracking-[0.15em] text-brand-text-muted mb-2">In-browser</div>
+                  <div id="time-local" class="text-3xl font-bold tabular-nums text-brand-text-muted/60 font-mono">—</div>
+                  <div id="tag-local" class="mt-1.5 text-[10px] uppercase tracking-widest text-brand-text-muted/60"></div>
                   <div id="steps-local" class="hidden mt-2 pt-2 border-t border-brand-border/40 text-left"></div>
                 </div>
-                <div id="result-accelerated" class="border border-brand-border p-4 text-center transition-colors rounded">
-                  <div class="text-[10px] uppercase tracking-[0.15em] text-brand-text-muted mb-2">Accelerated (native)</div>
-                  <div id="time-accelerated" class="text-3xl font-bold tabular-nums text-gray-700 font-mono">—</div>
-                  <div id="tag-accelerated" class="mt-1.5 text-[10px] uppercase tracking-widest text-gray-700"></div>
+                <div id="result-accelerated" class="border border-brand-border p-4 text-center transition-colors rounded-xl">
+                  <div class="text-[10px] uppercase tracking-[0.15em] text-brand-text-muted mb-2">With Presto</div>
+                  <div id="time-accelerated" class="text-3xl font-bold tabular-nums text-brand-text-muted/60 font-mono">—</div>
+                  <div id="tag-accelerated" class="mt-1.5 text-[10px] uppercase tracking-widest text-brand-text-muted/60"></div>
                   <div id="steps-accelerated" class="hidden mt-2 pt-2 border-t border-brand-border/40 text-left"></div>
                 </div>
               </div>
@@ -190,14 +186,14 @@
           <section class="panel flex-1 flex flex-col min-h-0" aria-label="Activity log">
             <div class="border-b border-brand-border px-4 py-1.5 flex items-center">
               <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">log</span>
-              <span id="log-count" class="ml-auto text-[10px] text-brand-text-muted/40 tabular-nums font-mono">0 entries</span>
-              <button id="export-diagnostics-btn" class="ml-2 text-[10px] text-brand-text-muted/40 hover:text-brand-accent transition-colors uppercase tracking-wider" title="Download diagnostic log as JSON">Export</button>
+              <span id="log-count" class="ml-auto text-[10px] text-brand-text-muted/60 tabular-nums font-mono">0 entries</span>
+              <button id="export-diagnostics-btn" class="ml-2 text-[10px] text-brand-text-muted/60 hover:text-brand-accent transition-colors uppercase tracking-wider" title="Download diagnostic log as JSON">Export</button>
             </div>
             <div
               id="log"
               role="log"
               aria-live="polite"
-              class="flex-1 overflow-y-auto text-[11px] leading-[1.6] text-brand-text-muted bg-black/40 px-3 py-2 space-y-px scroll-smooth font-mono"
+              class="flex-1 overflow-y-auto text-[11px] leading-[1.6] text-brand-text-muted bg-brand-surface-raised/40 px-3 py-2 space-y-px scroll-smooth font-mono"
             ></div>
           </section>
 
@@ -208,8 +204,8 @@
           <div class="border-b border-brand-border px-4 py-1.5 flex items-center">
             <span class="text-[10px] uppercase tracking-[0.2em] text-brand-text-muted">log</span>
           </div>
-          <div class="flex-1 overflow-y-auto text-[11px] leading-[1.6] text-brand-text-muted bg-black/40 px-3 py-2 font-mono flex items-center justify-center">
-            <span class="text-brand-text-muted/30 text-xs uppercase tracking-widest">Initializing...</span>
+          <div class="flex-1 overflow-y-auto text-[11px] leading-[1.6] text-brand-text-muted bg-brand-surface-raised/40 px-3 py-2 font-mono flex items-center justify-center">
+            <span class="text-brand-text-muted/50 text-xs uppercase tracking-widest">Initializing...</span>
           </div>
         </section>
 
@@ -218,8 +214,8 @@
     </div>
 
     <!-- FOOTER -->
-    <footer class="text-center text-[10px] text-brand-text-muted/40 py-2 mx-2 mb-2 tracking-wide">
-      made with &hearts; by <a href="https://github.com/alejoamiras/aztec-accelerator" class="text-brand-accent/70 hover:text-brand-accent">alejo</a>
+    <footer class="text-center text-[10px] text-brand-text-muted/60 py-2 mx-2 mb-2 tracking-wide">
+      made by <a href="https://github.com/alejoamiras/aztec-accelerator" class="text-brand-accent/80 hover:text-brand-accent">alejo</a>, with a little magic <span class="text-brand-accent">✦</span>
     </footer>
 
   </div>
