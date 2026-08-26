@@ -160,4 +160,18 @@ describe("SparkOrbitController", () => {
     expect(c.angle()).toBeGreaterThan(atTada);
     c.stop();
   });
+
+  test("a repeated same-quadrant phase after a lap never rewinds the angle", async () => {
+    const c = new SparkOrbitController(host, elapsed, { reducedMotion: false });
+    c.start("accelerated");
+    c.pushPhase("proved"); // quadrant 3
+    await sleep(MIN_DISPLAY_MS + 80);
+    c.pushPhase("app:simulate"); // laps to quadrant 0
+    await sleep(MIN_DISPLAY_MS + 80);
+    const afterLap = c.angle();
+    c.pushPhase("detect"); // same quadrant 0 again — must not reset easing
+    await sleep(MIN_DISPLAY_MS + 80);
+    expect(c.angle()).toBeGreaterThanOrEqual(afterLap);
+    c.stop();
+  });
 });

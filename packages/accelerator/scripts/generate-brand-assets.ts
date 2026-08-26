@@ -4,7 +4,8 @@
  *   bun scripts/generate-brand-assets.ts --target app-icons   # icns/ico/png ladder via `tauri icon`
  *   bun scripts/generate-brand-assets.ts --target tray        # tray-idle + 24 orbit frames (SVG+PNG)
  *   bun scripts/generate-brand-assets.ts --target og-landing | og-playground   # 1200×630 via chromium
- *   bun scripts/generate-brand-assets.ts --check              # re-render icons+tray, byte-compare
+ *   bun scripts/generate-brand-assets.ts --check              # byte-reproduce the TRAY assets
+ *                                                             # (app icons: sha256 manifest test)
  *   bun scripts/generate-brand-assets.ts --write-manifest     # refresh brand-assets.sha256.json
  *
  * Determinism: icon/tray rendering is resvg-wasm with system fonts disabled and no text, so bytes

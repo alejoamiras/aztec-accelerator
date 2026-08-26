@@ -142,7 +142,9 @@ export class SparkOrbitController {
     if (target.quadrant < this.#quadrant) {
       this.#lap += 1; // a new run — keep the angle growing, never rewind
     }
-    if (target.quadrant !== this.#quadrant || this.#lap > 0) {
+    // Reset easing only on a quadrant CHANGE (a lap always is one); a repeated same-quadrant
+    // phase must not restart p, or the angle would dip backwards.
+    if (target.quadrant !== this.#quadrant) {
       this.#quadrantSince = Date.now();
     }
     this.#quadrant = target.quadrant;

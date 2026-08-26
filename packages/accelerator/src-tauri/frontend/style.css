@@ -64,8 +64,8 @@
   --thumb-shadow: rgba(0, 0, 0, 0.55);
 }
 
-/* Vendored subsets (fonts/LICENSES.md); the app CSP is `style-src 'self'`, so faces must be
-   same-origin — never a fonts.googleapis.com link. */
+/* Vendored subsets (fonts/LICENSES.md). The CSP has no font-src, so font fetches fall back to
+   `default-src 'self'` — faces must be same-origin, never a fonts.googleapis.com link. */
 @font-face {
   font-family: "Bricolage Grotesque";
   font-style: normal;
@@ -557,6 +557,27 @@ h2 {
 .speed-slider::-webkit-slider-thumb:active {
   box-shadow: 0 0 0 6px rgba(59, 79, 224, 0.28), 0 1px 4px var(--thumb-shadow);
   box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 28%, transparent), 0 1px 4px var(--thumb-shadow);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .speed-slider::-webkit-slider-thumb:hover {
+    box-shadow: 0 0 0 4px rgba(139, 153, 255, 0.2), 0 1px 4px var(--thumb-shadow);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent), 0 1px 4px var(--thumb-shadow);
+  }
+  :root:not([data-theme="light"]) .speed-slider::-webkit-slider-thumb:active {
+    box-shadow: 0 0 0 6px rgba(139, 153, 255, 0.3), 0 1px 4px var(--thumb-shadow);
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 30%, transparent), 0 1px 4px var(--thumb-shadow);
+  }
+}
+
+:root[data-theme="dark"] .speed-slider::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 4px rgba(139, 153, 255, 0.2), 0 1px 4px var(--thumb-shadow);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent), 0 1px 4px var(--thumb-shadow);
+}
+
+:root[data-theme="dark"] .speed-slider::-webkit-slider-thumb:active {
+  box-shadow: 0 0 0 6px rgba(139, 153, 255, 0.3), 0 1px 4px var(--thumb-shadow);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 30%, transparent), 0 1px 4px var(--thumb-shadow);
 }
 
 .speed-slider::-moz-range-thumb {

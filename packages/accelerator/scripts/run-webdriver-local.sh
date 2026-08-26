@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Local WebDriver E2E: builds the webdriver-featured app, supervises it (and, when needed, an
 # owned Xvfb/DBus/stalonetray stack mirroring _e2e-webdriver.yml), runs the WDIO suite, and tears
-# down ONLY what it started. Fails fast when the host cannot provide a display — install
+# down ONLY what it started. Fails fast when the host cannot provide a display; fix with
 #   sudo apt install xvfb stalonetray dbus-x11
-# or defer the suite to CI (see the plan's deferred-with-consent contingency).
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,6 +44,7 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null; then
     eval "$(dbus-launch --sh-syntax)"
     export DBUS_SESSION_BUS_ADDRESS
+    [ -n "${DBUS_SESSION_BUS_PID:-}" ] && OWNED_PGIDS+=("$DBUS_SESSION_BUS_PID")
   fi
   setsid stalonetray >/dev/null 2>&1 &
   OWNED_PGIDS+=("$!")
@@ -73,15 +73,22 @@ APP_LOG="$PKG_DIR/../../$LOG_DIR/webdriver-app.log"
 setsid "$BIN" >"$APP_LOG" 2>&1 &
 OWNED_PGIDS+=("$!")
 
-# ── Readiness: webdriver port + health endpoint ──
+# ── Readiness: BOTH the webdriver port and the health endpoint, and the app still alive ──
+APP_PID="${OWNED_PGIDS[${#OWNED_PGIDS[@]}-1]}"
+ready=0
 for _ in $(seq 1 60); do
+  if ! kill -0 "$APP_PID" 2>/dev/null; then
+    echo "ERROR: the app exited during startup; log: $APP_LOG" >&2
+    exit 1
+  fi
   if ! port_free 4445 && curl -fsS "http://127.0.0.1:59833/health" >/dev/null 2>&1; then
+    ready=1
     break
   fi
   sleep 1
 done
-if port_free 4445; then
-  echo "ERROR: webdriver port 4445 never became ready; app log: $APP_LOG" >&2
+if [ "$ready" != 1 ]; then
+  echo "ERROR: webdriver (4445) + health (59833) never both became ready; app log: $APP_LOG" >&2
   exit 1
 fi
 

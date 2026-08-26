@@ -1,8 +1,8 @@
 /**
  * Dual-theme rendering: the Presto token sheet must resolve per prefers-color-scheme, and the
  * [data-theme] override (the Rust eval fallback channel) must beat the media query in both
- * directions. Chromium's colorScheme emulation stands in for the OS; actual webview propagation
- * is exercised by the WebDriver suite on a real build.
+ * directions. Chromium's colorScheme emulation stands in for the OS; whether a real webview
+ * propagates the OS theme into prefers-color-scheme is outside this suite's reach.
  */
 import { expect, test } from "@playwright/test";
 

@@ -1,10 +1,13 @@
 /**
  * Rebrand sweep, two directions:
  *  1. Retired visual values (old palette hexes, old font families) must be GONE from every
- *     product surface — a token swap that misses a hardcoded literal fails here, not in review.
+ *     product surface — a token swap that misses a hardcoded literal fails here, not in front of
+ *     a user.
  *  2. Frozen operational identity must be byte-INTACT: the visual rebrand may never leak
  *     "Presto" into identity-bearing files, and every frozen literal must still exist at its site.
  * Patterns are word-boundary/quoted on purpose: bare `Inter` matches IntersectionObserver.
+ * Presence checks are the guarantee level here; exact-field pinning of tauri.conf.json lives in
+ * packages/accelerator/scripts/tauri-identity.test.ts.
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
@@ -125,7 +128,7 @@ describe("brand sweep", () => {
     expect(leaks).toEqual([]);
   });
 
-  test("all CI workflows are untouched by the rebrand", async () => {
+  test("no CI workflow mentions the visual brand", async () => {
     const wfDir = join(ROOT, ".github", "workflows");
     const leaks: string[] = [];
     for (const f of readdirSync(wfDir).filter((f) => f.endsWith(".yml"))) {
@@ -133,5 +136,17 @@ describe("brand sweep", () => {
       if (/presto/i.test(text)) leaks.push(f);
     }
     expect(leaks).toEqual([]);
+  });
+
+  test("workflows and composite actions carry no uncommitted rebrand edits vs origin/main", () => {
+    // A real untouched-check, not a keyword scan. Only meaningful where origin/main exists
+    // (local dev, CI checkouts with history); skipped silently on shallow throwaway clones.
+    const probe = Bun.spawnSync(["git", "rev-parse", "--verify", "origin/main"], { cwd: ROOT });
+    if (probe.exitCode !== 0) return;
+    const diff = Bun.spawnSync(
+      ["git", "diff", "--name-only", "origin/main", "--", ".github/workflows", ".github/actions"],
+      { cwd: ROOT },
+    );
+    expect(diff.stdout.toString().trim()).toBe("");
   });
 });
