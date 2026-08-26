@@ -27,7 +27,12 @@
 
 ---
 
-## Phase 1 — Docs-truth PR (the only repo change before publishing; merges BEFORE any dispatch)
+## Phase 1 ✓ — Docs-truth PR — GREEN 2026-08-26: PR #479 merged (squash) with rollup
+`SUCCESS×20 SKIPPED×17`, zero failures; **Tarball Consumer pass (1m19s)** and SDK E2E pass at the
+PR head. `bun run lint` exit 0 locally at every round. Codex loop: reject (3 blocking: shipped-README
+temporal falsity, missing promote-failure triage, wrong-manifest local recipe) → reject → conditional
+→ **approve**. Lessons: `lessons/phase-1.md`. CI-trigger gotcha recorded there: the push+`gh pr create`
+raced and produced ZERO workflow runs; an empty commit was needed to trigger them.
 
 The stale dist-tag story ships inside the tarball if uncorrected (`packages/sdk/README.md` is
 packed by npm always; its line 18 still says "Aztec 5.0 line (`5.0.0-rc.x`), install `testnet`").
@@ -62,7 +67,59 @@ pre-flight instead and note it.
 - `bun run lint` exit 0; PR CI green on all required checks; merged to main.
 - Layers: lint · CI required checks.
 
-## Phase 2 — Pre-flight + publish dispatch (`publish-testnet.yml`)
+## Phase 2 ✓ — GREEN 2026-08-26 on the second dispatch, after the owner rotated `NPM_TOKEN`
+
+Run [32995296830](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32995296830),
+`headSha=acb3d317d4d64ca2aeee2e7a8d0d7dd90365e39b` == the approved merge commit (asserted before
+watching). Pre-flight re-run in full first: registry still had no `5.2.0`, tag still absent, no
+in-flight npm mutation, HEAD unmoved at `acb3d31` (so the earlier tarball proof at that exact SHA
+still stood). All jobs green including `Publish to npm` and `Create git tag and GitHub release`.
+
+Verify bullets, all four passing:
+1. `npm view … dist-tags` → `{"nightlies":"4.2.0-nightly.20260413.1","latest":"5.0.1","testnet":"5.2.0"}`
+   — testnet moved, **`latest` untouched at 5.0.1** exactly as designed.
+2. `5.2.0` resolves (`dist.integrity = sha512-SjgdAEFcllcrbl0U6kZnbr3e16rHqjlAWoOXw1oUx0sLa5+1hiVylpeZn3/l0nMdtTso1ouGuDVF5ywLh1xOsQ==`)
+   and provenance is attached: `dist.attestations` present with `predicateType
+   https://slsa.dev/provenance/v1`.
+3. Tag `@alejoamiras/aztec-accelerator@5.2.0` → `acb3d317d4d64ca2aeee2e7a8d0d7dd90365e39b` (the
+   dispatch SHA); GitHub release `draft=false prerelease=false target=main assets=MIGRATION.md`,
+   and it does NOT hold the repo's Latest badge (the `--latest=false` invariant held).
+4. Playground live: `assets/index-CauoAjA1.js` serves `VITE_AZTEC_SDK_VERSION:"5.2.0"`.
+
+### First dispatch (failed, kept for the record)
+
+Run [32993796578](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32993796578),
+dispatched 2026-08-26 on `main`, `headSha=acb3d317…` == the Phase-1 merge commit (assert passed).
+
+- Pre-flight 1–5 ALL GREEN: registry had no `5.2.0` (`latest=5.0.1`, `testnet=5.0.1-revision.1`);
+  tag `@alejoamiras/aztec-accelerator@5.2.0` absent; no queued/in-flight run in any of the three
+  npm-mutating workflows; HEAD == merge commit; derived version = bare **5.2.0**; local
+  tarball-consumer proof at `acb3d31` exit 0 ("packed tarball resolves + typechecks; exact-host
+  @aztec graph is a singleton"), manifest restored clean.
+- Jobs: `Assert main ref` ✓ · `e2e / SDK E2E` ✓ (native-bb leg) · `deploy-app` ✓ ·
+  **`publish-sdk` ✗**.
+- **npm rejected the publish**: `npm error 404 The requested resource
+  '@alejoamiras/aztec-accelerator@5.2.0' could not be found or you do not have permission to
+  access it.` npm packed the tarball first (contents logged), so the failure is at the registry
+  PUT, not in our build.
+- **Registry state re-read FIRST per protocol** (quoted in transcript): `5.2.0` ABSENT, dist-tags
+  UNCHANGED (`latest=5.0.1`, `testnet=5.0.1-revision.1`). Nothing was published; no `-revision.N`
+  risk; the tag/GitHub-release step never ran.
+- Classification: version-absent + auth-shaped E404 = the documented 2026-05-27 incident shape
+  (`implementations-plan/release-2026-05-27/lessons/phase-3b.md`) — a credential problem, NOT a
+  code problem. Per protocol: STOPPED, zero retries, token untouched, surfaced to owner.
+- **Playground DID deploy** (`deploy-app` has no `needs:` edge on `publish-sdk` — recon fact 1):
+  live bundle serves `VITE_AZTEC_SDK_VERSION:"5.2.0"`. The 5.2 playground half of the release is
+  DONE; only the npm publish is blocked.
+- **Cause identified (high confidence): the token expired.** `gh secret list` (metadata only)
+  shows `NPM_TOKEN` last updated 2026-05-27 — the previous rotation. This failure is day 91; the
+  last successful publish (2026-08-18) was day 83, consistent with a 90-day granular-token
+  lifetime. Nothing in the repo changed between those two dates.
+- **Unblock**: owner mints a fresh granular, package-scoped npm token and updates the `NPM_TOKEN`
+  secret, then re-dispatch — the derived version is still bare `5.2.0`
+  because nothing was published.
+
+### Original phase definition (unchanged — re-run from pre-flight on unblock)
 
 Pre-flight (read-only, from the dispatch-intended main HEAD):
 1. `npm view @alejoamiras/aztec-accelerator dist-tags versions --json` — assert `5.2.0` absent,
@@ -129,7 +186,24 @@ healthy (probe ops, not status flags, if in doubt).
   step 7 pass.
 - Layers: CI e2e (sandbox, native-bb) · registry state · live-site check.
 
-## Phase 3 — Promote `latest` (`promote-latest.yml`) + close-out
+## Phase 3 ✓ — GREEN 2026-08-26: npm `latest` = 5.2.0, verified by a newcomer's install
+
+Run [32995776080](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32995776080),
+all steps green (`Validate version format` · `Verify the version is already published` ·
+`Point npm latest at the version` → `+latest: @alejoamiras/aztec-accelerator@5.2.0`).
+
+Gate outputs:
+- `dist-tags` → `{"nightlies":"4.2.0-nightly.20260413.1","latest":"5.2.0","testnet":"5.2.0"}`.
+  **Read-back lag**: the workflow's own `npm view` 0.4 s after the successful tag write still
+  showed `latest: '5.0.1'`, as did a local `npm view` a minute later — registry/CDN propagation,
+  not a failed promote (the write itself printed `+latest: …@5.2.0`). Confirmed with a
+  cache-bypassing packument fetch. **Do not treat a stale read-back as a failed promote**; compare
+  against the write's own output first, per the runbook's failed-promote triage.
+- Newcomer install: fresh temp dir, `npm init -y`, bare `npm install @alejoamiras/aztec-accelerator`
+  → installed **5.2.0**; ESM import → `exports OK: AcceleratorProver=function,
+  ACCELERATOR_API_VERSION=1`; exit 0. No rollback needed.
+
+### Original phase definition (executed as written)
 
 1. `gh workflow run promote-latest.yml -f version=5.2.0` → confirm started → watch.
 2. Verify: `npm view @alejoamiras/aztec-accelerator dist-tags --json` → `latest=5.2.0`,
