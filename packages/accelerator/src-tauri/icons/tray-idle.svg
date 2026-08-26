@@ -1,4 +1,3 @@
-<svg width="300" height="300" viewBox="40 40 220 220" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M150,50 L250,150 L150,250 L50,150 Z M150,75 L75,150 L150,225 L225,150 Z" fill="black"/>
-  <path d="M140,108 L164,108 L152,140 L168,140 L136,192 L148,156 L132,156 Z" fill="black"/>
+<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <path d="M26 5 L12 27 H21 L19 43 L36 19 H25 Z" fill="black" stroke="black" stroke-width="4" stroke-linejoin="round"/>
 </svg>

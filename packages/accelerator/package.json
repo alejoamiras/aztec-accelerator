@@ -15,7 +15,11 @@
     "test:unit": "bun test scripts/"
   },
   "devDependencies": {
+    "@fontsource/bricolage-grotesque": "^5.3.0",
+    "@fontsource/figtree": "^5.3.0",
+    "@fontsource/fragment-mono": "^5.3.0",
     "@playwright/test": "^1.58.2",
+    "@resvg/resvg-wasm": "^2.6.2",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/cli": "^2",
     "@wdio/cli": "^9",
