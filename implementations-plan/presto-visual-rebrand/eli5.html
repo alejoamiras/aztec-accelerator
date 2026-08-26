@@ -144,37 +144,31 @@ li{margin:.3rem 0}
   meet both names. The site says Presto, but the installer they download, the app list entry, and
   the certificate prompt still say Aztec Accelerator. That is the one open question below.</p>
 
-  <h2>Open question (needs your call)</h2>
+  <h2>Open question: resolved</h2>
   <div class="ask">
-    <p><b class="t">Bridging copy at the name seams.</b> Both reviewers flagged that unexplained
-    name mismatches on trust prompts teach users bad habits. Pick one:</p>
-    <ul>
-      <li><b>(a) No bridging copy.</b> Cleanest look, mismatch unexplained.</li>
-      <li><b>(b) Recommended: one plain sentence at the three seams.</b> Download section
-      ("Installs as 'Aztec Accelerator' until our full rename"), the certificate row in the app,
-      and the update prompt. Honest, cheap, easy to delete after the real rename.</li>
-      <li><b>(c) Only in Settings</b>, next to Manage certificate.</li>
-    </ul>
+    <p><b class="t">Bridging copy at the name seams: decided (option b, three seams).</b> Approved
+    2026-08-26: one plain sentence at the download section ("Installs as 'Aztec Accelerator' until
+    our full rename"), the certificate row in the app, and the update prompt. Easy to delete after
+    the real rename.</p>
   </div>
 
   <div class="approval">
-    <h2 style="margin-top:0">Approval decision needed from you</h2>
+    <h2 style="margin-top:0">Status: APPROVED (2026-08-26)</h2>
     <ul>
-      <li>Confirm scope: everything visual, nothing operational, extras included (social card,
+      <li>Scope confirmed: everything visual, nothing operational, extras included (social card,
       mobile menu).</li>
-      <li>Confirm tier <code>mid</code> and the validation plan: fast checks every phase, the real
-      end-to-end suite once at the end.</li>
-      <li>Confirm delivery: preview branch only, no PR until you flip; at flip time you choose one
-      PR or three stacked ones.</li>
-      <li>Answer the bridging-copy question above (a, b, or c).</li>
-      <li>Note: no security-hardening pass is scheduled for this plan (it changes no trust logic);
-      the standing pre-release hardening recommendation is unchanged.</li>
-      <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
+      <li>Tier <code>mid</code>; fast checks every phase, the real end-to-end suite once at the
+      end.</li>
+      <li>Delivery: preview branch only, no PR until the owner flips (one PR or three stacked,
+      chosen at flip time).</li>
+      <li>Bridging copy: option (b), three seams.</li>
+      <li>No security-hardening pass scheduled (no trust-logic changes); the standing pre-release
+      hardening recommendation is unchanged.</li>
     </ul>
   </div>
 
   <section>
-    <h2>Implementation seeds (final, post-approval)</h2>
+    <h2>Implementation seeds (FINAL, approved scope)</h2>
     <p class="dim">Two ways to run the autonomous implementation session, which must be started
     inside the plan's worktree (<code>agent-worktree resume presto-visual-rebrand</code>).
     <code>/goal</code> keeps working until the finish line holds and survives resume, and every
@@ -186,7 +180,7 @@ li{margin:.3rem 0}
       <pre><code>/goal All five phases marked ✓ in implementations-plan/presto-visual-rebrand/plan.md (the phase headers in the file), each ✓ backed by its phase's validation gate as defined in plan.md reported passing in the transcript (P1: bun install committed + frontend:build + bun run test + accelerator test:unit + cargo test; P2: frontend:build + bun run test + both cargo test runs + test:e2e:ui with tauri-identity.test.ts unmodified + dual-theme manual pass recorded in lessons; P3: bun run test + playground test:e2e + playground build; P4: bun run test + landing test (with typecheck) + landing build; P5: frontend:build + bun run test + test:e2e:ui + test:e2e:webdriver or its deferred-with-consent record); for each phase LESSONS_FILE=implementations-plan/presto-visual-rebrand/lessons/phase-N.md printed in the transcript; /code-review max --fix complete with fixes committed separately; the codex fix loop converged (a resumed codex pass reporting no new material findings, quoted in the transcript); NO pull request opened (pushes to worktree-presto-visual-rebrand only); the wrap-up report with preview instructions and PR flip options delivered in the transcript; bun run test exits 0 in the transcript.</code></pre>
     </div>
     <h3>Alternative: /loop</h3>
-    <pre><code>/loop 15m Drive implementations-plan/presto-visual-rebrand forward. Never idle waiting for my input. Each firing: (1) read plan.md + lessons/ (authoritative), git status, git log --oneline -5; no PRs exist by design, do NOT open one. (2) No task in hand? Pick the next pending step from plan.md and start it; after each meaningful edit run bun run lint + the touched package's unit tests; commit per surface with P-N markers; push the branch. (3) Stuck or facing a decision? Call /codex xhigh with full context, decide together, act, log the consult in lessons/phase-N.md; hard limits stay hard (no PR, no merge, no publish, no scope beyond plan.md; the bridging-copy decision is recorded in plan.md before implementation starts). (4) Same step failed 5 times? Stop retrying, reassess with codex. (5) Phase gate green (exact commands in plan.md)? Paste the result, mark ✓ in plan.md, print LESSONS_FILE=..., advance. (6) All phases ✓? Execute plan.md's Post-implementation section (code-review then codex loop then STOP before PRs then wrap-up report with preview instructions), then surface and stop.</code></pre>
+    <pre><code>/loop 15m Drive implementations-plan/presto-visual-rebrand forward. Never idle waiting for my input. Each firing: (1) read plan.md + lessons/ (authoritative), git status, git log --oneline -5; no PRs exist by design, do NOT open one. (2) No task in hand? Pick the next pending step from plan.md and start it; after each meaningful edit run bun run lint + the touched package's unit tests; commit per surface with P-N markers; push the branch. (3) Stuck or facing a decision? Call /codex xhigh with full context, decide together, act, log the consult in lessons/phase-N.md; hard limits stay hard (no PR, no merge, no publish, no scope beyond plan.md). (4) Same step failed 5 times? Stop retrying, reassess with codex. (5) Phase gate green (exact commands in plan.md)? Paste the result, mark ✓ in plan.md, print LESSONS_FILE=..., advance. (6) All phases ✓? Execute plan.md's Post-implementation section (code-review then codex loop then STOP before PRs then wrap-up report with preview instructions), then surface and stop.</code></pre>
     </h3>
   </section>
 

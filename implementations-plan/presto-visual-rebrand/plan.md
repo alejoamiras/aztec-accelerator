@@ -65,14 +65,10 @@ where the frozen `productName` (or CA CN) is what they'll see:
 - `playground/src/diagnostics.ts:218` → `presto-diagnostics-*.json`. `AcceleratorProver` class name
   and demo token "Accelerator"/ACEL: KEEP (SDK API / content).
 
-**OPEN ASK (owner decision at the approval gate) — name-mismatch bridging copy.** Presto-branded UI
-hands off to OS surfaces still named "Aztec Accelerator" (installer/DMG from the Download button,
-the macOS keychain prompt naming "Aztec Accelerator Local CA", the app list entry). Both auditors
-flag that unexplained mismatches on trust prompts train bad habits. Options: (a) no bridging copy;
-(b) **recommended**: one plain sentence at the three seams — landing download section ("Installs as
-'Aztec Accelerator' until our full rename"), the HTTPS row / Manage-certificate disclosure (names
-the CA by its CN), and the update prompt; (c) settings-only. The plan implements whichever the
-owner picks; (b) is drafted in the phase specs and trivially removable.
+**RESOLVED ASK (owner, 2026-08-26) — name-mismatch bridging copy: option (b), three seams.** One
+plain sentence at: the landing download section ("Installs as 'Aztec Accelerator' until our full
+rename"), the HTTPS row / Manage-certificate disclosure (naming the CA by its CN "Aztec
+Accelerator Local CA"), and the update prompt. Trivially removable at the operational rename.
 
 ---
 
@@ -298,7 +294,7 @@ riskiest new code (renderer swap), and earlier means more soak time before Phase
 | Outline A over B | draft + both audits concur | adopted |
 | Naming rule + KEEP list; exact-fact tray error strings classified KEEP | draft + codex/fable | adopted |
 | Per-OS cert copy retained (Book's single line rejected as factually false); Book correction queued | codex H + fable H-1 | adopted |
-| Bridging copy at name-mismatch seams | codex Ask-High + fable M-1 | **OPEN ASK at gate** (rec: option b) |
+| Bridging copy at name-mismatch seams: option (b), three seams | codex Ask-High + fable M-1 | **resolved by owner at gate (2026-08-26)** |
 | `denied`/`version-mismatch`/`fallback` continue (not terminal); idle-hold specified | codex High (verified in SDK) + recon gap | adopted |
 | `tauri icon` for app ladder; resvg-**wasm** for tray/og; masters replaced in place; spec derived from real bytes; sha256 manifest incl. fonts | codex M + fable C-1/C-3/M-2/M-3/L-1 | adopted |
 | Slider: restyle native input (no custom ARIA control) | codex M + fable C-2 (recon "adapt") | adopted |
@@ -379,8 +375,8 @@ riskiest new code (renderer swap), and earlier means more soak time before Phase
 4. WebDriver runs on this host (CI does it on ubuntu runners); Phase 5 contingency covers failure.
 5. `tauri icon` output feeds the existing `bundle.icon` list without tauri.conf changes (files kept
    under the same names) — verified at Phase 1 by `cargo test` + a bundle dry-run if needed.
-**Asks**: exactly one — the bridging-copy decision (Naming rule, OPEN ASK). Presented at the
-approval gate with recommendation (b).
+**Asks**: none open. The bridging-copy decision was presented at the approval gate and resolved by
+the owner: option (b), three seams (Naming rule, RESOLVED ASK).
 
 ## Delivery
 Single branch `worktree-presto-visual-rebrand`; conventional commits with `P1`..`P5` markers; push
@@ -433,7 +429,7 @@ or (b) three stacked PRs (assets+app / playground / landing) cut from the commit
   round-2 findings are genuinely resolved… no new security, gate-ordering, reuse, or executability
   blocker." Full transcripts in `audit-codex.md`.
 
-## Seeds (drafts — finalized after approval)
+## Seeds (FINAL — approved 2026-08-26: scope unchanged, bridging copy = option b)
 
 /goal All five phases marked ✓ in implementations-plan/presto-visual-rebrand/plan.md (the phase
 headers in the file), each ✓ backed by its phase's validation gate as defined in plan.md reported
@@ -456,8 +452,7 @@ no PRs exist by design — do NOT open one. (2) No task in hand? Pick the next p
 plan.md and start it; after each meaningful edit run bun run lint + the touched package's unit
 tests; commit per surface with P-N markers; push the branch. (3) Stuck or facing a decision? Call
 /codex xhigh with full context, decide together, act, log the consult in lessons/phase-N.md; hard
-limits stay hard (no PR, no merge, no publish, no scope beyond plan.md; the one OPEN ASK — bridging
-copy — is resolved at approval and recorded in plan.md before implementation starts). (4) Same step
+limits stay hard (no PR, no merge, no publish, no scope beyond plan.md). (4) Same step
 failed 5 times? Stop retrying, reassess with codex. (5) Phase gate green (exact commands in
 plan.md)? Paste the result, mark ✓ in plan.md, print LESSONS_FILE=..., advance. (6) All phases ✓?
 Execute plan.md's Post-implementation section (code-review → codex loop → STOP before PRs → wrap-up
