@@ -1,0 +1,278 @@
+<title>SDK 5.2.0 Release</title>
+
+<style>
+  :root {
+    --paper: #f5f6f7;
+    --card: #ffffff;
+    --ink: #15191e;
+    --ink-soft: #4d565f;
+    --ink-faint: #79828b;
+    --rule: #dfe3e6;
+    --accent: #1c5f66;
+    --accent-soft: #e6f0f0;
+    --caution: #8a5518;
+    --caution-soft: #f7efe4;
+    --live: #2f6b3f;
+    --code-bg: #eceef0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #101317;
+      --card: #171b20;
+      --ink: #e8ebee;
+      --ink-soft: #a8b1ba;
+      --ink-faint: #79838d;
+      --rule: #2a3037;
+      --accent: #5fb3ba;
+      --accent-soft: #14282a;
+      --caution: #d3a163;
+      --caution-soft: #2a2117;
+      --live: #79c08d;
+      --code-bg: #1e242a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #101317;
+    --card: #171b20;
+    --ink: #e8ebee;
+    --ink-soft: #a8b1ba;
+    --ink-faint: #79838d;
+    --rule: #2a3037;
+    --accent: #5fb3ba;
+    --accent-soft: #14282a;
+    --caution: #d3a163;
+    --caution-soft: #2a2117;
+    --live: #79c08d;
+    --code-bg: #1e242a;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.65;
+    margin: 0;
+    padding: 3.5rem 1.25rem 5rem;
+    font-size: 17px;
+  }
+  main { max-width: 42rem; margin: 0 auto; display: flex; flex-direction: column; gap: 2.75rem; }
+  section { display: flex; flex-direction: column; gap: 0.9rem; }
+
+  h1 {
+    font-family: Georgia, "Iowan Old Style", serif;
+    font-weight: 600;
+    font-size: 2.1rem;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h2 {
+    font-family: Georgia, "Iowan Old Style", serif;
+    font-weight: 600;
+    font-size: 1.22rem;
+    margin: 0;
+    text-wrap: balance;
+  }
+  h3 { font-size: 1rem; font-weight: 650; margin: 0; text-wrap: balance; }
+  p, li { margin: 0; }
+  ul { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  strong { font-weight: 650; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  code { background: var(--code-bg); padding: 0.08em 0.34em; border-radius: 3px; font-size: 0.86em; }
+  pre {
+    background: var(--code-bg);
+    color: var(--ink);
+    padding: 1rem 1.1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 0.79rem;
+    line-height: 1.6;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .lede { font-size: 1.06rem; color: var(--ink-soft); }
+  .eyebrow {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.13em;
+    color: var(--accent);
+    font-weight: 650;
+  }
+  .meta { color: var(--ink-faint); font-size: 0.86rem; }
+
+  .state {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 2rem;
+    padding: 1rem 1.15rem;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+  }
+  .state div { display: flex; flex-direction: column; gap: 0.1rem; }
+  .state dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-faint); }
+  .state dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92rem; font-variant-numeric: tabular-nums; }
+  .arrow { color: var(--accent); }
+
+  .phase {
+    display: grid;
+    grid-template-columns: 2.3rem 1fr;
+    gap: 0 1rem;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 1.15rem 1.25rem;
+  }
+  .phase .num {
+    font-family: Georgia, serif;
+    font-size: 1.5rem;
+    color: var(--accent);
+    line-height: 1;
+    padding-top: 0.1rem;
+  }
+  .phase .body { display: flex; flex-direction: column; gap: 0.6rem; }
+  .gate {
+    font-size: 0.88rem;
+    color: var(--ink-soft);
+    border-left: 2px solid var(--accent);
+    padding-left: 0.7rem;
+  }
+  .gate b { color: var(--ink); font-weight: 650; }
+
+  .note {
+    background: var(--caution-soft);
+    border-left: 3px solid var(--caution);
+    padding: 0.85rem 1.05rem;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.93rem;
+  }
+  .approval {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 1.25rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+  .seed { display: flex; flex-direction: column; gap: 0.55rem; }
+  .rec { color: var(--live); font-weight: 650; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.09em; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 0; }
+</style>
+
+<main>
+
+<header>
+  <p class="eyebrow">Blueprint · light tier</p>
+  <h1>Shipping SDK 5.2.0 to npm</h1>
+  <p class="lede">Our published toolkit currently tells the world it works with Aztec 5.0. The code has been on 5.2.0 for a week and has passed every gate we have — it just hasn't been handed to anyone yet. This plan does the handing over: publish the package, point the default download at it, and refresh the playground site in the same motion.</p>
+</header>
+
+<section>
+  <h2>Where things stand today</h2>
+  <div class="state">
+    <div><dt>Default download</dt><dd>5.0.1 <span class="arrow">→</span> 5.2.0</dd></div>
+    <div><dt>Early-access tag</dt><dd>5.0.1-rev.1 <span class="arrow">→</span> 5.2.0</dd></div>
+    <div><dt>Playground site</dt><dd>rebuilds</dd></div>
+  </div>
+  <p>The desktop app is <strong>not</strong> part of this — it downloads its proving engine at runtime, so an Aztec version change doesn't require a new app. That release is its own separate thing.</p>
+</section>
+
+<section>
+  <h2>Why the lightest tier</h2>
+  <p>Of the six risk dimensions we score, exactly one comes back high: <strong>you cannot un-publish</strong>. Everything else is familiar ground — this is the fifth time through this machinery, the pipeline is unchanged, no new code ships, and nothing about the package's shape is novel. One high dimension is the textbook case for <em>light</em>: a single reviewer pass rather than a committee.</p>
+  <p>The "can't undo it" part is handled by ordering rather than ceremony: the package goes out under an opt-in label first, and only a separate second step makes it the default — a step that is a pure label move and can be pointed back at the old version in one command.</p>
+</section>
+
+<section>
+  <h2>The three steps</h2>
+
+  <div class="phase">
+    <span class="num">1</span>
+    <div class="body">
+      <h3>Fix the instructions before they're set in stone</h3>
+      <p>The package's own README travels inside the download, permanently, for whichever version it ships with. Right now it tells people we're on a release-candidate line and that they need a special tag to get current code — both untrue for months. Our internal release handbook has the matching problem, plus it never documents the "make it the default" step at all, which is the exact step this plan relies on.</p>
+      <p>So: one small pull request correcting three documents, merged before anything is published. It also earns something for free — touching the package re-runs the check that installs our package from scratch the way a stranger would.</p>
+      <p class="gate"><b>Proves itself by:</b> formatting clean, every automated check green, merged.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="num">2</span>
+    <div class="body">
+      <h3>Look before dispatching, then publish</h3>
+      <p>Four things get checked first: nobody has already claimed the 5.2.0 name, no stray label is squatting on it, nothing else is mid-publish, and — unless the pull request just proved it — the packaged file installs and runs in a throwaway folder like a stranger's would.</p>
+      <p>Then one dispatch does three things: runs the full proving test suite against a locally built copy of the accelerator, publishes the package under the opt-in label with a cryptographic receipt tying it to that exact build, and rebuilds the playground site.</p>
+      <p>A green run isn't taken as proof on its own. We then read the registry back: the new version is really there, the receipt is attached, the default download hasn't moved yet, and the live site is genuinely serving the new bundle.</p>
+      <p class="gate"><b>Proves itself by:</b> the run finishing green on the exact approved commit, plus all four read-backs confirming reality.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="num">3</span>
+    <div class="body">
+      <h3>Make it the default, then check a stranger's install</h3>
+      <p>A second dispatch moves the default pointer to 5.2.0 — a label change, nothing new published. Then the honest test: in an empty folder, install the package the plain way any newcomer would, and load it. If that fails, the pointer goes straight back to 5.0.1 while we investigate.</p>
+      <p class="gate"><b>Proves itself by:</b> both labels reading 5.2.0, and the plain install-and-load exiting clean.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Things worth knowing</h2>
+  <ul>
+    <li><strong>Two labels, two audiences.</strong> Anyone who wrote "5.0-or-newer" in their project gets 5.2.0 the instant it's published — labels don't hold them back. The default-pointer step only affects people who install without specifying anything. That makes step 2, not step 3, the real moment of exposure — which is why the packaging check happens right before it.</li>
+    <li><strong>Nothing is deletable.</strong> Published versions and their tags stay forever. A bad publish is fixed by publishing a newer one, never by removing the old — so mistakes are additive, and the plan never has a step that assumes cleanup is possible.</li>
+    <li><strong>The most likely failure isn't the code.</strong> The one real breakage in this pipeline's history was an expired registry credential — the publish signed its receipt, then the upload was refused. If that happens again, everything stops and comes to you; I don't retry and I don't touch credentials.</li>
+    <li><strong>"Failed" doesn't mean "didn't happen."</strong> A publish command can fail after the registry already accepted the upload. So on any failure the very first action is reading the registry back and showing you what it says, before anything is classified or retried.</li>
+  </ul>
+  <div class="note">You asked me to run the dispatches autonomously. I've written the authorization as an exact list of four commands — publish, promote, roll back, and redeploy the site — and everything outside that list stops and waits for you, including anything involving credentials or a fix-forward version number.</div>
+</section>
+
+<section>
+  <h2>Open questions</h2>
+  <ul>
+    <li><strong>Is the publishing credential still valid and narrowly scoped?</strong> I can't check this without publishing, and I won't inspect the secret. If you know it's a granular, package-scoped token, say so; if it's an old broad one, this is a good moment to swap it.</li>
+    <li><strong>One known weak spot stays open this cycle.</strong> The inner publish workflow can be triggered directly from any branch, skipping the "must be main" guard and the test gate. It's a real exposure if an account is ever compromised. Closing it means editing a publish workflow — and an edited release workflow's first real run is its own first test, which is not something to discover during a release. I've queued it as a follow-up instead. Say the word if you'd rather fix it first.</li>
+  </ul>
+</section>
+
+<div class="approval">
+  <h2>What I need from you</h2>
+  <ul>
+    <li>Confirm the scope: publish + make default + playground refresh; desktop app excluded.</li>
+    <li>Confirm the light tier and the "trust the pipeline" bar — no separate hands-on smoke session between publishing and switching the default.</li>
+    <li>Confirm the delivery shape: one documentation pull request, two dispatches, one small tidy-up pull request at the end.</li>
+    <li>Confirm the autonomous authorization as scoped to those four commands.</li>
+    <li>Noted for the record: the full security audit stays queued, not scheduled here.</li>
+    <li>Reply <strong>approve</strong>, <strong>conditional approve</strong> (with conditions), or <strong>reject</strong> (with blockers).</li>
+  </ul>
+</div>
+
+<hr>
+
+<section>
+  <h2>Implementation seeds</h2>
+  <p class="meta">Paste one of these into the session that does the work. They don't combine — setting one replaces the other.</p>
+
+  <div class="seed">
+    <p class="rec">Recommended — completion is visible in the transcript</p>
+    <pre><code>/goal All three phases marked ✓ in implementations-plan/sdk-5-2-0-release/plan.md with each phase's validation-gate outputs quoted in the transcript (Phase 1: PR merged + CI green; Phase 2: publish run green with its headSha quoted matching the approved merge SHA + all four verify bullets incl. `npm view` showing testnet=5.2.0 with latest still 5.0.1, `dist.attestations` present, and the playground bundle serving 5.2.0; Phase 3: `npm view` showing latest=5.2.0 AND the scratch bare `npm i` resolving 5.2.0 with the ESM import exit 0), `LESSONS_FILE=implementations-plan/sdk-5-2-0-release/lessons/phase-N.md` printed per phase, the codex loop on the Phase-1 diff converged (resumed pass quoting no new material findings), and `bun run lint` exit 0; OR the blocked path: a failure surfaced with its protocol followed — on ANY failed publish/promote run, `npm view @alejoamiras/aztec-accelerator versions dist-tags --json` output quoted BEFORE any further action; token-shaped failure → owner surfaced, zero retries; promote verify failed → rollback dispatched, watched, and `latest=5.0.1` re-verification quoted — and the state honestly recorded in plan.md.</code></pre>
+  </div>
+
+  <div class="seed">
+    <h3>Alternative — fixed-interval driver</h3>
+    <pre><code>/loop 15m Drive implementations-plan/sdk-5-2-0-release forward per plan.md. Never idle. Each firing: read plan.md + lessons (authoritative), `git status`, check any in-flight `gh run` (watch ≤10 min, stuck → log + reassess). Phase gates are as written in plan.md — quote outputs, mark ✓, print LESSONS_FILE. Hard limits — the authorization is EXACTLY four dispatches and nothing else: (1) publish-testnet.yml; (2) promote-latest.yml -f version=5.2.0; (3) rollback promote-latest.yml -f version=5.0.1; (4) publish-testnet.yml -f skip_sdk_publish=true for a playground-only repair. Manual tag/release creation, any -revision.N decision, token handling, accelerator release → STOP and surface. On ANY failed publish or promote run, quote `npm view @alejoamiras/aztec-accelerator versions dist-tags --json` BEFORE any other action (a failed command may have succeeded server-side); classify only after that quote. Token/auth-shaped failures → stop and surface, never retry, never touch NPM_TOKEN; no scope beyond plan.md. Stuck or 5 same-step failures → codex xhigh, log the consult, act within scope.</code></pre>
+  </div>
+</section>
+
+<p class="meta">Full technical plan, reviewer findings, and per-phase logs live in the repo at <code>implementations-plan/sdk-5-2-0-release/</code>.</p>
+
+</main>
