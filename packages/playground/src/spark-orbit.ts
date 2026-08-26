@@ -48,6 +48,7 @@ const TICK_MS = 100;
 /** Within-quadrant easing: p = 1 − e^(−t/τ), capped so the boundary is only crossed by a phase. */
 const QUADRANT_TAU_MS = 1400;
 const QUADRANT_CAP = 0.96;
+const TADA_SWEEP_MS = 450;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -126,10 +127,16 @@ export class SparkOrbitController {
   /** Current spark angle in degrees — monotonically non-decreasing across a run. */
   angle(): number {
     const held = Date.now() - this.#quadrantSince;
-    // Quadrants 0-2 never cross their boundary without a phase (cap); ta-da may complete the
-    // lap so the spark lands exactly on top for the pop.
-    const cap = this.#quadrant === 3 ? 1 : QUADRANT_CAP;
-    const p = this.#reduced ? cap : Math.min(cap, 1 - Math.exp(-held / QUADRANT_TAU_MS));
+    // Quadrants 0-2 ease asymptotically and never cross their boundary without a phase; ta-da
+    // sweeps linearly to the top in TADA_SWEEP_MS and holds, so the spark actually lands there
+    // (an exponential approach would still be ~40° short when the pop fires).
+    const p = this.#reduced
+      ? this.#quadrant === 3
+        ? 1
+        : QUADRANT_CAP
+      : this.#quadrant === 3
+        ? Math.min(1, held / TADA_SWEEP_MS)
+        : Math.min(QUADRANT_CAP, 1 - Math.exp(-held / QUADRANT_TAU_MS));
     return this.#lap * 360 + (this.#quadrant + p) * 90;
   }
 

@@ -167,10 +167,13 @@ describe("SparkOrbitController", () => {
     c.pushPhase("proved"); // quadrant 3
     await sleep(MIN_DISPLAY_MS + 80);
     c.pushPhase("app:simulate"); // laps to quadrant 0
-    await sleep(MIN_DISPLAY_MS + 80);
+    // Let quadrant 0 ease MATERIALLY (p well past what a reset could re-reach quickly), so a
+    // rewind bug produces a strictly smaller sample rather than a within-jitter equal one.
+    await sleep(MIN_DISPLAY_MS + 1200);
     const afterLap = c.angle();
     c.pushPhase("detect"); // same quadrant 0 again — must not reset easing
-    await sleep(MIN_DISPLAY_MS + 80);
+    // Sample shortly after the queued phase is applied: a reset would sit far below afterLap.
+    await sleep(MIN_DISPLAY_MS + 150);
     expect(c.angle()).toBeGreaterThanOrEqual(afterLap);
     c.stop();
   });

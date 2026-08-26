@@ -138,15 +138,17 @@ describe("brand sweep", () => {
     expect(leaks).toEqual([]);
   });
 
-  test("workflows and composite actions carry no uncommitted rebrand edits vs origin/main", () => {
-    // A real untouched-check, not a keyword scan. Only meaningful where origin/main exists
-    // (local dev, CI checkouts with history); skipped silently on shallow throwaway clones.
+  test("workflows and composite actions carry no rebrand edits since the branch base", () => {
+    // A real untouched-check, not a keyword scan. `origin/main...` diffs from the merge-base to
+    // the working tree, so later upstream workflow changes can't falsely implicate this branch.
+    // Only meaningful where origin/main exists; skipped on shallow throwaway clones.
     const probe = Bun.spawnSync(["git", "rev-parse", "--verify", "origin/main"], { cwd: ROOT });
     if (probe.exitCode !== 0) return;
     const diff = Bun.spawnSync(
-      ["git", "diff", "--name-only", "origin/main", "--", ".github/workflows", ".github/actions"],
+      ["git", "diff", "--name-only", "origin/main...", "--", ".github/workflows", ".github/actions"],
       { cwd: ROOT },
     );
+    expect(diff.exitCode).toBe(0);
     expect(diff.stdout.toString().trim()).toBe("");
   });
 });
