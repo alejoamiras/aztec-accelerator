@@ -125,7 +125,7 @@ test("partial cert failure: HTTPS shown off with Retry, other choices still appl
   // Retry, or press it again (HTTPS now unchecked) to continue without HTTPS. With HTTPS off but the
   // other two still on, the label stays "Start".
   await expect(page.locator("#start")).toBeEnabled();
-  await expect(page.locator("#start")).toHaveText("Start");
+  await expect(page.locator("#start")).toHaveText("Let's go");
 });
 
 test("Retry re-checks HTTPS and re-enables Start", async ({ page }) => {
@@ -162,14 +162,14 @@ test("the primary label follows the toggles (Start when any is on, Continue when
   // There is no Skip button: unchecking everything IS the decline. "Start" would read wrong for that,
   // so the label adapts.
   await page.goto("/onboarding.html");
-  await expect(page.locator("#start")).toHaveText("Start");
+  await expect(page.locator("#start")).toHaveText("Let's go");
 
   for (const id of ALL_TOGGLES) await setToggle(page, id, false);
   await expect(page.locator("#start")).toHaveText("Continue");
 
   // Any single toggle back on flips it back.
   await setToggle(page, "#opt-autostart", true);
-  await expect(page.locator("#start")).toHaveText("Start");
+  await expect(page.locator("#start")).toHaveText("Let's go");
 });
 
 test("declining everything is an explicit, recorded choice", async ({ page }) => {

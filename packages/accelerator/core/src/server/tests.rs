@@ -525,10 +525,10 @@ async fn a_denied_origin_is_refused_with_authorization_cooldown_without_re_promp
 
 /// CHARACTERIZATION (quality-refactor Phase 0 — Q2 ordering + Q10 status guards).
 /// Pins the `/prove` SUCCESS path via a fake `bb` (`BB_BINARY_PATH`): 200 + `{proof}` base64 body
-/// + `x-prove-duration-ms` header, and the on_status sequence `["Status: Proving...",
-/// "Status: Idle"]` (the bundled path sets Proving, `StatusGuard` resets to Idle on exit).
-/// `#[serial]` because `find_bb` reads the process-global `BB_BINARY_PATH`. Q2 (server split)
-/// must preserve this ordering; Q10 (ServerStatus enum) must reproduce these exact strings.
+/// + `x-prove-duration-ms` header, and the on_status sequence `["Working a proof…", "Ready"]`
+/// (the bundled path sets Proving, `StatusGuard` resets to Idle on exit). `#[serial]` because
+/// `find_bb` reads the process-global `BB_BINARY_PATH`. Q2 (server split) must preserve this
+/// ordering; the strings pin `ServerStatus::display_text` verbatim.
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
@@ -594,7 +594,7 @@ async fn prove_success_path_and_status_sequence() {
     let seq = recorded.lock().unwrap().clone();
     assert_eq!(
         seq,
-        vec!["Status: Proving...".to_string(), "Status: Idle".to_string()],
+        vec!["Working a proof…".to_string(), "Ready".to_string()],
         "bundled success path status sequence (Q10 pin)"
     );
 }

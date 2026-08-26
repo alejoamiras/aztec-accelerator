@@ -190,7 +190,7 @@ test("toggle error reverts checkbox and shows hint", async ({ page }) => {
   // Should revert to unchecked and show error hint
   await expect(toggle).not.toBeChecked();
   await expect(page.locator(".error-hint")).toBeVisible();
-  await expect(page.locator(".error-hint")).toHaveText("Failed — try again");
+  await expect(page.locator(".error-hint")).toHaveText("Failed. Try again");
 });
 
 // ── Autostart health row (plan D17: the switch shows INTENT, the row shows HEALTH) ──
@@ -440,7 +440,7 @@ test("a failed enable_https shows the persisted state, not the failure", async (
 
   // Reflects what the backend actually stored...
   await expect(page.locator("#https")).toBeChecked();
-  // ...and says why, in the backend's own words — "Failed — try again" would hide the restart.
+  // ...and says why, in the backend's own words — "Failed. Try again" would hide the restart.
   await expect(page.getByText("still using a previous certificate")).toBeVisible();
 });
 

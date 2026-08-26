@@ -16,7 +16,7 @@ describe("Smoke", () => {
   it("should have the Settings window open", async () => {
     // The bootstrap window (Settings) opens automatically in webdriver mode
     const title = await browser.getTitle();
-    expect(title).toBe("Aztec Accelerator Settings");
+    expect(title).toBe("Presto Settings");
   });
 
   it("should render the Settings page with a speed label", async () => {

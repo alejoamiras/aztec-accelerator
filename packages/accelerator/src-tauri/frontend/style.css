@@ -1,15 +1,214 @@
+/* Presto design system — light is home, dark is a designed twin (not an inversion). The app follows
+   the OS via prefers-color-scheme; [data-theme] overrides exist so Rust can force a theme through
+   window.eval if a webview ever fails to propagate the media query. Tokens are defined HERE only —
+   onboarding.css/renewal.css consume them and must never re-declare tokens.
+   Compatibility floor is macOS 10.15 WebKit (no color-mix): every derived color below sits behind a
+   same-theme static fallback declaration. */
 :root {
-  --bg: #0b0a06;
-  --surface: #131008;
-  --surface-raised: #1a1610;
-  --border: #2a2518;
-  --border-accent: rgba(212, 255, 40, 0.15);
-  --text: #f0e8d0;
-  --text-muted: #9a9080;
-  --accent: #d4ff28;
-  --accent-dim: #b8dd1e;
-  --accent-on-dark: #0e1400;
-  --danger: #e5484d;
+  color-scheme: light dark;
+  --bg: #fffaf1;
+  --surface: #ffffff;
+  --surface-raised: #fff3dd;
+  --border: #ece3d4;
+  --text: #241b33;
+  --text-muted: #6e6580;
+  --accent: #3b4fe0;
+  --accent-dim: #2f40c4;
+  --accent-on-dark: #ffffff;
+  --danger: #b02d23;
+  --danger-contrast: #ffffff;
+  --warning: #7a5a00;
+  --warning-bg: #fff3d1;
+  --go: #189e62;
+  --go-text: #147a4c;
+  --thumb-shadow: rgba(36, 27, 51, 0.3);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #191226;
+    --surface: #221a33;
+    --surface-raised: #2a2140;
+    --border: #372c4e;
+    --text: #f1ebe0;
+    --text-muted: #9d93b0;
+    --accent: #8b99ff;
+    --accent-dim: #a5b0ff;
+    --accent-on-dark: #141026;
+    --danger: #ff6a5c;
+    --danger-contrast: #191226;
+    --warning: #ffd87e;
+    --warning-bg: #33280f;
+    --go: #3fce8c;
+    --go-text: #3fce8c;
+    --thumb-shadow: rgba(0, 0, 0, 0.55);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #191226;
+  --surface: #221a33;
+  --surface-raised: #2a2140;
+  --border: #372c4e;
+  --text: #f1ebe0;
+  --text-muted: #9d93b0;
+  --accent: #8b99ff;
+  --accent-dim: #a5b0ff;
+  --accent-on-dark: #141026;
+  --danger: #ff6a5c;
+  --danger-contrast: #191226;
+  --warning: #ffd87e;
+  --warning-bg: #33280f;
+  --go: #3fce8c;
+  --go-text: #3fce8c;
+  --thumb-shadow: rgba(0, 0, 0, 0.55);
+}
+
+/* Vendored subsets (fonts/LICENSES.md); the app CSP is `style-src 'self'`, so faces must be
+   same-origin — never a fonts.googleapis.com link. */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/bricolage-grotesque-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/bricolage-grotesque-latin-ext-600-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/bricolage-grotesque-latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/bricolage-grotesque-latin-ext-700-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("fonts/bricolage-grotesque-latin-800-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("fonts/bricolage-grotesque-latin-ext-800-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/figtree-latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/figtree-latin-ext-400-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/figtree-latin-500-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/figtree-latin-ext-500-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/figtree-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/figtree-latin-ext-600-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/figtree-latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/figtree-latin-ext-700-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Fragment Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fragment-mono-latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Fragment Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fragment-mono-latin-ext-400-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332,
+    U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
 * {
@@ -19,7 +218,7 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Figtree", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: var(--bg);
   color: var(--text);
   font-size: 13px;
@@ -50,8 +249,10 @@ body.scrollable::-webkit-scrollbar-thumb {
 }
 
 h2 {
+  font-family: "Bricolage Grotesque", "Figtree", sans-serif;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   margin-bottom: 12px;
   color: var(--text);
 }
@@ -67,7 +268,7 @@ h2 {
   padding: 8px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   margin-bottom: 6px;
 }
 
@@ -114,7 +315,7 @@ h2 {
   height: 14px;
   left: 3px;
   bottom: 3px;
-  background: var(--text);
+  background: var(--surface);
   border-radius: 50%;
   transition: transform 0.2s;
 }
@@ -137,8 +338,21 @@ h2 {
    caption stranded below it. The empty state now lives INSIDE this well. */
 .well {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 6px;
+  background: #fffdf7;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .well {
+    background: #1f1830;
+    background: color-mix(in srgb, var(--surface) 55%, transparent);
+  }
+}
+
+:root[data-theme="dark"] .well {
+  background: #1f1830;
   background: color-mix(in srgb, var(--surface) 55%, transparent);
 }
 
@@ -178,7 +392,7 @@ h2 {
   font-size: 12px;
   padding: 7px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   list-style: none;
   user-select: none;
 }
@@ -234,10 +448,10 @@ h2 {
   padding: 6px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   margin-bottom: 4px;
   font-size: 12px;
-  font-family: monospace;
+  font-family: "Fragment Mono", ui-monospace, monospace;
 }
 
 /* Match the row's own line box so the label and the button sit on the same optical centre —
@@ -247,6 +461,7 @@ h2 {
   border: none;
   color: var(--danger);
   cursor: pointer;
+  font-family: "Figtree", sans-serif;
   font-size: 11px;
   line-height: 1.5;
   padding: 2px 6px;
@@ -256,7 +471,7 @@ h2 {
 
 .origin-item button:hover {
   background: var(--danger);
-  color: white;
+  color: var(--danger-contrast);
 }
 
 .empty-state {
@@ -269,7 +484,7 @@ h2 {
 .speed-section {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 10px 12px 12px;
   margin-bottom: 6px;
 }
@@ -330,16 +545,18 @@ h2 {
   border-radius: 50%;
   cursor: pointer;
   border: 2px solid var(--bg);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 4px var(--thumb-shadow);
   transition: box-shadow 0.15s;
 }
 
 .speed-slider::-webkit-slider-thumb:hover {
-  box-shadow: 0 0 0 4px rgba(212, 255, 40, 0.15), 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 4px rgba(59, 79, 224, 0.18), 0 1px 4px var(--thumb-shadow);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent), 0 1px 4px var(--thumb-shadow);
 }
 
 .speed-slider::-webkit-slider-thumb:active {
-  box-shadow: 0 0 0 6px rgba(212, 255, 40, 0.25), 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 6px rgba(59, 79, 224, 0.28), 0 1px 4px var(--thumb-shadow);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 28%, transparent), 0 1px 4px var(--thumb-shadow);
 }
 
 .speed-slider::-moz-range-thumb {
@@ -349,7 +566,7 @@ h2 {
   border-radius: 50%;
   cursor: pointer;
   border: 2px solid var(--bg);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 4px var(--thumb-shadow);
 }
 
 .speed-slider::-moz-range-progress {
@@ -415,11 +632,11 @@ h2 {
 }
 
 .popup-detail {
-  font-family: monospace;
+  font-family: "Fragment Mono", ui-monospace, monospace;
   font-size: 13px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 8px 16px;
   margin: 14px 0;
   word-break: break-all;
@@ -438,9 +655,10 @@ h2 {
 .btn {
   padding: 8px 20px;
   border: none;
-  border-radius: 6px;
+  border-radius: 999px;
+  font-family: "Figtree", sans-serif;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -471,13 +689,26 @@ h2 {
   font-size: 12px;
   background: var(--surface-raised);
   color: var(--danger);
+  border: 1px solid #d8b1ab;
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
   flex: 0 0 auto;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .btn-danger {
+    border: 1px solid #925148;
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  }
+}
+
+:root[data-theme="dark"] .btn-danger {
+  border: 1px solid #925148;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
 .btn-danger:hover {
   background: var(--danger);
-  color: #fff;
+  color: var(--danger-contrast);
   border-color: var(--danger);
 }
 
@@ -510,7 +741,7 @@ h2 {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Figtree", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
@@ -526,12 +757,12 @@ h2 {
 .verified-check {
   width: 16px;
   height: 16px;
-  fill: #16a34a;
+  fill: var(--go);
   flex-shrink: 0;
 }
 
 .origin-line {
-  font-family: monospace;
+  font-family: "Fragment Mono", ui-monospace, monospace;
   font-size: 13px;
   /* F-014: the full origin is user-selectable (the doc disables selection globally) and bidi-isolated so
      RTL/format characters cannot visually reorder it into a look-alike. */
@@ -541,7 +772,7 @@ h2 {
 }
 
 .origin-line:focus-visible {
-  outline: 2px solid var(--accent, #4a90d9);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 3px;
 }
@@ -556,7 +787,7 @@ h2 {
 .health-row > span:first-child {
   font-size: 12px;
   line-height: 1.4;
-  color: var(--warning, #c98a2d);
+  color: var(--warning);
   flex: 1;
 }
 
@@ -575,6 +806,13 @@ h2 {
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 /* Disclosure that approving is permanent (authorize.html #permanence). Replaces the "Always allow"

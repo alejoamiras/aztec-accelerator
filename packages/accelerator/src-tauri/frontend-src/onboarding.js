@@ -13,12 +13,12 @@ const OPTION_IDS = ["opt-https", "opt-autostart", "opt-auto-update"];
 /**
  * The primary button is the ONLY way out of the wizard (there is deliberately no Skip — every outcome
  * it offered is reachable by unchecking toggles, more deliberately, and a second route to "no" next to
- * the primary action invites reflexive dismissal). So its label has to follow the toggles: "Start"
- * reads wrong when the user has turned everything off and just wants out.
+ * the primary action invites reflexive dismissal). So its label has to follow the toggles: an
+ * eager "Let's go" reads wrong when the user has turned everything off and just wants out.
  */
 function syncPrimaryLabel() {
   const anyChecked = OPTION_IDS.some((id) => document.getElementById(id).checked);
-  document.getElementById("start").textContent = anyChecked ? "Start" : "Continue";
+  document.getElementById("start").textContent = anyChecked ? "Let's go" : "Continue";
 }
 
 async function load() {

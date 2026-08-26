@@ -105,7 +105,7 @@ pub fn open_settings_window(app: &AppHandle) {
         WindowConfig {
             label: "settings",
             url: "settings.html".to_string(),
-            title: "Aztec Accelerator Settings",
+            title: "Presto Settings",
             width: 500.0,
             // 600, not 520: the Encrypted Connection section adds rows, and at 520 the speed slider
             // was clipped by the bottom edge.
@@ -125,7 +125,7 @@ pub fn show_onboarding_window(app: &AppHandle) {
         WindowConfig {
             label: "onboarding",
             url: "onboarding.html".to_string(),
-            title: "Welcome to Aztec Accelerator",
+            title: "Welcome to Presto",
             width: 520.0,
             // Bracketed from real feedback, not computed: 600 left an obvious dead band under the
             // button (it was sized around a footer that no longer exists) and 510 clipped the
@@ -254,7 +254,7 @@ pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_ver
         WindowConfig {
             label: "update-prompt",
             url,
-            title: "Aztec Accelerator Update",
+            title: "Presto Update",
             width: 420.0,
             height: 280.0,
             always_on_top: false,

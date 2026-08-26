@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Aztec Accelerator Settings</title>
+  <title>Presto Settings</title>
   <link rel="stylesheet" href="style.css" />
   <script type="module" src="assets/settings.js"></script>
 </head>
@@ -23,7 +23,7 @@
     <div class="row">
       <span class="row-text">
         <span id="https-label">Use HTTPS</span>
-        <span class="row-sub">Lets browsers reach the accelerator over an encrypted channel. Required for Safari.</span>
+        <span class="row-sub">Encrypted channel between your browser and Presto. On by default; Safari requires it.</span>
       </span>
       <label class="toggle">
         <input type="checkbox" id="https" role="switch" aria-labelledby="https-label" />
@@ -37,7 +37,7 @@
       <div class="row">
         <span class="row-text">
           <span>Certificate installed</span>
-          <span class="row-sub">Removing it turns HTTPS off. You'll be asked for your password again to re-enable.</span>
+          <span class="row-sub">Removing it turns HTTPS off. Your system will ask you to approve it again to re-enable. Shown in your system as "Aztec Accelerator Local CA" until our full rename.</span>
         </span>
         <button type="button" id="remove-trust" class="btn btn-danger">Remove</button>
       </div>

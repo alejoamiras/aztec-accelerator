@@ -159,7 +159,7 @@ async function loadAutostart() {
     // never an actionable "off") and the health row stays out of the way.
     console.error("Failed to read autostart state:", e);
     document.getElementById("autostart-health").hidden = true;
-    showErrorHint(autostartEl, "Autostart state unavailable — reopen Settings to retry");
+    showErrorHint(autostartEl, "Autostart state unavailable. Reopen Settings to retry");
   }
 }
 
@@ -175,7 +175,7 @@ autostartEl.addEventListener("change", async (e) => {
   } catch (err) {
     el.checked = !el.checked;
     console.error("Failed to invoke set_autostart:", err);
-    showErrorHint(el, typeof err === "string" ? err : "Failed — try again");
+    showErrorHint(el, typeof err === "string" ? err : "Failed. Try again");
     el.disabled = false;
   }
 });
@@ -188,7 +188,7 @@ document.getElementById("autostart-fix").addEventListener("click", async (e) => 
     renderAutostartStatus(await invoke("repair_autostart"));
   } catch (err) {
     console.error("Autostart repair failed:", err);
-    showErrorHint(btn, typeof err === "string" ? err : "Repair failed — try again");
+    showErrorHint(btn, typeof err === "string" ? err : "Repair failed. Try again");
   } finally {
     btn.disabled = false;
   }
@@ -217,7 +217,7 @@ async function runHttpsOp(anchor, op) {
     console.error("HTTPS operation failed:", err);
     // Surface the backend's own message: "restart to finish enabling" and "a proof is running" are
     // both actionable, and a generic "Failed — try again" would throw that away.
-    showErrorHint(anchor, typeof err === "string" ? err : "Failed — try again");
+    showErrorHint(anchor, typeof err === "string" ? err : "Failed. Try again");
   } finally {
     // Authoritative refresh — never infer the resulting state from whether the call threw.
     try {

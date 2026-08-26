@@ -51,7 +51,7 @@ async function refreshPending() {
   } catch {
     // A2: transient IPC error — keep controls disabled and let the user retry/close.
     setControlsEnabled(false);
-    showErrorHint(allowBtn, "Couldn't reach the accelerator — retrying…");
+    showErrorHint(allowBtn, "Can't find Presto, retrying…");
     return;
   }
   if (decided || responding) return; // state changed while awaiting — drop this (possibly stale) result

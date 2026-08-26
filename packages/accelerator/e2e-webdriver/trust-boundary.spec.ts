@@ -19,7 +19,7 @@
  */
 import { readConfig } from "./helpers.ts";
 
-const SETTINGS_TITLE = "Aztec Accelerator Settings";
+const SETTINGS_TITLE = "Presto Settings";
 const TEST_ORIGIN = "https://trust-boundary-e2e.example.com";
 const PROVE_URL = "http://127.0.0.1:59833/prove";
 

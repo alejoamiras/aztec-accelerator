@@ -16,7 +16,7 @@ export function readConfig(): Record<string, unknown> {
   }
 }
 
-const SETTINGS_TITLE = "Aztec Accelerator Settings";
+const SETTINGS_TITLE = "Presto Settings";
 
 /**
  * Anchor the session on the Settings window before a spec interacts with it.

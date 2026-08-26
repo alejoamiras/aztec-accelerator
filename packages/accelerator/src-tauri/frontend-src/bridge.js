@@ -91,7 +91,7 @@ export function wireToggle(id, handler) {
       .catch((err) => {
         el.checked = !el.checked;
         console.error(`Failed to invoke ${cmd}:`, err);
-        showErrorHint(el, "Failed — try again");
+        showErrorHint(el, "Failed. Try again");
       })
       .finally(() => {
         el.disabled = false;
@@ -131,7 +131,7 @@ export function wireButton(id, opts) {
       btn.textContent = originalText;
       btn.disabled = false;
       if (otherBtn) otherBtn.disabled = false;
-      showErrorHint(btn, "Failed — try again");
+      showErrorHint(btn, "Failed. Try again");
     }
   });
 }

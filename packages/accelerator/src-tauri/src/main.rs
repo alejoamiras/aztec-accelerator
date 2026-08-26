@@ -725,7 +725,7 @@ fn main() {
 
             let bundled_version = env!("AZTEC_BB_VERSION").to_string();
 
-            let status = MenuItemBuilder::with_id("status", "Status: Idle")
+            let status = MenuItemBuilder::with_id("status", "Ready")
                 .enabled(false)
                 .build(app)?;
 

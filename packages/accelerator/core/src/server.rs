@@ -63,11 +63,11 @@ pub const AUTH_QUEUE_BACKSTOP: Duration = Duration::from_secs(
 );
 
 /// Status surfaced to the tray via the `on_status` callback during a `/prove` request.
-/// `display_text()` MUST stay byte-identical to the legacy `"Status: …"` string literals — the
-/// tray label and the `prove_success_path_and_status_sequence` characterization test both pin
-/// them. `is_busy()` drives the tray spinner (true ⟺ work in flight: Downloading or Proving).
-/// Replaces the prior stringly-typed `Fn(&str)` callback so the tray consumer matches on variants
-/// instead of substring-sniffing the label text (Q10).
+/// `display_text()` is pinned verbatim by the tray label, the initial dev-menu item in
+/// src-tauri's main.rs, and the `prove_success_path_and_status_sequence` characterization test —
+/// change all of them together. `is_busy()` drives the tray spinner (true ⟺ work in flight:
+/// Downloading or Proving). Replaces the prior stringly-typed `Fn(&str)` callback so the tray
+/// consumer matches on variants instead of substring-sniffing the label text (Q10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerStatus {
     Idle,
@@ -76,12 +76,12 @@ pub enum ServerStatus {
 }
 
 impl ServerStatus {
-    /// Tray label text. Byte-identical to the pre-Q10 string literals (behavior-preserving).
+    /// Tray label text, in the product voice.
     pub fn display_text(self) -> &'static str {
         match self {
-            ServerStatus::Idle => "Status: Idle",
-            ServerStatus::Downloading => "Status: Downloading bb...",
-            ServerStatus::Proving => "Status: Proving...",
+            ServerStatus::Idle => "Ready",
+            ServerStatus::Downloading => "Fetching the prover…",
+            ServerStatus::Proving => "Working a proof…",
         }
     }
 

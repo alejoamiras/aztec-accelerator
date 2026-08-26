@@ -3,21 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Welcome to Aztec Accelerator</title>
+    <title>Welcome to Presto</title>
     <link rel="stylesheet" href="style.css" />
     <link rel="stylesheet" href="onboarding.css" />
     <script type="module" src="assets/onboarding.js"></script>
   </head>
   <body class="scrollable">
     <div class="wiz">
-      <h1>Let's get you set up</h1>
-      <p class="sub">Three quick choices, all changeable later in Settings. Skipping changes nothing.</p>
+      <h1>Hi! Three quick choices.</h1>
+      <p class="sub">You can change all of these later in Settings. Skipping is fine too.</p>
 
       <div class="opt">
-        <div class="ic">🔒</div>
+        <div class="ic" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+        </div>
         <div class="meta">
           <div class="name">Encrypted Connection (HTTPS)</div>
-          <div class="desc" id="https-desc">Lets your browser talk to the accelerator over an encrypted channel. Required for Safari.</div>
+          <div class="desc" id="https-desc">So your browser and Presto can talk privately. On by default; Safari requires it.</div>
           <div class="desc warn" id="https-warn"></div>
           <div class="result" id="https-result"></div>
           <button type="button" class="retry" id="https-retry">Retry</button>
@@ -29,10 +31,12 @@
       </div>
 
       <div class="opt">
-        <div class="ic">🚀</div>
+        <div class="ic" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+        </div>
         <div class="meta">
           <div class="name">Start on Login</div>
-          <div class="desc">Runs quietly in your menu bar so proving is instant, with no manual launch.</div>
+          <div class="desc">Presto's ready the moment you are. No launching things.</div>
           <div class="result" id="autostart-result"></div>
         </div>
         <label class="toggle">
@@ -42,10 +46,12 @@
       </div>
 
       <div class="opt">
-        <div class="ic">⬆️</div>
+        <div class="ic" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+        </div>
         <div class="meta">
           <div class="name">Auto-Update</div>
-          <div class="desc">Installs signed updates in the background so you always have the latest proving speed and fixes.</div>
+          <div class="desc">Signed updates install themselves. You stay current, effortlessly.</div>
           <div class="result" id="auto-update-result"></div>
         </div>
         <label class="toggle">
@@ -55,7 +61,7 @@
       </div>
 
       <div class="cta">
-        <button type="button" class="primary" id="start">Start</button>
+        <button type="button" class="primary" id="start">Let's go</button>
       </div>
     </div>
   </body>

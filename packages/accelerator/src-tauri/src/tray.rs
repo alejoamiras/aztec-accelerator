@@ -135,7 +135,7 @@ pub fn build_tray_icon(
     Ok(TrayIconBuilder::new()
         .icon(tray_icon)
         .icon_as_template(true)
-        .tooltip("Aztec Accelerator")
+        .tooltip("Presto")
         .menu(menu)
         .on_menu_event(on_menu_event)
         .build(app)?)

@@ -16,8 +16,8 @@
       "origins": [
         "https://playground.aztec-accelerator.dev"
       ],
-      "displayName": "Aztec Accelerator Playground",
-      "description": "Playground for testing the accelerator",
+      "displayName": "Presto Playground",
+      "description": "Playground for trying Presto",
       "curatedBy": "alejoamiras",
       "addedAt": "2026-05-28"
     }
