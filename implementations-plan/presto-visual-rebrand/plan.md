@@ -204,7 +204,7 @@ elapsed text; fallback family flips the dial mode and keeps flowing.
 Common prerequisite used below: `FB = bun run --cwd packages/accelerator frontend:build` (build.rs
 verifies bundle hashes; required before any `cargo` gate after JS/lockfile changes).
 
-### Phase 1 — Toolchain + app brand assets
+### Phase 1 — Toolchain + app brand assets ✓ (gate green 2026-08-26)
 Pin devDeps (`@resvg/resvg-wasm`, fontsource families — exact versions; `bun install`, commit
 `bun.lock`; min-age gate applies). Replace SVG masters in place; build `generate-brand-assets.ts`
 (`app-icons` via `tauri icon`, `tray` via resvg-wasm); regenerate the 30 load-bearing icon files

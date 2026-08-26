@@ -13,3 +13,15 @@
   (text-free, deterministic).
 - Tray SVG masters are emitted by the generator itself from one geometry constant (bolt path +
   orbit radius), then rasterized — a single source of truth instead of 25 hand-kept files.
+- PNG IDAT is a zlib stream: `Bun.inflateSync` (raw deflate) fails with "invalid stored block
+  lengths"; use `node:zlib` `inflateSync`.
+- `tauri icon` emits `icon.png` at 512px; the repo convention (and Linux `{{icon}}` source) is
+  1024px — the generator overwrites it with the 1024 master render.
+- This host's non-interactive shell has no cargo on PATH: prefix `PATH="$HOME/.cargo/bin:$PATH"`
+  for every cargo-touching command (root `bun run test` includes `lint:rust`).
+- Fresh worktree needs the bb sidecar before any cargo build: `bun scripts/copy-bb.ts` (the
+  `prebuild` script) stages `src-tauri/binaries/bb-<triple>` from node_modules.
+- Never trust `cargo test | tail` exit codes (zsh, no pipefail): run unpiped with output
+  redirected to a file, echo `$?`.
+- Gate: frontend:build ✓ · root `bun run test` ✓ · accelerator test:unit 64 pass (incl. 6
+  icon-asset checks) ✓ · `cargo test` exit 0, 131 passed ✓ · commit `ccf1415`.
