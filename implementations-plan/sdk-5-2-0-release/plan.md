@@ -163,7 +163,19 @@ healthy (probe ops, not status flags, if in doubt).
   step 7 pass.
 - Layers: CI e2e (sandbox, native-bb) · registry state · live-site check.
 
-## Phase 3 — Promote `latest` (`promote-latest.yml`) + close-out
+## Phase 3 ⛔ NOT STARTED — blocked upstream by Phase 2
+
+`promote-latest.yml` refuses any version not already on npm, and `5.2.0` was never published, so
+this phase is not merely unstarted but **structurally unreachable** until Phase 2 completes. No
+promote was dispatched; `latest` remains `5.0.1` — its correct, untouched pre-release value.
+
+**Terminal state of this release arc**: docs shipped (Phase 1 ✓), playground live on 5.2.0
+(Phase 2's `deploy-app` leg), npm publish blocked on an owner-only credential repair, promotion
+correctly not attempted. Resuming needs exactly one external action — see Phase 2's unblock note
+and `lessons/phase-2.md` — after which Phase 2 re-runs from pre-flight (derived version is still
+bare `5.2.0`) and Phase 3 proceeds as written below, unchanged.
+
+### Original phase definition (unchanged — runs once Phase 2 clears)
 
 1. `gh workflow run promote-latest.yml -f version=5.2.0` → confirm started → watch.
 2. Verify: `npm view @alejoamiras/aztec-accelerator dist-tags --json` → `latest=5.2.0`,
