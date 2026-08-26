@@ -1,9 +1,9 @@
 /**
- * The three popups that size themselves and cannot scroll: whatever does not fit is simply gone.
- * Settings and onboarding own bespoke layout specs (they carry `body.scrollable`, so for them the
- * question is "does the default state fit", not "is the button reachable at all"). These three had
- * no layout coverage, which is how the renewal window shipped with its consent buttons under the
- * bottom edge.
+ * The three popups sized to their content rather than to a scrollable frame. Authorize and
+ * update-prompt cannot scroll at all, so whatever does not fit is simply gone; renewal now carries
+ * `body.scrollable` as a floor, but a consent dialog that opens with its buttons below the fold is
+ * still a defect, so it is held to the same fit assertion. None of the three had layout coverage,
+ * which is how renewal shipped with its buttons under the bottom edge.
  *
  * Sized to VIEWPORT_SIZES, not WINDOW_SIZES: the title bar's `WEBVIEW_CHROME_HEIGHT` is exactly what
  * hid those buttons, so a spec that grants the page the full window height cannot see the bug.

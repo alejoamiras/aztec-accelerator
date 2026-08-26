@@ -231,8 +231,10 @@ body {
 
 /* Windows whose content can legitimately outgrow the frame: Settings when the certificate
    disclosure opens, the wizard when per-row results appear. Sizing the window for the tallest
-   possible state would leave dead space in the common one, so these scroll instead. The popups keep
-   `overflow: hidden` — they manage their own inner scroll so their buttons stay pinned (F-014). */
+   possible state would leave dead space in the common one, so these scroll instead. Renewal opts in
+   too, as a floor under cross-platform font metrics rather than for a taller state — its consent
+   buttons must never end up unreachable. The authorize and update popups keep `overflow: hidden`
+   and manage their own inner scroll so their buttons stay pinned (F-014). */
 body.scrollable {
   overflow-y: auto;
   scrollbar-width: thin;

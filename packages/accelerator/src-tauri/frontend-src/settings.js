@@ -45,6 +45,12 @@ async function loadSettings() {
 
   CPUS = sysInfo.cpu_count;
 
+  // Before the autostart await, not after: the radios are enabled from first paint, so hydrating
+  // downstream of an await would let a click during a slow query be overwritten by this stale value.
+  const theme = config.theme || "system";
+  const themeInput = document.querySelector(`#theme input[value="${theme}"]`);
+  if (themeInput) themeInput.checked = true;
+
   // codex r2 #6 / r3 #6: the autostart switch ships DISABLED (settings.html) and stays disabled until
   // its true state is CONFIRMED — so an unknown state is never presented as an actionable "off", and a
   // failure of ANY preceding request (which would throw before this block) still leaves it disabled
@@ -59,10 +65,6 @@ async function loadSettings() {
     document.getElementById("https-section").hidden = false;
     document.getElementById("https").checked = config.https_enabled;
   }
-
-  const theme = config.theme || "system";
-  const themeInput = document.querySelector(`#theme input[value="${theme}"]`);
-  if (themeInput) themeInput.checked = true;
 
   const idx = speedToIndex(config.speed || "full");
   document.getElementById("speed").value = idx;

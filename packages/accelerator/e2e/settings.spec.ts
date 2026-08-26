@@ -626,3 +626,46 @@ test("a failed set_theme reverts to the persisted choice instead of the clicked 
   await page.locator("#theme label", { hasText: "Dark" }).click();
   await expect(page.locator('#theme input[value="system"]')).toBeChecked();
 });
+
+test("a theme picked while settings is still loading is not overwritten by the stale config", async ({
+  page,
+}) => {
+  // The radios are live from first paint, and bootstrap awaits the autostart query after reading
+  // the config. Hydrating the theme downstream of that await would reset the user's click to the
+  // value captured before it.
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({
+      config_version: 1,
+      https_enabled: false,
+      approved_origins: [],
+      speed: "full",
+      theme: "system",
+      onboarding_version: 1,
+    }));
+    (window as any).__TAURI_MOCK__.setHandler(
+      "get_autostart_enabled",
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                intentEnabled: false,
+                healthy: true,
+                unreadable: false,
+                pointsElsewhere: false,
+                canRepairNow: true,
+                storedPath: null,
+              }),
+            300,
+          ),
+        ),
+    );
+  });
+  await page.goto("/settings.html");
+
+  await page.locator("#theme label", { hasText: "Dark" }).click();
+  await expect(page.locator('#theme input[value="dark"]')).toBeChecked();
+  // Outlast the slow autostart query, then confirm bootstrap did not stomp the choice.
+  await page.waitForTimeout(500);
+  await expect(page.locator('#theme input[value="dark"]')).toBeChecked();
+});

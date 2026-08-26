@@ -325,14 +325,54 @@ pub fn set_speed(
 /// silently do nothing there; the observer applies the attribute the instant `<html>` appears, which
 /// is still ahead of first paint. Doing this at `on_page_load` instead would paint the OS palette
 /// first and visibly flip a frame later.
-pub fn theme_script(theme: config::Theme) -> String {
+/// Where the injected script gets the theme it applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeSource {
+    /// Read `localStorage` first and fall back to the baked value. For `initialization_script`,
+    /// whose baked value is frozen at window BUILD time and would otherwise be replayed stale on
+    /// every re-navigation.
+    PreferStored,
+    /// Take the baked value as authoritative and write it back to `localStorage`. For callers
+    /// holding the live config: `set_theme`, and the post-load re-assert.
+    Authoritative,
+}
+
+/// JS that pins `data-theme` on `<html>`, or clears it for [`config::Theme::System`].
+///
+/// The theme has to be on the element before first paint or the window visibly flips a frame in,
+/// which rules out doing this from `on_page_load`. `initialization_script` is early enough, but its
+/// string is fixed when the window is built — and it re-runs on every navigation, so a window that
+/// outlived a theme change would replay the old value. `localStorage` bridges that gap: it is
+/// readable at document-start, shared across these same-origin windows, and kept current by every
+/// [`ThemeSource::Authoritative`] caller. The config stays the source of truth; the stored copy is a
+/// cache, and the post-load re-assert repairs it if the two ever disagree.
+///
+/// `document.documentElement` cannot simply be assigned to: WebView2 runs document-created scripts
+/// before the element exists, so a bare assignment would silently no-op on Windows. The observer
+/// applies the attribute the instant `<html>` appears, still ahead of first paint.
+pub fn theme_script(theme: config::Theme, source: ThemeSource) -> String {
     let value = match theme.data_attr() {
         Some(v) => format!("\"{v}\""),
         None => "null".to_string(),
     };
+    // `Theme` is a closed serde enum, so `value` is one of three Rust-owned literals and can never
+    // carry caller-supplied text into the script.
+    let resolve = match source {
+        ThemeSource::PreferStored => {
+            r#"try {
+    var s = localStorage.getItem(KEY);
+    if (s === "system") v = null; else if (s === "light" || s === "dark") v = s;
+  } catch (e) {}"#
+        }
+        ThemeSource::Authoritative => {
+            r#"try { localStorage.setItem(KEY, v === null ? "system" : v); } catch (e) {}"#
+        }
+    };
     format!(
         r#"(function(){{
+  var KEY = "presto.theme";
   var v = {value};
+  {resolve}
   function apply() {{
     var el = document.documentElement;
     if (!el) return false;
@@ -358,8 +398,12 @@ pub fn set_theme(
     // Repaint every open window, not just Settings: an auth popup or the wizard sitting behind it
     // would otherwise keep the old palette until it was closed and reopened. Windows built after
     // this pick the theme up from the config at build time instead.
-    for (_, other) in app.webview_windows() {
-        let _ = other.eval(&theme_script(theme));
+    for (label, other) in app.webview_windows() {
+        if let Err(e) = other.eval(&theme_script(theme, ThemeSource::Authoritative)) {
+            // The config change is already persisted, so this is a partial application, not a
+            // failure: report success and leave a trail rather than reverting the user's choice.
+            tracing::warn!(window = %label, error = %e, "Could not repaint a window for the new theme");
+        }
     }
     Ok(())
 }
@@ -1072,27 +1116,56 @@ fn close_update_prompt(app: &tauri::AppHandle) {
 mod tests {
     use super::{
         is_auth_label, require_auth_window, require_label, sanitize_window_label, theme_script,
+        ThemeSource,
     };
     use crate::config::Theme;
 
     #[test]
     fn theme_script_clears_the_attribute_for_system_and_sets_it_otherwise() {
-        // The script is injected before first paint AND re-evaluated on a live switch, so it has to
-        // handle both directions: Dark→System must REMOVE the attribute, not write "system" (which
-        // matches no CSS override and would strand the window on the light palette).
-        let system = theme_script(Theme::System);
+        // Dark→System must REMOVE the attribute, not write "system": no CSS override matches that
+        // value, so the window would be stranded on the light palette.
+        let system = theme_script(Theme::System, ThemeSource::Authoritative);
         assert!(system.contains("var v = null;"), "{system}");
         assert!(system.contains("removeAttribute"), "{system}");
 
-        assert!(theme_script(Theme::Dark).contains(r#"var v = "dark";"#));
-        assert!(theme_script(Theme::Light).contains(r#"var v = "light";"#));
+        for source in [ThemeSource::PreferStored, ThemeSource::Authoritative] {
+            assert!(theme_script(Theme::Dark, source).contains(r#"var v = "dark";"#));
+            assert!(theme_script(Theme::Light, source).contains(r#"var v = "light";"#));
+        }
     }
 
     #[test]
     fn theme_script_survives_a_document_with_no_element_yet() {
         // Windows' WebView2 runs document-created scripts before <html> exists; without the observer
         // fallback the injected script would no-op there and the window would paint the OS palette.
-        assert!(theme_script(Theme::Dark).contains("MutationObserver"));
+        assert!(theme_script(Theme::Dark, ThemeSource::PreferStored).contains("MutationObserver"));
+    }
+
+    #[test]
+    fn only_the_build_time_script_defers_to_the_stored_theme() {
+        // The whole point of the split. The init script is baked when the window is BUILT and
+        // replayed on every re-navigation, so it must read the stored value or a window that
+        // outlived a theme change repaints stale. The authoritative callers hold the live config,
+        // so they write the cache instead of trusting it.
+        let stored = theme_script(Theme::Dark, ThemeSource::PreferStored);
+        assert!(stored.contains("getItem"), "{stored}");
+        assert!(!stored.contains("setItem"), "{stored}");
+
+        let live = theme_script(Theme::Dark, ThemeSource::Authoritative);
+        assert!(live.contains("setItem"), "{live}");
+        assert!(!live.contains("getItem"), "{live}");
+    }
+
+    #[test]
+    fn a_stored_theme_that_is_not_one_of_the_three_is_ignored() {
+        // localStorage is writable by the page itself, so the init script treats anything outside
+        // the three known values as absent and falls back to the baked theme.
+        let script = theme_script(Theme::Dark, ThemeSource::PreferStored);
+        assert!(script.contains(r#"s === "system""#), "{script}");
+        assert!(
+            script.contains(r#"s === "light" || s === "dark""#),
+            "{script}"
+        );
     }
 
     #[test]

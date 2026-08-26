@@ -1,8 +1,9 @@
 /**
- * The REAL Tauri window inner sizes, mirrored from `src-tauri/src/windows.rs`.
+ * The Tauri window sizes, mirrored from `src-tauri/src/windows.rs`. These are what the windows are
+ * BUILT with, which is not what the page gets — see `WEBVIEW_CHROME_HEIGHT`.
  *
  * Playwright sets no viewport by default, so the desktop-ui specs ran at 1280x720 while these windows
- * are 500x600 and 520x560. Anything that overflows the real window fits comfortably in a 720px-tall
+ * are 500x664 and 520x592. Anything that overflows the real window fits comfortably in a 720px-tall
  * browser viewport, which is structurally why two clipping bugs (the cut-off speed slider, the
  * onboarding height) reached the owner instead of CI. Specs that care about layout must size the page
  * to these values.
@@ -23,13 +24,16 @@ export const WINDOW_SIZES = {
 
 /**
  * Height the title bar takes out of the webview viewport, despite `inner_size` naming it "inner".
- * Measured against a real `--features webdriver` build on macOS 26.5: a window built
- * `inner_size(500, 600)` reports `innerHeight === 568`. Linux and Windows are unmeasured, so this is
- * the worst case there is evidence for rather than a per-platform model.
  *
- * It is a row of content, not a hairline. Sizing a layout spec to the WINDOW height passes any page
- * that fits in 600 while the user sees 568, which is the exact shape of the two clipping bugs that
- * reached the owner instead of CI.
+ * ONE measurement, not a worst case: a real `--features webdriver` build on macOS 26.5 built
+ * `inner_size(500, 600)` and reported `innerHeight === 568`. Linux and Windows have never been
+ * measured, and nothing here proves 32 is their ceiling — if either spends more, these specs stay
+ * green while that platform clips. Closing that needs a per-platform webdriver measurement.
+ *
+ * It still beats sizing to the window, which passes any page fitting in 600 while the user sees 568
+ * — the exact shape of the two clipping bugs that reached the owner instead of CI. Treat a page
+ * clearing this by only a few px as unproven rather than safe; `body.scrollable` on settings,
+ * onboarding and renewal is what keeps an under-estimate a scroll instead of a clip.
  */
 export const WEBVIEW_CHROME_HEIGHT = 32;
 

@@ -2,6 +2,7 @@
 
 use aztec_accelerator::authorization::{AuthDecision, AuthorizationManager};
 use aztec_accelerator::commands;
+use aztec_accelerator::config;
 use std::sync::Arc;
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
@@ -70,13 +71,18 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
     }
     // Read through the app handle rather than threading a theme into every WindowConfig: every
     // window wants the same stored value, and the popups are built from places that have no config.
-    let theme = app
-        .try_state::<commands::ConfigState>()
-        .map(|s| s.lock.read().theme)
-        .unwrap_or_default();
+    let theme = match app.try_state::<commands::ConfigState>() {
+        Some(state) => state.lock.read().theme,
+        None => {
+            tracing::warn!(
+                "No ConfigState while building a window; falling back to the default theme"
+            );
+            config::Theme::default()
+        }
+    };
     match WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url.into()))
         .title(config.title)
-        .initialization_script(&commands::theme_script(theme))
+        .initialization_script(&commands::theme_script(theme, commands::ThemeSource::PreferStored))
         .inner_size(config.width, config.height)
         .resizable(false)
         .center()
@@ -93,20 +99,26 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
         // directly. These guards allow the real tauri://localhost initial load.)
         .on_navigation(is_local_asset_url)
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
-        // The initialization_script above carries the theme as of window BUILD time, which is what
-        // keeps first paint from flashing. It also re-runs on every re-navigation, so a window that
-        // outlived a theme change would snap back to the stale value — the update prompt re-points
-        // itself that way on a version mismatch. Re-assert the live theme once the document exists.
+        // The init script above resolves against `localStorage`, so a re-navigation paints the
+        // CURRENT theme rather than the one baked at build time. This re-assert is the repair path:
+        // it is the only place holding the live config, so it corrects a stored copy that drifted
+        // (a config edited between sessions) and rewrites it for the next navigation.
         .on_page_load(|window, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
-            let theme = window
-                .app_handle()
-                .try_state::<commands::ConfigState>()
-                .map(|s| s.lock.read().theme)
-                .unwrap_or_default();
-            let _ = window.eval(&commands::theme_script(theme));
+            let theme = match window.app_handle().try_state::<commands::ConfigState>() {
+                Some(state) => state.lock.read().theme,
+                None => {
+                    // Registered before any window is built, so absence is a wiring regression.
+                    tracing::warn!("No ConfigState while re-asserting the theme; using the default");
+                    config::Theme::default()
+                }
+            };
+            if let Err(e) = window.eval(&commands::theme_script(theme, commands::ThemeSource::Authoritative))
+            {
+                tracing::warn!(window = %window.label(), error = %e, "Could not re-assert the theme after a page load");
+            }
         })
         .build()
     {
