@@ -36,5 +36,14 @@ REJECTED (with reasons):
 Gates after fixes: root `bun run test` ✓ (81-test final leg incl. new sweep+dial tests),
 `test:e2e:ui` 74 ✓, shellcheck ✓.
 
-## Codex round 2
-- _pending — resumed session re-review_
+## Codex round 2 (resumed)
+Three Lows, all adopted (commit `53d72c7`): ta-da now sweeps linearly to the top in 450ms and
+holds (the exponential approach stalled ~40° short of the claimed "lands on top"); the rewind
+regression test eases materially before sampling so the old bug actually fails it; the sweep's
+workflow guard asserts git's exit code.
+
+## Codex round 3 (resumed) — CONVERGED
+One Low, adopted verbatim (commit `b44b122`): `git diff origin/main...` with no second ref stops
+at HEAD (missing staged/unstaged edits); `git diff --merge-base origin/main` diffs merge-base →
+working tree with the same upstream-change immunity. Codex verdict, quoted: "No other new
+material findings remain."
