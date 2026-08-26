@@ -19,6 +19,7 @@
     "allow-repair-autostart",
     "allow-set-auto-update",
     "allow-set-speed",
+    "allow-set-theme",
     "allow-enable-https",
     "allow-disable-https",
     "allow-remove-https-trust",

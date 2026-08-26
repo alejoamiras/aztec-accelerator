@@ -9,16 +9,34 @@
  *
  * `scripts/tauri-trust-boundary.test.ts` fails if these drift from windows.rs.
  *
- * Caveat worth knowing: this is the window INNER size. The webview viewport can be a few pixels
- * shorter on some platforms, so a page that only just fits here is not proven to fit everywhere — the
- * value of the check is catching content that overflows by rows, which is how these bugs actually show
- * up, not by a hairline.
+ * These are WINDOW sizes. Layout specs must size the page to `VIEWPORT_SIZES` below instead — the
+ * webview gets less height than the window is built with.
  */
 export const WINDOW_SIZES = {
-  settings: { width: 500, height: 600 },
-  onboarding: { width: 520, height: 560 },
-  renewal: { width: 420, height: 260 },
+  settings: { width: 500, height: 664 },
+  onboarding: { width: 520, height: 592 },
+  renewal: { width: 420, height: 320 },
   "update-prompt": { width: 420, height: 280 },
   // The auth popup's label is per-request (`auth-<id>`), so the drift guard keys it by its url.
   authorize: { width: 400, height: 300 },
 } as const;
+
+/**
+ * Height the title bar takes out of the webview viewport, despite `inner_size` naming it "inner".
+ * Measured against a real `--features webdriver` build on macOS 26.5: a window built
+ * `inner_size(500, 600)` reports `innerHeight === 568`. Linux and Windows are unmeasured, so this is
+ * the worst case there is evidence for rather than a per-platform model.
+ *
+ * It is a row of content, not a hairline. Sizing a layout spec to the WINDOW height passes any page
+ * that fits in 600 while the user sees 568, which is the exact shape of the two clipping bugs that
+ * reached the owner instead of CI.
+ */
+export const WEBVIEW_CHROME_HEIGHT = 32;
+
+/** What a layout spec must size the page to: the window minus its chrome. */
+export const VIEWPORT_SIZES = Object.fromEntries(
+  Object.entries(WINDOW_SIZES).map(([label, { width, height }]) => [
+    label,
+    { width, height: height - WEBVIEW_CHROME_HEIGHT },
+  ]),
+) as { [K in keyof typeof WINDOW_SIZES]: { width: number; height: number } };

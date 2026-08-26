@@ -1,6 +1,6 @@
 import path from "node:path";
 import { expect, type Page, test } from "@playwright/test";
-import { WINDOW_SIZES } from "./window-sizes.js";
+import { VIEWPORT_SIZES } from "./window-sizes.js";
 
 const MOCK_PATH = path.join(import.meta.dirname, "tauri-mock.js");
 
@@ -207,7 +207,7 @@ async function overflow(page: Page) {
 test("the pre-Start wizard fits its window without needing to scroll", async ({ page }) => {
   // The state the user sees on first launch, and the one the 560px height was chosen for. If this
   // starts overflowing, the height is wrong again — or a row was added without revisiting it.
-  await page.setViewportSize(WINDOW_SIZES.onboarding);
+  await page.setViewportSize(VIEWPORT_SIZES.onboarding);
   await page.goto("/onboarding.html");
 
   const { content, window } = await overflow(page);
@@ -228,7 +228,7 @@ test("the taller post-Start state stays reachable by scrolling", async ({ page }
       completed: false,
     }));
   });
-  await page.setViewportSize(WINDOW_SIZES.onboarding);
+  await page.setViewportSize(VIEWPORT_SIZES.onboarding);
   await page.goto("/onboarding.html");
   await page.locator("#start").click();
   await expect(page.locator("#https-retry")).toBeVisible();

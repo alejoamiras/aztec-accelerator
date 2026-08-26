@@ -70,6 +70,21 @@
         <span class="slider"></span>
       </label>
     </div>
+    <!-- Radios, not a listbox: three fixed options that all fit, so the whole choice stays readable
+         without opening anything and a click both expresses and applies the intent. `.seg` paints
+         them as a segmented control; the native inputs keep arrow-key roving and the group label. -->
+    <div class="row">
+      <span class="row-text">
+        <span id="theme-label">Appearance</span>
+        <span class="row-sub">Follows your system unless you pick one.</span>
+      </span>
+      <fieldset class="seg" id="theme">
+        <legend class="visually-hidden">Appearance</legend>
+        <label><input type="radio" name="theme" value="system" checked /><span>System</span></label>
+        <label><input type="radio" name="theme" value="light" /><span>Light</span></label>
+        <label><input type="radio" name="theme" value="dark" /><span>Dark</span></label>
+      </fieldset>
+    </div>
     <div class="speed-section">
       <div class="speed-header">
         <span>Proving Speed</span>

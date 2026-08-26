@@ -314,6 +314,56 @@ pub fn set_speed(
     mutate_config(&config, |cfg| cfg.speed = speed)
 }
 
+/// JS that pins `data-theme` on `<html>`, or clears it for [`Theme::System`].
+///
+/// Serves two callers with the same string: injected at window BUILD time via
+/// `initialization_script`, and evaluated again by `set_theme` on every open window so a change in
+/// Settings lands without reopening anything.
+///
+/// The build-time path is why this cannot just touch `document.documentElement`. Windows' WebView2
+/// runs document-created scripts before the document element exists, so a bare assignment would
+/// silently do nothing there; the observer applies the attribute the instant `<html>` appears, which
+/// is still ahead of first paint. Doing this at `on_page_load` instead would paint the OS palette
+/// first and visibly flip a frame later.
+pub fn theme_script(theme: config::Theme) -> String {
+    let value = match theme.data_attr() {
+        Some(v) => format!("\"{v}\""),
+        None => "null".to_string(),
+    };
+    format!(
+        r#"(function(){{
+  var v = {value};
+  function apply() {{
+    var el = document.documentElement;
+    if (!el) return false;
+    if (v === null) el.removeAttribute("data-theme"); else el.setAttribute("data-theme", v);
+    return true;
+  }}
+  if (apply()) return;
+  new MutationObserver(function (_m, obs) {{ if (apply()) obs.disconnect(); }})
+    .observe(document, {{ childList: true }});
+}})();"#
+    )
+}
+
+#[tauri::command]
+pub fn set_theme(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+    theme: config::Theme,
+) -> Result<(), String> {
+    require_label(window.label(), SETTINGS_LABEL)?;
+    mutate_config(&config, |cfg| cfg.theme = theme)?;
+    // Repaint every open window, not just Settings: an auth popup or the wizard sitting behind it
+    // would otherwise keep the old palette until it was closed and reopened. Windows built after
+    // this pick the theme up from the config at build time instead.
+    for (_, other) in app.webview_windows() {
+        let _ = other.eval(&theme_script(theme));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn remove_approved_origin(
     window: tauri::WebviewWindow,
@@ -1020,7 +1070,30 @@ fn close_update_prompt(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_auth_label, require_auth_window, require_label, sanitize_window_label};
+    use super::{
+        is_auth_label, require_auth_window, require_label, sanitize_window_label, theme_script,
+    };
+    use crate::config::Theme;
+
+    #[test]
+    fn theme_script_clears_the_attribute_for_system_and_sets_it_otherwise() {
+        // The script is injected before first paint AND re-evaluated on a live switch, so it has to
+        // handle both directions: Dark→System must REMOVE the attribute, not write "system" (which
+        // matches no CSS override and would strand the window on the light palette).
+        let system = theme_script(Theme::System);
+        assert!(system.contains("var v = null;"), "{system}");
+        assert!(system.contains("removeAttribute"), "{system}");
+
+        assert!(theme_script(Theme::Dark).contains(r#"var v = "dark";"#));
+        assert!(theme_script(Theme::Light).contains(r#"var v = "light";"#));
+    }
+
+    #[test]
+    fn theme_script_survives_a_document_with_no_element_yet() {
+        // Windows' WebView2 runs document-created scripts before <html> exists; without the observer
+        // fallback the injected script would no-op there and the window would paint the OS palette.
+        assert!(theme_script(Theme::Dark).contains("MutationObserver"));
+    }
 
     #[test]
     fn require_label_matches_exactly() {

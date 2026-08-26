@@ -146,6 +146,7 @@ fn main() {
         "set_autostart",
         "repair_autostart",
         "set_speed",
+        "set_theme",
         "remove_approved_origin",
         "get_system_info",
         "get_verified_info",

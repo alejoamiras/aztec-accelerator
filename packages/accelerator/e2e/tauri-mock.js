@@ -27,6 +27,7 @@ const defaults = {
     https_enabled: false,
     approved_origins: ["https://example.com"],
     speed: "full",
+    theme: "system",
     onboarding_version: 1,
     // auto_update intentionally omitted — matches Rust None serialization
   }),
@@ -42,6 +43,7 @@ const defaults = {
   }),
   get_system_info: () => ({ platform: "macos", cpu_count: 10 }),
   set_speed: () => null,
+  set_theme: () => null,
   set_autostart: () => null,
   // Default: a repair succeeds and the entry is healthy afterwards.
   repair_autostart: () => ({

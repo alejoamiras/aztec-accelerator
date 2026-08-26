@@ -148,6 +148,7 @@ const WINDOW_MATRIX: Record<string, string[]> = {
     "repair_autostart",
     "set_auto_update",
     "set_speed",
+    "set_theme",
     "enable_https",
     "disable_https",
     "remove_https_trust",
@@ -242,7 +243,7 @@ describe("F-012 P3 — per-window capability ACL", () => {
 
     expect(buildCommands).toEqual(handlers); // declared surface == registered surface
     expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
-    expect(handlers.length).toBe(19); // +repair_autostart (autostart self-heal Fix button, plan D16)
+    expect(handlers.length).toBe(20); // +set_theme (Settings appearance control)
   });
 
   test("tauri.conf.json pins the capability allowlist to exactly the 5", async () => {

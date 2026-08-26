@@ -60,6 +60,10 @@ async function loadSettings() {
     document.getElementById("https").checked = config.https_enabled;
   }
 
+  const theme = config.theme || "system";
+  const themeInput = document.querySelector(`#theme input[value="${theme}"]`);
+  if (themeInput) themeInput.checked = true;
+
   const idx = speedToIndex(config.speed || "full");
   document.getElementById("speed").value = idx;
   updateSpeedUI(idx);
@@ -252,6 +256,19 @@ speedSlider.addEventListener("change", (e) => {
   invoke("set_speed", { speed: level.value }).catch((err) => {
     console.error("Failed to set speed:", err);
     showErrorHint(speedSlider, "Failed to save");
+    loadSettings();
+  });
+});
+
+// Appearance. Rust owns the repaint: set_theme re-evaluates the data-theme script in every open
+// window, so this handler deliberately does NOT touch the DOM. Reverting on failure means re-reading
+// the config rather than trusting the radio the user just clicked.
+const themeGroup = document.getElementById("theme");
+themeGroup.addEventListener("change", (e) => {
+  const value = e.target.value;
+  invoke("set_theme", { theme: value }).catch((err) => {
+    console.error("Failed to set theme:", err);
+    showErrorHint(themeGroup, "Failed to save");
     loadSettings();
   });
 });

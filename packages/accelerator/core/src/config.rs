@@ -35,6 +35,33 @@ impl Speed {
     }
 }
 
+/// Which palette the app's windows render in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follow the OS. The webview resolves it through `prefers-color-scheme` with no help from us
+    /// (verified on a real macOS WKWebView), so this is the one value that sets no attribute.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    /// The `data-theme` attribute value, or `None` for [`Theme::System`].
+    ///
+    /// `None` means REMOVE the attribute rather than set it to "system": the CSS overrides key off
+    /// `[data-theme="light"]`/`[data-theme="dark"]` and deliberately leave the media query in charge
+    /// otherwise, so any other value would silently pin the light palette.
+    pub fn data_attr(self) -> Option<&'static str> {
+        match self {
+            Theme::System => None,
+            Theme::Light => Some("light"),
+            Theme::Dark => Some("dark"),
+        }
+    }
+}
+
 /// Current config schema version. Bump when fields are removed or renamed.
 /// Added fields with `#[serde(default)]` don't require a version bump.
 ///
@@ -76,6 +103,10 @@ pub struct AcceleratorConfig {
     pub approved_origins: Vec<CanonicalOrigin>,
     #[serde(default)]
     pub speed: Speed,
+    /// Palette for the app's own windows. Additive field with a serde default, so it needs no
+    /// `CONFIG_VERSION` bump and an older build simply re-defaults it.
+    #[serde(default)]
+    pub theme: Theme,
     /// None = never asked, Some(true) = auto-update, Some(false) = manual
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
@@ -103,6 +134,7 @@ impl Default for AcceleratorConfig {
             https_enabled: false,
             approved_origins: Vec::new(),
             speed: Speed::default(),
+            theme: Theme::default(),
             auto_update: None,
             auto_approve_localhost: false,
             onboarding_version: 0,
@@ -1244,6 +1276,26 @@ mod tests {
             de_origins(r#"["https://b.com","https://a.com"]"#),
             vec![co("https://b.com"), co("https://a.com")],
         );
+    }
+
+    #[test]
+    fn theme_defaults_to_system_and_system_sets_no_attribute() {
+        // A config predating the field, and the reason System is special: the CSS overrides key off
+        // [data-theme="light"]/[data-theme="dark"] and leave the media query in charge otherwise, so
+        // emitting data-theme="system" would silently pin the light palette.
+        let cfg: AcceleratorConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.theme, Theme::System);
+        assert_eq!(cfg.theme.data_attr(), None);
+        assert_eq!(Theme::Light.data_attr(), Some("light"));
+        assert_eq!(Theme::Dark.data_attr(), Some("dark"));
+    }
+
+    #[test]
+    fn theme_roundtrips_through_the_lowercase_wire_form() {
+        // The settings UI sends these exact strings, and they are what lands on disk.
+        let cfg: AcceleratorConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(cfg.theme, Theme::Dark);
+        assert_eq!(serde_json::to_value(Theme::System).unwrap(), "system");
     }
 
     #[test]

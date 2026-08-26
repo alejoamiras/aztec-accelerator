@@ -1,6 +1,6 @@
 import path from "node:path";
 import { expect, type Page, test } from "@playwright/test";
-import { WINDOW_SIZES } from "./window-sizes.js";
+import { VIEWPORT_SIZES } from "./window-sizes.js";
 
 const MOCK_PATH = path.join(import.meta.dirname, "tauri-mock.js");
 
@@ -556,7 +556,7 @@ test("at the real window size the speed control is reachable with the certificat
 }) => {
   // The exact regression the owner hit: opening "Manage certificate" pushes the speed section down,
   // and at the old 520px height it was clipped with no scroll.
-  await page.setViewportSize(WINDOW_SIZES.settings);
+  await page.setViewportSize(VIEWPORT_SIZES.settings);
   await page.goto("/settings.html");
   await page.locator("#cert-details summary").click();
 
@@ -572,7 +572,7 @@ test("at the real window size the default Settings view fits with no scrolling a
   // didn't fit — `body.scrollable` makes that merely scrollable, not correct. A reachability-only
   // assertion passes on the old 520px height, so it would not have caught the bug it exists for.
   // (Scrolling IS the accepted answer once the certificate disclosure is open — see the test above.)
-  await page.setViewportSize(WINDOW_SIZES.settings);
+  await page.setViewportSize(VIEWPORT_SIZES.settings);
   await page.goto("/settings.html");
 
   const fit = await page.evaluate(() => ({
@@ -584,4 +584,45 @@ test("at the real window size the default Settings view fits with no scrolling a
     `the default Settings view is ${fit.content}px in a ${fit.window}px window — raise the height in windows.rs or drop a row`,
   ).toBeLessThanOrEqual(fit.window);
   await expect(page.locator(".speed-section")).toBeInViewport({ ratio: 1 });
+});
+
+test("appearance reflects the stored theme and saves the picked one", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("get_config", () => ({
+      config_version: 1,
+      https_enabled: false,
+      approved_origins: [],
+      speed: "full",
+      theme: "dark",
+      onboarding_version: 1,
+    }));
+  });
+  await page.goto("/settings.html");
+
+  await expect(page.locator('#theme input[value="dark"]')).toBeChecked();
+
+  await page.locator("#theme label", { hasText: "Light" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).__TAURI_MOCK__.calls.filter((c: any) => c.cmd === "set_theme"),
+      ),
+    )
+    .toEqual([expect.objectContaining({ args: { theme: "light" } })]);
+});
+
+test("a failed set_theme reverts to the persisted choice instead of the clicked one", async ({
+  page,
+}) => {
+  // The radio flips on click before the command resolves. Rust is what repaints, so leaving a
+  // rejected choice selected would show a theme the app is not actually in.
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("set_theme", () => {
+      throw new Error("config written by a newer build");
+    });
+  });
+  await page.goto("/settings.html");
+
+  await page.locator("#theme label", { hasText: "Dark" }).click();
+  await expect(page.locator('#theme input[value="system"]')).toBeChecked();
 });
