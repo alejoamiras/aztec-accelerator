@@ -47,3 +47,48 @@ One Low, adopted verbatim (commit `b44b122`): `git diff origin/main...` with no 
 at HEAD (missing staged/unstaged edits); `git diff --merge-base origin/main` diffs merge-base →
 working tree with the same upstream-change immunity. Codex verdict, quoted: "No other new
 material findings remain."
+
+## Post-QA round (local build + appearance control)
+
+Owner ran the branch on a real Mac. Findings and the codex loop that followed.
+
+### From the visual QA pass
+- **OS dark mode DOES reach the WKWebView.** Queried the live webview of a `--features webdriver`
+  build both directions (`-NSRequiresAquaSystemAppearance YES` forces light for one process without
+  touching the system setting). The plan's Rust `data-theme` fallback is therefore NOT needed on
+  macOS. Linux/Windows still unverified.
+- **`inner_size` is not the viewport.** A window built 500x600 gives the page 568 on macOS. The
+  desktop-ui specs sized pages to the WINDOW, so they proved a fit the user never gets. Switching to
+  `VIEWPORT_SIZES` immediately failed twice: onboarding over by 5px, renewal by 51px with its consent
+  buttons unreachable and no scroll. Both were pre-existing.
+- Tray spark vanished for 3 of 24 frames (bolt tail sits 19.6 from center against an orbit of 20);
+  fixed with a mask that punches a gap rather than moving the orbit.
+
+### Loop notes worth keeping
+- **`codex login status` lies.** It reported "Logged in using ChatGPT" while the token was expired
+  (`401 token_expired` in the log). Check the log, not the status command.
+- **Falsify every regression test.** Three of the tests added here were run against the un-fixed
+  code first. One that was NOT falsifiable got rewritten: a "survives a reload" E2E would have
+  passed with or without the localStorage fix, because the post-load re-assert produces the same end
+  state. It is now split, with the cache assertion as the real check.
+- **Playwright does not report a `<fieldset>` element as disabled**, though it does resolve disabled
+  through an ancestor fieldset. A false failure here nearly sent a correct implementation back for
+  "fixing"; a MutationObserver probe settled it. Assert on a child input.
+- **Do not build with `--features webdriver` before committing** — `gen/schemas` picks up
+  `webdriver:default` churn. Regenerate from a plain `cargo build`.
+- **The WDIO runner cannot start a session on this machine** (`UND_ERR_INVALID_ARG` from its bundled
+  undici, all six spec files identically, pre-existing). New E2E assertions were validated by driving
+  the same steps over raw WebDriver; the spec file itself runs only in CI.
+- `:has()` is Safari 15.4+ and this app's floor is macOS 10.15 WebKit. The style sheet says so in its
+  own header, and it still got used once. `fieldset[disabled]` + `:disabled` was the portable answer.
+
+### Codex rounds (session 01a03fef-d797-7260-961f-928f3117acde, xhigh)
+R1: 4 should-fix (re-navigation flash only half-fixed, hydration race, discarded `eval` errors, the
+32px overclaim). R2: 2 (hydration race still open via a stalled `get_system_info`; non-atomic cache
+write — documented, not fixed). R3: 3 (`:has()` floor break, E2E waited on existence not hydration,
+fixed 400ms sleeps). R4: 3 (recovery path re-opened the race, `!undefined` truthiness bug, schema
+churn). R5: **"Converged. I found no remaining merge-blocking issues."**
+
+Rejected with reasons: a revision marker for the cache/config write gap (self-healing transient, more
+machinery than the defect); per-platform chrome constants (never measured — documented the gap
+instead of guessing).
