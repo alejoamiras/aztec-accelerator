@@ -15,7 +15,7 @@ npm install @alejoamiras/aztec-accelerator
 bun add @alejoamiras/aztec-accelerator
 ```
 
-> The bare install resolves npm `latest`, which tracks the last **stable** Aztec line. For the current **Aztec 5.0** line (`5.0.0-rc.x`), install the `testnet` dist-tag: `npm install @alejoamiras/aztec-accelerator@testnet`.
+> The bare install resolves npm `latest`, which tracks the current **stable** Aztec line (`5.2.x`). The `testnet` dist-tag points at the newest published build — usually the same version, and ahead of `latest` only while a new line is being validated: `npm install @alejoamiras/aztec-accelerator@testnet`.
 
 The SDK ships its `@aztec/*` packages as exact-pinned **dependencies** (not peer dependencies), so it installs standalone. When your project already depends on the same exact `@aztec` version — the normal case for an Aztec dApp — npm/Bun dedupe them to a single `@aztec` graph.
 

@@ -90,18 +90,49 @@ gh workflow run publish-testnet.yml
 gh workflow run publish-testnet.yml -f skip_sdk_publish=true
 ```
 
-- **dist-tag `testnet`, `latest:false`.** While the `@aztec/*` deps are release-candidate-labeled (`5.0.0-rc.N`), the SDK ships on the **`testnet`** dist-tag and never npm `latest` — `latest` stays on the last stable line. Consumers opt in with `npm install @alejoamiras/aztec-accelerator@testnet`.
+- **Always publishes to `testnet`, never to `latest`.** `_publish-sdk.yml` accepts only `testnet` / `nightlies` (guard step); moving npm `latest` is structurally impossible from the publish path and belongs to `promote-latest.yml` (below). A publish therefore never changes what a bare `npm install` resolves — but note it DOES immediately reach anyone whose range (`^5.1.0`, `^5.2.0`, …) matches, since semver ranges ignore dist-tags.
 - The reusable `_publish-sdk.yml` runs `npm publish --provenance --access public --tag <dist_tag>` — **Sigstore build provenance** is attached via `id-token: write`. npm authentication uses the `NPM_TOKEN` secret (passed into the reusable workflow); the GitHub release it cuts is always `--latest=false` (the npm dist-tag, not the GitHub "Latest" flag, governs consumer resolution).
 - The same run deploys the playground (`deploy-app` job) unless the e2e gate failed. Use `skip_sdk_publish=true` to redeploy the playground after a docs/UI-only change without bumping npm.
-- **7-day npm min-age** still applies to the SDK's own dependencies — never override the gate in CI.
+- **7-day npm min-age** applies when a lockfile is regenerated locally, with one standing, scoped exception: first-party `@aztec/*` is listed in `bunfig.toml`'s `minimumReleaseAgeExcludes` (an Aztec bump PR is human-reviewed and CI-gated, and the gate would otherwise stall every bump for a week). Never widen that exclusion, and never bypass the gate ad hoc. The publish job itself installs `--frozen-lockfile`, so min-age is not a publish-time control.
 
 ### Pre-flight (SDK)
 
 - [ ] `bun run --cwd packages/sdk test:lint` (typecheck) + `bun run --cwd packages/sdk test:unit` green; `bun run lint` clean (biome)
-- [ ] SDK version in `packages/sdk/package.json` bumped (the rc / `testnet` line)
-- [ ] `@aztec/*` deps resolve to the intended version; `bun.lock` committed (`bun install --frozen-lockfile` passes)
+- [ ] `@aztec/*` deps resolve to the intended version; `bun.lock` committed (`bun install --frozen-lockfile` passes). The published version is DERIVED from `@aztec/stdlib` by `scripts/get-sdk-publish-version.ts` — `packages/sdk/package.json`'s own `version` field is a `0.0.0` placeholder and is never hand-bumped.
+- [ ] `npm view @alejoamiras/aztec-accelerator versions dist-tags --json` — the target version must NOT already exist (if it does, a dispatch mints `X.Y.Z-revision.N` instead), and no other npm mutation may be queued or in flight.
+- [ ] `git ls-remote origin 'refs/tags/@alejoamiras/aztec-accelerator@<version>'` empty — the workflow's tag guard fires only AFTER npm publish, so a squatted tag would strand a published version without its release.
+- [ ] Consumer-fidelity proof at the dispatch commit: `sdk.yml`'s `tarball-consumer` job green at that SHA (it packs the real rewritten manifest and installs it with plain npm), or run `scripts/sdk-tarball-consumer.sh` locally against a fresh `npm pack`.
 
-## Rollback Procedure
+## Promoting the SDK to npm `latest`
+
+`promote-latest.yml` is the ONLY sanctioned path that moves `latest`. It never publishes: it validates the version string, verifies the version already exists on npm, then moves the tag.
+
+```bash
+# Make an already-published version the default install:
+gh workflow run promote-latest.yml -f version=5.2.0
+
+# Roll `latest` back to a previous published version (same workflow — it is the rollback lever):
+gh workflow run promote-latest.yml -f version=5.0.1
+```
+
+- **Precondition**: whatever acceptance bar the cycle's plan defines (historically a live smoke of the published artifact; at minimum, verify the publish landed — dist-tags, provenance attestation, git tag + GitHub release — before promoting).
+- **What rollback does and does not fix.** Moving the tag back changes what NEW bare/`@latest` installs resolve. It does not downgrade anyone already installed, and it does not help range consumers (`^X.Y.Z`) — they resolved the published version the moment it hit npm, and a `X.Y.Z-revision.N` fix-forward is a semver *prerelease* their ranges will not match. Fix-forward for those consumers means the next real version.
+- **Append-only.** Never delete or re-publish a version to "undo" it; a colliding tag makes the publish step fail loud, and re-cutting the same version is a STOP-and-surface event.
+
+### After any FAILED publish or promote run
+
+Read the registry BEFORE classifying the failure — an npm command can fail after the registry accepted the change (a lost response, a failed trailing step):
+
+```bash
+npm view @alejoamiras/aztec-accelerator versions dist-tags --json
+```
+
+Then: version absent + auth-shaped error (E401/E403/E404) → treat as a credential problem (this has happened: an expired `NPM_TOKEN` once failed the upload *after* provenance was signed); rotate the secret, never blind-retry. Version present but a later leg failed → do NOT redispatch the publish (it would mint `-revision.N`); repair only the failed leg, and treat a missing tag/release as STOP-and-surface.
+
+## Rollback Procedure (accelerator app)
+
+For the SDK on npm, rollback is the `promote-latest.yml` dispatch documented above — this section covers the
+desktop app's signed update feed only.
 
 B6 is **append-only**: NEVER delete a published release or tag, and never hand-upload a feed. Rollback is a
 FEED operation — you move the live `latest.json` back to a previous good version with a `promote-only`
