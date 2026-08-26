@@ -1,4 +1,8 @@
 <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" fill="none">
-  <path d="M26 5 L12 27 H21 L19 43 L36 19 H25 Z" fill="black" stroke="black" stroke-width="4" stroke-linejoin="round"/>
+  <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="48" height="48">
+    <rect width="48" height="48" fill="white"/>
+    <circle cx="41.321" cy="14.000" r="4.9" fill="black"/>
+  </mask>
+  <path d="M26 5 L12 27 H21 L19 43 L36 19 H25 Z" fill="black" stroke="black" stroke-width="4" stroke-linejoin="round" mask="url(#gap)"/>
   <circle cx="41.321" cy="14.000" r="3.1" fill="black"/>
 </svg>

@@ -27,6 +27,10 @@ const MANIFEST = join(PKG_DIR, "scripts", "brand-assets.sha256.json");
 const TRAY_BOLT = "M26 5 L12 27 H21 L19 43 L36 19 H25 Z";
 const TRAY_FRAMES = 24;
 const TRAY_PX = 44;
+const SPARK_R = 3.1;
+// Clear space held around the spark wherever it crosses the bolt. 1.8 units survives the menu bar's
+// downscale of the 44px asset; much more starts eating visible chunks out of the bolt.
+const SPARK_GAP = 1.8;
 
 const BUNDLE_FILES = ["32x32.png", "128x128.png", "icon.png", "icon.icns", "icon.ico"];
 
@@ -68,14 +72,26 @@ async function resvg(svg: string, widthPx: number): Promise<Uint8Array> {
 
 function traySvg(frame: number | null): string {
   let spark = "";
+  let knockout = "";
+  let masked = "";
   if (frame !== null) {
     const theta = (-90 + (frame - 1) * 15) * (Math.PI / 180);
     const cx = (24 + 20 * Math.cos(theta)).toFixed(3);
     const cy = (24 + 20 * Math.sin(theta)).toFixed(3);
-    spark = `\n  <circle cx="${cx}" cy="${cy}" r="3.1" fill="black"/>`;
+    spark = `\n  <circle cx="${cx}" cy="${cy}" r="${SPARK_R}" fill="black"/>`;
+    // Both shapes are solid black, so where the orbit crosses the bolt they fuse and the spark
+    // disappears — worst at the bolt's lower tail, which sits 19.6 from center against an orbit of
+    // 20 (frame 14 lands on it almost exactly). Punching the gap out of the BOLT keeps the spark a
+    // full disc and the orbit geometry untouched.
+    knockout =
+      `\n  <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="48" height="48">` +
+      `\n    <rect width="48" height="48" fill="white"/>` +
+      `\n    <circle cx="${cx}" cy="${cy}" r="${SPARK_R + SPARK_GAP}" fill="black"/>` +
+      `\n  </mask>`;
+    masked = ` mask="url(#gap)"`;
   }
-  return `<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" fill="none">
-  <path d="${TRAY_BOLT}" fill="black" stroke="black" stroke-width="4" stroke-linejoin="round"/>${spark}
+  return `<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" fill="none">${knockout}
+  <path d="${TRAY_BOLT}" fill="black" stroke="black" stroke-width="4" stroke-linejoin="round"${masked}/>${spark}
 </svg>
 `;
 }

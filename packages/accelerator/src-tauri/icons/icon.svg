@@ -1,6 +1,9 @@
+<!-- Bolt and spark only. The silk dot the marketing mark carries is deliberately absent here: a small
+     red dot in the corner of an app icon reads as an unread badge or a rendering fault, and by 32px
+     it is a 2px speck. `bunx tauri icon` derives every shipped size from this one file, so the mark
+     has to hold at 16px, not just in the Dock. -->
 <svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
   <rect width="96" height="96" rx="21" fill="#FFFAF1"/>
   <path d="M52 14 L26 56 H44 L40 84 L74 40 H52 Z" fill="#3B4FE0" stroke="#3B4FE0" stroke-width="7" stroke-linejoin="round"/>
   <path d="M74 16 l3.4 7 7 3.4 -7 3.4 -3.4 7 -3.4-7 -7-3.4 7-3.4 Z" fill="#FFC53D"/>
-  <circle cx="22" cy="24" r="3.4" fill="#F04E42"/>
 </svg>
