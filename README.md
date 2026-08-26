@@ -64,7 +64,7 @@ const prover = new AcceleratorProver();
 
 See the [SDK README](packages/sdk/README.md) for full API reference.
 
-> **Aztec 5.2 / dist-tags.** The current SDK line targets Aztec `5.2.x`. Every build publishes on npm's **`testnet`** dist-tag first; **`latest`** is moved to it in a separate, deliberate step, so the two usually point at the same version and diverge only while a new line is being validated. The accelerator downloads the matching `bb` binary **at runtime**, so an Aztec version bump ships **SDK-only** — already-installed accelerators need no re-release. See the [release runbook](docs/RELEASE_RUNBOOK.md).
+> **Versioning / dist-tags.** SDK `X.Y.Z` targets Aztec `X.Y.Z` — the published version is derived from the pinned `@aztec/stdlib` dependency. Every build publishes on npm's **`testnet`** dist-tag; **`latest`** is moved to it in a separate, deliberate step, so the two usually match and differ only while a newer line is being validated or after a rollback. The accelerator downloads the matching `bb` binary **at runtime**, so an Aztec version bump ships **SDK-only** — already-installed accelerators need no re-release. See the [release runbook](docs/RELEASE_RUNBOOK.md).
 
 ### For users (Desktop App)
 
