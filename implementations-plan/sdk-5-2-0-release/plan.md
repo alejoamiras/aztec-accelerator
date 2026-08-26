@@ -27,7 +27,12 @@
 
 ---
 
-## Phase 1 — Docs-truth PR (the only repo change before publishing; merges BEFORE any dispatch)
+## Phase 1 ✓ — Docs-truth PR — GREEN 2026-08-26: PR #479 merged (squash) with rollup
+`SUCCESS×20 SKIPPED×17`, zero failures; **Tarball Consumer pass (1m19s)** and SDK E2E pass at the
+PR head. `bun run lint` exit 0 locally at every round. Codex loop: reject (3 blocking: shipped-README
+temporal falsity, missing promote-failure triage, wrong-manifest local recipe) → reject → conditional
+→ **approve**. Lessons: `lessons/phase-1.md`. CI-trigger gotcha recorded there: the push+`gh pr create`
+raced and produced ZERO workflow runs; an empty commit was needed to trigger them.
 
 The stale dist-tag story ships inside the tarball if uncorrected (`packages/sdk/README.md` is
 packed by npm always; its line 18 still says "Aztec 5.0 line (`5.0.0-rc.x`), install `testnet`").
@@ -62,7 +67,36 @@ pre-flight instead and note it.
 - `bun run lint` exit 0; PR CI green on all required checks; merged to main.
 - Layers: lint · CI required checks.
 
-## Phase 2 — Pre-flight + publish dispatch (`publish-testnet.yml`)
+## Phase 2 ⛔ BLOCKED (owner action required) — pre-flight all green, publish rejected by npm
+
+Run [32993796578](https://github.com/alejoamiras/aztec-accelerator/actions/runs/32993796578),
+dispatched 2026-08-26 on `main`, `headSha=acb3d317…` == the Phase-1 merge commit (assert passed).
+
+- Pre-flight 1–5 ALL GREEN: registry had no `5.2.0` (`latest=5.0.1`, `testnet=5.0.1-revision.1`);
+  tag `@alejoamiras/aztec-accelerator@5.2.0` absent; no queued/in-flight run in any of the three
+  npm-mutating workflows; HEAD == merge commit; derived version = bare **5.2.0**; local
+  tarball-consumer proof at `acb3d31` exit 0 ("packed tarball resolves + typechecks; exact-host
+  @aztec graph is a singleton"), manifest restored clean.
+- Jobs: `Assert main ref` ✓ · `e2e / SDK E2E` ✓ (native-bb leg) · `deploy-app` ✓ ·
+  **`publish-sdk` ✗**.
+- **npm rejected the publish**: `npm error 404 The requested resource
+  '@alejoamiras/aztec-accelerator@5.2.0' could not be found or you do not have permission to
+  access it.` npm packed the tarball first (contents logged), so the failure is at the registry
+  PUT, not in our build.
+- **Registry state re-read FIRST per protocol** (quoted in transcript): `5.2.0` ABSENT, dist-tags
+  UNCHANGED (`latest=5.0.1`, `testnet=5.0.1-revision.1`). Nothing was published; no `-revision.N`
+  risk; the tag/GitHub-release step never ran.
+- Classification: version-absent + auth-shaped E404 = the documented 2026-05-27 incident shape
+  (`implementations-plan/release-2026-05-27/lessons/phase-3b.md`) — a credential problem, NOT a
+  code problem. Per protocol: STOPPED, zero retries, token untouched, surfaced to owner.
+- **Playground DID deploy** (`deploy-app` has no `needs:` edge on `publish-sdk` — recon fact 1):
+  live bundle serves `VITE_AZTEC_SDK_VERSION:"5.2.0"`. The 5.2 playground half of the release is
+  DONE; only the npm publish is blocked.
+- **Unblock**: owner rotates/repairs the `NPM_TOKEN` secret (see `lessons/phase-2.md` for the
+  read-only diagnostic checklist), then re-dispatch — the derived version is still bare `5.2.0`
+  because nothing was published.
+
+### Original phase definition (unchanged — re-run from pre-flight on unblock)
 
 Pre-flight (read-only, from the dispatch-intended main HEAD):
 1. `npm view @alejoamiras/aztec-accelerator dist-tags versions --json` — assert `5.2.0` absent,
