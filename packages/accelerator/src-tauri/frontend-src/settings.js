@@ -41,6 +41,11 @@ function updateSpeedUI(index) {
 }
 
 async function loadSettings() {
+  // Disable per call, not just via the HTML attribute: this also runs as the recovery path after a
+  // failed set_theme, and by then the fieldset is enabled — leaving the awaits below open to the
+  // same click-then-overwrite race the initial disabled state exists to close.
+  document.getElementById("theme").disabled = true;
+
   const [config, sysInfo] = await Promise.all([invoke("get_config"), invoke("get_system_info")]);
 
   CPUS = sysInfo.cpu_count;

@@ -23,7 +23,12 @@ type Choice = "system" | "light" | "dark";
 async function waitForHydration(): Promise<void> {
   await browser.waitUntil(
     async () =>
-      await browser.execute(() => !document.querySelector<HTMLFieldSetElement>("#theme")?.disabled),
+      await browser.execute(() => {
+        const group = document.querySelector<HTMLFieldSetElement>("#theme");
+        // `!undefined` is true, so an optional-chained read would report hydration before the
+        // control exists at all.
+        return group !== null && !group.disabled;
+      }),
     { timeout: 5000, timeoutMsg: "the appearance control never became enabled" },
   );
 }

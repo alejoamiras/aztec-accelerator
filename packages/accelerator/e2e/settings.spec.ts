@@ -663,3 +663,40 @@ test("the appearance control is not actionable until the stored value is known",
     ),
   ).toBe(0);
 });
+
+test("the recovery reload disables the appearance control again while it re-hydrates", async ({
+  page,
+}) => {
+  // A failed set_theme re-runs loadSettings, and by then the fieldset is enabled. Without disabling
+  // per call, that second pass has the same click-then-overwrite window as the first.
+  await page.addInitScript(() => {
+    (window as any).__TAURI_MOCK__.setHandler("set_theme", () => {
+      throw new Error("config written by a newer build");
+    });
+    (window as any).__TAURI_MOCK__.setHandler("get_config", (_args: unknown, callIndex: number) => {
+      const config = {
+        config_version: 1,
+        https_enabled: false,
+        approved_origins: [],
+        speed: "full",
+        theme: "system",
+        onboarding_version: 1,
+      };
+      // Stall only the recovery pass, so the assertion lands inside its awaits.
+      return callIndex === 1
+        ? config
+        : new Promise((resolve) => setTimeout(() => resolve(config), 400));
+    });
+  });
+  await page.goto("/settings.html");
+  // Asserted on a child input, not the fieldset: Playwright resolves disabled through an ancestor
+  // fieldset but does not report the fieldset element itself as disabled.
+  const option = page.locator('#theme input[value="light"]');
+  await expect(option).toBeEnabled();
+
+  await page.locator("#theme label", { hasText: "Dark" }).click();
+  await expect(option).toBeDisabled();
+
+  await expect(option).toBeEnabled({ timeout: 5000 });
+  await expect(page.locator('#theme input[value="system"]')).toBeChecked();
+});
