@@ -93,6 +93,21 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
         // directly. These guards allow the real tauri://localhost initial load.)
         .on_navigation(is_local_asset_url)
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
+        // The initialization_script above carries the theme as of window BUILD time, which is what
+        // keeps first paint from flashing. It also re-runs on every re-navigation, so a window that
+        // outlived a theme change would snap back to the stale value — the update prompt re-points
+        // itself that way on a version mismatch. Re-assert the live theme once the document exists.
+        .on_page_load(|window, payload| {
+            if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            let theme = window
+                .app_handle()
+                .try_state::<commands::ConfigState>()
+                .map(|s| s.lock.read().theme)
+                .unwrap_or_default();
+            let _ = window.eval(&commands::theme_script(theme));
+        })
         .build()
     {
         Ok(window) => {
