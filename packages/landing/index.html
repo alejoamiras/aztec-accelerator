@@ -3,25 +3,28 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Aztec Accelerator — Native-Speed Proving for Aztec Apps</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 48 48' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M24,2 L46,24 L24,46 L2,24 Z M24,7.6 L7.6,24 L24,40.4 L40.4,24 Z' fill='%23d4ff28'/%3E%3Cpath d='M21.8,14.8 L27.1,14.8 L24.4,21.8 L27.9,21.8 L20.9,33.2 L23.6,25.3 L20.1,25.3 Z' fill='%23d4ff28'/%3E%3C/svg%3E" />
-  <meta name="description" content="Bypass browser throttling and prove Aztec transactions at full native speed. A lightweight desktop app that lives in your system tray — install once, every Aztec dApp on your machine gets faster. Open-source, zero config." />
-  <meta name="theme-color" content="#d4ff28" />
+  <title>Presto — Fast Proofs for Aztec Apps</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 48 48' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M26 5 L12 27 H21 L19 43 L36 19 H25 Z' fill='%233B4FE0' stroke='%233B4FE0' stroke-width='4' stroke-linejoin='round'/%3E%3Cpath d='M38 6 l1.7 3.6 3.6 1.7 -3.6 1.7 -1.7 3.6 -1.7-3.6 -3.6-1.7 3.6-1.7 Z' fill='%23FFC53D'/%3E%3C/svg%3E" />
+  <meta name="description" content="Presto sits in your menu bar and makes every Aztec app on your machine prove at full native speed. No setup, no accounts, nothing to configure. Open source." />
+  <meta name="theme-color" content="#FFFAF1" />
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#191226" />
   <link rel="canonical" href="https://aztec-accelerator.dev" />
 
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://aztec-accelerator.dev" />
-  <meta property="og:title" content="Aztec Accelerator — Native-Speed Proving" />
-  <meta property="og:description" content="Bypass browser throttling and prove Aztec transactions at full native speed. A lightweight system-tray app — install once, every dApp gets faster." />
+  <meta property="og:title" content="Presto — Fast Proofs for Aztec Apps" />
+  <meta property="og:description" content="Presto sits in your menu bar. Any Aztec app you open just gets faster. No setup, no accounts, nothing to configure." />
+  <meta property="og:image" content="https://aztec-accelerator.dev/og-image.png" />
 
   <!-- Twitter Card -->
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="Aztec Accelerator — Native-Speed Proving" />
-  <meta name="twitter:description" content="Bypass browser throttling and prove Aztec transactions at full native speed. Install once, every dApp gets faster." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Presto — Fast Proofs for Aztec Apps" />
+  <meta name="twitter:description" content="Presto sits in your menu bar. Any Aztec app you open just gets faster. Nothing to configure." />
+  <meta name="twitter:image" content="https://aztec-accelerator.dev/og-image.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;700;800&family=Inter:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Figtree:wght@400..700&family=Fragment+Mono&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
@@ -29,27 +32,27 @@
   <aside class="prerelease-banner" role="status" aria-label="Pre-release notice">
     <span class="prerelease-banner-dot" aria-hidden="true"></span>
     <p class="prerelease-banner-text">
-      <strong>Early release</strong>
-      <span class="prerelease-banner-sep" aria-hidden="true">&middot;</span>
-      Not yet production-ready
+      <strong>Early days</strong>
       <span class="prerelease-banner-sep" aria-hidden="true">&middot;</span>
       Use at your own risk
     </p>
   </aside>
-  <div class="hero-ambient" aria-hidden="true"></div>
   <div class="container">
 
     <!-- Nav -->
     <nav class="nav">
       <a href="/" class="nav-brand">
-        <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M24,2 L46,24 L24,46 L2,24 Z M24,7.6 L7.6,24 L24,40.4 L40.4,24 Z" fill="currentColor"/>
-          <path d="M21.8,14.8 L27.1,14.8 L24.4,21.8 L27.9,21.8 L20.9,33.2 L23.6,25.3 L20.1,25.3 Z" fill="currentColor"/>
+        <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M26 5 L12 27 H21 L19 43 L36 19 H25 Z" fill="currentColor" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/>
         </svg>
-        <span>Aztec Accelerator</span>
+        <span>presto<em class="spark">✦</em></span>
       </a>
-      <div class="nav-links">
-        <a href="https://github.com/alejoamiras/aztec-accelerator#readme">Docs</a>
+      <button id="nav-toggle" class="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="nav-links" id="nav-links">
+        <a href="#how">How it works</a>
+        <a href="#dev">For developers</a>
         <a href="https://github.com/alejoamiras/aztec-accelerator">GitHub</a>
         <a href="https://github.com/alejoamiras/aztec-accelerator/releases" class="btn btn-nav">Download</a>
       </div>
@@ -59,45 +62,60 @@
     <section class="hero">
       <div class="hero-inner">
         <div class="hero-content">
-          <h1>Accelerate your <em>Aztec apps.</em></h1>
+          <h1>Fast proofs.<br />Like <span class="accent">magic</span><span class="spark tw">✦</span></h1>
           <p>
-            Lives in your system tray. Bypasses browser throttling
-            so every Aztec app on your machine proves at native speed.
-            No per-app setup needed.
+            Presto sits in your menu bar. Any Aztec app you open just&hellip; gets faster.
+            No setup, no accounts, nothing to configure.
           </p>
           <div class="hero-actions">
             <a id="download-btn" href="https://github.com/alejoamiras/aztec-accelerator/releases" class="btn btn-primary">
-              Download
+              Get Presto
             </a>
-            <a href="https://github.com/alejoamiras/aztec-accelerator/releases" class="hero-secondary">
-              All platforms &rarr;
+            <a href="https://playground.aztec-accelerator.dev" class="hero-secondary">
+              Try the live demo &rarr;
             </a>
           </div>
+          <p class="hero-note">Free &middot; open source &middot; installs as "Aztec Accelerator" until our full rename</p>
           <div class="hero-sub">
             <a href="https://playground.aztec-accelerator.dev">
-              Already installed? Try it in the playground <span>&rarr;</span>
+              Already installed? Try the playground <span>&rarr;</span>
             </a>
           </div>
         </div>
         <div class="hero-visual" aria-hidden="true">
-          <div class="hero-glow"></div>
-          <div class="hero-ring hero-ring-outer"></div>
-          <div class="hero-ring hero-ring-mid"></div>
-          <div class="hero-ring hero-ring-inner">
-            <svg class="hero-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M24,2 L46,24 L24,46 L2,24 Z M24,7.6 L7.6,24 L24,40.4 L40.4,24 Z" fill="currentColor"/>
-              <path d="M21.8,14.8 L27.1,14.8 L24.4,21.8 L27.9,21.8 L20.9,33.2 L23.6,25.3 L20.1,25.3 Z" fill="currentColor"/>
-            </svg>
-          </div>
+          <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path class="hero-cloud" d="M34 78 a16 16 0 0 1 -2 -31 a20 20 0 0 1 38 -8 a15 15 0 0 1 18 22 a14 14 0 0 1 -6 17" stroke-linecap="round" stroke-dasharray="1 7"/>
+            <path class="hero-bolt" d="M64 34 L46 62 H58 L55 84 L77 52 H63 Z" stroke-linejoin="round"/>
+            <path class="hero-spark tw" d="M88 30 l2.6 5.5 5.5 2.6 -5.5 2.6 -2.6 5.5 -2.6-5.5 -5.5-2.6 5.5-2.6 Z"/>
+            <path class="hero-mote tw tw2" d="M28 40 l1.8 3.8 3.8 1.8 -3.8 1.8 -1.8 3.8 -1.8-3.8 -3.8-1.8 3.8-1.8 Z"/>
+            <circle class="hero-dot1" cx="90" cy="78" r="2.6"/>
+            <circle class="hero-dot2" cx="30" cy="86" r="2"/>
+          </svg>
         </div>
       </div>
     </section>
 
+    <!-- The race -->
+    <div class="race-card reveal" id="race">
+      <div class="race-head">
+        <span class="race-label">Same proof, timed: one token flow</span>
+        <span id="race-note" class="chip chip-gold">9.4&times; faster ✦</span>
+      </div>
+      <div class="race-grid">
+        <span class="race-name">In-browser</span>
+        <div class="race-track"><div id="race-w-bar" class="race-bar race-bar-slow"></div></div>
+        <span id="race-w-num" class="race-num dim">0.0s</span>
+        <span class="race-name strong">With Presto</span>
+        <div class="race-track race-track-accent"><div id="race-p-bar" class="race-bar race-bar-fast"></div></div>
+        <span id="race-p-num" class="race-num strong">0.0s</span>
+      </div>
+    </div>
+
     <!-- Developer callout -->
-    <div class="dev-callout reveal">
+    <div class="dev-callout reveal" id="dev">
       <div class="dev-callout-text">
-        <strong>Ship faster apps.</strong>
-        <span>Drop in the SDK. Your users get native proving with zero config.</span>
+        <strong>Developers: it's one install.</strong>
+        <span>Drop in the SDK and your users get native proving with zero config.</span>
         <code>npm install @alejoamiras/aztec-accelerator</code>
       </div>
       <a href="https://github.com/alejoamiras/aztec-accelerator#for-dapp-developers-sdk">
@@ -108,32 +126,40 @@
     <!-- Features -->
     <div class="features reveal">
       <div class="feature">
-        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
         </svg>
         <p class="feature-label">Unthrottled</p>
         <h3>Native-speed proving</h3>
       </div>
       <div class="feature">
-        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="11" width="18" height="11" rx="3"/>
           <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
         </svg>
         <p class="feature-label">Site approval</p>
         <h3>You decide who proves</h3>
       </div>
       <div class="feature">
-        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="10"/>
           <path d="M12 6v6l4 2"/>
         </svg>
         <p class="feature-label">Speed control</p>
         <h3>Tune CPU usage to your liking</h3>
       </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3l7 3v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z"/>
+          <path d="M9.5 12l2 2 3.5-4"/>
+        </svg>
+        <p class="feature-label">Encrypted</p>
+        <h3>HTTPS on by default</h3>
+      </div>
     </div>
 
     <!-- How it works -->
-    <section class="how reveal">
+    <section class="how reveal" id="how">
       <div class="how-header">
         <h2>How it works</h2>
         <p>Install once. Every Aztec app on your machine gets native-speed proving automatically.</p>
@@ -142,38 +168,36 @@
         <div class="step">
           <div class="step-number">1</div>
           <h3>Install</h3>
-          <p>Download the desktop app. It lives in your system tray and manages proving binaries automatically.</p>
+          <p>Download the app. It lives in your menu bar and manages proving binaries by itself.</p>
         </div>
         <div class="step">
           <div class="step-number">2</div>
-          <h3>Stays in your tray</h3>
-          <p>No windows, no interruptions. The accelerator stays in your menu bar with a tray icon showing real-time status.</p>
+          <h3>It stays out of the way</h3>
+          <p>No windows, no interruptions. A tiny icon shows what's happening, live.</p>
         </div>
         <div class="step">
           <div class="step-number">3</div>
           <h3>Apps get faster</h3>
-          <p>Any app using the SDK detects the accelerator and proves natively instead of through browser WASM.</p>
+          <p>Any app using the SDK finds Presto and proves natively instead of in the browser.</p>
         </div>
       </div>
     </section>
 
-    <!-- Safari notice -->
-    <div class="notice reveal">
-      <div class="notice-content">
-        <h3>Safari users</h3>
-        <p>
-          Safari requires HTTPS for localhost connections. On first launch,
-          the accelerator generates a local-only certificate and asks macOS to
-          trust it once. After that, Safari works automatically. Your keys
-          never leave your machine.
-        </p>
-      </div>
-      <a href="https://github.com/alejoamiras/aztec-accelerator#readme" class="btn btn-outline">Learn more</a>
+    <!-- Why presto -->
+    <div class="why-card reveal">
+      <p class="why-label">Why &ldquo;presto&rdquo;?</p>
+      <p class="why-lede">A zero-knowledge proof is a magic trick with math underneath: something is
+      shown true without revealing why. And <span class="accent">presto</span> is both the reveal word
+      and the musical marking for &ldquo;very fast&rdquo;.</p>
+      <p class="why-sub">Built for everyone who will never read the word WASM, and shouldn't have to.</p>
     </div>
 
-    <!-- TEE-Rex cross-link -->
-    <a href="https://tee-rex.dev" class="tee-rex-callout reveal">
-      <div class="tee-rex-callout-icon">🦖</div>
+    <!-- TEE-Rex cross-link: BUILT BUT HIDDEN (project currently unmaintained). Delete the `hidden` attribute to re-enable. -->
+    <a href="https://tee-rex.dev" class="tee-rex-callout reveal" hidden>
+      <svg class="tee-rex-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+        <path d="M10 30 C8 18 18 8 30 10 C40 12 42 22 38 26 L30 26 L32 32 L26 30 L27 36 L20 33 C14 32 11 32 10 30 Z" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+        <circle cx="30" cy="17" r="1.8" fill="currentColor"/>
+      </svg>
       <div class="tee-rex-callout-body">
         <strong>Need verifiable remote proving?</strong>
         <span>TEE-Rex delegates proving to hardware-attested enclaves. Your users' data stays private, even from the server operator.</span>
@@ -183,10 +207,10 @@
 
   </div>
 
-  <!-- Footer (full-width, outside 960px container) -->
+  <!-- Footer (full-width, outside the container) -->
   <footer class="footer">
     <div class="footer-inner">
-      <p class="footer-disclosure">Built for the Aztec ecosystem by Alejo Amiras. Aztec Accelerator is not affiliated with Aztec Labs.</p>
+      <p class="footer-disclosure">Built for the Aztec ecosystem by Alejo Amiras. Presto is not affiliated with Aztec Labs or the Aztec Foundation.</p>
       <div class="footer-links">
         <a href="https://github.com/alejoamiras/aztec-accelerator">GitHub</a>
         <a href="https://github.com/alejoamiras/aztec-accelerator/releases">Releases</a>

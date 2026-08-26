@@ -2,7 +2,7 @@
  * WCAG contrast guard over the SHIPPED token sheets — parses the real CSS custom-property
  * declarations (no duplicated constants) and fails any text-role pair under 4.5:1 in either
  * theme. `silk`/`go`/`gold` are non-text by design; their `-text` twins carry text.
- * Covers the converted surfaces: the Tauri app + the playground (landing joins in its phase).
+ * Covers all three converted surfaces: the Tauri app, the playground, and the landing.
  */
 import { describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
@@ -101,6 +101,25 @@ describe("contrast guard", () => {
         ["--color-brand-go-text", "--color-brand-bg"],
       ],
       "playground",
+    );
+  });
+
+  test("landing token sheet: every text role clears 4.5:1 in both themes", async () => {
+    const themes = await parseThemes(resolve(PKG_DIR, "..", "landing", "src", "style.css"), "--");
+    assertPairs(
+      themes,
+      [
+        ["--text", "--bg"],
+        ["--text", "--surface"],
+        ["--text-muted", "--bg"],
+        ["--text-muted", "--surface"],
+        ["--accent", "--bg"],
+        ["--accent-on", "--accent"],
+        ["--accent-dim", "--bg"],
+        ["--gold-text", "--bg"],
+        ["--go-text", "--bg"],
+      ],
+      "landing",
     );
   });
 });

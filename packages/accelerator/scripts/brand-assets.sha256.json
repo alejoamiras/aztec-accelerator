@@ -47,5 +47,6 @@
   "packages/accelerator/src-tauri/frontend/fonts/figtree-latin-ext-700-normal.woff2": "b3252ef48dfbfc51b2e7eecb4de8414dec694c4c83a16ef7afd319796235ef72",
   "packages/accelerator/src-tauri/frontend/fonts/fragment-mono-latin-400-normal.woff2": "44c4e39bff5e76652a24a872cbebabccbcfb20f62c4633b27c1f2745cba86b56",
   "packages/accelerator/src-tauri/frontend/fonts/fragment-mono-latin-ext-400-normal.woff2": "54f55ef4bf2e5789b18f862e037e4eb28920048f1d8e7892c090fda9b698312d",
+  "packages/landing/public/og-image.png": "dcb4933dbefb65bd913c6728b00521ad4e79836e89a28ed1ae6eb3148234adbe",
   "packages/playground/public/og-image.png": "cb62adcb4e7b2f3833ace0db95f5ff6379a666c8c69b77e8e7202765d5060ca3"
 }

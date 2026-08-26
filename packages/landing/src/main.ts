@@ -1,4 +1,5 @@
 import { FEED_URL, feedVersionToTag } from "./feed";
+import { initRace } from "./race";
 
 // ── Scroll reveals ──
 const observer = new IntersectionObserver(
@@ -17,14 +18,32 @@ for (const el of document.querySelectorAll(".reveal")) {
   observer.observe(el);
 }
 
-// ── Mouse-reactive ambient glow ──
-const glow = document.querySelector(".hero-ambient") as HTMLElement | null;
-if (glow) {
-  document.addEventListener("mousemove", (e) => {
-    glow.style.left = `${e.clientX}px`;
-    glow.style.top = `${e.clientY}px`;
+// ── Mobile nav ──
+function initNav(): void {
+  const toggle = document.getElementById("nav-toggle");
+  const links = document.getElementById("nav-links");
+  if (!toggle || !links) return;
+  const setOpen = (open: boolean) => {
+    links.classList.toggle("open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  toggle.addEventListener("click", () => {
+    setOpen(!links.classList.contains("open"));
+  });
+  links.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest("a")) setOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && links.classList.contains("open")) {
+      setOpen(false);
+      toggle.focus();
+    }
   });
 }
+initNav();
+
+// ── The race ──
+initRace();
 
 // ── OS-aware download button ──
 const REPO = "alejoamiras/aztec-accelerator";
@@ -46,14 +65,14 @@ function detectOs(): OsInfo {
       // Safari + Chrome on Apple Silicon report this
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     return isArm
-      ? { label: "Download for macOS (Apple Silicon)", pattern: /Apple-Silicon\.dmg$/ }
-      : { label: "Download for macOS", pattern: /macOS.*\.dmg$/ };
+      ? { label: "Get Presto for macOS (Apple Silicon)", pattern: /Apple-Silicon\.dmg$/ }
+      : { label: "Get Presto for macOS", pattern: /macOS.*\.dmg$/ };
   }
   if (/Linux/.test(ua)) {
-    return { label: "Download for Linux", pattern: /\.AppImage$/ };
+    return { label: "Get Presto for Linux", pattern: /\.AppImage$/ };
   }
   // Windows or unknown — point to releases page
-  return { label: "Download", pattern: /^$/ };
+  return { label: "Get Presto", pattern: /^$/ };
 }
 
 // Resolve the live stable tag from the SIGNED S3 feed (single source of truth — B6), NOT a GitHub releases
@@ -100,7 +119,7 @@ async function initDownload(): Promise<void> {
 
 initDownload();
 
-// ── Accelerator detection ──
+// ── Presto detection ──
 async function checkAccelerator(): Promise<boolean> {
   try {
     const { res } = await Promise.any([
@@ -126,8 +145,12 @@ async function initAcceleratorDetection(): Promise<void> {
   const link = heroSub?.querySelector("a") as HTMLAnchorElement | null;
   if (heroSub && link) {
     heroSub.classList.add("detected");
-    link.innerHTML =
-      '<span class="accel-dot" aria-hidden="true"></span> Accelerator detected — Open the Playground <span>&rarr;</span>';
+    const dot = document.createElement("span");
+    dot.className = "accel-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const arrow = document.createElement("span");
+    arrow.textContent = "→";
+    link.replaceChildren(dot, "Presto is running on this machine. Open the playground ", arrow);
   }
 }
 

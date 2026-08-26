@@ -241,7 +241,7 @@ packages/playground build`. Pass: exit 0; spark-orbit suite green; `#progress` c
 `dist/` contains `og-image.png`. Layers: lint/typecheck/unit + mocked e2e + build. In-phase: dev
 server manual pass, light + dark.
 
-### Phase 4 — Landing rebuild
+### Phase 4 — Landing rebuild ✓ (gate green 2026-08-26)
 Full Presto landing per Book (banner trim; hero + retimed CSS stagger + `race.ts`; 4 feature tiles;
 "Why presto?"; TEE-Rex hidden with re-enable comment; footer + Foundation; detected-state restyle on
 the existing probe contract; bridging sentence per owner Ask); mobile nav (button, `aria-expanded`,
