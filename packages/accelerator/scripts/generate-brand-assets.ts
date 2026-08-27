@@ -118,13 +118,13 @@ async function genAppIcons(outDir: string): Promise<void> {
   const masterSvg = await Bun.file(join(ICONS_DIR, "icon.svg")).text();
   const staging = mkdtempSync(join(tmpdir(), "presto-icons-"));
   try {
-    const master = join(staging, "icon-1024.png");
-    await Bun.write(master, await resvg(masterSvg, 1024));
-    const cli = Bun.spawnSync(["bunx", "tauri", "icon", master, "-o", join(staging, "out")], {
-      cwd: PKG_DIR,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    // Hand the CLI the VECTOR, not a pre-rendered master: given a PNG it bitmap-downsamples every
+    // smaller rung, and the ringing that leaves is visible as fuzz at Finder/DMG sizes (the 128px
+    // rung weighed 5154 bytes of resampling noise against 2264 rendered from the SVG).
+    const cli = Bun.spawnSync(
+      ["bunx", "tauri", "icon", join(ICONS_DIR, "icon.svg"), "-o", join(staging, "out")],
+      { cwd: PKG_DIR, stdout: "pipe", stderr: "pipe" },
+    );
     if (cli.exitCode !== 0) {
       throw new Error(`tauri icon failed:\n${cli.stderr.toString()}\n${cli.stdout.toString()}`);
     }
