@@ -9,7 +9,14 @@
   preflight (owned Xvfb/DBus/stalonetray when available), port preflight 4445/59833 with owning-pid
   report, webdriver-featured build, owned-pgid launch with log capture, readiness wait, WDIO run,
   trap teardown of owned pgids only.
-- **WebDriver run: DEFERRED-WITH-CONSENT.** The launcher exited 2 as designed: this host has no
+- **WebDriver run: RESOLVED 2026-08-27 — no longer deferred.** Owner approved installing the
+  display stack (`xvfb stalonetray dbus-x11`, 3 packages; every X lib was already present from the
+  Tauri build deps). `run-webdriver-local.sh` then went green first try: **22 passing across all 6
+  spec files, exit 0** — 3 smoke, 3 settings, 5 trust-boundary, 6 theme (the Mac agent's new spec,
+  first execution anywhere), 2 auth-flow, 3 autostart. Confirms the renamed `"Presto Settings"`
+  title constants against the real binary. Teardown left no Xvfb/stalonetray/app processes.
+  The Mac's WDIO `UND_ERR_INVALID_ARG` remains a Mac-local runner defect, not a suite problem.
+- Original deferral record (superseded, kept for the trail): **DEFERRED-WITH-CONSENT.** The launcher exited 2 as designed: this host has no
   DISPLAY/WAYLAND_DISPLAY and no Xvfb/stalonetray installed (verified via preflight AND directly).
   System packages are not installed autonomously per plan. Options for the owner (wrap-up report):
   (a) `sudo apt install xvfb stalonetray dbus-x11` then `packages/accelerator/scripts/

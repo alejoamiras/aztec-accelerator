@@ -1,0 +1,64 @@
+[2m2026-08-27T13:27:08.219356Z[0m [32m INFO[0m [2mAztecAccelerator[0m[2m:[0m Logging initialized [3mlog_dir[0m[2m=[0m/home/homelab/.local/share/aztec-accelerator/logs
+[2m2026-08-27T13:27:08.219413Z[0m [32m INFO[0m [2mAztecAccelerator[0m[2m:[0m Developer mode enabled
+[2m2026-08-27T13:27:08.219577Z[0m [32m INFO[0m [2mAztecAccelerator[0m[2m:[0m WebDriver plugin registered (port 4445)
+[2m2026-08-27T13:27:33.303546Z[0m [32m INFO[0m [2mtauri_plugin_webdriver[0m[2m:[0m WebDriver plugin initialized on port 4445
+[2m2026-08-27T13:27:33.309169Z[0m [32m INFO[0m [2mtauri_plugin_webdriver::server[0m[2m:[0m WebDriver server listening on http://127.0.0.1:4445
+
+(AztecAccelerator:1709258): libayatana-appindicator-WARNING **: 13:27:33.309: libayatana-appindicator is deprecated. Please use libayatana-appindicator-glib in newly written code.
+libEGL warning: DRI3 error: Could not get DRI3 device
+libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[2m2026-08-27T13:27:38.559727Z[0m [32m INFO[0m [2maccelerator_core::server[0m[2m:[0m Accelerator server listening on 127.0.0.1:59833
+
+(AztecAccelerator:1709258): Gdk-CRITICAL **: 13:27:39.135: gdk_window_thaw_toplevel_updates: assertion 'window->update_and_descendants_freeze_count > 0' failed
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[2m2026-08-27T13:27:46.152880Z[0m [32m INFO[0m [2maccelerator_core::server::prove[0m[2m:[0m Received /prove request
+[2m2026-08-27T13:27:46.152999Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin not approved, requesting authorization [3morigin[0m[2m=[0mhttps://trust-boundary-e2e.example.com
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[2m2026-08-27T13:27:53.305642Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin denied [3morigin[0m[2m=[0mhttps://trust-boundary-e2e.example.com
+[2m2026-08-27T13:27:55.187333Z[0m [32m INFO[0m [2maccelerator_core::server::prove[0m[2m:[0m Received /prove request
+[2m2026-08-27T13:27:55.187428Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin not approved, requesting authorization [3morigin[0m[2m=[0mhttps://test-e2e-webdriver.example.com
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[2m2026-08-27T13:28:01.728892Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin authorized (persistent) [3morigin[0m[2m=[0mhttps://test-e2e-webdriver.example.com
+[2m2026-08-27T13:28:01.729207Z[0m [32m INFO[0m [2mAztecAccelerator[0m[2m:[0m on_status callback fired [3mtext[0m[2m=[0m"Working a proof…"
+[2m2026-08-27T13:28:01.729899Z[0m [32m INFO[0m [2maccelerator_core::bb[0m[2m:[0m Starting bb prove [3mversion[0m[2m=[0m"bundled" [3mthreads[0m[2m=[0mNone
+[2m2026-08-27T13:28:02.816404Z[0m [33m WARN[0m [2maccelerator_core::bb[0m[2m:[0m bb stderr:
+Scheme is: chonk, num threads: 12 (mem: 235.45 MiB)
+libc++abi: terminating due to uncaught exception of type msgpack::v1::type_error: std::bad_cast
+ [3mstderr_total_bytes[0m[2m=[0m148
+[2m2026-08-27T13:28:02.816466Z[0m [31mERROR[0m [2maccelerator_core::bb[0m[2m:[0m bb prove failed [3mexit_code[0m[2m=[0msignal: 6 (SIGABRT) (core dumped)
+[2m2026-08-27T13:28:02.816608Z[0m [31mERROR[0m [2maccelerator_core::server::prove[0m[2m:[0m Proving failed: bb prove failed (exit signal: 6 (SIGABRT) (core dumped))
+[2m2026-08-27T13:28:02.816641Z[0m [32m INFO[0m [2mAztecAccelerator[0m[2m:[0m on_status callback fired [3mtext[0m[2m=[0m"Ready"
+[2m2026-08-27T13:28:04.650858Z[0m [32m INFO[0m [2maccelerator_core::server::prove[0m[2m:[0m Received /prove request
+[2m2026-08-27T13:28:04.650951Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin not approved, requesting authorization [3morigin[0m[2m=[0mhttps://test-e2e-webdriver.example.com
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/renderD128: Permission denied
+
+libEGL warning: failed to open /dev/dri/card0: Permission denied
+
+[2m2026-08-27T13:28:11.180552Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin denied [3morigin[0m[2m=[0mhttps://test-e2e-webdriver.example.com
+[2m2026-08-27T13:28:11.485603Z[0m [32m INFO[0m [2maccelerator_core::server::prove[0m[2m:[0m Received /prove request
+[2m2026-08-27T13:28:11.485701Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin not approved, requesting authorization [3morigin[0m[2m=[0mhttps://test-e2e-webdriver.example.com
+[2m2026-08-27T13:28:11.485738Z[0m [32m INFO[0m [2maccelerator_core::server::auth[0m[2m:[0m Origin in post-deny cooldown; refusing without re-prompting [3morigin[0m[2m=[0mhttps://test-e2e-webdriver.example.com
+[2m2026-08-27T13:28:12.845814Z[0m [32m INFO[0m [2maztec_accelerator::autostart[0m[2m:[0m autostart entry healed (stored target no longer resolved) [3mfrom[0m[2m=[0m…/homelab/definitely [3mto[0m[2m=[0m…/debug/AztecAccelerator

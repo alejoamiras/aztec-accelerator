@@ -253,7 +253,7 @@ contrast guard to landing's tokens (completing its three-source contract).
 lint/typecheck/unit + build. In-phase: dev server manual pass at 1280px/375px, light + dark,
 keyboard-only nav check.
 
-### Phase 5 — Integration sweep + full E2E ✓ (gate green 2026-08-26; WebDriver leg deferred-with-consent per contingency — no display/Xvfb on this host, launcher exit 2 recorded in lessons/phase-5.md)
+### Phase 5 — Integration sweep + full E2E ✓ (gate FULLY green; WebDriver leg resolved 2026-08-27 after the owner approved the display stack: 22 passing across all 6 spec files, exit 0 — see lessons/phase-5.md)
 `scripts/brand-sweep.test.ts` (committed; retired-values + full frozen-identity fixture). Full
 suites + WebDriver on this Linux host (validates the title lockstep for real). Because
 `wdio.conf.ts` expects an ALREADY-RUNNING app (audit), the WebDriver leg is a committed launcher
