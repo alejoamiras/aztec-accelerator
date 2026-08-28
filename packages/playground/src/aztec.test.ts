@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { checkAccelerator, checkAztecNode, setUiMode, state } from "./aztec";
+import {
+  checkAcceleratorStatus,
+  checkAztecNode,
+  getAcceleratorProver,
+  setUiMode,
+  state,
+} from "./aztec";
 
 // ── fetch mocking ──
 const originalFetch = globalThis.fetch;
@@ -67,18 +73,33 @@ describe.skipIf(!process.env.AZTEC_NODE_URL)("checkAztecNode (live node)", () =>
   );
 });
 
-// ── checkAccelerator ──
-describe("checkAccelerator", () => {
-  test("returns true when health check succeeds", async () => {
+// ── checkAcceleratorStatus ──
+describe("checkAcceleratorStatus", () => {
+  test("returns the SDK status when the recognized health check succeeds", async () => {
     setFetchMock(() =>
-      Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 })),
+      Promise.resolve(
+        Response.json({
+          status: "ok",
+          api_version: 1,
+          available_versions: [],
+        }),
+      ),
     );
-    expect(await checkAccelerator()).toBe(true);
+    expect((await checkAcceleratorStatus()).available).toBe(true);
   });
 
-  test("returns false when fetch throws", async () => {
+  test("returns offline when fetch throws", async () => {
     setFetchMock(() => Promise.reject(new Error("connection refused")));
-    expect(await checkAccelerator()).toBe(false);
+    expect(await checkAcceleratorStatus()).toMatchObject({
+      available: false,
+      reason: "offline",
+    });
+  });
+
+  test("startup checks and wallet/proving access reuse one lazy prover", () => {
+    const startup = getAcceleratorProver();
+    expect(state.prover).toBe(startup);
+    expect(getAcceleratorProver()).toBe(startup);
   });
 });
 

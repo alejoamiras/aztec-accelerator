@@ -65,7 +65,7 @@
             so every Aztec app on your machine proves at native speed.
             No per-app setup needed.
           </p>
-          <div class="hero-actions">
+          <div id="download-actions" class="hero-actions">
             <a id="download-btn" href="https://github.com/alejoamiras/aztec-accelerator/releases" class="btn btn-primary">
               Download
             </a>
@@ -77,6 +77,17 @@
             <a href="https://playground.aztec-accelerator.dev">
               Already installed? Try it in the playground <span>&rarr;</span>
             </a>
+          </div>
+          <div id="landing-permission-help" class="notice landing-permission-notice hidden" role="status" aria-live="polite">
+            <div class="notice-content">
+              <h3>Chrome blocked local access</h3>
+              <p>
+                Open Site controls beside the address bar, then Site settings, allow local network
+                access, and retry. Managed policy or an embedded page may require administrator or
+                site-owner access.
+              </p>
+            </div>
+            <button id="landing-accelerator-retry" type="button" class="btn btn-outline">Retry</button>
           </div>
         </div>
         <div class="hero-visual" aria-hidden="true">

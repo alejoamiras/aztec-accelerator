@@ -560,6 +560,17 @@ img, svg {
   line-height: 1.7;
 }
 
+.landing-permission-notice {
+  gap: 1rem;
+  margin: 2rem 0 0;
+  padding: 1.25rem;
+}
+
+.landing-permission-notice .notice-content p {
+  margin-bottom: 0;
+  font-size: 0.875rem;
+}
+
 /* ── TEE-Rex cross-link ───────────────────────────────────────────── */
 .tee-rex-callout {
   display: flex;

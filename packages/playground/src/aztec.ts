@@ -2,6 +2,8 @@ import {
   type AcceleratorPhase,
   type AcceleratorPhaseData,
   AcceleratorProver,
+  type AcceleratorStatus,
+  type AcceleratorStatusCheckOptions,
 } from "@alejoamiras/aztec-accelerator";
 import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
@@ -97,23 +99,26 @@ function pickSessionSender(): AztecAddress {
   return sender;
 }
 
-export async function checkAccelerator(): Promise<boolean> {
-  try {
-    // Probe both HTTP (59833) and HTTPS (59834) in parallel.
-    // Chrome/Firefox: HTTP responds instantly. Safari: HTTPS needed (mixed-content block).
-    const { res } = await Promise.any([
-      fetch("http://127.0.0.1:59833/health", { signal: AbortSignal.timeout(2000) }).then((res) => ({
-        res,
-        protocol: "http" as const,
-      })),
-      fetch("https://127.0.0.1:59834/health", { signal: AbortSignal.timeout(2000) }).then(
-        (res) => ({ res, protocol: "https" as const }),
-      ),
-    ]);
-    return res.ok;
-  } catch {
-    return false;
+/**
+ * One lazy prover for the whole page. Startup detection creates it first; wallet initialization,
+ * Retry, and every proof then reuse the same status cache, protocol pin, generation, and HTTPS
+ * history.
+ */
+export function getAcceleratorProver(): AcceleratorProver {
+  if (!state.prover) {
+    const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
+    state.prover = httpsOnly
+      ? new AcceleratorProver({ accelerator: { httpsOnly: true, allowInsecureDowngrade: false } })
+      : new AcceleratorProver();
+    state.prover.setForceLocal(state.uiMode === "local");
   }
+  return state.prover;
+}
+
+export function checkAcceleratorStatus(
+  options?: AcceleratorStatusCheckOptions,
+): Promise<AcceleratorStatus> {
+  return getAcceleratorProver().checkAcceleratorStatus(options);
 }
 
 export async function checkAztecNode(): Promise<{ reachable: boolean; nodeVersion?: string }> {
@@ -199,9 +204,7 @@ export async function initializeNode(log: LogFn): Promise<void> {
       ? "Creating AcceleratorProver (HTTPS-only, packaged-E2E)..."
       : "Creating AcceleratorProver...",
   );
-  state.prover = httpsOnly
-    ? new AcceleratorProver({ accelerator: { httpsOnly: true, allowInsecureDowngrade: false } })
-    : new AcceleratorProver();
+  state.prover = getAcceleratorProver();
 
   log("Connecting to Aztec node...");
   state.node = createAztecNodeClient(AZTEC_NODE_URL);
