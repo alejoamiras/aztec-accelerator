@@ -134,6 +134,19 @@ describe("F-012 P2 — CSP + global flag drift guards", () => {
     // The asset-CSP nonce augmentation must stay on (never disable it).
     expect(c.app?.security?.dangerousDisableAssetCspModification ?? false).toBe(false);
   });
+
+  test("tauri dev/build regenerate the gitignored frontend bundles before Rust codegen", async () => {
+    const build = (await conf()).build;
+    expect(build.beforeDevCommand).toEqual({
+      script: "bun run frontend:build",
+      cwd: "..",
+      wait: true,
+    });
+    expect(build.beforeBuildCommand).toEqual({
+      script: "bun run frontend:build",
+      cwd: "..",
+    });
+  });
 });
 
 // The authoritative per-window (window → snake_case command) matrix. Every command a window's frontend

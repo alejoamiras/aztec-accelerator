@@ -4,6 +4,15 @@
   "version": "2.0.1-rc.1",
   "identifier": "dev.aztec.accelerator",
   "build": {
+    "beforeDevCommand": {
+      "script": "bun run frontend:build",
+      "cwd": "..",
+      "wait": true
+    },
+    "beforeBuildCommand": {
+      "script": "bun run frontend:build",
+      "cwd": ".."
+    },
     "frontendDist": "./frontend"
   },
   "app": {
