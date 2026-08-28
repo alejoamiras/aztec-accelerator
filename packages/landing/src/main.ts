@@ -1,3 +1,9 @@
+import {
+  detectAccelerator,
+  type LandingAcceleratorStatus,
+  LandingDetectionController,
+  watchLoopbackPermissionChanges,
+} from "./accelerator-detection";
 import { FEED_URL, feedVersionToTag } from "./feed";
 
 // ── Scroll reveals ──
@@ -101,34 +107,50 @@ async function initDownload(): Promise<void> {
 initDownload();
 
 // ── Accelerator detection ──
-async function checkAccelerator(): Promise<boolean> {
-  try {
-    const { res } = await Promise.any([
-      fetch("http://127.0.0.1:59833/health", { signal: AbortSignal.timeout(2000) }).then((res) => ({
-        res,
-        protocol: "http" as const,
-      })),
-      fetch("https://127.0.0.1:59834/health", { signal: AbortSignal.timeout(2000) }).then(
-        (res) => ({ res, protocol: "https" as const }),
-      ),
-    ]);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
+const heroSub = document.querySelector(".hero-sub") as HTMLElement | null;
+const heroLink = heroSub?.querySelector("a") as HTMLAnchorElement | null;
+const originalHeroLink = heroLink?.innerHTML ?? "";
+const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
 
-async function initAcceleratorDetection(): Promise<void> {
-  const detected = await checkAccelerator();
-  if (!detected) return;
+function renderAcceleratorStatus(status: LandingAcceleratorStatus): void {
+  const blocked = status === "permission-blocked";
+  document.getElementById("landing-permission-help")?.classList.toggle("hidden", !blocked);
+  document.getElementById("download-actions")?.classList.toggle("hidden", blocked);
 
-  const heroSub = document.querySelector(".hero-sub") as HTMLElement | null;
-  const link = heroSub?.querySelector("a") as HTMLAnchorElement | null;
-  if (heroSub && link) {
+  if (!heroSub || !heroLink) return;
+  if (status === "available") {
     heroSub.classList.add("detected");
-    link.innerHTML =
+    heroLink.innerHTML =
       '<span class="accel-dot" aria-hidden="true"></span> Accelerator detected — Open the Playground <span>&rarr;</span>';
+  } else {
+    // Offline and generic error remain deliberately quiet: restore the unchanged landing CTA.
+    heroSub.classList.remove("detected");
+    heroLink.innerHTML = originalHeroLink;
   }
 }
 
-initAcceleratorDetection();
+const detection = new LandingDetectionController(
+  () => detectAccelerator({ httpsOnly }),
+  renderAcceleratorStatus,
+  (pending) => {
+    const button = document.getElementById("landing-accelerator-retry") as HTMLButtonElement | null;
+    if (!button) return;
+    button.disabled = pending;
+    button.textContent = pending ? "Checking…" : "Retry";
+  },
+);
+
+document.getElementById("landing-accelerator-retry")?.addEventListener("click", () => {
+  // The detector has no settled cache. The token guard ensures a late startup result cannot overwrite
+  // this same-context recovery attempt.
+  void detection.refresh().catch(() => {});
+});
+
+void (async () => {
+  // Subscribe before the first health request can open the browser prompt. A decision made after the
+  // bounded probe expires must still replace the quiet offline/download state without a reload.
+  await watchLoopbackPermissionChanges(() => {
+    void detection.refreshAfterPermissionChange().catch(() => {});
+  });
+  await detection.refresh();
+})().catch(() => {});

@@ -80,6 +80,17 @@
                class="hidden block text-[10px] text-brand-accent hover:text-brand-accent-dim transition-colors pl-[22px]">
               Get the app &rarr;
             </a>
+            <div id="accelerator-permission-help" class="hidden ml-[22px] rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[10px] leading-relaxed text-brand-text-muted" role="status" aria-live="polite">
+              <p>
+                Your browser blocked local access. Open this site's
+                <strong class="text-brand-text">permissions</strong> beside the address bar, allow local
+                network or device access, and retry. Managed devices or embedded pages may require
+                administrator or site-owner access.
+              </p>
+              <button id="accelerator-retry" type="button" class="mt-2 rounded border border-brand-accent/50 px-2 py-1 text-brand-accent transition-colors hover:bg-brand-accent/10 disabled:cursor-wait disabled:opacity-50">
+                Retry
+              </button>
+            </div>
             <div class="border-t border-brand-border/60 mt-2 pt-2 flex items-center gap-3 text-xs">
               <span id="wallet-dot" class="status-dot status-unknown"></span>
               <span class="text-brand-text-muted/70 w-24">Wallet</span>

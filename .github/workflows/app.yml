@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 2
     outputs:
       relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+      lna_relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.lna_relevant }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -36,6 +37,23 @@ jobs:
               - '.github/workflows/_e2e-app.yml'
               - '.github/actions/setup-aztec/**'
               - '.github/actions/start-services/**'
+            # Fail closed for the real Chromium Local Network Access boundary. This is independent
+            # from `relevant`: a landing-only change runs this focused browser job without waking the
+            # expensive Aztec node/proving matrix below.
+            lna_relevant:
+              - 'packages/sdk/**'
+              - 'packages/playground/**'
+              - 'packages/landing/**'
+              - 'README.md'
+              - 'docs/PLATFORM_SUPPORT.md'
+              - 'tsconfig*.json'
+              - 'biome.json'
+              - 'package.json'
+              - 'bun.lock'
+              - 'bunfig.toml'
+              - '.bun-version'
+              - '.github/actions/playwright-cache/**'
+              - '.github/workflows/**'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: override
@@ -137,16 +155,38 @@ jobs:
     with:
       test_script: "test:e2e:local-network"
 
+  chromium-lna-e2e:
+    name: Chromium LNA E2E
+    needs: changes
+    if: needs.changes.outputs.lna_relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/playwright-cache
+        with:
+          package-dir: packages/playground
+      - run: bun run --cwd packages/playground test:e2e:lna
+
   app-status:
     name: App Status
     if: always()
-    needs: [changes, lint, unit-tests, mocked-e2e, production-smoke, local-network-e2e]
+    needs: [changes, lint, unit-tests, mocked-e2e, production-smoke, local-network-e2e, chromium-lna-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Check results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.unit-tests.result }} ${{ needs.mocked-e2e.result }} ${{ needs.production-smoke.result }} ${{ needs.local-network-e2e.result }}"
+          results="${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.unit-tests.result }} ${{ needs.mocked-e2e.result }} ${{ needs.production-smoke.result }} ${{ needs.local-network-e2e.result }} ${{ needs.chromium-lna-e2e.result }}"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "Job failed or was cancelled: $r"

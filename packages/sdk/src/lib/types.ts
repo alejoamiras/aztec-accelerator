@@ -74,6 +74,15 @@ export interface AcceleratorProverOptions {
   onPhase?: (phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void;
 }
 
+/** Options for {@link AcceleratorProver.checkAcceleratorStatus}. */
+export interface AcceleratorStatusCheckOptions {
+  /**
+   * Ignore a settled status cached within the normal ten-second TTL and start a fresh probe. An
+   * already-running probe for the current endpoint is still shared.
+   */
+  forceRefresh?: boolean;
+}
+
 /** Protocol used to reach the accelerator's `/health` + `/prove` endpoints. */
 export type AcceleratorProtocol = "http" | "https";
 
@@ -113,8 +122,17 @@ export type AcceleratorStatus =
     }
   | {
       available: false;
-      /** Both the HTTP and HTTPS probes failed — the accelerator isn't running. */
+      /**
+       * The endpoint did not answer and the browser did not expose a conclusive permission denial. The
+       * accelerator may be offline, or a local-network prompt may still be pending/dismissed.
+       */
       reason: "offline";
+      sdkAztecVersion?: string;
+    }
+  | {
+      available: false;
+      /** The browser explicitly denied this origin permission to reach the loopback address space. */
+      reason: "permission-blocked";
       sdkAztecVersion?: string;
     }
   | {

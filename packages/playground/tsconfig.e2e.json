@@ -8,6 +8,6 @@
     // their private properties conflict. Force every `import "vite"` onto one copy.
     "paths": { "vite": ["./node_modules/vite"] }
   },
-  "include": ["e2e", "playwright.config.ts", "vite.config.ts"],
+  "include": ["e2e", "playwright.config.ts", "playwright.lna.config.ts", "vite.config.ts"],
   "exclude": []
 }

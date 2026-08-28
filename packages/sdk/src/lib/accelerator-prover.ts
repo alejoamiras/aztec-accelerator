@@ -5,6 +5,7 @@ import { ChonkProofWithPublicInputs } from "@aztec/stdlib/proofs";
 import sdkPkg from "../../package.json" with { type: "json" };
 import {
   AcceleratorTransport,
+  isLoopbackPermissionDenied,
   isRecognizedHealthBody,
   TransportHttpError,
 } from "./accelerator-transport.js";
@@ -18,6 +19,7 @@ import type {
   AcceleratorProtocol,
   AcceleratorProverOptions,
   AcceleratorStatus,
+  AcceleratorStatusCheckOptions,
 } from "./types.js";
 
 /**
@@ -173,15 +175,21 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
    * Single-flight: concurrent callers share one in-flight probe (per configuration generation), so
    * overlapping health checks can't race each other's pin commits.
    */
-  async checkAcceleratorStatus(): Promise<AcceleratorStatus> {
-    // Return cached result if still fresh — avoids re-probing on every proof call
-    // and eliminates the 1s retry delay when the accelerator is offline.
-    const cached = this.#transport.getFreshCachedStatus();
-    if (cached) return cached;
-    // Reuse an in-flight probe ONLY if it targets the current endpoint configuration.
+  async checkAcceleratorStatus(
+    options?: AcceleratorStatusCheckOptions,
+  ): Promise<AcceleratorStatus> {
+    // Reuse an in-flight probe ONLY if it targets the current endpoint configuration. This check is
+    // deliberately before the cache so an ordinary caller also joins a force-refresh already in
+    // progress instead of observing the stale value it is replacing.
     const gen = this.#transport.generation;
     if (this.#inflightProbe && this.#inflightProbe.gen === gen) {
       return this.#inflightProbe.promise;
+    }
+    // A forced refresh bypasses only the settled status cache. It does not configure/reset transport
+    // state, change the generation, clear the protocol pin, or erase HTTPS downgrade history.
+    if (!options?.forceRefresh) {
+      const cached = this.#transport.getFreshCachedStatus();
+      if (cached) return cached;
     }
     const promise = this.#probeAndParseHealth(gen).finally(() => {
       if (this.#inflightProbe?.promise === promise) this.#inflightProbe = null;
@@ -245,8 +253,17 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
         { pin: "set", protocol },
         gen,
       );
-    } catch {
-      // q7e3-F-06: both probes failed → offline; CLEAR the pin.
+    } catch (error) {
+      if (isLoopbackPermissionDenied(error)) {
+        // Permission says nothing about endpoint identity or health. Cache the result under the normal
+        // TTL, but KEEP any prior protocol pin and HTTPS history so Retry cannot weaken transport.
+        return this.#transport.commitStatus(
+          { available: false, reason: "permission-blocked", sdkAztecVersion },
+          { pin: "keep" },
+          gen,
+        );
+      }
+      // q7e3-F-06: both probes failed without a conclusive permission denial → offline; CLEAR the pin.
       return this.#transport.commitStatus(
         { available: false, reason: "offline", sdkAztecVersion },
         { pin: "clear" },

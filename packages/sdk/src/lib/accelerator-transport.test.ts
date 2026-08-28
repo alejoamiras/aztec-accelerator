@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { AcceleratorTransport, isRecognizedHealthBody } from "./accelerator-transport.js";
+import {
+  AcceleratorTransport,
+  isLoopbackPermissionDenied,
+  isRecognizedHealthBody,
+} from "./accelerator-transport.js";
 import type { AcceleratorStatus } from "./types.js";
 
 const offlineStatus: AcceleratorStatus = { available: false, reason: "offline" };
@@ -379,6 +383,16 @@ describe("AcceleratorTransport", () => {
       t.setProtocol("https"); // a prior OK probe pinned https
       t.commitStatus(errStatus, { pin: "keep" });
       expect(t.baseUrl).toBe("https://127.0.0.1:59834"); // still https — NOT cleared, NOT repinned
+    });
+
+    test('"permission-blocked" is cached with "keep" and carries no protocol', () => {
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      t.setProtocol("https");
+      const blocked: AcceleratorStatus = { available: false, reason: "permission-blocked" };
+      t.commitStatus(blocked, { pin: "keep" });
+      expect(t.baseUrl).toBe("https://127.0.0.1:59834");
+      expect(t.getFreshCachedStatus()).toEqual(blocked);
+      expect("protocol" in blocked).toBe(false);
     });
 
     test('"clear" unpins (the malformed-JSON / offline case)', () => {
@@ -935,6 +949,181 @@ describe("AcceleratorTransport", () => {
       expect(await postProveAgainst("application/problem+json; charset=utf-8")).toEqual({
         error: "some_code",
       });
+    });
+  });
+
+  describe("Local Network Access", () => {
+    let originalFetch: typeof globalThis.fetch;
+    let targetAddressSpaceDescriptor: PropertyDescriptor | undefined;
+    let permissionsDescriptor: PropertyDescriptor | undefined;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      targetAddressSpaceDescriptor = Object.getOwnPropertyDescriptor(
+        Request.prototype,
+        "targetAddressSpace",
+      );
+      permissionsDescriptor = Object.getOwnPropertyDescriptor(navigator, "permissions");
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      if (targetAddressSpaceDescriptor) {
+        Object.defineProperty(
+          Request.prototype,
+          "targetAddressSpace",
+          targetAddressSpaceDescriptor,
+        );
+      } else {
+        delete (Request.prototype as Request & { targetAddressSpace?: string }).targetAddressSpace;
+      }
+      if (permissionsDescriptor) {
+        Object.defineProperty(navigator, "permissions", permissionsDescriptor);
+      } else {
+        delete (navigator as Navigator & { permissions?: Permissions }).permissions;
+      }
+    });
+
+    const exposeTargetAddressSpace = () => {
+      Object.defineProperty(Request.prototype, "targetAddressSpace", {
+        configurable: true,
+        get: () => undefined,
+      });
+    };
+
+    const setPermissionQuery = (
+      query: (descriptor: { name: string }) => Promise<{ state: PermissionState }>,
+    ) => {
+      Object.defineProperty(navigator, "permissions", {
+        configurable: true,
+        value: { query },
+      });
+    };
+
+    test("annotates HTTP loopback fetches only when the runtime exposes targetAddressSpace", async () => {
+      exposeTargetAddressSpace();
+      const seen: { url: string; targetAddressSpace?: string }[] = [];
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        seen.push({
+          url,
+          targetAddressSpace: (init as RequestInit & { targetAddressSpace?: string })
+            ?.targetAddressSpace,
+        });
+        return Response.json(HEALTHY);
+      }) as typeof fetch;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      expect(await t.isProtocolHealthy("http")).toBe(true);
+      expect(await t.isProtocolHealthy("https")).toBe(true);
+      expect(seen).toEqual([
+        { url: "http://127.0.0.1:59833/health", targetAddressSpace: "loopback" },
+        { url: "https://127.0.0.1:59834/health", targetAddressSpace: undefined },
+      ]);
+    });
+
+    test("leaves RequestInit unchanged in unsupported runtimes", async () => {
+      delete (Request.prototype as Request & { targetAddressSpace?: string }).targetAddressSpace;
+      let annotated = false;
+      globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+        annotated = "targetAddressSpace" in (init ?? {});
+        return Response.json(HEALTHY);
+      }) as typeof fetch;
+
+      expect(
+        await new AcceleratorTransport("127.0.0.1", 59833, 59834).isProtocolHealthy("http"),
+      ).toBe(true);
+      expect(annotated).toBe(false);
+    });
+
+    test("modern denied is conclusive after one dual round and skips the retry", async () => {
+      const names: string[] = [];
+      setPermissionQuery(async ({ name }) => {
+        names.push(name);
+        return { state: "denied" };
+      });
+      let fetches = 0;
+      globalThis.fetch = mock(async () => {
+        fetches++;
+        throw new TypeError("browser deliberately hides the cause");
+      }) as typeof fetch;
+
+      const t = new AcceleratorTransport("127.0.0.1", 59833, 59834);
+      const error = await t.probeHealth().catch((caught) => caught);
+      expect(isLoopbackPermissionDenied(error)).toBe(true);
+      expect(fetches).toBe(2);
+      expect(names).toEqual(["loopback-network"]);
+    });
+
+    test("falls back to the legacy descriptor only when the modern descriptor rejects", async () => {
+      const names: string[] = [];
+      setPermissionQuery(async ({ name }) => {
+        names.push(name);
+        if (name === "loopback-network") throw new TypeError("unsupported permission name");
+        return { state: "denied" };
+      });
+      globalThis.fetch = mock(async () => {
+        throw new TypeError("network error");
+      }) as typeof fetch;
+
+      const error = await new AcceleratorTransport("127.0.0.1", 59833, 59834)
+        .probeHealth()
+        .catch((caught) => caught);
+      expect(isLoopbackPermissionDenied(error)).toBe(true);
+      expect(names).toEqual(["loopback-network", "local-network-access"]);
+    });
+
+    test("unsupported or failing permission queries remain inconclusive and keep the retry", async () => {
+      const names: string[] = [];
+      setPermissionQuery(async ({ name }) => {
+        names.push(name);
+        throw new TypeError("permission descriptor unsupported");
+      });
+      let fetches = 0;
+      globalThis.fetch = mock(async () => {
+        fetches++;
+        throw new TypeError("network error");
+      }) as typeof fetch;
+
+      const error = await new AcceleratorTransport("127.0.0.1", 59833, 59834, true)
+        .probeHealth()
+        .catch((caught) => caught);
+      expect(isLoopbackPermissionDenied(error)).toBe(false);
+      expect(fetches).toBe(2);
+      expect(names).toEqual([
+        "loopback-network",
+        "local-network-access",
+        "loopback-network",
+        "local-network-access",
+      ]);
+    });
+
+    test("httpsOnly denial probes once, while prompt remains offline and retries", async () => {
+      let state: PermissionState = "denied";
+      const names: string[] = [];
+      setPermissionQuery(async ({ name }) => {
+        names.push(name);
+        return { state };
+      });
+      let fetches = 0;
+      globalThis.fetch = mock(async () => {
+        fetches++;
+        throw new TypeError("network error");
+      }) as typeof fetch;
+
+      const deniedTransport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const denied = await deniedTransport.probeHealth().catch((caught) => caught);
+      expect(isLoopbackPermissionDenied(denied)).toBe(true);
+      expect(fetches).toBe(1);
+
+      state = "prompt";
+      fetches = 0;
+      names.length = 0;
+      const promptTransport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const prompt = await promptTransport.probeHealth().catch((caught) => caught);
+      expect(isLoopbackPermissionDenied(prompt)).toBe(false);
+      expect(fetches).toBe(2);
+      expect(names).toEqual(["loopback-network", "loopback-network"]);
     });
   });
 
