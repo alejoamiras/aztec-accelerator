@@ -142,6 +142,65 @@ export function assertLoopbackHost(host: string): string {
  */
 type ProbeResult = { response: Response; protocol: AcceleratorProtocol; body: unknown };
 
+/** Experimental Fetch/LNA types kept local until they are part of TypeScript's `lib.dom`. */
+type LoopbackRequestInit = RequestInit & { targetAddressSpace?: "loopback" };
+type LoopbackRequest = Request & { readonly targetAddressSpace?: string };
+type LoopbackPermissionName = "loopback-network" | "local-network-access";
+type LoopbackPermissionDescriptor = { name: LoopbackPermissionName };
+type LoopbackPermissions = {
+  query(descriptor: LoopbackPermissionDescriptor): Promise<{ state: PermissionState }>;
+};
+
+/** Payload-free private sentinels: raw browser fetch failures never cross the transport boundary. */
+const PROBE_FAILED = Object.freeze({});
+const LOOPBACK_PERMISSION_DENIED = Object.freeze({});
+
+/** Internal-only discriminator used by the prover to map the public blocked status. */
+export function isLoopbackPermissionDenied(error: unknown): boolean {
+  return error === LOOPBACK_PERMISSION_DENIED;
+}
+
+/** SSR-safe capability check for Chrome's experimental LNA fetch annotation. */
+export function supportsLoopbackTargetAddressSpace(): boolean {
+  try {
+    return (
+      typeof Request !== "undefined" &&
+      typeof Request.prototype === "object" &&
+      "targetAddressSpace" in (Request.prototype as LoopbackRequest)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Query Chrome's fine-grained loopback permission, falling back to its legacy umbrella name only
+ * when the modern descriptor itself is rejected. Missing APIs, prompt/granted, and query failures
+ * are intentionally inconclusive.
+ */
+async function isLoopbackPermissionExplicitlyDenied(): Promise<boolean> {
+  let permissions: LoopbackPermissions | undefined;
+  try {
+    if (typeof navigator === "undefined") return false;
+    permissions = navigator.permissions as unknown as LoopbackPermissions | undefined;
+    if (!permissions || typeof permissions.query !== "function") return false;
+  } catch {
+    return false;
+  }
+
+  try {
+    const status = await permissions.query({ name: "loopback-network" });
+    return status.state === "denied";
+  } catch {
+    try {
+      const status = await permissions.query({ name: "local-network-access" });
+      return status.state === "denied";
+    } catch {
+      return false;
+    }
+  }
+}
+
 /** q7e3-F-06: the three protocol-pin transitions {@link AcceleratorTransport.commitStatus} can apply. */
 export type ProtocolTransition =
   | { pin: "set"; protocol: AcceleratorProtocol }
@@ -192,7 +251,14 @@ async function fetchHeaderBounded(
     timeoutMs,
   );
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
+    const boundedInit: LoopbackRequestInit = { ...init, signal: ctrl.signal };
+    // Declare the intended address space only for plaintext loopback traffic. HTTPS never needs the
+    // mixed-content exemption, and omitting the experimental member in unsupported runtimes avoids
+    // WebKit's released targetAddressSpace regression. The annotation does not bypass permission.
+    if (new URL(url).protocol === "http:" && supportsLoopbackTargetAddressSpace()) {
+      boundedInit.targetAddressSpace = "loopback";
+    }
+    return await fetch(url, boundedInit);
   } finally {
     clearTimeout(timer);
   }
@@ -605,13 +671,24 @@ export class AcceleratorTransport {
       return this.#probePreferHttps(fire(httpsUrl, "https"), fire(httpUrl, "http"));
     };
 
+    const probeRound = async (): Promise<ProbeResult> => {
+      try {
+        return await probe();
+      } catch {
+        // Fetch deliberately exposes LNA denials as indistinguishable network errors. Only the
+        // permission state can classify one, and only explicit `denied` is conclusive.
+        if (await isLoopbackPermissionExplicitlyDenied()) throw LOOPBACK_PERMISSION_DENIED;
+        throw PROBE_FAILED;
+      }
+    };
+
     try {
-      return await probe();
-    } catch {
-      // Both probes failed — retry once (the accelerator may be slow to start on
-      // first launch or just after an update). Then let a second failure propagate.
+      return await probeRound();
+    } catch (error) {
+      // A persistent permission denial cannot be repaired by waiting, so skip the startup retry.
+      if (error === LOOPBACK_PERMISSION_DENIED) throw error;
       await new Promise((resolve) => setTimeout(resolve, PROBE_RETRY_DELAY_MS));
-      return probe();
+      return probeRound();
     }
   }
 

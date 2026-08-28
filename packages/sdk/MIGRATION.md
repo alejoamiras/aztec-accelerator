@@ -1,5 +1,41 @@
 # Migration guide
 
+## `AcceleratorStatus` adds `permission-blocked`
+
+`checkAcceleratorStatus` can now distinguish an explicit Chrome loopback-network permission denial:
+
+```ts
+type AcceleratorStatus =
+  | /* existing available/error/version arms */
+  | { available: false; reason: "offline"; sdkAztecVersion?: string }
+  | { available: false; reason: "permission-blocked"; sdkAztecVersion?: string };
+```
+
+This additive union arm is **source-breaking for exhaustive TypeScript switches**. Add the new case;
+it intentionally has no `protocol`, because neither loopback endpoint answered:
+
+```ts
+const status = await prover.checkAcceleratorStatus();
+if (!status.available) {
+  switch (status.reason) {
+    case "permission-blocked":
+      showChromeSiteSettingsHelp();
+      break;
+    case "offline":
+    case "error":
+    case "version-mismatch":
+      break;
+  }
+}
+
+// After the user changes the permission, bypass the settled 10-second status cache.
+await prover.checkAcceleratorStatus({ forceRefresh: true });
+```
+
+Only an explicit `denied` state is distinguishable. A pending/dismissed prompt, unsupported
+Permissions API, or query error remains `offline`. `forceRefresh` does not reset configuration,
+protocol pins, HTTPS history, or an already-running same-generation probe.
+
 ## `AcceleratorStatus` is now a discriminated union (Q12)
 
 `AcceleratorStatus` (returned by `AcceleratorProver.checkAcceleratorStatus()`) changed from a flat
@@ -32,6 +68,7 @@ type AcceleratorStatus =
       protocol: AcceleratorProtocol;            // "http" | "https"
     }
   | { available: false; reason: "offline"; sdkAztecVersion?: string }
+  | { available: false; reason: "permission-blocked"; sdkAztecVersion?: string }
   | { available: false; reason: "error"; protocol: AcceleratorProtocol; sdkAztecVersion?: string }
   | {
       available: false;
@@ -63,10 +100,13 @@ if (status.available) {
     /* ... */
   }
 } else {
-  // status.reason: "offline" | "error" | "version-mismatch"
+  // status.reason: "offline" | "permission-blocked" | "error" | "version-mismatch"
   switch (status.reason) {
     case "version-mismatch":
       console.warn(`accelerator is on ${status.acceleratorVersion}, SDK wants ${status.sdkAztecVersion}`);
+      break;
+    case "permission-blocked":
+      // Show Chrome Site settings guidance and an immediate forced Retry.
       break;
     case "offline":
     case "error":

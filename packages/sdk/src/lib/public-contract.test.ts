@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { AcceleratorPhase, AcceleratorProtocol } from "../index.js";
+import type {
+  AcceleratorPhase,
+  AcceleratorProtocol,
+  AcceleratorStatusCheckOptions,
+} from "../index.js";
 import * as sdk from "../index.js";
 
 // F-05 — doc-sync guard. Pins the published contract so source ↔ barrel ↔ docs can't silently drift
@@ -23,15 +27,19 @@ describe("public contract (F-05 doc-sync guard)", () => {
     const phase: AcceleratorPhase = "proving";
     // B7: pins the new `version-mismatch` phase into the barrel's type surface.
     const versionPhase: AcceleratorPhase = "version-mismatch";
+    const statusOptions: AcceleratorStatusCheckOptions = { forceRefresh: true };
     expect(protocol).toBe("https");
     expect(phase).toBe("proving");
     expect(versionPhase).toBe("version-mismatch");
+    expect(statusOptions.forceRefresh).toBe(true);
   });
 
   test("README documents the discriminated union, not the obsolete flat interface", () => {
     const readme = read("../../README.md");
     expect(readme).not.toContain("interface AcceleratorStatus {");
     expect(readme).toContain('reason: "offline"');
+    expect(readme).toContain('reason: "permission-blocked"');
+    expect(readme).toContain("forceRefresh: true");
     expect(readme).toContain("setForceLocal");
   });
 
@@ -54,10 +62,23 @@ describe("public contract (F-05 doc-sync guard)", () => {
     expect(skill).not.toContain("Peer dependency");
   });
 
+  test("README + MIGRATION + packaged SKILL document permission-blocked and forced Retry", () => {
+    for (const doc of [
+      read("../../README.md"),
+      read("../../MIGRATION.md"),
+      read("../../.claude/skills/aztec-accelerator/SKILL.md"),
+    ]) {
+      expect(doc).toContain("permission-blocked");
+      expect(doc).toContain("forceRefresh: true");
+    }
+  });
+
   test("MIGRATION references AcceleratorProtocol + the typed error, and SHIPS in the tarball (F15)", () => {
     const migration = read("../../MIGRATION.md");
     expect(migration).toContain("AcceleratorProtocol");
     expect(migration).toContain("AcceleratorHttpError");
+    expect(migration).toContain("source-breaking for exhaustive TypeScript switches");
+    expect(migration).toContain('reason: "permission-blocked"');
     // F15: MIGRATION.md must be in `files` — otherwise npm never packs it and consumers never see it.
     const pkg = JSON.parse(read("../../package.json"));
     expect(pkg.files).toContain("MIGRATION.md");

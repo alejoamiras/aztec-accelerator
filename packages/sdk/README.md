@@ -60,7 +60,7 @@ const prover = new AcceleratorProver(options?: AcceleratorProverOptions);
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `checkAcceleratorStatus()` | `Promise<AcceleratorStatus>` | Probe the accelerator's health endpoint. Use for UI status indicators. |
+| `checkAcceleratorStatus(options?)` | `Promise<AcceleratorStatus>` | Probe the accelerator's health endpoint. `{ forceRefresh: true }` bypasses a settled cached status but still joins a current probe. |
 | `setAcceleratorConfig(config)` | `void` | Update connection settings (port, host). Resets cached protocol. |
 | `setOnPhase(callback)` | `void` | Register a phase transition callback for UI animation. |
 | `createChonkProof(steps)` | `Promise<ChonkProofWithPublicInputs>` | Generate a proof — routes to accelerator or falls back to WASM. |
@@ -73,6 +73,10 @@ interface AcceleratorProverOptions {
   simulator?: CircuitSimulator;  // Defaults to lazy-loaded WASMSimulator
   accelerator?: AcceleratorConfig;
   onPhase?: (phase: AcceleratorPhase, data?: AcceleratorPhaseData) => void;
+}
+
+interface AcceleratorStatusCheckOptions {
+  forceRefresh?: boolean;
 }
 ```
 
@@ -106,6 +110,7 @@ type AcceleratorStatus =
       protocol: AcceleratorProtocol; // "http" | "https"
     }
   | { available: false; reason: "offline"; sdkAztecVersion?: string }
+  | { available: false; reason: "permission-blocked"; sdkAztecVersion?: string }
   | { available: false; reason: "error"; sdkAztecVersion?: string; protocol: AcceleratorProtocol }
   | {
       available: false;
@@ -115,6 +120,18 @@ type AcceleratorStatus =
       protocol: AcceleratorProtocol;
     };
 ```
+
+`permission-blocked` means Chrome explicitly reports that this origin's loopback-network permission
+is denied; it does **not** mean the accelerator is installed or healthy. It has no `protocol` because
+neither endpoint answered. Use a forced refresh after the user changes the site permission:
+
+```typescript
+const status = await prover.checkAcceleratorStatus({ forceRefresh: true });
+```
+
+The refresh preserves the endpoint configuration, protocol pin, HTTPS history, and an existing
+same-generation probe. Results, including `permission-blocked`, otherwise use the normal ten-second
+status cache.
 
 > **Origin approval affects `/health` detail.** Before the user approves your dApp's origin in the
 > accelerator popup, `/health` returns a *minimal* body, so `needsDownload` / `availableVersions` /
@@ -307,9 +324,12 @@ Safari blocks `fetch()` from HTTPS pages to `http://127.0.0.1`. The SDK works ar
 Starting with Chrome 142 (October 2025), requests from a public website to loopback addresses are gated behind a **Local Network Access permission prompt** ("… wants to access devices on your local network"). Chrome 145 splits this into separate `local-network` and `loopback-network` permissions. This applies to the SDK's health probe and prove requests:
 
 - If the user **allows**, everything works as before.
-- If the user **blocks** (or dismisses) the prompt, the probe fails and the SDK reports the accelerator as unavailable — proving silently falls back to WASM (`fallback` phase), which is indistinguishable from the accelerator not running. To recover, the user must re-allow the permission via the icon in Chrome's address bar (Site settings).
+- If Chrome's permission state is explicitly **denied**, status is `{ available: false, reason: "permission-blocked" }`; proving still falls back to WASM. A prompt that remains open, is dismissed without a persisted denial, or cannot be queried is inconclusive and can still appear as `offline`.
+- The usual recovery is to open Chrome's Site controls beside the address bar, allow local network access in Site settings, then call `checkAcceleratorStatus({ forceRefresh: true })`. This is not guaranteed: managed policy may require an administrator, and an iframe may need top-level access or an appropriate Permissions Policy delegation.
 
-Note this is about the destination address space, not the scheme — enabling HTTPS mode on the accelerator does **not** bypass the prompt.
+The SDK adds `targetAddressSpace: "loopback"` to supported plaintext Fetch requests. That declares
+intent so Chrome can apply its mixed-content/LNA flow; it does **not** grant or bypass permission.
+The gate is about the destination address space, not the scheme, so HTTPS is not an escape hatch.
 
 ## Security: local service discovery is shape-matched, not authenticated
 
