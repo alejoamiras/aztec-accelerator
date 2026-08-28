@@ -121,7 +121,7 @@ type AcceleratorStatus =
     };
 ```
 
-`permission-blocked` means Chrome explicitly reports that this origin's loopback-network permission
+`permission-blocked` means the browser explicitly reports that this origin's loopback-network permission
 is denied; it does **not** mean the accelerator is installed or healthy. It has no `protocol` because
 neither endpoint answered. Use a forced refresh after the user changes the site permission:
 
@@ -313,22 +313,22 @@ const prover = new AcceleratorProver({
 
 | Browser | Works | Notes |
 |---------|-------|-------|
-| Chrome | Yes* | HTTP localhost exempt from mixed-content restrictions; Chrome 142+ shows a Local Network Access permission prompt (see below) |
-| Firefox | Yes | HTTP localhost exempt from mixed-content restrictions |
+| Chrome | Yes* | Chrome 142+ shows a Local Network Access permission prompt (see below) |
+| Firefox | Yes* | Firefox 153+ enables Local Network Access prompting by default (see below) |
 | Safari | Yes* | Requires HTTPS mode enabled in the accelerator app |
 
 Safari blocks `fetch()` from HTTPS pages to `http://127.0.0.1`. The SDK works around this by probing both HTTP and HTTPS in parallel — Chrome/Firefox use HTTP, Safari uses HTTPS. See the [accelerator README](../../packages/accelerator/README.md#safari-support-macos-only) for setup instructions.
 
-### Chrome Local Network Access (Chrome 142+)
+### Browser Local Network Access (Chrome 142+, Firefox 153+)
 
-Starting with Chrome 142 (October 2025), requests from a public website to loopback addresses are gated behind a **Local Network Access permission prompt** ("… wants to access devices on your local network"). Chrome 145 splits this into separate `local-network` and `loopback-network` permissions. This applies to the SDK's health probe and prove requests:
+Current Chrome and Firefox gate requests from a public website to loopback addresses behind a **Local Network Access permission prompt**. Chrome introduced the prompt in 142 and split it into `local-network` and `loopback-network` permissions in 145; Firefox enables its corresponding protection by default in 153. This applies to the SDK's health probe and prove requests:
 
 - If the user **allows**, everything works as before.
-- If Chrome's permission state is explicitly **denied**, status is `{ available: false, reason: "permission-blocked" }`; proving still falls back to WASM. A prompt that remains open, is dismissed without a persisted denial, or cannot be queried is inconclusive and can still appear as `offline`.
-- The usual recovery is to open Chrome's Site controls beside the address bar, allow local network access in Site settings, then call `checkAcceleratorStatus({ forceRefresh: true })`. This is not guaranteed: managed policy may require an administrator, and an iframe may need top-level access or an appropriate Permissions Policy delegation.
+- If the browser's permission state is explicitly **denied**, status is `{ available: false, reason: "permission-blocked" }`; proving still falls back to WASM. A prompt that remains open, is dismissed without a persisted denial, or cannot be queried is inconclusive and can still appear as `offline`.
+- The usual recovery is to open the site's permissions beside the address bar, allow local network or device access, then call `checkAcceleratorStatus({ forceRefresh: true })`. This is not guaranteed: managed policy may require an administrator, and an iframe may need top-level access or an appropriate Permissions Policy delegation.
 
 The SDK adds `targetAddressSpace: "loopback"` to supported plaintext Fetch requests. That declares
-intent so Chrome can apply its mixed-content/LNA flow; it does **not** grant or bypass permission.
+intent so supporting browsers can apply their mixed-content/LNA flow; it does **not** grant or bypass permission.
 The gate is about the destination address space, not the scheme, so HTTPS is not an escape hatch.
 
 ## Security: local service discovery is shape-matched, not authenticated

@@ -143,16 +143,16 @@ Safari blocks HTTP fetch from HTTPS pages (mixed-content). The SDK handles this 
 
 No code changes needed in the dApp — the SDK handles protocol negotiation.
 
-## Chrome Local Network Access (Chrome 142+)
+## Browser Local Network Access (Chrome 142+, Firefox 153+)
 
-Chrome 142+ gates requests from public sites to loopback behind a permission prompt (Chrome 145+ uses a dedicated `loopback-network` permission). An explicit denial returns `reason: "permission-blocked"`; a prompt/dismissal, unsupported Permissions API, or query error remains indistinguishable from `offline`. Show Site controls → Site settings guidance and a forced Retry, but do not claim the accelerator is installed or healthy. Site settings are the usual recovery, not a guarantee: managed policy may require an administrator, and an iframe may require top-level access or Permissions Policy delegation. The SDK's `targetAddressSpace: "loopback"` annotation declares intent but does not bypass permission, and HTTPS is not an escape hatch because the gate follows the destination address space. Pages served from `localhost` (local dev) are same-address-space and unaffected.
+Current Chrome and Firefox gate requests from public sites to loopback behind a permission prompt (Chrome 145+ and Firefox 153+ expose the dedicated `loopback-network` permission). An explicit denial returns `reason: "permission-blocked"`; a prompt/dismissal, unsupported Permissions API, or query error remains indistinguishable from `offline`. Show site-permission guidance and a forced Retry, but do not claim the accelerator is installed or healthy. Browser settings are the usual recovery, not a guarantee: managed policy may require an administrator, and an iframe may require top-level access or Permissions Policy delegation. The SDK's `targetAddressSpace: "loopback"` annotation declares intent but does not bypass permission, and HTTPS is not an escape hatch because the gate follows the destination address space. Pages served from `localhost` (local dev) are same-address-space and unaffected.
 
 ## Error handling
 
 The SDK is designed to be fail-safe:
 
 - **Accelerator offline**: automatically falls back to WASM (no error thrown)
-- **Chrome loopback permission denied**: `checkAcceleratorStatus()` returns `permission-blocked`; proving still falls back to WASM
+- **Browser loopback permission denied**: `checkAcceleratorStatus()` returns `permission-blocked`; proving still falls back to WASM
 - **Accelerator returns a RECOGNISED error**: falls back to WASM — a denial (`denied` phase), a version
   refusal (`version-mismatch` phase), an authorization cooldown, and capacity/transient errors (408, 413,
   429, 503, `500 download_failed`/`prove_failed`)

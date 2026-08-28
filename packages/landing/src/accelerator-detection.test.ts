@@ -3,6 +3,7 @@ import {
   detectAccelerator,
   type LandingAcceleratorStatus,
   LandingDetectionController,
+  watchLoopbackPermissionChanges,
 } from "./accelerator-detection";
 
 describe("landing accelerator detection", () => {
@@ -26,7 +27,7 @@ describe("landing accelerator detection", () => {
     if (permissionsDescriptor) {
       Object.defineProperty(navigator, "permissions", permissionsDescriptor);
     } else {
-      delete (navigator as Navigator & { permissions?: Permissions }).permissions;
+      Reflect.deleteProperty(navigator, "permissions");
     }
   });
 
@@ -101,6 +102,33 @@ describe("landing accelerator detection", () => {
     expect(await detectAccelerator({ httpsOnly: true })).toBe("available");
     expect(urls).toEqual(["https://127.0.0.1:59834/health"]);
   });
+
+  test("watches a delayed prompt decision and removes the listener on cleanup", async () => {
+    let state: PermissionState = "prompt";
+    const status = new EventTarget() as EventTarget & { readonly state: PermissionState };
+    Object.defineProperty(status, "state", { get: () => state });
+    const names: string[] = [];
+    Object.defineProperty(navigator, "permissions", {
+      configurable: true,
+      value: {
+        query: async ({ name }: { name: string }) => {
+          names.push(name);
+          return status;
+        },
+      },
+    });
+    const seen: PermissionState[] = [];
+
+    const stop = await watchLoopbackPermissionChanges((next) => seen.push(next));
+    state = "denied";
+    status.dispatchEvent(new Event("change"));
+    stop();
+    state = "granted";
+    status.dispatchEvent(new Event("change"));
+
+    expect(names).toEqual(["loopback-network"]);
+    expect(seen).toEqual(["denied"]);
+  });
 });
 
 test("landing Retry is uncached and stale results cannot overwrite recovery", async () => {
@@ -121,4 +149,26 @@ test("landing Retry is uncached and stale results cannot overwrite recovery", as
   await startup;
   expect(calls).toBe(2);
   expect(rendered).toEqual(["available"]);
+});
+
+test("landing permission refresh starts an uncached probe and owns the display epoch", async () => {
+  let resolveFirst!: (status: LandingAcceleratorStatus) => void;
+  const first = new Promise<LandingAcceleratorStatus>((resolve) => {
+    resolveFirst = resolve;
+  });
+  let calls = 0;
+  const rendered: LandingAcceleratorStatus[] = [];
+  const controller = new LandingDetectionController(
+    async () => (++calls === 1 ? first : "permission-blocked"),
+    (status) => rendered.push(status),
+    () => {},
+  );
+
+  const startup = controller.refresh();
+  await controller.refreshAfterPermissionChange();
+  resolveFirst("offline");
+  await startup;
+
+  expect(calls).toBe(2);
+  expect(rendered).toEqual(["permission-blocked"]);
 });

@@ -3,8 +3,13 @@ export type LandingAcceleratorStatus = "available" | "offline" | "error" | "perm
 type LoopbackRequestInit = RequestInit & { targetAddressSpace?: "loopback" };
 type LoopbackRequest = Request & { readonly targetAddressSpace?: string };
 type LoopbackPermissionName = "loopback-network" | "local-network-access";
+type LoopbackPermissionStatus = {
+  readonly state: PermissionState;
+  addEventListener?(type: "change", listener: () => void): void;
+  removeEventListener?(type: "change", listener: () => void): void;
+};
 type LoopbackPermissions = {
-  query(descriptor: { name: LoopbackPermissionName }): Promise<{ state: PermissionState }>;
+  query(descriptor: { name: LoopbackPermissionName }): Promise<LoopbackPermissionStatus>;
 };
 
 const HEADER_TIMEOUT_MS = 2_000;
@@ -24,25 +29,52 @@ export function supportsLoopbackTargetAddressSpace(): boolean {
   }
 }
 
-async function permissionDenied(): Promise<boolean> {
+async function queryLoopbackPermission(): Promise<LoopbackPermissionStatus | null> {
   let permissions: LoopbackPermissions | undefined;
   try {
-    if (typeof navigator === "undefined") return false;
+    if (typeof navigator === "undefined") return null;
     permissions = navigator.permissions as unknown as LoopbackPermissions | undefined;
-    if (!permissions || typeof permissions.query !== "function") return false;
+    if (!permissions || typeof permissions.query !== "function") return null;
   } catch {
-    return false;
+    return null;
   }
 
   try {
-    return (await permissions.query({ name: "loopback-network" })).state === "denied";
+    return await permissions.query({ name: "loopback-network" });
   } catch {
     try {
-      return (await permissions.query({ name: "local-network-access" })).state === "denied";
+      return await permissions.query({ name: "local-network-access" });
     } catch {
-      return false;
+      return null;
     }
   }
+}
+
+async function permissionDenied(): Promise<boolean> {
+  return (await queryLoopbackPermission())?.state === "denied";
+}
+
+/** Observe a prompt decision that occurs after the bounded landing-page probe has timed out. */
+export async function watchLoopbackPermissionChanges(
+  onChange: (state: PermissionState) => void,
+): Promise<() => void> {
+  const status = await queryLoopbackPermission();
+  if (
+    !status ||
+    typeof status.addEventListener !== "function" ||
+    typeof status.removeEventListener !== "function"
+  ) {
+    return () => {};
+  }
+
+  let lastState = status.state;
+  const listener = () => {
+    if (status.state === lastState) return;
+    lastState = status.state;
+    onChange(lastState);
+  };
+  status.addEventListener("change", listener);
+  return () => status.removeEventListener?.("change", listener);
 }
 
 async function fetchBounded(url: string): Promise<Response> {
@@ -138,6 +170,7 @@ export async function detectAccelerator(options?: {
 
 export class LandingDetectionController {
   #epoch = 0;
+  #permissionRefresh: Promise<void> | null = null;
 
   constructor(
     private readonly check: () => Promise<LandingAcceleratorStatus>,
@@ -154,5 +187,15 @@ export class LandingDetectionController {
     } finally {
       if (epoch === this.#epoch) this.setPending(false);
     }
+  }
+
+  /** Coalesce browser permission events into one uncached probe with fresh display ownership. */
+  refreshAfterPermissionChange(): Promise<void> {
+    if (this.#permissionRefresh) return this.#permissionRefresh;
+    const refresh = this.refresh();
+    this.#permissionRefresh = refresh.finally(() => {
+      this.#permissionRefresh = null;
+    });
+    return this.#permissionRefresh;
   }
 }

@@ -123,7 +123,7 @@ export type AcceleratorStatus =
   | {
       available: false;
       /**
-       * The endpoint did not answer and Chrome did not expose a conclusive permission denial. The
+       * The endpoint did not answer and the browser did not expose a conclusive permission denial. The
        * accelerator may be offline, or a local-network prompt may still be pending/dismissed.
        */
       reason: "offline";
@@ -131,7 +131,7 @@ export type AcceleratorStatus =
     }
   | {
       available: false;
-      /** Chrome explicitly denied this origin permission to reach the loopback address space. */
+      /** The browser explicitly denied this origin permission to reach the loopback address space. */
       reason: "permission-blocked";
       sdkAztecVersion?: string;
     }

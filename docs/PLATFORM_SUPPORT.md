@@ -72,13 +72,13 @@ The app uses GTK via WebKitGTK. Tray icon support depends on the compositor:
 
 ## Browser Notes
 
-### Chrome Local Network Access (Chrome 142+)
+### Browser Local Network Access (Chrome 142+, Firefox 153+)
 
-Chrome 142 (October 2025) began gating requests from public websites to loopback addresses behind a user permission prompt (Local Network Access); Chrome 145 splits it into `local-network` and `loopback-network` permissions. A dApp probing the accelerator from a public origin triggers the prompt on first use. An explicit denial is reported by the SDK as `permission-blocked` and still falls back to WASM; a pending/dismissed prompt or unavailable permission query can remain `offline`.
+Chrome 142 began gating requests from public websites to loopback addresses behind a user permission prompt (Local Network Access); Chrome 145 splits it into `local-network` and `loopback-network` permissions. Firefox 153 enables its corresponding Local Network Access protection by default for desktop users. A dApp probing the accelerator from a public origin triggers the browser prompt on first use. An explicit denial is reported by the SDK as `permission-blocked` and still falls back to WASM; a pending/dismissed prompt or unavailable permission query can remain `offline`.
 
-The SDK annotates supported plaintext requests with `targetAddressSpace: "loopback"`. This declares the destination so Chrome can run its LNA flow; it does not bypass permission. HTTPS is not an escape hatch because the gate follows address space, not scheme. Chrome Site controls → Site settings is the usual recovery, followed by a forced Retry, but it is not guaranteed: enterprise policy can require an administrator, while an iframe can require top-level access or explicit Permissions Policy delegation.
+The SDK annotates supported plaintext requests with `targetAddressSpace: "loopback"`. This declares the destination so supporting browsers can run their LNA flow; it does not bypass permission. HTTPS is not an escape hatch because the gate follows address space, not scheme. Site permissions beside the address bar are the usual recovery, followed by a forced Retry, but this is not guaranteed: enterprise policy can require an administrator, while an iframe can require top-level access or explicit Permissions Policy delegation.
 
-Firefox and Safari have no equivalent gate as of mid-2026. Requests from `localhost`-served pages (local dev) are same-address-space and do not trigger the prompt.
+Safari currently retains the existing transport behavior: unsupported HTTP annotations and permission descriptors are omitted/ignored, and its trusted local HTTPS path remains required. Requests from `localhost`-served pages (local dev) are same-address-space and do not trigger the public-to-loopback prompt.
 
 ## Security Model
 

@@ -1,5 +1,9 @@
 import "./style.css";
-import { AcceleratorStatusController, acceleratorStatusView } from "./accelerator-status";
+import {
+  AcceleratorStatusController,
+  acceleratorStatusView,
+  watchLoopbackPermissionChanges,
+} from "./accelerator-status";
 import { AsciiController } from "./ascii-animation";
 import {
   AZTEC_DISPLAY_URL,
@@ -232,6 +236,14 @@ async function init(): Promise<void> {
   installWorkerDiagnostics();
   installWasmDiagnostics();
   installErrorHandlers();
+
+  // Install this before the first health request can open the LNA prompt. The health probe stays
+  // bounded; a later Allow/Block decision owns a fresh, cache-bypassing status refresh instead.
+  await watchLoopbackPermissionChanges(() => {
+    void acceleratorStatus.refreshAfterPermissionChange().catch(() => {
+      appendLog("Accelerator status refresh failed; WASM fallback remains available", "error");
+    });
+  });
 
   $("aztec-url").textContent = AZTEC_DISPLAY_URL;
 

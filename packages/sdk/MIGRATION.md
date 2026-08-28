@@ -2,7 +2,7 @@
 
 ## `AcceleratorStatus` adds `permission-blocked`
 
-`checkAcceleratorStatus` can now distinguish an explicit Chrome loopback-network permission denial:
+`checkAcceleratorStatus` can now distinguish an explicit browser loopback-network permission denial:
 
 ```ts
 type AcceleratorStatus =
@@ -19,7 +19,7 @@ const status = await prover.checkAcceleratorStatus();
 if (!status.available) {
   switch (status.reason) {
     case "permission-blocked":
-      showChromeSiteSettingsHelp();
+      showBrowserSitePermissionHelp();
       break;
     case "offline":
     case "error":
@@ -106,7 +106,7 @@ if (status.available) {
       console.warn(`accelerator is on ${status.acceleratorVersion}, SDK wants ${status.sdkAztecVersion}`);
       break;
     case "permission-blocked":
-      // Show Chrome Site settings guidance and an immediate forced Retry.
+      // Show browser site-permission guidance and an immediate forced Retry.
       break;
     case "offline":
     case "error":

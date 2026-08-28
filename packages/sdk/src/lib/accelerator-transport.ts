@@ -160,7 +160,7 @@ export function isLoopbackPermissionDenied(error: unknown): boolean {
   return error === LOOPBACK_PERMISSION_DENIED;
 }
 
-/** SSR-safe capability check for Chrome's experimental LNA fetch annotation. */
+/** SSR-safe capability check for the experimental LNA fetch annotation. */
 export function supportsLoopbackTargetAddressSpace(): boolean {
   try {
     return (
@@ -174,7 +174,7 @@ export function supportsLoopbackTargetAddressSpace(): boolean {
 }
 
 /**
- * Query Chrome's fine-grained loopback permission, falling back to its legacy umbrella name only
+ * Query the browser's fine-grained loopback permission, falling back to the legacy umbrella name only
  * when the modern descriptor itself is rejected. Missing APIs, prompt/granted, and query failures
  * are intentionally inconclusive.
  */

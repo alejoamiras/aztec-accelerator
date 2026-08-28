@@ -2,6 +2,7 @@ import {
   detectAccelerator,
   type LandingAcceleratorStatus,
   LandingDetectionController,
+  watchLoopbackPermissionChanges,
 } from "./accelerator-detection";
 import { FEED_URL, feedVersionToTag } from "./feed";
 
@@ -145,4 +146,11 @@ document.getElementById("landing-accelerator-retry")?.addEventListener("click", 
   void detection.refresh().catch(() => {});
 });
 
-void detection.refresh().catch(() => {});
+void (async () => {
+  // Subscribe before the first health request can open the browser prompt. A decision made after the
+  // bounded probe expires must still replace the quiet offline/download state without a reload.
+  await watchLoopbackPermissionChanges(() => {
+    void detection.refreshAfterPermissionChange().catch(() => {});
+  });
+  await detection.refresh();
+})().catch(() => {});
