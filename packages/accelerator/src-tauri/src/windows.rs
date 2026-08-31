@@ -6,6 +6,7 @@ use aztec_accelerator::config;
 use std::sync::Arc;
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use url::Host;
 
 /// True iff `url` is the app's OWN local asset origin. Tauri serves the bundled frontend from
 /// `tauri://localhost` (Linux/macOS) or `http://tauri.localhost` (Windows). Every other navigation
@@ -29,6 +30,36 @@ fn is_local_asset_url(url: &Url) -> bool {
     {
         url.scheme() == "tauri" && url.host_str() == Some("localhost")
     }
+}
+
+/// Tauri CLI's built-in static dev server is the only non-asset origin these windows may use. When
+/// `devUrl` is omitted, `tauri dev` injects a loopback URL at build time and intentionally embeds an
+/// empty asset set; rejecting that initial navigation produces a titled but completely blank window.
+fn is_loopback_dev_origin(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+fn is_allowed_navigation(url: &Url, dev_origin: Option<&Url>) -> bool {
+    if is_local_asset_url(url) {
+        return true;
+    }
+    dev_origin.is_some_and(|origin| {
+        is_loopback_dev_origin(origin)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.origin() == origin.origin()
+    })
 }
 
 /// Focus a newly created window. We stay as Accessory (tray-only) rather than
@@ -80,6 +111,13 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
             config::Theme::default()
         }
     };
+    // `tauri dev` supplies its built-in frontend server through the effective runtime config even
+    // though the checked-in config deliberately has no devUrl. Production never accepts this path.
+    let dev_origin = if tauri::is_dev() {
+        app.config().build.dev_url.clone()
+    } else {
+        None
+    };
     match WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url.into()))
         .title(config.title)
         .initialization_script(&commands::theme_script(theme, commands::ThemeSource::PreferStored))
@@ -94,10 +132,9 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
         .focused(config.focus_on_create)
         // F-012 (codex HIGH-3): confine the webview to its own local asset origin. Block any attempt
         // to navigate off-origin (data-exfil / phishing) and deny opening new windows/webviews — the
-        // popups never legitimately do either. (Confirmed NOT the cause of the CI asset-load failure —
-        // that was `tauri dev` injecting a dev-server devUrl → empty embed; fixed by running the binary
-        // directly. These guards allow the real tauri://localhost initial load.)
-        .on_navigation(is_local_asset_url)
+        // popups never legitimately do either. In dev only, admit the exact loopback origin injected
+        // by Tauri's built-in static server; paths, queries, and fragments remain same-origin.
+        .on_navigation(move |url| is_allowed_navigation(url, dev_origin.as_ref()))
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
         // The init script above resolves against `localStorage`, so a re-navigation paints the
         // cached theme rather than the one baked at build time. This is the repair path for when
@@ -308,7 +345,7 @@ pub fn show_update_prompt_window(app: &AppHandle, current_version: &str, new_ver
 
 #[cfg(test)]
 mod tests {
-    use super::is_local_asset_url;
+    use super::{is_allowed_navigation, is_local_asset_url, is_loopback_dev_origin};
     use tauri::Url;
 
     #[test]
@@ -378,6 +415,33 @@ mod tests {
                 !is_local_asset_url(&Url::parse(bad).unwrap()),
                 "{bad} should be blocked"
             );
+        }
+    }
+
+    #[test]
+    fn navigation_guard_allows_only_the_exact_injected_loopback_dev_origin() {
+        for configured in [
+            "http://127.0.0.1:1430/",
+            "http://localhost:1430/",
+            "https://[::1]:1430/",
+        ] {
+            let origin = Url::parse(configured).unwrap();
+            assert!(is_loopback_dev_origin(&origin));
+            let page = origin.join("authorize.html?requestId=abc").unwrap();
+            assert!(is_allowed_navigation(&page, Some(&origin)));
+
+            let other_port = Url::parse("http://127.0.0.1:59833/health").unwrap();
+            assert!(!is_allowed_navigation(&other_port, Some(&origin)));
+        }
+
+        for configured in [
+            "https://example.com/",
+            "file:///tmp/frontend/",
+            "http://user@127.0.0.1:1430/",
+        ] {
+            let origin = Url::parse(configured).unwrap();
+            assert!(!is_loopback_dev_origin(&origin));
+            assert!(!is_allowed_navigation(&origin, Some(&origin)));
         }
     }
 }

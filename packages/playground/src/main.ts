@@ -1,8 +1,13 @@
 import "./style.css";
 import {
+  AcceleratorStatusController,
+  acceleratorStatusView,
+  watchLoopbackPermissionChanges,
+} from "./accelerator-status";
+import {
   AZTEC_DISPLAY_URL,
   AZTEC_SDK_VERSION,
-  checkAccelerator,
+  checkAcceleratorStatus,
   checkAztecNode,
   deployTestAccount,
   initializeWallet,
@@ -25,23 +30,33 @@ import { sameMajor } from "./version";
 
 let deploying = false;
 
+const acceleratorStatus = new AcceleratorStatusController({
+  check: checkAcceleratorStatus,
+  render: (status) => {
+    const view = acceleratorStatusView(status);
+    setStatus("accelerator-status", view.connected);
+    $("accelerator-label").textContent = view.label;
+    $("accelerator-cta").classList.toggle("hidden", !view.showInstall);
+    $("accelerator-permission-help").classList.toggle("hidden", !view.showPermissionHelp);
+
+    const showInstallBanner = view.showInstall && !localStorage.getItem("accel-banner-dismissed");
+    $("accel-banner").classList.toggle("hidden", !showInstallBanner);
+    appendLog(view.log, view.logLevel);
+  },
+  setPending: (pending) => {
+    const retry = $btn("accelerator-retry");
+    retry.disabled = pending;
+    retry.textContent = pending ? "Checking…" : "Retry";
+  },
+});
+
 // ── Clock ──
 startClock();
 
 // ── Service checks ──
 
 async function checkServices(): Promise<void> {
-  const accel = await checkAccelerator();
-  updateAcceleratorLabel(accel);
-  if (accel) {
-    appendLog("Presto detected on localhost:59833", "success");
-    $("accel-banner").classList.add("hidden");
-  } else {
-    appendLog("Presto not detected, proving stays in-browser", "warn");
-    if (!localStorage.getItem("accel-banner-dismissed")) {
-      $("accel-banner").classList.remove("hidden");
-    }
-  }
+  await acceleratorStatus.refresh();
 }
 
 // ── Mode toggle ──
@@ -77,19 +92,14 @@ $("mode-accelerated").addEventListener("click", () => {
 
 // ── Shared helpers ──
 
-/** Update the accelerator service label, CTA link, and button state. */
-function updateAcceleratorLabel(available: boolean): void {
-  setStatus("accelerator-status", available);
-  $("accelerator-label").textContent = available ? "running" : "not detected, in-browser";
-  $("accelerator-cta").classList.toggle("hidden", available);
-}
-
 /** Handle a prover phase: feed the dial and react to fallback. */
 function handleProverPhase(ascii: SparkOrbitController, phase: string, _data?: unknown): void {
   ascii.pushPhase(phase as Parameters<typeof ascii.pushPhase>[0]);
   if (phase === "fallback") {
-    updateAcceleratorLabel(false);
     appendLog("Presto's offline, proving in-browser for now (slower)", "warn");
+    // The proof path never awaits this. The controller starts a single forced refresh only if its
+    // last rendered state was available, so in-browser fallback remains immediate and failure-proof.
+    if (state.uiMode === "accelerated") acceleratorStatus.refreshAfterFallback();
   }
 }
 
@@ -227,6 +237,14 @@ async function init(): Promise<void> {
   installWasmDiagnostics();
   installErrorHandlers();
 
+  // Install this before the first health request can open the LNA prompt. The health probe stays
+  // bounded; a later Allow/Block decision owns a fresh, cache-bypassing status refresh instead.
+  await watchLoopbackPermissionChanges(() => {
+    void acceleratorStatus.refreshAfterPermissionChange().catch(() => {
+      appendLog("Accelerator status refresh failed; WASM fallback remains available", "error");
+    });
+  });
+
   $("aztec-url").textContent = AZTEC_DISPLAY_URL;
 
   // Wire diagnostics export
@@ -236,6 +254,12 @@ async function init(): Promise<void> {
   $("accel-banner-dismiss").addEventListener("click", () => {
     $("accel-banner").classList.add("hidden");
     localStorage.setItem("accel-banner-dismissed", "1");
+  });
+
+  $btn("accelerator-retry").addEventListener("click", () => {
+    void acceleratorStatus.refresh({ forceRefresh: true }).catch(() => {
+      appendLog("Accelerator status refresh failed; WASM fallback remains available", "error");
+    });
   });
 
   // Default mode UI

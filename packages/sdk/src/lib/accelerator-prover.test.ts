@@ -564,6 +564,97 @@ describe("AcceleratorProver", () => {
       expect(status.sdkAztecVersion).toBe(SDK_AZTEC_VERSION);
     });
 
+    describe("Local Network Access status and forced refresh", () => {
+      let permissionsDescriptor: PropertyDescriptor | undefined;
+
+      beforeEach(() => {
+        permissionsDescriptor = Object.getOwnPropertyDescriptor(navigator, "permissions");
+      });
+
+      afterEach(() => {
+        if (permissionsDescriptor) {
+          Object.defineProperty(navigator, "permissions", permissionsDescriptor);
+        } else {
+          delete (navigator as Navigator & { permissions?: Permissions }).permissions;
+        }
+      });
+
+      const setPermissionState = (state: PermissionState) => {
+        Object.defineProperty(navigator, "permissions", {
+          configurable: true,
+          value: { query: async () => ({ state }) },
+        });
+      };
+
+      test("maps only explicit denial to permission-blocked, without a protocol", async () => {
+        setPermissionState("denied");
+        mockFetchOffline();
+        const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
+
+        const status = await prover.checkAcceleratorStatus();
+        expect(status).toEqual({
+          available: false,
+          reason: "permission-blocked",
+          sdkAztecVersion: SDK_AZTEC_VERSION,
+        });
+        expect("protocol" in status).toBe(false);
+      });
+
+      test("caches blocked under the normal TTL and forceRefresh bypasses that settled cache", async () => {
+        setPermissionState("denied");
+        let healthCalls = 0;
+        globalThis.fetch = mock(async () => {
+          healthCalls++;
+          throw new TypeError("blocked");
+        }) as typeof fetch;
+        const prover = new AcceleratorProver({
+          simulator: new WASMSimulator(),
+          accelerator: { httpsOnly: true },
+        });
+
+        const first = await prover.checkAcceleratorStatus();
+        expect(first.available).toBe(false);
+        expect(healthCalls).toBe(1);
+        expect(await prover.checkAcceleratorStatus()).toEqual(first);
+        expect(healthCalls).toBe(1);
+        expect(await prover.checkAcceleratorStatus({ forceRefresh: true })).toEqual(first);
+        expect(healthCalls).toBe(2);
+      });
+
+      test("forced refresh joins an existing same-generation probe, including ordinary callers", async () => {
+        let healthCalls = 0;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        globalThis.fetch = mock(async () => {
+          healthCalls++;
+          await gate;
+          return Response.json({
+            status: "ok",
+            api_version: 1,
+            available_versions: [SDK_AZTEC_VERSION],
+          });
+        }) as typeof fetch;
+        const prover = new AcceleratorProver({
+          simulator: new WASMSimulator(),
+          accelerator: { httpsOnly: true },
+        });
+
+        const forcedA = prover.checkAcceleratorStatus({ forceRefresh: true });
+        const forcedB = prover.checkAcceleratorStatus({ forceRefresh: true });
+        const ordinary = prover.checkAcceleratorStatus();
+        await Promise.resolve();
+        expect(healthCalls).toBe(1);
+        release();
+        const [a, b, c] = await Promise.all([forcedA, forcedB, ordinary]);
+        expect(a.available).toBe(true);
+        expect(b).toEqual(a);
+        expect(c).toEqual(a);
+        expect(healthCalls).toBe(1);
+      });
+    });
+
     test("does not cache protocol on non-ok health response", async () => {
       // First check: accelerator returns 500 — protocol should NOT be cached
       mockFetch({
@@ -705,9 +796,7 @@ describe("AcceleratorProver", () => {
       const prover = new AcceleratorProver({ simulator: new WASMSimulator() });
 
       // First call: probes + retries (takes ~1s due to retry delay)
-      const start = performance.now();
       const status1 = await prover.checkAcceleratorStatus();
-      const firstCallMs = performance.now() - start;
       expect(status1.available).toBe(false);
 
       // Second call within TTL: should return immediately from cache (< 50ms)

@@ -30,6 +30,32 @@ async function mockServicesOnline(page: import("@playwright/test").Page) {
   });
 }
 
+const HEALTHY = JSON.stringify({ status: "ok", api_version: 1 });
+
+async function mockHealth(
+  page: import("@playwright/test").Page,
+  http: (route: import("@playwright/test").Route) => Promise<void> | void,
+) {
+  await page.route("http://127.0.0.1:59833/health", http);
+  await page.route("https://127.0.0.1:59834/health", (route) => route.abort());
+}
+
+async function mockPermissionState(
+  page: import("@playwright/test").Page,
+  initial: "denied" | "prompt" | "granted",
+) {
+  await page.addInitScript((state) => {
+    const target = window as typeof window & { __mockLnaPermission?: string };
+    target.__mockLnaPermission = state;
+    Object.defineProperty(navigator, "permissions", {
+      configurable: true,
+      value: {
+        query: async () => ({ state: target.__mockLnaPermission }),
+      },
+    });
+  }, initial);
+}
+
 // ── JS error safety net — catches runtime errors across all mocked tests ──
 
 const jsErrors: string[] = [];
@@ -109,6 +135,79 @@ test("accelerator status is shown in services panel", async ({ page }) => {
 
   await expect(page.locator("#accelerator-status")).toBeVisible();
   await expect(page.locator("#accelerator-label")).toBeVisible();
+});
+
+test("recognized health renders available and suppresses install UI", async ({ page }) => {
+  await mockServicesOffline(page);
+  await mockHealth(page, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: HEALTHY }),
+  );
+  await page.goto("/");
+
+  await expect(page.locator("#accelerator-label")).toHaveText("running");
+  await expect(page.locator("#accelerator-status")).toHaveAttribute("data-status", "online");
+  await expect(page.locator("#accel-banner")).toBeHidden();
+  await expect(page.locator("#accelerator-cta")).toBeHidden();
+});
+
+test("offline remains the quiet install/fallback state", async ({ page }) => {
+  await mockServicesOffline(page);
+  await mockPermissionState(page, "prompt");
+  await mockHealth(page, (route) => route.abort());
+  await page.goto("/");
+
+  await expect(page.locator("#accelerator-label")).toContainText("not detected");
+  await expect(page.locator("#accelerator-permission-help")).toBeHidden();
+  await expect(page.locator("#accel-banner")).toBeVisible();
+  await expect(page.locator("#accelerator-cta")).toBeVisible();
+});
+
+test("health error and version mismatch do not offer a contradictory install", async ({ page }) => {
+  await mockServicesOffline(page);
+  await mockHealth(page, (route) => route.fulfill({ status: 500, body: "error" }));
+  await page.goto("/");
+  await expect(page.locator("#accelerator-label")).toContainText("health check error");
+  await expect(page.locator("#accel-banner")).toBeHidden();
+  await expect(page.locator("#accelerator-cta")).toBeHidden();
+
+  await page.unroute("http://127.0.0.1:59833/health");
+  await page.route("http://127.0.0.1:59833/health", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "ok", api_version: 1, aztec_version: "0.0.0" }),
+    }),
+  );
+  await page.reload();
+  await expect(page.locator("#accelerator-label")).toContainText("version mismatch");
+  await expect(page.locator("#accel-banner")).toBeHidden();
+  await expect(page.locator("#accelerator-cta")).toBeHidden();
+});
+
+test("permission-blocked guidance recovers through immediate Retry", async ({ page }) => {
+  await mockServicesOffline(page);
+  await mockPermissionState(page, "denied");
+  let blocked = true;
+  await mockHealth(page, async (route) => {
+    if (blocked) return route.abort();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return route.fulfill({ status: 200, contentType: "application/json", body: HEALTHY });
+  });
+  await page.goto("/");
+
+  await expect(page.locator("#accelerator-label")).toHaveText("local access blocked");
+  await expect(page.locator("#accelerator-permission-help")).toBeVisible();
+  await expect(page.locator("#accel-banner")).toBeHidden();
+  await expect(page.locator("#accelerator-cta")).toBeHidden();
+
+  blocked = false;
+  await page.evaluate(() => {
+    (window as typeof window & { __mockLnaPermission?: string }).__mockLnaPermission = "granted";
+  });
+  await page.locator("#accelerator-retry").click();
+  await expect(page.locator("#accelerator-retry")).toBeDisabled();
+  await expect(page.locator("#accelerator-label")).toHaveText("running");
+  await expect(page.locator("#accelerator-permission-help")).toBeHidden();
 });
 
 // ── Expanded coverage ──

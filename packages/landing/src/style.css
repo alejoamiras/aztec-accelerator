@@ -474,6 +474,32 @@ h1, h2, h3 {
 }
 .why-sub { color: var(--text-muted); font-size: 14px; font-weight: 500; margin-top: 10px; }
 
+/* ── Permission notice (hero, shown only when the browser denied local access) ── */
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 28px;
+  padding: 18px 20px;
+  background: var(--wash);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+.notice-content { max-width: 560px; }
+.notice-content h3 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.notice-content p { color: var(--text-muted); font-size: 14px; line-height: 1.6; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 20px;
+  font-size: 14px;
+}
+.btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+.hidden { display: none !important; }
+
 /* ── TEE-Rex cross-link (hidden while the project is unmaintained) ── */
 .tee-rex-callout {
   display: flex;

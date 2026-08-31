@@ -124,15 +124,38 @@ describe("F-012 P2 — CSP + global flag drift guards", () => {
     expect(csp).not.toContain("unsafe-eval");
   });
 
-  test("dev never silently weakens the shipped CSP (no devUrl, no weaker devCsp)", async () => {
+  test("dev never silently weakens the shipped CSP (no configured devUrl, exact page policies)", async () => {
     const c = await conf();
-    // is_dev() serves the same csp only when devCsp is unset and there is no devUrl — pin both so a future
-    // edit can't turn the dev-mode PR-gate WebDriver run into a no-op against the real policy.
+    // Tauri CLI injects its built-in loopback devUrl at runtime even though the checked-in config has
+    // none. External dev URLs do not inherit Tauri's asset-protocol CSP, so every page must carry a
+    // byte-identical meta policy. The configured CSP remains the single policy source of truth.
     expect(c.build?.devUrl, "no devUrl").toBeUndefined();
-    const devCsp = c.app?.security?.devCsp;
-    if (devCsp !== undefined) expect(devCsp).toBe(c.app.security.csp);
+    const csp = c.app?.security?.csp;
+    for (const page of PAGES) {
+      const html = await read(path.join(FRONTEND, page));
+      const policies = [
+        ...html.matchAll(
+          /<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"\s*\/?>/gi,
+        ),
+      ];
+      expect(policies.length, `${page}: exactly one CSP meta tag`).toBe(1);
+      expect(policies[0][1], `${page}: dev CSP matches tauri.conf.json`).toBe(csp);
+    }
     // The asset-CSP nonce augmentation must stay on (never disable it).
     expect(c.app?.security?.dangerousDisableAssetCspModification ?? false).toBe(false);
+  });
+
+  test("tauri dev/build regenerate the gitignored frontend bundles before Rust codegen", async () => {
+    const build = (await conf()).build;
+    expect(build.beforeDevCommand).toEqual({
+      script: "bun run frontend:build",
+      cwd: "..",
+      wait: true,
+    });
+    expect(build.beforeBuildCommand).toEqual({
+      script: "bun run frontend:build",
+      cwd: "..",
+    });
   });
 });
 

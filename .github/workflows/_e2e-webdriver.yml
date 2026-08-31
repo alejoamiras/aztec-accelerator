@@ -65,16 +65,6 @@ jobs:
         working-directory: packages/accelerator/src-tauri
         run: cargo build --release --features webdriver
 
-      # ── Build (dev — plain `cargo build`, run DIRECTLY, no `tauri dev`. F-012 ROOT CAUSE: `tauri dev`
-      #    injects a dev-server devUrl (e.g. http://127.0.0.1:1430), which makes tauri-codegen embed an EMPTY
-      #    asset set (context.rs: `dev && dev_url.is_some()`), so the webview's tauri:// protocol 404s every
-      #    asset. A plain `cargo build` has dev_url=None → codegen embeds frontendDist fully → tauri:// works.
-      #    setup-accelerator already built the frontend bundles the build.rs guard needs. ──
-      - name: Build app (dev)
-        if: inputs.mode == 'dev'
-        working-directory: packages/accelerator/src-tauri
-        run: cargo build --features webdriver
-
       # ── Build (built-debug — F-012/D8: a real `tauri build` enables tauri's custom-protocol feature, so
       #    the webdriver run exercises the SHIPPED asset/CSP path that `tauri dev` and raw `cargo build` skip.
       #    Runs from packages/accelerator so tauri's beforeBuildCommand (bun run frontend:build) fires. ──
@@ -90,8 +80,14 @@ jobs:
           case "${{ inputs.mode }}" in
             release)     APP_CMD="./src-tauri/target/release/AztecAccelerator$EXE" ;;
             built-debug) APP_CMD="./src-tauri/target/debug/AztecAccelerator$EXE" ;;
-            *)           APP_CMD="./src-tauri/target/debug/AztecAccelerator$EXE" ;; # dev: built above
-
+            dev)
+              # Exercise the real developer command. Tauri injects a loopback devUrl for its built-in
+              # static server; the dynamic-window navigation guard must admit that exact origin.
+              bunx tauri dev --no-watch --features webdriver > /tmp/tauri.log 2>&1 &
+              echo "TAURI_PID=$!" >> "$GITHUB_ENV"
+              exit 0
+              ;;
+            *) echo "unknown WebDriver mode: ${{ inputs.mode }}" >&2; exit 1 ;;
           esac
           $APP_CMD > /tmp/tauri.log 2>&1 &
           echo "TAURI_PID=$!" >> "$GITHUB_ENV"
@@ -155,11 +151,14 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             # Git Bash has no pkill; use taskkill on the native processes (// escapes
             # the flags so MSYS doesn't path-mangle them).
+            if [ -n "${TAURI_PID:-}" ]; then
+              taskkill //F //PID "$TAURI_PID" //T 2>/dev/null || true
+            fi
             taskkill //F //IM AztecAccelerator.exe 2>/dev/null || true
             taskkill //F //IM msedgewebview2.exe 2>/dev/null || true
           else
-            kill "$TAURI_PID" 2>/dev/null || true
-            pkill -P "$TAURI_PID" 2>/dev/null || true
+            pkill -P "${TAURI_PID:-0}" 2>/dev/null || true
+            kill "${TAURI_PID:-0}" 2>/dev/null || true
             pkill -f "AztecAccelerator" 2>/dev/null || true
             pkill -f stalonetray 2>/dev/null || true
             pkill -f Xvfb 2>/dev/null || true

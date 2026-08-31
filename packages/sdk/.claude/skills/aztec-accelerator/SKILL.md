@@ -103,9 +103,14 @@ if (status.available) {
   // status.protocol           — "http" or "https" (which succeeded)
   // status.acceleratorVersion — also available here
 } else {
-  // status.reason — "offline" | "error" | "version-mismatch"
+  // status.reason — "offline" | "permission-blocked" | "error" | "version-mismatch"
+  // `permission-blocked` has no protocol: neither endpoint answered.
 }
 ```
+
+After a user changes Chrome's local-network setting, retry immediately with
+`prover.checkAcceleratorStatus({ forceRefresh: true })`. This bypasses only the settled ten-second
+cache and still joins an existing same-generation probe.
 
 ### 7. Force WASM mode (testing/benchmarking)
 
@@ -138,15 +143,16 @@ Safari blocks HTTP fetch from HTTPS pages (mixed-content). The SDK handles this 
 
 No code changes needed in the dApp — the SDK handles protocol negotiation.
 
-## Chrome Local Network Access (Chrome 142+)
+## Browser Local Network Access (Chrome 142+, Firefox 153+)
 
-Chrome 142+ gates requests from public sites to loopback behind a permission prompt (Chrome 145+ uses a dedicated `loopback-network` permission). If the user blocks it, the SDK's probe fails and proving falls back to WASM (`fallback` phase) — indistinguishable from the accelerator not running. When a user reports "accelerator installed but not detected" on Chrome, have them check the Local Network Access permission in the address bar's site settings. HTTPS mode does not bypass the prompt. Pages served from `localhost` (local dev) are same-address-space and unaffected.
+Current Chrome and Firefox gate requests from public sites to loopback behind a permission prompt (Chrome 145+ and Firefox 153+ expose the dedicated `loopback-network` permission). An explicit denial returns `reason: "permission-blocked"`; a prompt/dismissal, unsupported Permissions API, or query error remains indistinguishable from `offline`. Show site-permission guidance and a forced Retry, but do not claim the accelerator is installed or healthy. Browser settings are the usual recovery, not a guarantee: managed policy may require an administrator, and an iframe may require top-level access or Permissions Policy delegation. The SDK's `targetAddressSpace: "loopback"` annotation declares intent but does not bypass permission, and HTTPS is not an escape hatch because the gate follows the destination address space. Pages served from `localhost` (local dev) are same-address-space and unaffected.
 
 ## Error handling
 
 The SDK is designed to be fail-safe:
 
 - **Accelerator offline**: automatically falls back to WASM (no error thrown)
+- **Browser loopback permission denied**: `checkAcceleratorStatus()` returns `permission-blocked`; proving still falls back to WASM
 - **Accelerator returns a RECOGNISED error**: falls back to WASM — a denial (`denied` phase), a version
   refusal (`version-mismatch` phase), an authorization cooldown, and capacity/transient errors (408, 413,
   429, 503, `500 download_failed`/`prove_failed`)
