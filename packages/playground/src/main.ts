@@ -241,7 +241,7 @@ async function init(): Promise<void> {
   // bounded; a later Allow/Block decision owns a fresh, cache-bypassing status refresh instead.
   await watchLoopbackPermissionChanges(() => {
     void acceleratorStatus.refreshAfterPermissionChange().catch(() => {
-      appendLog("Accelerator status refresh failed; WASM fallback remains available", "error");
+      appendLog("Couldn't re-check Presto. Proving stays in-browser", "error");
     });
   });
 
@@ -258,7 +258,7 @@ async function init(): Promise<void> {
 
   $btn("accelerator-retry").addEventListener("click", () => {
     void acceleratorStatus.refresh({ forceRefresh: true }).catch(() => {
-      appendLog("Accelerator status refresh failed; WASM fallback remains available", "error");
+      appendLog("Couldn't re-check Presto. Proving stays in-browser", "error");
     });
   });
 

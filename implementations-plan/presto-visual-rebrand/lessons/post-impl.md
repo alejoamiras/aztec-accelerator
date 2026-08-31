@@ -42,6 +42,23 @@ holds (the exponential approach stalled ~40° short of the claimed "lands on top
 regression test eases materially before sampling so the old bug actually fails it; the sweep's
 workflow guard asserts git's exit code.
 
+## Main merge 2026-08-31 (#479/#481/#482/#484 → branch) + codex audit
+Five conflicts, all in files the rebrand rewrote: `windows.rs` (branch theme lookup + main's
+dev-only loopback navigation exception, both kept), `landing/main.ts` (main's
+`LandingDetectionController` adopted; the branch's innerHTML-free rendering kept by snapshotting
+the CTA as cloned nodes), `landing/style.css` (the Presto rewrite had dropped `.notice`,
+`.btn-outline`, `.hidden` that #484's new permission notice relies on: re-added in Presto tokens),
+`playground/main.ts` (main's `AcceleratorStatusController` + the branch's `SparkOrbitController`),
+`index.md`. #484's new `accelerator-status.ts` view copy and the notice markup were re-voiced into
+branch vocabulary ("running", "in-browser", brand-gold tokens) with the pinned e2e assertions
+updated; `lna.real.spec.ts` needs a real-Chromium LNA harness not runnable here (mocked spec 12/12).
+Lesson: the sweep's `merge-base` guard held (main's `_e2e-webdriver.yml`/`app.yml` edits did not
+trip it), and `--features webdriver` churn in `gen/schemas` was restored before committing.
+Codex (fresh session `01a0582e-76c6-7670-9d59-4c4f50d6c33b`, xhigh): "merge needs fixes, but only
+low-severity copy cleanup; nothing material in behavior, security, or identity." Two Lows adopted:
+#484's residual "Accelerator status refresh failed; WASM fallback remains available" log, and the
+pre-existing em dashes in the landing/playground `<title>`/og/twitter copy.
+
 ## Codex round 3 (resumed) — CONVERGED
 One Low, adopted verbatim (commit `b44b122`): `git diff origin/main...` with no second ref stops
 at HEAD (missing staged/unstaged edits); `git diff --merge-base origin/main` diffs merge-base →
