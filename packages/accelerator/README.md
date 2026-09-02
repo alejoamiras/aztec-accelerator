@@ -455,11 +455,14 @@ ACCELERATOR_DOWNLOAD_TEST=1 cargo test download_and_verify -- --nocapture
 Releases are triggered via `gh workflow run release-accelerator.yml -f version=X.Y.Z`.
 
 ```
-validate → e2e-webdriver gate → tag → build (3 Tauri + 4 headless platforms) → post-build smoke → release → bump
+validate → build (4 desktop + 4 headless) → isolated updater signing → platform/updater smokes → draft release → packaged E2E → tag → publish
 ```
 
-- **E2E gate**: builds with `--features webdriver`, runs 9 WebDriver tests (macOS, release mode)
-- **Build**: Tauri bundles for 3 platforms (macOS arm64/x86_64, Linux x86_64) + headless `accelerator-server` for 4 platforms (macOS arm64/x86_64, Linux x86_64/arm64)
-- **Post-build smoke**: mounts the signed DMG, launches the app, polls `/health`
-- **Release**: creates GitHub Release with DMGs/debs/AppImages + headless tarballs (with SHA-256 sidecars) + `latest.json` for auto-updater
-- **Bump**: auto-creates PR to bump source version
+- **E2E gate**: builds with `--features webdriver` and runs the real desktop WebDriver suite.
+- **Build**: Tauri bundles for macOS arm64/x86_64, Linux x86_64, and Windows x86_64, plus headless `accelerator-server` for macOS arm64/x86_64 and Linux x86_64/arm64. Build jobs use throwaway updater keys.
+- **Updater signing**: one `release-signing` environment job receives the production updater key only after tooling and the verifier are prepared. It signs exact updater payload bytes, builds signed feeds, verifies them, and does not build, install, or launch apps.
+- **Release gates**: notarization/launch checks, blocking N-1→N updater smokes on macOS/Linux/Windows (including tamper rejection controls), then packaged E2E against the draft's own assets.
+- **Release**: publishes the verified draft after pushing the reviewed commit tag. Stable releases include signed `latest.json`; prereleases do not alter the live updater feed.
+- **Promote**: a separate `promote-only` dispatch verifies the 17-asset stable release and flips the live feed. With `bump_source=true`, it then opens the next-version PR.
+
+The Windows installer is intentionally not Authenticode-signed, so SmartScreen reports an unknown publisher on first install. Updater payloads are still Ed25519-signed and verified before application.

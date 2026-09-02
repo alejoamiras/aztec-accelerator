@@ -13,7 +13,7 @@ Native proving accelerator for Aztec transactions. Bypasses browser WASM throttl
 | Package | Description | Status |
 |---------|-------------|--------|
 | [`@alejoamiras/aztec-accelerator`](packages/sdk) | SDK — drop-in `AcceleratorProver` for dApp integration | [![npm](https://img.shields.io/npm/v/@alejoamiras/aztec-accelerator?label=npm)](https://www.npmjs.com/package/@alejoamiras/aztec-accelerator) |
-| [`packages/accelerator`](packages/accelerator) | Desktop tray app (macOS/Linux) + headless server for CI test acceleration | [![Accelerator](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml) |
+| [`packages/accelerator`](packages/accelerator) | Desktop tray app (macOS/Linux/Windows) + headless server for CI test acceleration | [![Accelerator](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml) |
 | [`packages/playground`](packages/playground) | [Live demo](https://playground.aztec-accelerator.dev) — WASM vs accelerated comparison | [![App](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/app.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/app.yml) |
 | [`packages/landing`](packages/landing) | Landing page at [aztec-accelerator.dev](https://aztec-accelerator.dev) | |
 
@@ -83,6 +83,7 @@ See the [Accelerator README](packages/accelerator/README.md) for installation an
 ```bash
 bun install                              # Install dependencies
 bun run test                             # Lint + typecheck + unit tests
+bun run audit:dependencies               # npm + Rust security policy
 bun run lint                             # Linting only (biome + pkg + rust)
 bun run lint:fix                         # Auto-fix lint/format issues
 bun run --cwd packages/playground dev    # Start playground dev server

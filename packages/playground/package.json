@@ -48,7 +48,7 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^6",
     "viem": "npm:@aztec/viem@2.38.2",
-    "vite": "^7.3.1",
+    "vite": "^7.3.6",
     "vite-plugin-node-polyfills": "^0.28"
   }
 }
