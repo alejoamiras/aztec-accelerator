@@ -5,7 +5,7 @@ name: _Updater Smoke Windows (reusable)
 # installs as an auto-update — i.e. it tests what we actually ship, like mac/Linux.
 #
 # N    = the prod-signed `-setup.nsis.zip`/.sig downloaded from this run's isolated signer job.
-# N-1  = the REAL previous Windows STABLE (`accelerator-v<n1-version>` release asset), the linux
+# N-1  = the resolver-selected real published Windows release (`accelerator-v<n1-version>`), the linux
 #        download-real-N-1 pattern. A preflight fails early if the fixture can no longer update to
 #        HEAD (asset missing, N not above the F-004 floor, updater pubkey rotated, or the feed
 #        endpoint moved) — each of those would otherwise surface as a confusing smoke failure on
@@ -26,9 +26,8 @@ on:
         required: true
         type: string
       n1-version:
-        description: The REAL previous Windows stable (release tag accelerator-v<n1-version>)
-        required: false
-        default: "1.0.7"
+        description: Version carried by the resolver-selected real N-1 release
+        required: true
         type: string
       n-artifact:
         description: This run's Windows build artifact name
@@ -139,15 +138,15 @@ jobs:
           if (-not $n1) { Write-Error "N-1 installer not found"; exit 1 }
           # Guard a no-op pass: N-1 must differ from N (the release version).
           if ($env:N1_VERSION -eq $env:N_VERSION) { Write-Error "N-1 == N ($env:N_VERSION) — a no-op update would pass trivially"; exit 1 }
+          $n1BinaryName = if ($env:N1_VERSION -eq "1.0.7") { "aztec-accelerator.exe" } else { "AztecAccelerator.exe" }
           & packages/accelerator/scripts/updater-smoke-windows.ps1 `
             -NVersion $env:N_VERSION `
             -NArtifactsDir "$env:RUNNER_TEMP\n" `
             -N1Installer $n1.FullName `
             -RepoRoot $env:GITHUB_WORKSPACE `
             -N1Version $env:N1_VERSION `
-            -N1BinaryName "aztec-accelerator.exe"
-          # ^ the v1.0.7 fixture predates the AztecAccelerator rename. When n1-version moves to a
-          #   renamed release, drop this argument (the ps1 default is the new name).
+            -N1BinaryName $n1BinaryName
+          # The only published complete Windows fixture before the executable rename is 1.0.7.
 
       - name: Result summary
         if: success()

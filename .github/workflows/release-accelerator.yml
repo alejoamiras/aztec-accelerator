@@ -37,6 +37,11 @@ on:
         required: false
         type: boolean
         default: false
+      updater_key_rotation_bootstrap:
+        description: "One-time only: permit rc.1 of a new major to prove old-key rejection when no lower same-key updater baseline exists. Never use for an ordinary release."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-accelerator
@@ -94,6 +99,52 @@ jobs:
     needs: validate
     if: ${{ !inputs.auth_probe && inputs.mode == 'publish' }}
     uses: ./.github/workflows/dependency-audit.yml
+
+  # Resolve one real, published, complete release below N for updater testing. Prefer the greatest
+  # same-key release, including prereleases, so RC2 can exercise RC1 and GA can exercise the latest RC.
+  # If none exists, fail closed unless the operator explicitly requests the tightly constrained first-RC
+  # key-rotation bootstrap. The resolver itself limits that path to rc.1 of exactly the next major.
+  resolve-updater-baseline:
+    name: Resolve updater smoke baseline
+    needs: validate
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      rotation: ${{ steps.resolve.outputs.rotation }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Select the greatest lower complete release under the current updater key
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          ALLOW_KEY_ROTATION_BOOTSTRAP: ${{ inputs.updater_key_rotation_bootstrap }}
+        run: |
+          PUBKEY=$(jq -r '.plugins.updater.pubkey' packages/accelerator/src-tauri/tauri.conf.json)
+          ARGS=(
+            --repository "$REPOSITORY"
+            --version "$RELEASE_VERSION"
+            --pubkey "$PUBKEY"
+          )
+          if [ "$ALLOW_KEY_ROTATION_BOOTSTRAP" = "true" ]; then
+            ARGS+=(--allow-key-rotation-bootstrap)
+          fi
+          RESULT=$(bun packages/accelerator/scripts/resolve-updater-baseline.ts "${ARGS[@]}")
+          echo "$RESULT" | jq .
+          {
+            echo "tag=$(echo "$RESULT" | jq -r .tag)"
+            echo "version=$(echo "$RESULT" | jq -r .version)"
+            echo "rotation=$(echo "$RESULT" | jq -r .rotation)"
+          } >> "$GITHUB_OUTPUT"
 
   # F-005 (Codex C3): prove the release OIDC token can assume the release-feed role BEFORE any tag/release
   # side effect. `tag` needs this, so a post-cutover trust/secret failure aborts before a dangling tag is
@@ -618,16 +669,16 @@ jobs:
         run: hdiutil detach /Volumes/AztecAccelerator-Intel 2>/dev/null || true
 
   # Release-time updater gate — BLOCKING. macOS arm64 + Intel
-  # positive legs prove install-N-1 → auto-update → relaunch → /health==N (the
+  # positive legs prove install-resolver-selected-N-1 → auto-update → relaunch → /health==N (the
   # 1.0.1 amfid failure class); the arm64 negative leg proves a tampered artifact
   # is REJECTED (signature enforcement). Linux and Windows have their own
   # release-blocking updater jobs below.
   update-smoke:
     name: Updater Smoke (${{ matrix.platform-key }} / ${{ matrix.mode }})
-    needs: [validate, sign-updater-artifacts, e2e-webdriver]
+    needs: [validate, resolve-updater-baseline, sign-updater-artifacts, e2e-webdriver]
     # The isolated signer requires all four build legs, then each matrix leg downloads only its
     # own production-signed updater artifact.
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.sign-updater-artifacts.result == 'success' && needs.e2e-webdriver.result == 'success' }}
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.resolve-updater-baseline.result == 'success' && needs.resolve-updater-baseline.outputs.rotation == 'false' && needs.sign-updater-artifacts.result == 'success' && needs.e2e-webdriver.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -658,42 +709,67 @@ jobs:
       platform-key: ${{ matrix.platform-key }}
       n-version: ${{ needs.validate.outputs.version }}
       n-artifact: ${{ matrix.n-artifact }}
+      n1-tag: ${{ needs.resolve-updater-baseline.outputs.tag }}
+      n1-version: ${{ needs.resolve-updater-baseline.outputs.version }}
       n1-dmg-glob: ${{ matrix.n1-dmg-glob }}
       mode: ${{ matrix.mode }}
+
+  # A first release under a new updater key cannot pass N-1 → N: old binaries are supposed to reject
+  # the authentic new-key manifest. This one-time gate proves that exact rejection on macOS arm64. The
+  # isolated signer already verifies every platform payload with the new key. After this RC publishes,
+  # the resolver selects it as the same-key baseline and every ordinary positive/tamper smoke returns.
+  update-smoke-key-rotation:
+    name: Updater Smoke (key-rotation bootstrap)
+    needs: [validate, resolve-updater-baseline, sign-updater-artifacts, e2e-webdriver]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.resolve-updater-baseline.result == 'success' && needs.resolve-updater-baseline.outputs.rotation == 'true' && needs.sign-updater-artifacts.result == 'success' && needs.e2e-webdriver.result == 'success' }}
+    uses: ./.github/workflows/_e2e-updater.yml
+    with:
+      runner: macos-latest
+      platform-key: darwin-aarch64
+      n-version: ${{ needs.validate.outputs.version }}
+      n-artifact: accelerator-macos-arm64
+      n1-tag: ${{ needs.resolve-updater-baseline.outputs.tag }}
+      n1-version: ${{ needs.resolve-updater-baseline.outputs.version }}
+      n1-dmg-glob: "*macOS-Apple-Silicon.dmg"
+      mode: key-rotation
   # Linux/AppImage updater smoke — BLOCKING (in `tag.needs` + `release.needs`).
-  # Proves a user on the previous stable AppImage auto-updates to N AND the
+  # Proves a user on the greatest lower same-key AppImage auto-updates to N AND the
   # relaunched app rebinds :59833 — the EADDRINUSE restart race fixed by the
   # server's bind-retry (#251). Started advisory; flipped to blocking after a
   # green 1.0.3-rc dry-run. To revert: drop it from tag/release `needs` and
   # restore `continue-on-error` on the smoke step in _e2e-updater-linux.yml.
   update-smoke-linux:
     name: Updater Smoke (linux-x86_64 / positive)
-    needs: [validate, sign-updater-artifacts, e2e-webdriver]
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.sign-updater-artifacts.result == 'success' && needs.e2e-webdriver.result == 'success' }}
+    needs: [validate, resolve-updater-baseline, sign-updater-artifacts, e2e-webdriver]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.resolve-updater-baseline.result == 'success' && needs.resolve-updater-baseline.outputs.rotation == 'false' && needs.sign-updater-artifacts.result == 'success' && needs.e2e-webdriver.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-linux.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
+      n1-tag: ${{ needs.resolve-updater-baseline.outputs.tag }}
+      n1-version: ${{ needs.resolve-updater-baseline.outputs.version }}
   # Windows/NSIS updater smoke — BLOCKING (in tag.needs + release.needs), proven green on the
   # 1.0.4-rc.3 dry-run (positive + negative). Tests the REAL prod-signed Windows artifact (this run's
-  # isolated signer output) installing as an auto-update FROM the REAL previous Windows stable
-  # (accelerator-v1.0.7 release asset, 4-point fixture preflight) — full parity with the mac/linux
+  # isolated signer output) installing as an auto-update FROM the resolver-selected real Windows release
+  # (complete asset set + 4-point fixture preflight) — full parity with the mac/linux
   # smokes. The ephemeral/current-ref sibling (incl. the L8 barrier) is smoke-updater-windows.yml.
   # REVERT (if it flakes): drop both jobs from tag.needs/release.needs to demote back to advisory.
   update-smoke-windows:
     name: Updater Smoke (windows-x86_64 / positive)
-    needs: [validate, sign-updater-artifacts]
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.sign-updater-artifacts.result == 'success' }}
+    needs: [validate, resolve-updater-baseline, sign-updater-artifacts]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.resolve-updater-baseline.result == 'success' && needs.resolve-updater-baseline.outputs.rotation == 'false' && needs.sign-updater-artifacts.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
+      n1-version: ${{ needs.resolve-updater-baseline.outputs.version }}
       mode: positive
   update-smoke-windows-negative:
     name: Updater Smoke (windows-x86_64 / negative)
-    needs: [validate, sign-updater-artifacts]
-    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.sign-updater-artifacts.result == 'success' }}
+    needs: [validate, resolve-updater-baseline, sign-updater-artifacts]
+    if: ${{ !inputs.auth_probe && inputs.mode == 'publish' && needs.validate.result == 'success' && needs.resolve-updater-baseline.result == 'success' && needs.resolve-updater-baseline.outputs.rotation == 'false' && needs.sign-updater-artifacts.result == 'success' }}
     uses: ./.github/workflows/_e2e-updater-windows.yml
     with:
       n-version: ${{ needs.validate.outputs.version }}
+      n1-version: ${{ needs.resolve-updater-baseline.outputs.version }}
       mode: negative
   # B4/F: MOVED AFTER the packaged-E2E gate (was pre-gate). `packaged-e2e-on-draft` transitively needs the
   # whole build+smoke+e2e-webdriver+release-auth-preflight chain, so a broken release-role trust or a failed
@@ -760,7 +836,7 @@ jobs:
   # updater smokes; prereleases simply omit its already-produced latest.json from release assets.
   release:
     name: Create draft release
-    needs: [validate, dependency-audit, release-auth-preflight, build, build-headless, sign-updater-artifacts, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
+    needs: [validate, dependency-audit, release-auth-preflight, resolve-updater-baseline, build, build-headless, sign-updater-artifacts, smoke, smoke-intel, update-smoke, update-smoke-key-rotation, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
     # codex F-review: require EXPLICIT success of every MANDATORY need (a bare `!contains(failure)` would let a
     # SKIPPED smoke/webdriver/preflight still create a draft). `always() && !cancelled()` is REQUIRED up front:
     # without a status function GitHub implicitly ANDs `success()`, which could skip `release` before the
@@ -770,15 +846,24 @@ jobs:
       && needs.validate.result == 'success'
       && needs.dependency-audit.result == 'success'
       && needs.release-auth-preflight.result == 'success'
+      && needs.resolve-updater-baseline.result == 'success'
       && needs.build.result == 'success'
       && needs.build-headless.result == 'success'
       && needs.sign-updater-artifacts.result == 'success'
       && needs.smoke.result == 'success'
       && needs.smoke-intel.result == 'success'
+      && ((needs.resolve-updater-baseline.outputs.rotation == 'true'
+      && needs.update-smoke-key-rotation.result == 'success'
+      && needs.update-smoke.result == 'skipped'
+      && needs.update-smoke-linux.result == 'skipped'
+      && needs.update-smoke-windows.result == 'skipped'
+      && needs.update-smoke-windows-negative.result == 'skipped')
+      || (needs.resolve-updater-baseline.outputs.rotation == 'false'
+      && needs.update-smoke-key-rotation.result == 'skipped'
       && needs.update-smoke.result == 'success'
       && needs.update-smoke-linux.result == 'success'
       && needs.update-smoke-windows.result == 'success'
-      && needs.update-smoke-windows-negative.result == 'success'
+      && needs.update-smoke-windows-negative.result == 'success'))
       && needs.e2e-webdriver.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

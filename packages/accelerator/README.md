@@ -478,7 +478,7 @@ validate → build (4 desktop + 4 headless) → isolated updater signing → pla
 - **E2E gate**: builds with `--features webdriver` and runs the real desktop WebDriver suite.
 - **Build**: Tauri bundles for macOS arm64/x86_64, Linux x86_64, and Windows x86_64, plus headless `accelerator-server` for macOS arm64/x86_64 and Linux x86_64/arm64. Build jobs use throwaway updater keys.
 - **Updater signing**: one `release-signing` environment job receives the production updater key only after tooling and the verifier are prepared. It signs exact updater payload bytes, builds signed feeds, verifies them, and does not build, install, or launch apps.
-- **Release gates**: notarization/launch checks, blocking N-1→N updater smokes on macOS/Linux/Windows (including tamper rejection controls), then packaged E2E against the draft's own assets.
+- **Release gates**: notarization/launch checks, blocking N-1→N updater smokes on macOS/Linux/Windows (including tamper rejection controls), then packaged E2E against the draft's own assets. The baseline resolver includes prereleases so RC2 can prove a same-key update from RC1. Only the first RC after an intentional key rotation uses the explicit, next-major-only bootstrap gate, which proves that an old-key app rejects the authentic new-key manifest before the ordinary smokes resume.
 - **Release**: publishes the verified draft after pushing the reviewed commit tag. Stable releases include signed `latest.json`; prereleases do not alter the live updater feed.
 - **Promote**: a separate `promote-only` dispatch verifies the 17-asset stable release and flips the live feed. With `bump_source=true`, it then opens the next-version PR.
 

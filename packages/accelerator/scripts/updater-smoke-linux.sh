@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Release-time updater smoke test (Linux / AppImage) — release-blocking.
 #
-# Linux sibling of updater-smoke.sh (macOS). Proves a user on the previous stable
-# (N-1) AppImage can auto-update to the just-built, just-signed build (N) AND the
+# Linux sibling of updater-smoke.sh (macOS). Proves a user on a resolver-selected
+# lower same-key (N-1) AppImage can auto-update to the just-built, just-signed build (N) AND the
 # result relaunches reporting version N. It verifies Tauri's `v1Compatible`
 # updater applies the shipped raw `.AppImage` (+ `.AppImage.sig`) in place and
 # re-executes it. A red job blocks draft creation.

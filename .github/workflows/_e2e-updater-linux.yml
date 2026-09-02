@@ -1,7 +1,7 @@
 name: _Updater Smoke Linux (reusable)
 
-# Release-blocking Linux/AppImage sibling of _e2e-updater.yml. Installs the previous
-# stable (N-1) AppImage, lets it auto-update to the just-built+signed build (N)
+# Release-blocking Linux/AppImage sibling of _e2e-updater.yml. Installs the resolver-selected
+# lower same-key (N-1) AppImage, lets it auto-update to the just-built+signed build (N)
 # via a local feed impersonating the prod endpoint, and asserts it relaunches
 # reporting version N. Answers the open `v1Compatible` question: does Tauri's
 # Linux updater actually applies a RAW .AppImage in place. A red job blocks the
@@ -21,6 +21,14 @@ on:
         description: This run's Linux build artifact name (accelerator-linux-x86_64)
         required: false
         default: accelerator-linux-x86_64
+        type: string
+      n1-tag:
+        description: Resolver-selected real published release tag below N
+        required: true
+        type: string
+      n1-version:
+        description: Version carried by the resolver-selected N-1 release
+        required: true
         type: string
       platform-key:
         description: Tauri updater platform key
@@ -89,15 +97,16 @@ jobs:
           name: ${{ inputs.n-artifact }}
           path: n-artifacts
 
-      - name: Download latest stable (N-1) AppImage
+      - name: Download resolver-selected N-1 AppImage
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           N_VERSION: ${{ inputs.n-version }}
+          N1_TAG: ${{ inputs.n1-tag }}
+          N1_VERSION: ${{ inputs.n1-version }}
         run: |
-          N1_TAG=$(gh release list --exclude-pre-releases --limit 20 --json tagName --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
-          if [ -z "$N1_TAG" ]; then
-            echo "::error::no stable release found to use as N-1"
+          if [ "$N1_TAG" != "accelerator-v$N1_VERSION" ]; then
+            echo "::error::resolver output is inconsistent: tag=$N1_TAG version=$N1_VERSION"
             exit 1
           fi
           echo "N-1 = $N1_TAG"

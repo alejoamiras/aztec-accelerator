@@ -1,13 +1,14 @@
 name: _Updater Smoke (reusable)
 
-# Release-time gate: install the previous stable (N-1), let it auto-update to
+# Release-time gate: install the resolver-selected lower release (N-1), let it auto-update to
 # the just-built+signed build (N) via a local feed impersonating the prod
 # endpoint, and assert it relaunches reporting version N. Reproduces the 1.0.1
 # failure class (macOS amfid hang after the in-place .app swap). Linux and
 # Windows release-blocking siblings live in their own reusable workflows.
 #
 # Needs no signing key: it serves the already-prod-signed N artifact and N-1
-# validates it against its embedded pubkey. See updater-smoke.sh.
+# validates it against its embedded pubkey. The one-time key-rotation mode instead
+# requires an old-key N-1 to reject the authentic new-key manifest. See updater-smoke.sh.
 
 on:
   workflow_call:
@@ -28,12 +29,20 @@ on:
         description: This run's build artifact name (e.g. accelerator-macos-arm64)
         required: true
         type: string
+      n1-tag:
+        description: Resolver-selected real published release tag below N
+        required: true
+        type: string
+      n1-version:
+        description: Version carried by the resolver-selected N-1 release
+        required: true
+        type: string
       n1-dmg-glob:
         description: Glob for the N-1 release DMG asset (e.g. *macOS-Apple-Silicon.dmg)
         required: true
         type: string
       mode:
-        description: "positive (expect the update to apply) | negative (serve a tampered tarball, expect rejection)"
+        description: "positive (apply) | negative (reject tamper) | key-rotation (old key rejects authentic new manifest)"
         required: false
         default: positive
         type: string
@@ -57,25 +66,40 @@ jobs:
           name: ${{ inputs.n-artifact }}
           path: n-artifacts
 
-      - name: Download latest stable (N-1) DMG
+      - name: Download resolver-selected N-1 DMG and verify its updater-key relationship
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           N_VERSION: ${{ inputs.n-version }}
+          N1_TAG: ${{ inputs.n1-tag }}
+          N1_VERSION: ${{ inputs.n1-version }}
+          SMOKE_MODE: ${{ inputs.mode }}
         run: |
-          N1_TAG=$(gh release list --exclude-pre-releases --limit 20 --json tagName --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
-          if [ -z "$N1_TAG" ]; then
-            echo "::error::no stable release found to use as N-1"
+          if [ "$N1_TAG" != "accelerator-v$N1_VERSION" ]; then
+            echo "::error::resolver output is inconsistent: tag=$N1_TAG version=$N1_VERSION"
             exit 1
           fi
           echo "N-1 = $N1_TAG"
           # Guard against a no-op pass: if N-1 resolves to the SAME version under
-          # test (e.g. a re-run after N is already the latest stable), the updater
+          # test (e.g. bad resolver wiring selects N itself), the updater
           # has nothing to do and `/health == N` would pass trivially (false pass).
           # Exact tag compare (tags are `accelerator-v<version>`) — a suffix match
           # would false-trip on e.g. accelerator-v11.0.3 vs 1.0.3.
           if [ "$N1_TAG" = "accelerator-v$N_VERSION" ]; then
             echo "::error::N-1 ($N1_TAG) is the version under test (accelerator-v$N_VERSION) — no-op no-update would pass trivially. Aborting."
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/contents/packages/accelerator/src-tauri/tauri.conf.json?ref=$N1_TAG" --jq '.content' | base64 -d > n1-tauri.conf.json
+          OLD_PUB=$(jq -r '.plugins.updater.pubkey' n1-tauri.conf.json)
+          NEW_PUB=$(jq -r '.plugins.updater.pubkey' packages/accelerator/src-tauri/tauri.conf.json)
+          if [ "$SMOKE_MODE" = "key-rotation" ]; then
+            if [ "$OLD_PUB" = "$NEW_PUB" ]; then
+              echo "::error::key-rotation bootstrap requires different N-1 and N updater keys"
+              exit 1
+            fi
+            echo "key-rotation preflight OK: old and new updater keys differ"
+          elif [ "$OLD_PUB" != "$NEW_PUB" ]; then
+            echo "::error::ordinary updater smoke requires a same-key N-1 baseline"
             exit 1
           fi
           # Retry the N-1 asset download: GitHub's release-asset CDN throttles/errors transiently (the
@@ -110,6 +134,7 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
+          UPDATER_SMOKE_N1_VERSION: ${{ inputs.n1-version }}
         run: |
           DMG=$(find n1 -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi
@@ -119,3 +144,7 @@ jobs:
             n-artifacts \
             "$DMG" \
             "$GITHUB_WORKSPACE"
+
+      - name: Result summary
+        if: ${{ success() && inputs.mode == 'key-rotation' }}
+        run: echo "✅ old updater key rejected the authentic new-key manifest; manual reinstall boundary proven." >> "$GITHUB_STEP_SUMMARY"

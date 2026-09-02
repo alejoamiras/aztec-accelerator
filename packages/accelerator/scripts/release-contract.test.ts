@@ -84,6 +84,19 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(CHANGELOG).toContain("456E5A3DB518F598");
   });
 
+  test("an updater-key rotation has a narrow bootstrap gate, then returns to same-key N-1 smokes", () => {
+    expect(WF).toContain("updater_key_rotation_bootstrap:");
+    expect(WF).toContain("resolve-updater-baseline.ts");
+    expect(WF).toContain("needs.resolve-updater-baseline.outputs.rotation == 'false'");
+    expect(WF).toContain("needs.resolve-updater-baseline.outputs.rotation == 'true'");
+    expect(WF).toContain("mode: key-rotation");
+    expect(WF).toContain("needs.update-smoke-key-rotation.result == 'success'");
+    expect(UPDATER).toContain("old updater key rejected the authentic new-key manifest");
+    expect(UPDATER_SMOKE_SCRIPTS[0]).toContain(
+      "update-manifest verification failed (SignatureInvalid)",
+    );
+  });
+
   test("mode split: `promote` runs only under promote-only; publish gated across release/tag/finalize", () => {
     // [mut: drop the mode guard on `release` → its always()/!cancelled() would run it under promote-only → fails]
     expect(WF).toContain("inputs.mode == 'promote-only'");
