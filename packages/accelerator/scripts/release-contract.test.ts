@@ -17,6 +17,19 @@ const UPDATER_LINUX = fs.readFileSync(
   path.join(REPO, ".github/workflows/_e2e-updater-linux.yml"),
   "utf8",
 );
+const UPDATER_WINDOWS = fs.readFileSync(
+  path.join(REPO, ".github/workflows/_e2e-updater-windows.yml"),
+  "utf8",
+);
+const RELEASE_SIGNER = fs.readFileSync(
+  path.join(REPO, "packages/accelerator/scripts/sign-release-updater-artifacts.sh"),
+  "utf8",
+);
+const UPDATER_SMOKE_SCRIPTS = [
+  "updater-smoke.sh",
+  "updater-smoke-linux.sh",
+  "updater-smoke-windows.ps1",
+].map((name) => fs.readFileSync(path.join(REPO, "packages/accelerator/scripts", name), "utf8"));
 const PACKAGED = fs.readFileSync(path.join(REPO, ".github/workflows/_e2e-packaged.yml"), "utf8");
 const UNINSTALL_WIN = fs.readFileSync(
   path.join(REPO, ".github/scripts/packaged-e2e-uninstall-windows.ps1"),
@@ -143,6 +156,43 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).toMatch(/Flip the S3 feed[\s\S]{0,120}?if: \$\{\{ !inputs\.dry_run \}\}/);
   });
 
+  test("production updater signing is isolated from builds, smokes, apps, and cloud credentials", () => {
+    const secretRef = /\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY(?:_PASSWORD)? \}\}/g;
+    expect(WF.match(secretRef)?.length).toBe(2);
+    const signer = WF.split("  sign-updater-artifacts:")[1]?.split("\n  build-headless:")[0] ?? "";
+    expect(signer).toContain("environment: release-signing");
+    expect(signer).toContain("contents: read");
+    expect(signer).toContain(
+      `TAURI_SIGNING_PRIVATE_KEY: \${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`,
+    );
+    expect(signer).not.toContain("id-token: write");
+    expect(signer).not.toContain("aws-actions/configure-aws-credentials");
+    expect(WF).toContain("bunx tauri signer generate --ci");
+    expect(WF).toContain(`name: unsigned-accelerator-\${{ matrix.platform }}`);
+    for (const smoke of [UPDATER, UPDATER_LINUX, UPDATER_WINDOWS]) {
+      expect(smoke).not.toMatch(secretRef);
+    }
+    for (const script of UPDATER_SMOKE_SCRIPTS) {
+      expect(script).toContain("smoke-latest.json");
+      expect(script).not.toContain("TAURI_SIGNING_PRIVATE_KEY");
+    }
+    expect(RELEASE_SIGNER).toContain("verify-artifact");
+    expect(RELEASE_SIGNER).toContain("verify --feed");
+    expect(RELEASE_SIGNER).toContain(
+      'TAURI_CLI="$REPO_ROOT/packages/accelerator/node_modules/.bin/tauri"',
+    );
+    expect(RELEASE_SIGNER).not.toContain("bunx tauri signer sign");
+    expect(RELEASE_SIGNER).not.toContain("tauri build");
+    expect(RELEASE_SIGNER).not.toContain("bun install");
+  });
+
+  test("dependency audit is a release publication gate", () => {
+    const release = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    expect(WF).toContain("uses: ./.github/workflows/dependency-audit.yml");
+    expect(release).toContain("needs: [validate, dependency-audit,");
+    expect(release).toContain("needs.dependency-audit.result == 'success'");
+  });
+
   test("blocker-1 failure-atomicity: authoritative PUT (fatal) split from best-effort invalidation (non-fatal)", () => {
     // The S3 PUT commits the promote; the CloudFront invalidation only accelerates propagation. They MUST be
     // separate steps AND the invalidation must be non-fatal: if a transient invalidation error after the PUT
@@ -223,9 +273,9 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
   });
 
   test("prerelease publish DAG is scheduled (own status fn) yet still can't publish an ungated draft", () => {
-    // The RC's skipped `sign-update-feed` poisoned the IMPLICIT success() of the packaged gate / tag /
-    // finalize (transitive via `release`'s always()), so the first RC to reach them drafted but never
-    // published. Each MUST carry its own status function (always()+!cancelled()) so GitHub schedules it,
+    // A skipped prerequisite once poisoned the IMPLICIT success() of the packaged gate / tag / finalize,
+    // so the first RC to reach them drafted but never published. Each MUST carry its own status function
+    // (always()+!cancelled()) so GitHub schedules it,
     // while the explicit `.result == 'success'` chain stays the authorization policy.
     // [mut: drop `always()` from any of the three → the RC silently skips publish again; drop a
     //  `.result == 'success'` guard → an ungated/failed gate could publish]

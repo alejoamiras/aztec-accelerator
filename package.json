@@ -8,6 +8,7 @@
     "packages/landing"
   ],
   "scripts": {
+    "audit:dependencies": "bun scripts/dependency-audit.ts",
     "aztec:check": "bun scripts/check-aztec-update.ts",
     "aztec:update": "bun scripts/update-aztec-version.ts",
     "bb:download": "bun scripts/download-bb.ts",
@@ -21,6 +22,7 @@
     "lint:shell": "shellcheck packages/*/scripts/*.sh",
     "lint:tofu": "cd infra/tofu && tofu fmt -check -diff .",
     "prepare": "husky",
+    "sdk:promote": "bun scripts/promote-sdk-latest.ts",
     "test": "bun run lint && bun run test:typecheck && bun run test:unit",
     "test:all": "bun run test && bun run test:e2e",
     "test:e2e": "bun run --cwd packages/sdk test:e2e",
@@ -49,15 +51,19 @@
       "sort-package-json"
     ]
   },
+  "overrides": {
+    "systeminformation": "5.31.7",
+    "ws": "8.21.3"
+  },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.8",
-    "@commitlint/cli": "^21",
-    "@commitlint/config-conventional": "^21",
-    "@types/bun": "^1.3.11",
+    "@biomejs/biome": "^2.5.10",
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
+    "@types/bun": "^1.4.0",
     "@types/node": "20.19.37",
     "husky": "^9.1.7",
-    "lint-staged": "^17",
-    "sort-package-json": "^3.6.1",
-    "typescript": "^6"
+    "lint-staged": "^17.3.0",
+    "sort-package-json": "^3.7.1",
+    "typescript": "^6.0.3"
   }
 }

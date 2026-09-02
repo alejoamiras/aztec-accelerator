@@ -7,7 +7,7 @@
 | **macOS 13+** (Ventura) | Apple Silicon (arm64) | Supported | Primary development platform |
 | **macOS 13+** (Ventura) | Intel (x86_64) | Supported | Built and tested in CI |
 | **Linux** | x86_64 | Supported | .deb and .AppImage provided |
-| **Windows** | x86_64 | Supported | NSIS installer (per-user) |
+| **Windows** | x86_64 | Supported (unsigned installer) | Per-user NSIS installer; SmartScreen shows Unknown publisher |
 
 ## Encrypted Connection (HTTPS)
 
@@ -50,7 +50,7 @@ all shared state intact and reports why. Config and approved origins are never r
 
 ## Windows Details
 
-- **NSIS installer** (per-user, `installMode: currentUser`)
+- **NSIS installer** (per-user, `installMode: currentUser`). It is not Authenticode-signed, so first install shows Windows SmartScreen's **Unknown publisher** warning. This is a known distribution limitation; users must choose **More info → Run anyway**.
 - **Auto-update** via Ed25519-signed artifacts (tauri-plugin-updater)
 - **Encrypted connection (HTTPS)** via the CurrentUser `Root` store — see [Encrypted Connection (HTTPS)](#encrypted-connection-https). The NSIS uninstaller removes the trust anchor on a real uninstall (guarded so it never fires during an auto-update)
 - **Start on Login** via the autostart Run key; crash recovery via a Task Scheduler repeating trigger

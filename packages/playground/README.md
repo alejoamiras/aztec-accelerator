@@ -56,7 +56,7 @@ E2E tests use [Playwright](https://playwright.dev).
 bun run build   # Output: dist/
 ```
 
-Deployed to S3 + CloudFront at `playground.aztec-accelerator.dev`. `app.yml` is the PR gate (lint, typecheck, unit, e2e); the live deploy is a manual `publish-testnet.yml` dispatch — pass `skip_sdk_publish=true` to ship the playground without re-publishing the SDK to npm.
+Deployed to S3 + CloudFront at `playground.aztec-accelerator.dev`. `app.yml` is the PR gate (lint, typecheck, unit, e2e). The live deploy is a manual `release-sdk.yml` dispatch: choose `sdk-and-playground` for a candidate SDK release plus deploy, or `playground-only` to deploy without publishing npm.
 
 ## License
 

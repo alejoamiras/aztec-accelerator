@@ -9,6 +9,6 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "vite": "^8.0.1"
+    "vite": "^8.2.2"
   }
 }

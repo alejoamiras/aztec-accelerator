@@ -3,9 +3,8 @@ name: _Updater Smoke (reusable)
 # Release-time gate: install the previous stable (N-1), let it auto-update to
 # the just-built+signed build (N) via a local feed impersonating the prod
 # endpoint, and assert it relaunches reporting version N. Reproduces the 1.0.1
-# failure class (macOS amfid hang after the in-place .app swap). macOS only in
-# this first increment; Linux (AppImage) + a standing negative test land in a
-# follow-up once this is proven on a 1.0.3-rc dry-run.
+# failure class (macOS amfid hang after the in-place .app swap). Linux and
+# Windows release-blocking siblings live in their own reusable workflows.
 #
 # Needs no signing key: it serves the already-prod-signed N artifact and N-1
 # validates it against its embedded pubkey. See updater-smoke.sh.
@@ -38,14 +37,6 @@ on:
         required: false
         default: positive
         type: string
-    secrets:
-      # F-004: a C4+ N-1 enforces the signed-manifest envelope, so the smoke feed must be signed with
-      # the prod updater key (which the synthetic/real N-1 embeds). Same key the build job uses.
-      TAURI_SIGNING_PRIVATE_KEY:
-        required: true
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-        required: true
-
 jobs:
   updater-smoke:
     name: Updater Smoke
@@ -59,14 +50,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-
-      # REQUIRED for sign-smoke-feed.sh: it runs `bunx tauri signer sign`, which only resolves the
-      # LOCAL @tauri-apps/cli (a devDependency of packages/accelerator). Without an install, bunx
-      # falls back to fetching an npm package literally named `tauri` — which has no executable, so
-      # the smoke dies with "could not determine executable to run for package tauri". The Windows
-      # smoke never hit this because it uses ./.github/actions/setup-accelerator, which installs.
-      - name: Install dependencies (provides @tauri-apps/cli for feed signing)
-        run: bun install --frozen-lockfile
 
       - name: Download N artifacts (this run)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -127,8 +110,6 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           DMG=$(find n1 -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi
