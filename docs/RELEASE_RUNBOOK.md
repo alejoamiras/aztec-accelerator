@@ -23,6 +23,28 @@ Store this required environment secret:
 
 The production updater key and its optional password must not also exist as repository-level secrets. `release-accelerator.yml` exposes these values only to the dedicated signing step, whose commands are intentionally narrow and use the installed, lockfile-pinned Tauri CLI directly. Apple signing/notarization credentials remain separate because they are required by the macOS build jobs; this change does not isolate those build-time credentials.
 
+#### Accelerator 3 updater-key rotation
+
+Accelerator 3 rotates the production updater key to public key ID `456E5A3DB518F598`. The matching
+passwordless private key is stored in the Personal-vault item
+`Aztec Accelerator Updater Signing Key v3 (passwordless)` and in the `release-signing` environment only.
+The older `Tauri Signing Key` item is retained as historical evidence and must not be used.
+
+In that 1Password Login item, `username` records the public key and `password` contains the private-key
+payload. “Passwordless” means the updater private key has an empty encryption passphrase; it does **not** mean
+the 1Password `password` field is empty. GitHub's `TAURI_SIGNING_PRIVATE_KEY` must be populated from that
+`password` field, while `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` remains unset.
+
+This is an intentionally breaking updater migration: 1.x and 2.x binaries pin the old public key and cannot
+authenticate any 3.x feed. The 3.0.0 changelog and generated GitHub release notes must therefore tell those
+users to quit the accelerator and manually install 3.0.0 over the existing application. A prior uninstall is
+normally unnecessary and risks removing integration state; install-over preserves configuration and cached bb
+versions. After the manual reinstall, 3.x-to-3.x automatic updates work normally.
+
+Before publishing any 3.0.0 candidate, require the isolated signer job to prove that all updater payloads and
+the generated feed verify against the public key committed in `tauri.conf.json`. Never work around a mismatch
+with an HTTP feed, unsigned payload, alternate public key, or hand-edited release artifact.
+
 ### `npm-publish` GitHub environment and npm trusted publisher
 
 The environment has no npm secret. Configure the package's [npm GitHub Actions trusted publisher](https://docs.npmjs.com/trusted-publishers/) exactly as follows:

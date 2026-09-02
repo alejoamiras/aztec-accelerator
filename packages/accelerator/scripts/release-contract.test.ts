@@ -35,6 +35,11 @@ const UNINSTALL_WIN = fs.readFileSync(
   path.join(REPO, ".github/scripts/packaged-e2e-uninstall-windows.ps1"),
   "utf8",
 );
+const CHANGELOG = fs.readFileSync(path.join(REPO, "packages/accelerator/CHANGELOG.md"), "utf8");
+const ACCELERATOR_README = fs.readFileSync(
+  path.join(REPO, "packages/accelerator/README.md"),
+  "utf8",
+);
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
   test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
@@ -64,6 +69,19 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     // Any bare `--latest`, `--latest=true`, or line-continued `--latest` — but NOT `--latest=false`.
     expect(WF).not.toMatch(/--latest(\s|=true|$)/m);
     expect(WF).toContain("--latest=false");
+  });
+
+  test("the v3 signing-key break cannot ship without manual-reinstall guidance", () => {
+    for (const document of [WF, CHANGELOG, ACCELERATOR_README]) {
+      expect(document).toContain("manual reinstall");
+      expect(document).toContain("1.x");
+      expect(document).toContain("2.x");
+      expect(document).toMatch(/install it over the\s+existing/i);
+    }
+    expect(WF).toContain(
+      "preserves approved sites, settings, certificate state, and cached bb versions",
+    );
+    expect(CHANGELOG).toContain("456E5A3DB518F598");
   });
 
   test("mode split: `promote` runs only under promote-only; publish gated across release/tag/finalize", () => {

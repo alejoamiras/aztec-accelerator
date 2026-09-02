@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "accelerator-server"
-version = "2.0.1-rc.1"
+version = "3.0.0-rc.1"
 dependencies = [
  "accelerator-core",
  "parking_lot",

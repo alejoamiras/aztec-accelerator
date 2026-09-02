@@ -17,8 +17,25 @@ Download the latest release from [GitHub Releases](https://github.com/alejoamira
 | macOS (Apple Silicon) | `.dmg` |
 | macOS (Intel) | `.dmg` |
 | Linux (x86_64) | `.deb`, `.AppImage` |
+| Windows (x86_64) | `.exe` |
 
 **Running CI tests?** The release also ships a [headless server tarball](#headless-server-for-ci-test-acceleration) for accelerating end-to-end tests on GitHub-hosted runners.
+
+### Upgrading to 3.0.0 (manual reinstall required)
+
+Accelerator 3 uses a new updater signing key. Existing 1.x and 2.x installations cannot authenticate a
+3.x in-app update, so this upgrade must be installed manually once:
+
+1. Quit the running accelerator from its tray/menu-bar icon.
+2. Download the 3.0.0 installer for your platform from
+   [GitHub Releases](https://github.com/alejoamiras/aztec-accelerator/releases).
+3. Install it over the existing application: replace the app from the DMG on macOS, run the new setup
+   executable on Windows, install the new `.deb`, or replace the AppImage on Linux.
+4. Launch the accelerator and confirm the tray reports version 3.0.0.
+
+Do **not** uninstall first unless the normal install-over fails. Installing over the existing application
+preserves `~/.aztec-accelerator/config.json`, approved sites, HTTPS certificate state, and cached bb versions.
+After this one manual reinstall, automatic updates within the 3.x line work normally again.
 
 ### Upgrading from 1.0.1 (macOS)
 
