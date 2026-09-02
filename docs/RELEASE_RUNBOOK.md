@@ -99,12 +99,29 @@ gh workflow run release-accelerator.yml --ref main -f version=X.Y.Z
 gh workflow run release-accelerator.yml --ref main -f version=X.Y.Z-rc.N
 ```
 
+The first release after an intentional updater-key rotation is the only exception to the ordinary N-1 update
+smoke. It must be `rc.1` of exactly the next major and requires an explicit bootstrap flag:
+
+```bash
+gh workflow run release-accelerator.yml --ref main \
+  -f version=X.0.0-rc.1 -f updater_key_rotation_bootstrap=true
+```
+
+The resolver fails closed unless there is no complete lower release under the new key. In bootstrap mode, the
+macOS gate installs the newest complete old-key release and requires it to reject the authentic new-key
+manifest with `SignatureInvalid` while remaining healthy at N-1. This proves the manual-reinstall boundary;
+it does not pretend that an impossible cross-key automatic update succeeded. Publish `X.0.0-rc.2` normally
+afterward. The resolver then selects RC1 as a same-key baseline and restores every macOS, Linux, and Windows
+positive/tamper updater smoke. Never use the bootstrap flag for RC2, GA, a retry under an existing same-key
+baseline, or an ordinary release.
+
 The release path is:
 
 ```text
 validate/main-only + AWS preflight + 3-OS WebDriver
   → 4 desktop builds + 4 headless builds
   → isolated production updater signing
+  → resolve the greatest lower complete same-key updater baseline
   → notarization, launch, updater, and tamper-rejection smokes
   → draft release
   → packaged E2E against the draft's own assets
@@ -112,7 +129,7 @@ validate/main-only + AWS preflight + 3-OS WebDriver
   → re-check asset digests and publish the draft
 ```
 
-Desktop builds use fresh throwaway updater keys so a new binary can be produced without exposing the production key. Their temporary signatures are excluded. The `release-signing` job then signs the four exact updater payloads with the production key and verifies every payload and feed against the embedded public key. That job does not build, install, launch, or smoke-test applications. Smokes consume only the pre-signed artifacts.
+Desktop builds use fresh throwaway updater keys so a new binary can be produced without exposing the production key. Their temporary signatures are excluded. The `release-signing` job then signs the four exact updater payloads with the production key and verifies every payload and feed against the embedded public key. That job does not build, install, launch, or smoke-test applications. Smokes consume only the pre-signed artifacts. The updater baseline may be a prerelease: this is intentional, so RC2 exercises RC1 under the rotated key and GA exercises the newest same-key RC instead of falling back to an older incompatible key.
 
 A prerelease is public with `--latest=false` and omits `latest.json`. A stable release includes `latest.json`, but publishing still does not write S3 or alter what installed clients receive.
 

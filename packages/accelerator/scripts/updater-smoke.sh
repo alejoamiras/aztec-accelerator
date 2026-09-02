@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Release-time updater smoke test (macOS).
 #
-# Proves a user on the previous stable (N-1) can auto-update to the just-built,
-# just-signed build (N) AND the result relaunches successfully — the exact
+# Proves a user on a resolver-selected lower same-key release (N-1) can auto-update
+# to the just-built, just-signed build (N) AND the result relaunches successfully — the exact
 # failure class that shipped in 1.0.1 (amfid hang after the in-place .app swap),
 # which fresh-install smoke does not catch.
 #
@@ -35,7 +35,17 @@ REPO_ROOT="$5"
 # negative: serve a TAMPERED tarball and assert the update is REJECTED — proves
 #           the gate has teeth (a green positive run alone is consistent with a
 #           test that can never fail). Set via UPDATER_SMOKE_MODE.
+# key-rotation: serve the authentic new-key manifest to the old-key N-1 and
+#               require its fail-closed SignatureInvalid refusal.
 MODE="${UPDATER_SMOKE_MODE:-positive}"
+N1_VERSION="${UPDATER_SMOKE_N1_VERSION:-}"
+case "$MODE" in
+  positive|negative) ;;
+  key-rotation)
+    [ -n "$N1_VERSION" ] || { echo "::error::key-rotation mode requires UPDATER_SMOKE_N1_VERSION"; exit 1; }
+    ;;
+  *) echo "::error::unknown UPDATER_SMOKE_MODE '$MODE'"; exit 1 ;;
+esac
 
 APP="/Applications/Aztec Accelerator.app"
 # APP_BIN is resolved AFTER the N-1 install below — resolving here would probe a not-yet-installed
@@ -170,8 +180,13 @@ APP_BIN=$(find "$APP/Contents/MacOS" -maxdepth 1 -type f \( -name AztecAccelerat
 mkdir -p "$CONFIG_DIR"
 echo '{"config_version":1,"safari_support":false,"approved_origins":[],"speed":"full","auto_update":true}' > "$CONFIG_DIR/config.json"
 
-# ── Launch N-1; it should auto-update to N and relaunch ──
-log "launching N-1 (expecting auto-update → N)"
+# ── Launch N-1; ordinary modes exercise the update, while the bootstrap mode
+#    proves that an old-key app rejects an authentic manifest signed by the new key. ──
+if [ "$MODE" = "key-rotation" ]; then
+  log "launching N-1 (expecting old-key rejection of the authentic new-key manifest)"
+else
+  log "launching N-1 (expecting auto-update → N)"
+fi
 "$APP_BIN" > "$WORK/app.log" 2>&1 &
 APP_PID=$!
 
@@ -180,6 +195,45 @@ dump_logs() {
   echo "── feed log ──"; cat "$WORK/feed.log" 2>/dev/null || true
   echo "── last /health ──"; curl -s "$HEALTH" 2>/dev/null || true
 }
+
+if [ "$MODE" = "key-rotation" ]; then
+  # The old app must reach the signed-manifest verifier and reject there, before downloading or
+  # installing N. This is the only valid N-1 behavior across an intentional key rotation.
+  log "KEY ROTATION: waiting for fail-closed SignatureInvalid rejection (up to 60s)"
+  REJECTED=""
+  for _ in $(seq 1 60); do
+    GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+    if [ "$GOT" = "$N_VERSION" ]; then
+      echo "::error::KEY ROTATION FAILED — old-key N-1 unexpectedly accepted N ($N_VERSION)"
+      dump_logs
+      exit 1
+    fi
+    if grep -q "update-manifest verification failed (SignatureInvalid)" "$WORK/app.log" 2>/dev/null; then
+      REJECTED=1
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$REJECTED" ]; then
+    echo "::error::KEY ROTATION inconclusive — N-1 never logged the expected SignatureInvalid manifest rejection"
+    dump_logs
+    exit 1
+  fi
+  GOT="$(curl -sf "$HEALTH" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+  if [ "$GOT" != "$N1_VERSION" ]; then
+    echo "::error::KEY ROTATION inconclusive — N-1 is not alive at $N1_VERSION after rejection (got '$GOT')"
+    dump_logs
+    exit 1
+  fi
+  if grep -q "/releases/download/" "$WORK/feed.log" 2>/dev/null; then
+    echo "::error::KEY ROTATION FAILED — N-1 downloaded the payload after rejecting its manifest"
+    dump_logs
+    exit 1
+  fi
+  log "SUCCESS (key rotation) — N-1 stayed at $N1_VERSION and rejected the authentic new-key manifest"
+  dump_logs
+  exit 0
+fi
 
 if [ "$MODE" = "negative" ]; then
   # Teeth check: the tampered tarball MUST be rejected. /health must NEVER report
