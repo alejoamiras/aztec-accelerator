@@ -12,7 +12,6 @@ MANIFEST_TOOL="${5:?missing prebuilt update-manifest tool}"
 TAURI_CLI="$REPO_ROOT/packages/accelerator/node_modules/.bin/tauri"
 
 : "${TAURI_SIGNING_PRIVATE_KEY:?production updater signing key is required}"
-: "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:?production updater signing key password is required}"
 [ -x "$TAURI_CLI" ] || {
   echo "::error::pinned local Tauri CLI is missing at $TAURI_CLI" >&2
   exit 1
@@ -21,7 +20,7 @@ TAURI_CLI="$REPO_ROOT/packages/accelerator/node_modules/.bin/tauri"
 # Keep the credentials in this shell only. Child processes inherit them solely for the nine
 # direct, pinned Tauri signer invocations below; find/jq/date and the verifier never receive them.
 SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY"
-SIGNING_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}"
 unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 find_one() {

@@ -15,12 +15,13 @@ Keep the release setup small: neither GitHub environment requires reviewers, but
 
 ### `release-signing` GitHub environment
 
-Store only these environment secrets:
+Store this required environment secret:
 
 - `TAURI_SIGNING_PRIVATE_KEY`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 
-The production updater key must not also exist as repository-level secrets. `release-accelerator.yml` exposes these values only to the dedicated signing step, whose commands are intentionally narrow and use the installed, lockfile-pinned Tauri CLI directly. Apple signing/notarization credentials remain separate because they are required by the macOS build jobs; this change does not isolate those build-time credentials.
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional. Omit it when the production key is passwordless; the workflow passes an empty value and the signer supports that configuration. Set it only when the stored private key was generated with that exact password.
+
+The production updater key and its optional password must not also exist as repository-level secrets. `release-accelerator.yml` exposes these values only to the dedicated signing step, whose commands are intentionally narrow and use the installed, lockfile-pinned Tauri CLI directly. Apple signing/notarization credentials remain separate because they are required by the macOS build jobs; this change does not isolate those build-time credentials.
 
 ### `npm-publish` GitHub environment and npm trusted publisher
 

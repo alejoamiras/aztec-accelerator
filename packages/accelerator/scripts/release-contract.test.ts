@@ -186,6 +186,17 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(RELEASE_SIGNER).not.toContain("bun install");
   });
 
+  test("passwordless production updater keys remain supported", () => {
+    const requiredKeyExpansion =
+      "$" + "{TAURI_SIGNING_PRIVATE_KEY:?production updater signing key is required}";
+    const optionalPasswordExpansion = "$" + "{TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}";
+    const requiredPasswordExpansion = "$" + "{TAURI_SIGNING_PRIVATE_KEY_PASSWORD:?";
+
+    expect(RELEASE_SIGNER).toContain(`: "${requiredKeyExpansion}"`);
+    expect(RELEASE_SIGNER).toContain(optionalPasswordExpansion);
+    expect(RELEASE_SIGNER).not.toContain(requiredPasswordExpansion);
+  });
+
   test("dependency audit is a release publication gate", () => {
     const release = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
     expect(WF).toContain("uses: ./.github/workflows/dependency-audit.yml");
