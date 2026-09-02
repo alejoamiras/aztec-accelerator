@@ -924,6 +924,17 @@ jobs:
 
           Native proving accelerator for Aztec transactions.
 
+          ### Important: manual reinstall required when upgrading from 1.x or 2.x
+
+          The updater signing key changed for Accelerator 3. Existing 1.x and 2.x installations cannot
+          authenticate a 3.x in-app update. Quit the running accelerator, download the installer below, and
+          install it over the existing application. After that one manual reinstall, automatic 3.x updates
+          work normally again.
+
+          Do **not** uninstall first unless a normal install-over fails. Installing over the existing app
+          preserves approved sites, settings, certificate state, and cached bb versions. See the
+          [v3 upgrade instructions](https://github.com/alejoamiras/aztec-accelerator/blob/main/packages/accelerator/README.md#upgrading-to-300-manual-reinstall-required).
+
           ### Downloads
 
           | Platform | File |
