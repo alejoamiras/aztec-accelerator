@@ -265,6 +265,7 @@ jobs:
 
       # The playwright-cache action is Linux-only (GNU `timeout`), so install the browser directly on macOS.
       - name: Install Playwright browser
+        working-directory: packages/playground
         run: bunx playwright install chromium
 
       - uses: ./.github/actions/start-services
