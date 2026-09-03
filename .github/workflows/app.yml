@@ -44,8 +44,6 @@ jobs:
               - 'packages/sdk/**'
               - 'packages/playground/**'
               - 'packages/landing/**'
-              - 'README.md'
-              - 'docs/PLATFORM_SUPPORT.md'
               - 'tsconfig*.json'
               - 'biome.json'
               - 'package.json'
@@ -53,7 +51,7 @@ jobs:
               - 'bunfig.toml'
               - '.bun-version'
               - '.github/actions/playwright-cache/**'
-              - '.github/workflows/**'
+              - '.github/workflows/app.yml'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: override

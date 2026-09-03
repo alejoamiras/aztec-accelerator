@@ -113,6 +113,9 @@ runs:
       with:
         workspaces: ${{ inputs.rust-workspaces }}
         shared-key: ${{ inputs.rust-cache-key }}
+        # PR refs restore main/base caches but never create refs/pull cache entries.
+        # Main pushes, main release dispatches, and main warm-cache runs may save.
+        save-if: ${{ github.ref == 'refs/heads/main' }}
 
     - name: Copy bb sidecar
       if: inputs.run-prebuild != 'false'
