@@ -112,7 +112,9 @@
 .mode-btn {
   @apply flex flex-col items-center py-2.5 px-2 text-xs font-semibold
          border transition-all duration-150 border-brand-border text-brand-text-muted;
-  border-radius: 999px;
+  /* 12, not the 999 pill: these are two-line and nearly as tall as half their width, so a full
+     pill reads as an oval and eats the text box. Pills are for single-line, wide controls. */
+  border-radius: 12px;
   background: var(--color-brand-surface);
 }
 
