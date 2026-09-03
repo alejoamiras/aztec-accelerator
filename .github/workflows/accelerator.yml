@@ -16,65 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
-      desktop: ${{ steps.override.outputs.relevant || steps.filter.outputs.desktop }}
-      integration: ${{ steps.override.outputs.relevant || steps.filter.outputs.integration }}
+      rust_platform: ${{ steps.override.outputs.relevant || steps.filter.outputs.rust_platform }}
+      desktop_runtime: ${{ steps.override.outputs.relevant || steps.filter.outputs.desktop_runtime }}
+      windows_packaging: ${{ steps.override.outputs.relevant || steps.filter.outputs.windows_packaging }}
+      headless_server: ${{ steps.override.outputs.relevant || steps.filter.outputs.headless_server }}
+      sdk_integration: ${{ steps.override.outputs.relevant || steps.filter.outputs.sdk_integration }}
+      release_tooling: ${{ steps.override.outputs.relevant || steps.filter.outputs.release_tooling }}
+      updater_feed: ${{ steps.override.outputs.relevant || steps.filter.outputs.updater_feed }}
+      windows_bb: ${{ steps.override.outputs.relevant || steps.filter.outputs.windows_bb }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
-          filters: |
-            # Heavy desktop/Rust/macOS jobs (clippy, test, smoke, release-smoke,
-            # desktop-ui, e2e-webdriver). Retains ALL shared-infra paths so a
-            # workflow / composite / lockfile / config change still reruns them —
-            # only a PURE packages/sdk/src change is narrowed out (it cannot
-            # affect the accelerator's Rust/app build).
-            desktop:
-              - 'packages/accelerator/**'
-              - 'scripts/download-bb*.ts'
-              - 'scripts/__fixtures__/**'
-              - 'packages/sdk/package.json'
-              - 'biome.json'
-              - 'package.json'
-              - 'bun.lock'
-              - 'bunfig.toml'
-              - '.bun-version'
-              - '.github/workflows/accelerator.yml'
-              # The binary-name identity guard (tauri-identity.test.ts) greps these workflows —
-              # edits to them must re-run the suite so a half-rename can't land silently.
-              - '.github/workflows/_e2e-webdriver.yml'
-              - '.github/workflows/_e2e-updater-windows.yml'
-              - '.github/workflows/smoke-updater-windows.yml'
-              - '.github/workflows/release-accelerator.yml'
-              - '.github/workflows/_e2e.yml'
-              - '.github/workflows/_e2e-webdriver.yml'
-              - '.github/actions/**'
-            # SDK-against-accelerator integration (lint + the _e2e.yml SDK E2E).
-            # Identical to the previous single `relevant` filter, so it still
-            # runs on SDK src changes (what `desktop` skips) AND everything else.
-            integration:
-              - 'packages/accelerator/**'
-              - 'scripts/download-bb*.ts'
-              - 'scripts/__fixtures__/**'
-              - 'packages/sdk/src/**'
-              - 'packages/sdk/package.json'
-              - 'biome.json'
-              - 'package.json'
-              - 'bun.lock'
-              - 'bunfig.toml'
-              - '.bun-version'
-              - '.github/workflows/accelerator.yml'
-              # test:scripts (this job) runs the binary-identity guard that greps these
-              # workflows — a workflow-only PR must not skip the very test that pins it
-              # (arc-hunt round 1: desktop had them, integration didn't, and the guard
-              # runs in the integration-gated job).
-              - '.github/workflows/_e2e-webdriver.yml'
-              - '.github/workflows/_e2e-updater-windows.yml'
-              - '.github/workflows/smoke-updater-windows.yml'
-              - '.github/workflows/release-accelerator.yml'
-              - '.github/workflows/_e2e.yml'
-              - '.github/workflows/_e2e-webdriver.yml'
-              - '.github/actions/**'
+          filters: .github/filters/accelerator.yml
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: override
@@ -83,7 +38,7 @@ jobs:
   clippy:
     name: Clippy
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.rust_platform == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -106,7 +61,7 @@ jobs:
   test:
     name: Rust Tests
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.rust_platform == 'true'
     runs-on: ubuntu-latest
     # 20, not 10: warm-cache runs finish in ~4 min, but a cold rust-cache (notably on a manual
     # `gh run rerun`, which does not restore the cache) does a full workspace rebuild that can
@@ -131,7 +86,7 @@ jobs:
   cert-trust:
     name: Cert Trust (${{ matrix.platform }})
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.rust_platform == 'true'
     runs-on: ${{ matrix.runner }}
     # 30, not 20: a cold Windows Rust build (this leg has its own cache key) can run ~15-18 min before
     # the fast read-only trust test even starts.
@@ -164,6 +119,14 @@ jobs:
             packages/accelerator/src-tauri -> target
             packages/accelerator/core -> target
           rust-components: ""
+      # Keep Windows app/core unit coverage on the already-running platform leg so the
+      # installer job's critical path is reserved for packaging, install, and launch assurance.
+      - name: Compile + unit-test the app crate on Windows
+        if: matrix.platform == 'windows'
+        run: cargo test
+      - name: Compile + unit-test accelerator-core on Windows
+        if: matrix.platform == 'windows'
+        run: cargo test --manifest-path ../core/Cargo.toml
       # Linux drives certutil against a throwaway $HOME NSS db (install/verify/chain-validate/remove).
       - name: Install libnss3-tools (certutil)
         if: matrix.platform == 'linux'
@@ -344,7 +307,7 @@ jobs:
   updater-feed-e2e:
     name: Updater Feed Sign/Verify E2E
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.updater_feed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -399,7 +362,7 @@ jobs:
   lint:
     name: Lint
     needs: changes
-    if: needs.changes.outputs.integration == 'true'
+    if: needs.changes.outputs.release_tooling == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -422,7 +385,7 @@ jobs:
   smoke:
     name: Smoke
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.headless_server == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -503,7 +466,7 @@ jobs:
   release-smoke:
     name: Release Smoke
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.headless_server == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -534,7 +497,7 @@ jobs:
   desktop-ui:
     name: Desktop UI Tests
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.desktop_runtime == 'true'
     runs-on: ubuntu-latest
     # Headroom for a cold Playwright fill (~30 min) on a cache miss; ~2 min on a
     # cache hit, so this ceiling is a safety net that normal runs never approach.
@@ -558,7 +521,7 @@ jobs:
   e2e:
     name: E2E
     needs: changes
-    if: needs.changes.outputs.integration == 'true'
+    if: needs.changes.outputs.sdk_integration == 'true'
     uses: ./.github/workflows/_e2e.yml
     with:
       build_accelerator: true
@@ -566,7 +529,7 @@ jobs:
   e2e-webdriver:
     name: E2E WebDriver (${{ matrix.platform }})
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.desktop_runtime == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -589,7 +552,7 @@ jobs:
   e2e-webdriver-builtdebug:
     name: E2E WebDriver (built-debug, linux)
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.desktop_runtime == 'true'
     uses: ./.github/workflows/_e2e-webdriver.yml
     with:
       runner: ubuntu-latest
@@ -598,7 +561,7 @@ jobs:
   windows-prebuild:
     name: Windows Prebuild Smoke
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.windows_bb == 'true'
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -641,7 +604,7 @@ jobs:
   windows-build:
     name: Windows Build Smoke
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    if: needs.changes.outputs.windows_packaging == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     defaults:
@@ -654,12 +617,6 @@ jobs:
           rust-cache-key: accelerator-desktop-x86_64-pc-windows-msvc
           rust-workspaces: packages/accelerator/src-tauri -> target
           rust-components: ""
-      - name: Compile + unit-test the app crate on Windows
-        run: cargo test
-      # accelerator-core on Windows: exercises the bb.exe name, platform binding, marker/publish, and
-      # directory-replacement paths that the app crate doesn't cover (F-007).
-      - name: Compile + unit-test accelerator-core on Windows
-        run: cargo test --manifest-path ../core/Cargo.toml
       - name: Build the Tauri app (NSIS installer)
         working-directory: packages/accelerator
         shell: bash
