@@ -14,11 +14,12 @@ on:
         default: false
       # B6: publish and promote are SEPARATE operational events (two dispatches), not one job.
       #   publish      = build → 3-OS gates → publish. RC + stable are both PUBLIC GitHub releases pinned
-      #                  --latest=false; the signed latest.json ships as a stable release ASSET. Does NOT
-      #                  touch the S3 feed. (The stable DRAFT-gate — draft → packaged-E2E-on-draft →
+      #                  --latest=false until promotion; the signed latest.json ships as a stable release
+      #                  ASSET. Does NOT touch the S3 feed. (The stable DRAFT-gate — draft → packaged-E2E-on-draft →
       #                  finalize — lands in B4, which is a hard prerequisite of any 2.0.0 stable publish.)
       #   promote-only = no build; pre-flight an ALREADY-PUBLISHED version, then flip the S3 `latest.json`
-      #                  feed. This is also the rollback lever (`promote-only` an older version).
+      #                  feed. An organic GA (`bump_source=true`) is marked GitHub Latest only after the live
+      #                  feed verifies. This is also the rollback lever (`promote-only` an older version).
       mode:
         description: "publish (build+gate+publish, no feed flip) | promote-only (flip the S3 feed for an already-published version — also the rollback lever)"
         required: false
@@ -28,7 +29,7 @@ on:
           - promote-only
         default: publish
       bump_source:
-        description: "promote-only + organic GA only: open the post-release source version-bump PR. Leave false for a rollback promote."
+        description: "promote-only + organic GA only: mark the verified release GitHub Latest and open the post-release source version-bump PR. Leave false for a rollback promote."
         required: false
         type: boolean
         default: false
@@ -1210,7 +1211,8 @@ jobs:
           fi
           echo "All draft asset digests match the gated manifest — the published bytes are the gated bytes"
           # Flip draft → published. The tag was pushed by `tag` and VERIFIED == github.sha above (stronger than
-          # gh's --verify-tag). --latest=false: the signed S3 feed is the source of truth; `promote` flips it.
+          # gh's --verify-tag). Keep --latest=false until a forward GA promotion has independently verified
+          # the signed live feed; publication alone must not change either notion of the current release.
           gh release edit "$TAG" --draft=false --latest=false
           echo "Published $TAG (draft finalized)"
 
@@ -1471,12 +1473,47 @@ jobs:
             verify --feed live-latest.json --pubkey pubkey.b64
           echo "✅ live updater feed verified == $EXPECTED, all assets reachable, manifest signature valid"
 
+  # GitHub's Latest badge is human-facing and does not control the updater. Keep it aligned with a forward
+  # GA only after the signed production feed is independently verified. Rollbacks deliberately leave the
+  # badge on the newest GA while the authoritative updater feed temporarily points at an older release.
+  mark-github-latest:
+    name: Mark GitHub release as Latest
+    needs: [validate, verify-live-feed]
+    if: ${{ inputs.mode == 'promote-only' && inputs.bump_source && !inputs.dry_run && needs.verify-live-feed.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Mark the verified forward GA as GitHub Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --latest; then
+              latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+              if [ "$latest" = "$TAG" ]; then
+                echo "✅ GitHub Latest now points at $TAG"
+                exit 0
+              fi
+              echo "::warning::GitHub accepted the edit but Latest resolved to $latest (attempt $attempt/5)"
+            else
+              echo "::warning::failed to mark $TAG GitHub Latest (attempt $attempt/5)"
+            fi
+            sleep 5
+          done
+          echo "::error::could not verify GitHub Latest == $TAG after 5 attempts"
+          exit 1
+
   bump-source:
     name: Bump source version
-    needs: [validate, verify-live-feed]
+    needs: [validate, mark-github-latest]
     # B6: bump source only after a REAL organic-GA promotion — mode==promote-only, bump_source=true, not a
-    # dry_run. A ROLLBACK promote (bump_source=false) must NOT bump the source version.
-    if: ${{ inputs.mode == 'promote-only' && inputs.bump_source && !inputs.dry_run }}
+    # dry_run, and GitHub Latest has caught up. A ROLLBACK promote (bump_source=false) must NOT bump source
+    # or move the human-facing badge away from the newest GA.
+    if: ${{ inputs.mode == 'promote-only' && inputs.bump_source && !inputs.dry_run && needs.mark-github-latest.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # No default-GITHUB_TOKEN perms: a short-lived, repo-scoped GitHub App

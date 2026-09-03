@@ -3,8 +3,9 @@
  * promote: a `publish` dispatch builds+gates+publishes the GitHub release but NEVER flips the auto-updater's
  * S3 `latest.json` feed; a separate `promote-only` dispatch flips the feed (and is the rollback lever).
  * Each row below pins one invariant of that split and is mutation-provable by a single YAML edit — a
- * regression (re-coupling promote into publish, deleting a published release, marking GitHub --latest,
- * dropping a pre-flight check) flips CI in milliseconds instead of surfacing as a bad/oversold release.
+ * regression (re-coupling promote into publish, deleting a published release, marking GitHub Latest before
+ * the live feed verifies, dropping a pre-flight check) flips CI in milliseconds instead of surfacing as a
+ * bad/oversold release.
  */
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
@@ -76,11 +77,24 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).not.toContain("--clobber");
   });
 
-  test("the signed feed is the source of truth — no release is marked GitHub --latest", () => {
-    // [mut: change a `gh release create` back to `--latest` / `--latest=true` → fails]
-    // Any bare `--latest`, `--latest=true`, or line-continued `--latest` — but NOT `--latest=false`.
-    expect(WF).not.toMatch(/--latest(\s|=true|$)/m);
+  test("publish never marks Latest; only a verified forward GA promotion does", () => {
+    // Publication and promotion remain separate: creating/finalizing a release keeps Latest unchanged.
     expect(WF).toContain("--latest=false");
+    const bareLatest = /--latest(\s|=true|$)/m;
+    const publishJob = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    const finalizeJob = WF.split("  finalize:")[1]?.split("\n  # B6: PROMOTE")[0] ?? "";
+    expect(publishJob).not.toMatch(bareLatest);
+    expect(finalizeJob).not.toMatch(bareLatest);
+
+    const latestJob = WF.split("  mark-github-latest:")[1]?.split("\n  bump-source:")[0] ?? "";
+    expect(latestJob).toContain("needs: [validate, verify-live-feed]");
+    expect(latestJob).toContain("inputs.bump_source");
+    expect(latestJob).toContain("needs.verify-live-feed.result == 'success'");
+    expect(latestJob).toContain("contents: write");
+    expect(latestJob).toContain('gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --latest');
+    expect(latestJob).toContain('releases/latest" --jq .tag_name');
+    expect(latestJob).toContain('[ "$latest" = "$TAG" ]');
+    expect(latestJob).not.toContain("--latest=false");
   });
 
   test("the v3 signing-key break cannot ship without manual-reinstall guidance", () => {
@@ -311,10 +325,14 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     );
   });
 
-  test("downstream wiring: verify-live-feed needs promote; bump-source only on organic-GA promote", () => {
-    // [mut: point verify-live-feed back at `release`, or drop the bump_source guard → fails]
+  test("downstream wiring: verified feed → GitHub Latest → organic-GA source bump", () => {
+    // [mut: point verify-live-feed back at `release`, move Latest before verification, or let rollback move
+    // the badge/source version → fails]
     expect(WF).toContain("needs: [validate, promote]");
+    expect(WF).toContain("needs: [validate, verify-live-feed]");
+    expect(WF).toContain("needs: [validate, mark-github-latest]");
     expect(WF).toContain("inputs.bump_source && !inputs.dry_run");
+    expect(WF).toContain("needs.mark-github-latest.result == 'success'");
   });
 });
 
