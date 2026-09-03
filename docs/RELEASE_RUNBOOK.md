@@ -131,6 +131,8 @@ validate/main-only + AWS preflight + 3-OS WebDriver
 
 Desktop builds use fresh throwaway updater keys so a new binary can be produced without exposing the production key. Their temporary signatures are excluded. The `release-signing` job then signs the four exact updater payloads with the production key and verifies every payload and feed against the embedded public key. That job does not build, install, launch, or smoke-test applications. Smokes consume only the pre-signed artifacts. The updater baseline may be a prerelease: this is intentional, so RC2 exercises RC1 under the rotated key and GA exercises the newest same-key RC instead of falling back to an older incompatible key.
 
+The packaged composed-proof legs replace the playground's workspace SDK with the packed tarball, build the production playground, and serve that bundle only on `127.0.0.1:5173`. They deliberately do not use Vite's development dependency optimizer. Each composed-proof step has a 35-minute ceiling; a failure or cancellation retains the accelerator, node, preview-server, and Playwright trace output in the attempt-specific Actions artifact.
+
 A prerelease is public with `--latest=false` and omits `latest.json`. A stable release includes `latest.json`, but publishing still does not write S3 or alter what installed clients receive.
 
 ### Expected assets
