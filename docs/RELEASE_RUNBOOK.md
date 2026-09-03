@@ -23,7 +23,7 @@ Store this required environment secret:
 
 The production updater key and its optional password must not also exist as repository-level secrets. `release-accelerator.yml` exposes these values only to the dedicated signing step, whose commands are intentionally narrow and use the installed, lockfile-pinned Tauri CLI directly. Apple signing/notarization credentials remain separate because they are required by the macOS build jobs; this change does not isolate those build-time credentials.
 
-#### Accelerator 3 updater-key rotation
+#### Accelerator 3 updater-key rotation (completed)
 
 Accelerator 3 rotates the production updater key to public key ID `456E5A3DB518F598`. The matching
 passwordless private key is stored in the Personal-vault item
@@ -44,6 +44,11 @@ versions. After the manual reinstall, 3.x-to-3.x automatic updates work normally
 Before publishing any 3.0.0 candidate, require the isolated signer job to prove that all updater payloads and
 the generated feed verify against the public key committed in `tauri.conf.json`. Never work around a mismatch
 with an HTTP feed, unsigned payload, alternate public key, or hand-edited release artifact.
+
+The one-time Accelerator 3 bootstrap machinery has been removed now that complete published 3.x baselines
+exist. There is no dispatch toggle for bypassing same-key updater gates. Any future updater-key rotation
+requires a deliberately reviewed migration change that defines the user migration, release gates, rollback
+behavior, and documentation for that specific rotation.
 
 ### `npm-publish` GitHub environment and npm trusted publisher
 
@@ -99,21 +104,10 @@ gh workflow run release-accelerator.yml --ref main -f version=X.Y.Z
 gh workflow run release-accelerator.yml --ref main -f version=X.Y.Z-rc.N
 ```
 
-The first release after an intentional updater-key rotation is the only exception to the ordinary N-1 update
-smoke. It must be `rc.1` of exactly the next major and requires an explicit bootstrap flag:
-
-```bash
-gh workflow run release-accelerator.yml --ref main \
-  -f version=X.0.0-rc.1 -f updater_key_rotation_bootstrap=true
-```
-
-The resolver fails closed unless there is no complete lower release under the new key. In bootstrap mode, the
-macOS gate installs the newest complete old-key release and requires it to reject the authentic new-key
-manifest with `SignatureInvalid` while remaining healthy at N-1. This proves the manual-reinstall boundary;
-it does not pretend that an impossible cross-key automatic update succeeded. Publish `X.0.0-rc.2` normally
-afterward. The resolver then selects RC1 as a same-key baseline and restores every macOS, Linux, and Windows
-positive/tamper updater smoke. Never use the bootstrap flag for RC2, GA, a retry under an existing same-key
-baseline, or an ordinary release.
+Every publish requires a complete, published, lower release that uses the current updater key. The resolver
+includes prereleases, selects the greatest compatible version, and fails closed when none exists. There is no
+operator override. A future key rotation must arrive as a deliberately reviewed migration change rather than
+an evergreen release-dispatch option.
 
 The release path is:
 
@@ -129,7 +123,7 @@ validate/main-only + AWS preflight + 3-OS WebDriver
   → re-check asset digests and publish the draft
 ```
 
-Desktop builds use fresh throwaway updater keys so a new binary can be produced without exposing the production key. Their temporary signatures are excluded. The `release-signing` job then signs the four exact updater payloads with the production key and verifies every payload and feed against the embedded public key. That job does not build, install, launch, or smoke-test applications. Smokes consume only the pre-signed artifacts. The updater baseline may be a prerelease: this is intentional, so RC2 exercises RC1 under the rotated key and GA exercises the newest same-key RC instead of falling back to an older incompatible key.
+Desktop builds use fresh throwaway updater keys so a new binary can be produced without exposing the production key. Their temporary signatures are excluded. The `release-signing` job then signs the four exact updater payloads with the production key and verifies every payload and feed against the embedded public key. That job does not build, install, launch, or smoke-test applications. Smokes consume only the pre-signed artifacts. The updater baseline may be a prerelease: this is intentional, so RC2 exercises RC1 and GA exercises the newest same-key RC instead of falling back to an older incompatible key.
 
 The packaged composed-proof legs replace the playground's workspace SDK with the packed tarball, build the production playground, and serve that bundle only on `127.0.0.1:5173`. They deliberately do not use Vite's development dependency optimizer. Playwright is exact-pinned identically in the desktop and playground packages, and every browser install resolves from the consuming workspace instead of allowing a root-context `bunx` to fetch a different release. Each composed-proof step has a 35-minute ceiling; a failure or cancellation retains the accelerator, node, preview-server, and Playwright trace output in the attempt-specific Actions artifact.
 

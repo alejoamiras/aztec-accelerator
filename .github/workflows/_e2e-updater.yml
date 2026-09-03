@@ -7,8 +7,7 @@ name: _Updater Smoke (reusable)
 # Windows release-blocking siblings live in their own reusable workflows.
 #
 # Needs no signing key: it serves the already-prod-signed N artifact and N-1
-# validates it against its embedded pubkey. The one-time key-rotation mode instead
-# requires an old-key N-1 to reject the authentic new-key manifest. See updater-smoke.sh.
+# validates it against its embedded pubkey. See updater-smoke.sh.
 
 on:
   workflow_call:
@@ -42,7 +41,7 @@ on:
         required: true
         type: string
       mode:
-        description: "positive (apply) | negative (reject tamper) | key-rotation (old key rejects authentic new manifest)"
+        description: "positive (apply) | negative (reject tamper)"
         required: false
         default: positive
         type: string
@@ -73,7 +72,6 @@ jobs:
           N_VERSION: ${{ inputs.n-version }}
           N1_TAG: ${{ inputs.n1-tag }}
           N1_VERSION: ${{ inputs.n1-version }}
-          SMOKE_MODE: ${{ inputs.mode }}
         run: |
           if [ "$N1_TAG" != "accelerator-v$N1_VERSION" ]; then
             echo "::error::resolver output is inconsistent: tag=$N1_TAG version=$N1_VERSION"
@@ -92,13 +90,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/contents/packages/accelerator/src-tauri/tauri.conf.json?ref=$N1_TAG" --jq '.content' | base64 -d > n1-tauri.conf.json
           OLD_PUB=$(jq -r '.plugins.updater.pubkey' n1-tauri.conf.json)
           NEW_PUB=$(jq -r '.plugins.updater.pubkey' packages/accelerator/src-tauri/tauri.conf.json)
-          if [ "$SMOKE_MODE" = "key-rotation" ]; then
-            if [ "$OLD_PUB" = "$NEW_PUB" ]; then
-              echo "::error::key-rotation bootstrap requires different N-1 and N updater keys"
-              exit 1
-            fi
-            echo "key-rotation preflight OK: old and new updater keys differ"
-          elif [ "$OLD_PUB" != "$NEW_PUB" ]; then
+          if [ "$OLD_PUB" != "$NEW_PUB" ]; then
             echo "::error::ordinary updater smoke requires a same-key N-1 baseline"
             exit 1
           fi
@@ -134,7 +126,6 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
-          UPDATER_SMOKE_N1_VERSION: ${{ inputs.n1-version }}
         run: |
           DMG=$(find n1 -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi
@@ -144,7 +135,3 @@ jobs:
             n-artifacts \
             "$DMG" \
             "$GITHUB_WORKSPACE"
-
-      - name: Result summary
-        if: ${{ success() && inputs.mode == 'key-rotation' }}
-        run: echo "✅ old updater key rejected the authentic new-key manifest; manual reinstall boundary proven." >> "$GITHUB_STEP_SUMMARY"

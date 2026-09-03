@@ -45,10 +45,12 @@ REPO_ROOT="$5"
 
 # positive (default): expect the update to apply (/health reports N).
 # negative: serve a TAMPERED AppImage and assert the update is REJECTED. Set via
-#           UPDATER_SMOKE_MODE. (The macOS gate already proves signature teeth
-#           arch-independently; Linux ships positive-only first, but the mode is
-#           wired so a negative leg is a one-line matrix add later.)
+#           UPDATER_SMOKE_MODE.
 MODE="${UPDATER_SMOKE_MODE:-positive}"
+case "$MODE" in
+  positive|negative) ;;
+  *) echo "::error::unknown UPDATER_SMOKE_MODE '$MODE'"; exit 1 ;;
+esac
 
 HEALTH="http://127.0.0.1:59833/health"
 HOST="aztec-accelerator.dev"

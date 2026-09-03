@@ -22,5 +22,6 @@ one manual reinstall, automatic updates within the 3.x line work normally again.
 - Added dependency-vulnerability checks as publication gates for both release workflows.
 - Hardened release documentation and regression tests around passwordless signing, provenance, promotion,
   and updater-key migration.
-- Added a fail-closed updater-baseline resolver and a narrowly constrained first-RC key-rotation bootstrap;
-  the next RC must return to the full same-key cross-platform update and tamper suite before GA.
+- Added a fail-closed updater-baseline resolver that selects the greatest complete published same-key release,
+  including prereleases. The completed one-time rotation bootstrap is removed; future key changes require a
+  deliberately reviewed migration change and cannot bypass the cross-platform update and tamper suite.

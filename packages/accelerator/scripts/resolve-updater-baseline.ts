@@ -8,13 +8,11 @@ export interface UpdaterReleaseCandidate {
 export interface UpdaterBaseline {
   tag: string;
   version: string;
-  rotation: boolean;
 }
 
 interface SelectUpdaterBaselineOptions {
   version: string;
   currentPubkey: string;
-  allowKeyRotationBootstrap: boolean;
   releases: UpdaterReleaseCandidate[];
 }
 
@@ -73,41 +71,13 @@ export function selectUpdaterBaseline(options: SelectUpdaterBaselineOptions): Up
 
   const sameKey = eligible.find(({ release }) => release.pubkey === options.currentPubkey);
   if (sameKey) {
-    if (options.allowKeyRotationBootstrap) {
-      throw new Error(
-        `same-key updater baseline already exists at ${sameKey.release.tagName}; refuse key-rotation bootstrap`,
-      );
-    }
     return {
       tag: sameKey.release.tagName,
       version: sameKey.version,
-      rotation: false,
     };
   }
 
-  if (!options.allowKeyRotationBootstrap) {
-    throw new Error(
-      "no lower release uses the current updater key; the first release after an intentional rotation requires --allow-key-rotation-bootstrap",
-    );
-  }
-
-  const priorKey = eligible[0];
-  if (!priorKey)
-    throw new Error("no complete lower accelerator release is available as a rotation witness");
-
-  const firstMajorRc = /^(\d+)\.0\.0-rc\.1$/.exec(options.version);
-  const priorMajor = /^(\d+)\./.exec(priorKey.version);
-  if (!firstMajorRc || !priorMajor || Number(firstMajorRc[1]) !== Number(priorMajor[1]) + 1) {
-    throw new Error(
-      `key-rotation bootstrap is restricted to rc.1 of the next major after ${priorKey.version}`,
-    );
-  }
-
-  return {
-    tag: priorKey.release.tagName,
-    version: priorKey.version,
-    rotation: true,
-  };
+  throw new Error("no complete published lower accelerator release uses the current updater key");
 }
 
 function githubHeaders(token: string): HeadersInit {
@@ -195,7 +165,6 @@ if (import.meta.main) {
     const result = selectUpdaterBaseline({
       version,
       currentPubkey,
-      allowKeyRotationBootstrap: Bun.argv.includes("--allow-key-rotation-bootstrap"),
       releases,
     });
     console.log(JSON.stringify(result));
