@@ -87,7 +87,20 @@
                 site-owner access.
               </p>
             </div>
-            <button id="landing-accelerator-retry" type="button" class="btn btn-outline">Retry</button>
+            <button id="landing-permission-retry" type="button" class="btn btn-outline">Retry</button>
+          </div>
+          <div id="landing-secure-help" class="notice landing-permission-notice hidden" role="status" aria-live="polite">
+            <div class="notice-content">
+              <h3 id="landing-secure-title"></h3>
+              <p id="landing-secure-message"></p>
+              <p>
+                Open Accelerator from the tray, open Settings, and enable
+                <strong>Encrypted Connection</strong>. If it is already enabled, rerun certificate setup.
+                The playground can offer an explicitly confirmed, tab-only HTTP fallback; this landing
+                page never enables it.
+              </p>
+            </div>
+            <button id="landing-secure-retry" type="button" class="btn btn-outline">Retry secure connection</button>
           </div>
         </div>
         <div class="hero-visual" aria-hidden="true">

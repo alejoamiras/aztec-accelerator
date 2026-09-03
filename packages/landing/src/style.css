@@ -571,6 +571,14 @@ img, svg {
   font-size: 0.875rem;
 }
 
+.landing-permission-notice .notice-content p + p {
+  margin-top: 0.5rem;
+}
+
+.landing-permission-notice .notice-content strong {
+  color: var(--text);
+}
+
 /* ── TEE-Rex cross-link ───────────────────────────────────────────── */
 .tee-rex-callout {
   display: flex;

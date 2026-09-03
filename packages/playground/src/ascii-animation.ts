@@ -277,6 +277,10 @@ function versionMismatchFrames(): FrameFn {
   return () => box(["  version not supported  ✗", "  falling back to wasm"], "round", "⚠ VERSION");
 }
 
+function secureConnectionUnavailableFrames(): FrameFn {
+  return () => box(["  encrypted link failed  ✗", "  using wasm securely"], "round", "⚠ HTTPS");
+}
+
 /** Return the frame generator for a given (mode, phase) combination. */
 export function getFrameFn(mode: UiMode, phase: AnimationPhase): FrameFn {
   switch (phase) {
@@ -284,6 +288,8 @@ export function getFrameFn(mode: UiMode, phase: AnimationPhase): FrameFn {
       return detectFrames();
     case "fallback":
       return fallbackFrames();
+    case "secure-connection-unavailable":
+      return secureConnectionUnavailableFrames();
     case "downloading":
       return detectFrames(); // reuse detect animation for download
     case "app:simulate":

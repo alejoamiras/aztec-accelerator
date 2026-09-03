@@ -1,4 +1,17 @@
-export type LandingAcceleratorStatus = "available" | "offline" | "error" | "permission-blocked";
+export type LandingSecureConnectionDiagnosis =
+  | "https-disabled"
+  | "tls-or-trust-failure"
+  | "accelerator-reachable"
+  | "unconfirmed";
+
+export type LandingAcceleratorStatus =
+  | "available"
+  | "error"
+  | "permission-blocked"
+  | {
+      reason: "secure-connection-unavailable";
+      diagnosis: LandingSecureConnectionDiagnosis;
+    };
 
 type LoopbackRequestInit = RequestInit & { targetAddressSpace?: "loopback" };
 type LoopbackRequest = Request & { readonly targetAddressSpace?: string };
@@ -80,7 +93,7 @@ export async function watchLoopbackPermissionChanges(
 async function fetchBounded(url: string): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), HEADER_TIMEOUT_MS);
-  const init: LoopbackRequestInit = { redirect: "error", signal: ctrl.signal };
+  const init: LoopbackRequestInit = { method: "GET", redirect: "error", signal: ctrl.signal };
   if (new URL(url).protocol === "http:" && supportsLoopbackTargetAddressSpace()) {
     init.targetAddressSpace = "loopback";
   }
@@ -143,29 +156,101 @@ function isRecognizedHealth(body: unknown): boolean {
   return value.status === HEALTH.status && value.api_version === HEALTH.api_version;
 }
 
-type Candidate = { reached: true; healthy: boolean } | { reached: false };
+const DETAILED_HEALTH_KEYS = [
+  "version",
+  "aztec_version",
+  "available_versions",
+  "bb_available",
+  "https_port",
+] as const;
+
+function hasAnyDetailedHealthField(body: Record<string, unknown>): boolean {
+  return DETAILED_HEALTH_KEYS.some((key) => key in body);
+}
+
+function isValidHealth(body: unknown): body is Record<string, unknown> {
+  if (!isRecognizedHealth(body)) return false;
+  const value = body as Record<string, unknown>;
+  return (
+    (!("version" in value) || typeof value.version === "string") &&
+    (!("aztec_version" in value) || typeof value.aztec_version === "string") &&
+    (!("available_versions" in value) ||
+      (Array.isArray(value.available_versions) &&
+        value.available_versions.every((version) => typeof version === "string"))) &&
+    (!("bb_available" in value) || typeof value.bb_available === "boolean") &&
+    (!("https_port" in value) ||
+      (typeof value.https_port === "number" &&
+        Number.isInteger(value.https_port) &&
+        value.https_port >= 1 &&
+        value.https_port <= 65535))
+  );
+}
+
+function isDetailedHealth(body: unknown): body is Record<string, unknown> {
+  if (!isValidHealth(body)) return false;
+  const value = body as Record<string, unknown>;
+  return (
+    typeof value.version === "string" &&
+    typeof value.aztec_version === "string" &&
+    Array.isArray(value.available_versions) &&
+    value.available_versions.every((version) => typeof version === "string") &&
+    typeof value.bb_available === "boolean"
+  );
+}
+
+type Candidate =
+  | { reached: true; healthy: boolean; body: unknown }
+  | { reached: false; body?: never };
 
 async function probe(url: string): Promise<Candidate> {
   try {
     const response = await fetchBounded(url);
-    if (!response.ok) return { reached: true, healthy: false };
-    return { reached: true, healthy: isRecognizedHealth(await readHealthBody(response)) };
+    if (!response.ok) return { reached: true, healthy: false, body: undefined };
+    const body = await readHealthBody(response);
+    return { reached: true, healthy: isValidHealth(body), body };
   } catch {
     return { reached: false };
   }
 }
 
-/** Lightweight landing detector. It deliberately has no settled cache, so Retry is immediate. */
-export async function detectAccelerator(options?: {
-  httpsOnly?: boolean;
-}): Promise<LandingAcceleratorStatus> {
-  const urls = options?.httpsOnly
-    ? ["https://127.0.0.1:59834/health"]
-    : ["http://127.0.0.1:59833/health", "https://127.0.0.1:59834/health"];
-  const results = await Promise.all(urls.map(probe));
-  if (results.some((result) => result.reached && result.healthy)) return "available";
-  if (results.some((result) => result.reached)) return "error";
-  return (await permissionDenied()) ? "permission-blocked" : "offline";
+/** Lightweight landing detector. It never enables HTTP; Retry is immediate because there is no cache. */
+export async function detectAccelerator(): Promise<LandingAcceleratorStatus> {
+  const secure = await probe("https://127.0.0.1:59834/health");
+  if (secure.reached) return secure.healthy ? "available" : "error";
+  if (await permissionDenied()) return "permission-blocked";
+
+  // Informational only: one witness-free HTTP GET helps explain how to repair HTTPS. This result is
+  // never treated as available and the landing page has no HTTP proving or consent path.
+  const diagnostic = await probe("http://127.0.0.1:59833/health");
+  if (!diagnostic.reached) {
+    return (await permissionDenied())
+      ? "permission-blocked"
+      : { reason: "secure-connection-unavailable", diagnosis: "unconfirmed" };
+  }
+  if (!diagnostic.healthy) {
+    return { reason: "secure-connection-unavailable", diagnosis: "unconfirmed" };
+  }
+  const recognized = diagnostic.body as Record<string, unknown>;
+  if (hasAnyDetailedHealthField(recognized) && !isDetailedHealth(recognized)) {
+    return { reason: "secure-connection-unavailable", diagnosis: "unconfirmed" };
+  }
+  if (!isDetailedHealth(diagnostic.body)) {
+    return { reason: "secure-connection-unavailable", diagnosis: "accelerator-reachable" };
+  }
+  if (!("https_port" in diagnostic.body)) {
+    return { reason: "secure-connection-unavailable", diagnosis: "https-disabled" };
+  }
+  const httpsPort = diagnostic.body.https_port;
+  return {
+    reason: "secure-connection-unavailable",
+    diagnosis:
+      typeof httpsPort === "number" &&
+      Number.isInteger(httpsPort) &&
+      httpsPort >= 1 &&
+      httpsPort <= 65535
+        ? "tls-or-trust-failure"
+        : "unconfirmed",
+  };
 }
 
 export class LandingDetectionController {

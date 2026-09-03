@@ -5,6 +5,7 @@ import type {
   AcceleratorPhase,
   AcceleratorProtocol,
   AcceleratorStatusCheckOptions,
+  SecureConnectionDiagnosis,
 } from "../index.js";
 import * as sdk from "../index.js";
 
@@ -27,10 +28,14 @@ describe("public contract (F-05 doc-sync guard)", () => {
     const phase: AcceleratorPhase = "proving";
     // B7: pins the new `version-mismatch` phase into the barrel's type surface.
     const versionPhase: AcceleratorPhase = "version-mismatch";
+    const securePhase: AcceleratorPhase = "secure-connection-unavailable";
+    const diagnosis: SecureConnectionDiagnosis = "tls-or-trust-failure";
     const statusOptions: AcceleratorStatusCheckOptions = { forceRefresh: true };
     expect(protocol).toBe("https");
     expect(phase).toBe("proving");
     expect(versionPhase).toBe("version-mismatch");
+    expect(securePhase).toBe("secure-connection-unavailable");
+    expect(diagnosis).toBe("tls-or-trust-failure");
     expect(statusOptions.forceRefresh).toBe(true);
   });
 
@@ -69,6 +74,20 @@ describe("public contract (F-05 doc-sync guard)", () => {
       read("../../.claude/skills/aztec-accelerator/SKILL.md"),
     ]) {
       expect(doc).toContain("permission-blocked");
+      expect(doc).toContain("forceRefresh: true");
+    }
+  });
+
+  test("README + MIGRATION + packaged SKILL document secure recovery and session-only HTTP consent", () => {
+    for (const doc of [
+      read("../../README.md"),
+      read("../../MIGRATION.md"),
+      read("../../.claude/skills/aztec-accelerator/SKILL.md"),
+    ]) {
+      expect(doc).toContain("secure-connection-unavailable");
+      expect(doc).toContain("tls-or-trust-failure");
+      expect(doc).toContain("httpsOnly: false");
+      expect(doc).toContain("allowInsecureDowngrade: true");
       expect(doc).toContain("forceRefresh: true");
     }
   });

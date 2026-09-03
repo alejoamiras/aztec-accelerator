@@ -15,7 +15,8 @@ HTTPS between the browser and the accelerator is **default-on**, consented throu
 onboarding wizard, on **all three** desktop OSes (it was previously a macOS-only "Safari Support"
 toggle). It gives an encrypted, authenticated loopback channel; Safari *requires* it (Safari blocks
 plain HTTP from an HTTPS page), while Chrome/Firefox/Edge use it when the local certificate is trusted
-and otherwise fall back to HTTP with no added latency.
+and report an actionable secure-connection failure when it is not. Browser proving never activates
+HTTP automatically.
 
 The certificate is a **keyless local CA** (the CA signing key is generated in memory, signs one
 `localhost` leaf, and is discarded — never written to disk, so the trusted anchor can mint nothing)
@@ -74,11 +75,18 @@ The app uses GTK via WebKitGTK. Tray icon support depends on the compositor:
 
 ### Browser Local Network Access (Chrome 142+, Firefox 153+)
 
-Chrome 142 began gating requests from public websites to loopback addresses behind a user permission prompt (Local Network Access); Chrome 145 splits it into `local-network` and `loopback-network` permissions. Firefox 153 enables its corresponding Local Network Access protection by default for desktop users. A dApp probing the accelerator from a public origin triggers the browser prompt on first use. An explicit denial is reported by the SDK as `permission-blocked` and still falls back to WASM; a pending/dismissed prompt or unavailable permission query can remain `offline`.
+Chrome 142 began gating requests from public websites to loopback addresses behind a user permission prompt (Local Network Access); Chrome 145 splits it into `local-network` and `loopback-network` permissions. Firefox 153 enables its corresponding Local Network Access protection by default for desktop users. A dApp probing the accelerator from a public origin triggers the browser prompt on first use. An explicit denial is reported by the SDK as `permission-blocked` and still falls back to WASM; a pending/dismissed prompt or unavailable permission query can remain inconclusive.
 
 The SDK annotates supported plaintext requests with `targetAddressSpace: "loopback"`. This declares the destination so supporting browsers can run their LNA flow; it does not bypass permission. HTTPS is not an escape hatch because the gate follows address space, not scheme. Site permissions beside the address bar are the usual recovery, followed by a forced Retry, but this is not guaranteed: enterprise policy can require an administrator, while an iframe can require top-level access or explicit Permissions Policy delegation.
 
-Safari currently retains the existing transport behavior: unsupported HTTP annotations and permission descriptors are omitted/ignored, and its trusted local HTTPS path remains required. Requests from `localhost`-served pages (local dev) are same-address-space and do not trigger the public-to-loopback prompt.
+Keep this flow separate from HTTPS recovery. If HTTPS cannot connect, the SDK reports
+`secure-connection-unavailable` with a best-effort diagnosis. The normal repair is Accelerator tray
+→ Settings → enable **Encrypted Connection**, or re-run certificate setup for trust failures, then
+force Retry. The SDK may use one witness-free HTTP health diagnostic after HTTPS failure, but never
+sends an HTTP `/prove` or witness automatically. Safari may block that diagnostic, leaving the
+diagnosis `unconfirmed`; its trusted local HTTPS path remains required. Requests from
+`localhost`-served pages (local dev) are same-address-space and do not trigger the public-to-loopback
+prompt.
 
 ## Security Model
 

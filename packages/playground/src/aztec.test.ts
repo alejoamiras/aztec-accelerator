@@ -88,11 +88,12 @@ describe("checkAcceleratorStatus", () => {
     expect((await checkAcceleratorStatus()).available).toBe(true);
   });
 
-  test("returns offline when fetch throws", async () => {
+  test("returns an actionable secure status when browser HTTPS and its diagnostic fail", async () => {
     setFetchMock(() => Promise.reject(new Error("connection refused")));
     expect(await checkAcceleratorStatus()).toMatchObject({
       available: false,
-      reason: "offline",
+      reason: "secure-connection-unavailable",
+      diagnosis: "unconfirmed",
     });
   });
 

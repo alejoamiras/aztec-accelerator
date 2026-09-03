@@ -15,6 +15,7 @@ export const ACCELERATOR_API_VERSION = 1;
 /** Sub-phases emitted during proof generation for UI animation. */
 export type AcceleratorPhase =
   | "detect"
+  | "secure-connection-unavailable"
   | "serialize"
   | "transmit"
   | "proving"
@@ -41,24 +42,24 @@ export interface AcceleratorConfig {
   /** Host the accelerator binds to. Default: "127.0.0.1". */
   host?: string;
   /**
-   * Strict transport policy: talk to the accelerator over HTTPS ONLY. The SDK never probes or POSTs
-   * to the `http://` endpoint and never falls back to it — an unreachable HTTPS accelerator reports
-   * as offline (→ WASM fallback). Off by default (the SDK prefers HTTPS when healthy but still uses
-   * HTTP otherwise). Also settable via `AZTEC_ACCELERATOR_HTTPS_ONLY=1`. Default: false.
+   * Private proof transport policy. When true, the SDK never sends a `/prove` request or private
+   * witness over HTTP. After an HTTPS connection failure it may perform one bounded, witness-free
+   * HTTP `GET /health` solely to diagnose whether HTTPS is disabled or untrusted; that diagnostic
+   * can never make the accelerator eligible for proving.
+   *
+   * Defaults to true in browsers and false in Node, Bun, and SSR. An explicit constructor/runtime
+   * option wins over `AZTEC_ACCELERATOR_HTTPS_ONLY`, which wins over the runtime default.
    */
   httpsOnly?: boolean;
   /**
    * Allow the SDK to fall back to the plaintext `http://` endpoint **after it has already reached a
    * healthy `https://` accelerator at this address**. Off by default (F-01, audit 2026-07-31).
    *
-   * This is not the same knob as {@link AcceleratorConfig.httpsOnly}. An accelerator with HTTPS
-   * disabled — the user's own choice in the onboarding wizard, and the permanent state of the
-   * TLS-free headless server — is unaffected: the SDK never saw a healthy HTTPS endpoint, so there is
-   * nothing to downgrade FROM and it uses HTTP exactly as before. What this governs is the narrower
-   * case where HTTPS *was* working and then a `/prove` fails at the network layer: without it the SDK
-   * used to retry the same private witness over plaintext HTTP, and any local account can bind
-   * 127.0.0.1:59833 to receive it. Turn it on only if you would rather have the proof than the
-   * confidentiality. Also settable via `AZTEC_ACCELERATOR_ALLOW_INSECURE_DOWNGRADE=1`.
+   * This is not the same knob as {@link AcceleratorConfig.httpsOnly}. It governs the narrower case
+   * where HTTPS *was* working and then a `/prove` fails at the network layer. Turn it on only if you
+   * explicitly accept retrying the same private witness over plaintext HTTP. Browser dApps that offer
+   * a session-only HTTP recovery must set both `httpsOnly: false` and
+   * `allowInsecureDowngrade: true`; the SDK never persists that decision.
    *
    * Default: false.
    */
@@ -85,6 +86,13 @@ export interface AcceleratorStatusCheckOptions {
 
 /** Protocol used to reach the accelerator's `/health` + `/prove` endpoints. */
 export type AcceleratorProtocol = "http" | "https";
+
+/** Best-effort result of the witness-free HTTP diagnostic after an HTTPS connection failure. */
+export type SecureConnectionDiagnosis =
+  | "https-disabled"
+  | "tls-or-trust-failure"
+  | "accelerator-reachable"
+  | "unconfirmed";
 
 /**
  * Status of the local native accelerator, returned by {@link AcceleratorProver.checkAcceleratorStatus}.
@@ -123,8 +131,10 @@ export type AcceleratorStatus =
   | {
       available: false;
       /**
-       * The endpoint did not answer and the browser did not expose a conclusive permission denial. The
-       * accelerator may be offline, or a local-network prompt may still be pending/dismissed.
+       * The endpoint did not answer in a runtime/policy that permits normal HTTP probing, and the
+       * browser did not expose a conclusive permission denial. Browser HTTPS-only failures instead use
+       * `secure-connection-unavailable`, normally with an `unconfirmed` diagnosis when prompts or
+       * browser policy obscure both endpoints.
        */
       reason: "offline";
       sdkAztecVersion?: string;
@@ -133,6 +143,14 @@ export type AcceleratorStatus =
       available: false;
       /** The browser explicitly denied this origin permission to reach the loopback address space. */
       reason: "permission-blocked";
+      sdkAztecVersion?: string;
+    }
+  | {
+      available: false;
+      /** HTTPS could not connect and policy forbids using HTTP for private proving. */
+      reason: "secure-connection-unavailable";
+      /** Best-effort classification from a single witness-free HTTP `GET /health`. */
+      diagnosis: SecureConnectionDiagnosis;
       sdkAztecVersion?: string;
     }
   | {

@@ -226,6 +226,31 @@ After npm accepts the package, the workflow requires all of the following before
 
 It then tags the commit, creates a non-latest GitHub release, and verifies a fresh registry install. npm publication is irreversible, so if npm accepted the package but a later step failed, do not redispatch blindly; inspect and repair only the missing record.
 
+### HTTPS-by-default candidate canary
+
+Before promoting an SDK candidate that changes browser transport or recovery UI, validate the
+`testnet` package together with the deployed testnet playground. Do not promote until all of these
+hold in supported browsers:
+
+- trusted HTTPS reaches native proving and `/prove` is sent only to the HTTPS port;
+- HTTPS unavailable produces `secure-connection-unavailable`, then
+  `secure-connection-unavailable` → `fallback`, with WASM completing normally;
+- each health diagnosis renders the intended Encrypted Connection/certificate/install guidance;
+- the post-failure HTTP diagnostic is a bounded `GET /health` with no witness, no POST, no redirect,
+  and no change to proof eligibility or protocol pinning;
+- `permission-blocked` retains its separate browser site-permission recovery;
+- HTTP proving is unavailable until the user confirms the warning, after which both
+  `httpsOnly: false` and `allowInsecureDowngrade: true` apply only to the current prover instance;
+- reload/new prover restores HTTPS-only, with no consent in storage, cookies, URL parameters, or
+  desktop configuration; and
+- the landing page explains recovery but cannot activate or persist HTTP.
+
+If any transport invariant, status classification, prompt, or session-reset behavior regresses,
+stop promotion. Fix forward under a new derived SDK revision and redeploy the testnet playground.
+If a regression is discovered only after promotion, move `latest` back with the SDK rollback command
+below and restore the last known-good playground deployment; never delete or republish the bad npm
+version.
+
 ### First OIDC canary
 
 For the first run after enabling trusted publishing:

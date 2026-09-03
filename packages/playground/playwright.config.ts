@@ -10,8 +10,9 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_EXTERNAL_WEBSERVER
     ? undefined
     : {
-        // --no-orphans: Vite must not outlive the bun wrapper when Playwright tears down.
-        command: "bun --no-orphans run dev",
+        // Give Playwright the actual server process. A Bun script wrapper can exit first and leave
+        // Vite reparented, which makes teardown wait indefinitely after every assertion has passed.
+        command: "./node_modules/.bin/vite",
         port: 5173,
         reuseExistingServer: true,
       },

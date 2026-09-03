@@ -80,7 +80,10 @@ Browser (SDK)  →  HTTP POST /prove  →  Accelerator  →  bb binary  →  pro
                   (localhost:59833)     (Tauri app)     (native)
 ```
 
-The SDK auto-detects the accelerator on port 59833. If the accelerator is unavailable or has a version mismatch, the SDK automatically falls back to WASM proving.
+Browser SDK instances probe HTTPS for private proving by default and pin it after success. If HTTPS
+cannot connect, the SDK may use HTTP only for a bounded, witness-free health diagnosis; it never
+sends an HTTP `/prove` or witness automatically, and proving falls back to WASM. Node/Bun/SSR retain
+the dual HTTP/HTTPS behavior needed by the headless CI server.
 
 ### Proving Timing
 
@@ -284,12 +287,13 @@ With auto-update enabled, new versions are downloaded and installed in the backg
 
 HTTPS between your browser and the accelerator is **default-on** on macOS, Linux, and Windows,
 consented through the first-run onboarding wizard (you can opt out). Safari *requires* it (it blocks
-plain HTTP from an HTTPS page); Chrome/Firefox/Edge use it when the local certificate is trusted and
-otherwise fall back to HTTP with no added latency. The SDK probes both ports and prefers HTTPS when
-healthy (see the SDK README).
+plain HTTP from an HTTPS page); Chrome/Firefox/Edge also require trusted HTTPS for browser proving by
+default. If the secure connection is unavailable, the SDK reports recovery detail to the dApp and
+uses WASM without automatically activating HTTP proving (see the SDK README).
 
 Enable/disable anytime via the **Encrypted Connection (HTTPS)** toggle in Settings, or re-run the
-wizard from Settings → "Run setup again".
+wizard from Settings → "Run setup again". When a dApp reports a TLS/trust failure, re-running setup
+repairs certificate trust; restart the affected browser where the platform notes below require it.
 
 **Consent per OS** (installing the certificate):
 - **macOS** — a password dialog (login Keychain).
