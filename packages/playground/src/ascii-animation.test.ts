@@ -51,6 +51,7 @@ describe("getFrameFn", () => {
   const allModes: UiMode[] = ["local", "accelerated"];
   const allPhases: AnimationPhase[] = [
     "detect",
+    "secure-connection-unavailable",
     "fallback",
     "downloading",
     "app:simulate",

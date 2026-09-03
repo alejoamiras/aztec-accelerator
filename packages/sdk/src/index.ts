@@ -8,5 +8,6 @@ export type {
   AcceleratorProverOptions,
   AcceleratorStatus,
   AcceleratorStatusCheckOptions,
+  SecureConnectionDiagnosis,
 } from "./lib/types.js";
 export { ACCELERATOR_API_VERSION } from "./lib/types.js";

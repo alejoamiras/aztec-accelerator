@@ -10,6 +10,9 @@ export interface AcceleratorStatusView {
   logLevel: "success" | "warn" | "error";
   showInstall: boolean;
   showPermissionHelp: boolean;
+  showSecureConnectionHelp: boolean;
+  secureConnectionTitle?: string;
+  secureConnectionMessage?: string;
 }
 
 type LoopbackPermissionName = "loopback-network" | "local-network-access";
@@ -77,6 +80,7 @@ export function acceleratorStatusView(status: AcceleratorStatus): AcceleratorSta
       logLevel: "success",
       showInstall: false,
       showPermissionHelp: false,
+      showSecureConnectionHelp: false,
     };
   }
 
@@ -89,7 +93,43 @@ export function acceleratorStatusView(status: AcceleratorStatus): AcceleratorSta
         logLevel: "warn",
         showInstall: false,
         showPermissionHelp: true,
+        showSecureConnectionHelp: false,
       };
+    case "secure-connection-unavailable": {
+      const explanation = {
+        "https-disabled": {
+          title: "Encrypted Connection is disabled",
+          message:
+            "Accelerator is running, but its HTTPS listener is off. Enable Encrypted Connection in Settings.",
+        },
+        "tls-or-trust-failure": {
+          title: "Secure connection is not trusted",
+          message:
+            "Accelerator advertises HTTPS, but the browser could not establish it. Repair the local certificate trust setup.",
+        },
+        "accelerator-reachable": {
+          title: "Accelerator is reachable",
+          message:
+            "The public health response hides HTTPS details. Check Encrypted Connection and local certificate trust.",
+        },
+        unconfirmed: {
+          title: "Secure connection unavailable",
+          message:
+            "The diagnostic could not confirm Accelerator. It may be stopped or not installed, or the browser may have blocked local HTTP.",
+        },
+      }[status.diagnosis];
+      return {
+        connected: false,
+        label: "secure connection unavailable, fallback: wasm",
+        log: `${explanation.title}; falling back to WASM`,
+        logLevel: "warn",
+        showInstall: status.diagnosis === "unconfirmed",
+        showPermissionHelp: false,
+        showSecureConnectionHelp: true,
+        secureConnectionTitle: explanation.title,
+        secureConnectionMessage: explanation.message,
+      };
+    }
     case "offline":
       return {
         connected: false,
@@ -98,6 +138,7 @@ export function acceleratorStatusView(status: AcceleratorStatus): AcceleratorSta
         logLevel: "warn",
         showInstall: true,
         showPermissionHelp: false,
+        showSecureConnectionHelp: false,
       };
     case "error":
       return {
@@ -107,6 +148,7 @@ export function acceleratorStatusView(status: AcceleratorStatus): AcceleratorSta
         logLevel: "error",
         showInstall: false,
         showPermissionHelp: false,
+        showSecureConnectionHelp: false,
       };
     case "version-mismatch":
       return {
@@ -116,6 +158,7 @@ export function acceleratorStatusView(status: AcceleratorStatus): AcceleratorSta
         logLevel: "warn",
         showInstall: false,
         showPermissionHelp: false,
+        showSecureConnectionHelp: false,
       };
   }
 }
@@ -136,6 +179,7 @@ export class AcceleratorStatusController {
   #fallbackRefresh: Promise<void> | null = null;
   #inFlight = new Set<Promise<void>>();
   #permissionRefresh: Promise<void> | null = null;
+  #secureRefresh: Promise<void> | null = null;
 
   constructor(private readonly options: AcceleratorStatusControllerOptions) {}
 
@@ -186,6 +230,16 @@ export class AcceleratorStatusController {
     return this.#permissionRefresh;
   }
 
+  /** Coalesce repeated secure-recovery clicks into one forced status refresh. */
+  retrySecureConnection(): Promise<void> {
+    if (this.#secureRefresh) return this.#secureRefresh;
+    const refresh = this.refresh({ forceRefresh: true });
+    this.#secureRefresh = refresh.finally(() => {
+      this.#secureRefresh = null;
+    });
+    return this.#secureRefresh;
+  }
+
   /** Fire-and-forget refresh after a native attempt fell back. Never rejects into the proof path. */
   refreshAfterFallback(): void {
     if (!this.#displayed?.available || this.#fallbackRefresh) return;
@@ -194,5 +248,69 @@ export class AcceleratorStatusController {
       .finally(() => {
         this.#fallbackRefresh = null;
       });
+  }
+}
+
+interface HttpSessionConsentControllerOptions {
+  configure: () => void;
+  refresh: () => Promise<void>;
+  setConfirmationOpen: (open: boolean) => void;
+  setPending: (pending: boolean) => void;
+  announce: (message: string) => void;
+}
+
+/** Owns the explicit, non-persistent HTTP confirmation flow and suppresses duplicate activation. */
+export class HttpSessionConsentController {
+  #confirmationOpen = false;
+  #operation: Promise<void> | null = null;
+
+  constructor(private readonly options: HttpSessionConsentControllerOptions) {}
+
+  request(): void {
+    if (this.#confirmationOpen || this.#operation) return;
+    this.#confirmationOpen = true;
+    this.options.setConfirmationOpen(true);
+  }
+
+  cancel(): void {
+    if (!this.#confirmationOpen || this.#operation) return;
+    this.#confirmationOpen = false;
+    this.options.setConfirmationOpen(false);
+    this.options.announce("HTTP session fallback cancelled. HTTPS-only proving remains enabled.");
+  }
+
+  confirm(): Promise<void> {
+    if (this.#operation) return this.#operation;
+    if (!this.#confirmationOpen) return Promise.resolve();
+
+    this.#confirmationOpen = false;
+    this.options.setConfirmationOpen(false);
+    this.options.setPending(true);
+    this.options.announce("Enabling HTTP for this tab and checking Accelerator status.");
+
+    let configured = false;
+    const operation = Promise.resolve()
+      .then(() => {
+        this.options.configure();
+        configured = true;
+      })
+      .then(() => this.options.refresh())
+      .then(() => {
+        this.options.announce("HTTP is allowed for this tab only. Accelerator status refreshed.");
+      })
+      .catch((error) => {
+        this.options.announce(
+          configured
+            ? "HTTP is allowed for this tab, but the status refresh failed. WASM fallback remains available."
+            : "HTTP was not enabled because configuration failed. HTTPS-only proving remains enabled.",
+        );
+        throw error;
+      })
+      .finally(() => {
+        this.options.setPending(false);
+        if (this.#operation === operation) this.#operation = null;
+      });
+    this.#operation = operation;
+    return operation;
   }
 }

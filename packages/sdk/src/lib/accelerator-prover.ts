@@ -6,7 +6,7 @@ import sdkPkg from "../../package.json" with { type: "json" };
 import {
   AcceleratorTransport,
   isLoopbackPermissionDenied,
-  isRecognizedHealthBody,
+  isValidHealthBody,
   TransportHttpError,
 } from "./accelerator-transport.js";
 import { AcceleratorHttpError, parseServerError } from "./errors.js";
@@ -71,9 +71,47 @@ const DEFAULT_ACCELERATOR_PORT = 59833;
 const DEFAULT_ACCELERATOR_HTTPS_PORT = 59834;
 const DEFAULT_ACCELERATOR_HOST = "127.0.0.1";
 
+/** Parse the documented boolean environment spellings without weakening the browser-safe default. */
+function parseOptionalBooleanEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  switch (value.toLowerCase()) {
+    case "1":
+    case "true":
+      return true;
+    case "0":
+    case "false":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Resolve HTTPS policy with explicit option > environment > runtime default precedence.
+ * Exported from this internal module for table-driven tests; it is not part of the package barrel.
+ */
+export function resolveHttpsOnly(
+  option: boolean | undefined,
+  environment: string | undefined,
+  browserRuntime: boolean,
+): boolean {
+  return option ?? parseOptionalBooleanEnv(environment) ?? browserRuntime;
+}
+
+export function isBrowserRuntime(): boolean {
+  if (typeof window !== "undefined") return true;
+  const workerGlobalScope = (
+    globalThis as typeof globalThis & {
+      WorkerGlobalScope?: { new (...args: never[]): object };
+    }
+  ).WorkerGlobalScope;
+  return typeof workerGlobalScope === "function" && globalThis instanceof workerGlobalScope;
+}
+
 /**
  * Aztec private kernel prover that routes proving to a local native accelerator
- * running `bb` on the user's machine via `http://127.0.0.1:59833`.
+ * running `bb` on the user's machine through a validated loopback endpoint. Browser proving uses
+ * HTTPS by default; Node/Bun/SSR retain HTTP compatibility for the headless CI server.
  *
  * Falls back to WASM proving if the accelerator is unavailable.
  *
@@ -135,10 +173,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       httpsPort ??
       (Number.isNaN(parsedHttpsPort) ? DEFAULT_ACCELERATOR_HTTPS_PORT : parsedHttpsPort);
     const resolvedHost = host ?? DEFAULT_ACCELERATOR_HOST;
-    // Explicit option wins; else the env flag (`1`/`true`) enables strict HTTPS-only; else false.
-    const resolvedHttpsOnly =
-      httpsOnly ?? (envHttpsOnly === "1" || envHttpsOnly?.toLowerCase() === "true");
-    // F-01: off unless explicitly asked for, by option or env, exactly like `httpsOnly`.
+    // Browser proving is encrypted by default. Server runtimes retain HTTP compatibility for the
+    // TLS-free headless accelerator. Explicit option > environment > runtime default.
+    const resolvedHttpsOnly = resolveHttpsOnly(httpsOnly, envHttpsOnly, isBrowserRuntime());
+    // F-01: plaintext retry remains off unless explicitly asked for by option or environment.
     const resolvedAllowDowngrade =
       allowInsecureDowngrade ??
       (envAllowDowngrade === "1" || envAllowDowngrade?.toLowerCase() === "true");
@@ -151,7 +189,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     );
   }
 
-  /** Configure the local accelerator connection (port, host). Resets cached protocol + status. */
+  /** Configure the local endpoint or transport policy. Resets cached protocol + status. */
   setAcceleratorConfig(config: AcceleratorConfig) {
     // The transport resets BOTH the cached protocol and the status cache (each is keyed to
     // the old endpoint, so a stale hit would report the wrong host/port for up to the TTL).
@@ -202,7 +240,8 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   #inflightProbe: { gen: number; promise: Promise<AcceleratorStatus> } | null = null;
 
   /**
-   * Probe the accelerator's `/health` (dual HTTP/HTTPS, one retry) and parse the result into an
+   * Probe the accelerator's `/health` (runtime policy selects HTTPS-only or dual transport, one
+   * startup retry) and parse the result into an
    * {@link AcceleratorStatus}, caching the result. `gen` is the configuration generation this probe
    * was started against — every commit passes it, so a probe that raced a `setAcceleratorConfig`
    * cannot pin/cache against the NEW endpoint (post-impl codex High).
@@ -211,10 +250,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     const sdkAztecVersion = this.#getAztecVersion();
 
     try {
-      // Probe HTTP + HTTPS (one retry after 1s), preferring HTTPS when it's healthy (ok + the
-      // recognized health contract). Chrome/Firefox with HTTPS trusted: HTTPS wins → encrypted
-      // channel. HTTPS absent/untrusted: it rejects fast → HTTP wins with no added latency. Safari:
-      // HTTP blocked (mixed content) → HTTPS is the only responder. Both offline twice: throws → offline.
+      // The transport applies the resolved runtime policy and one startup retry. Browser default:
+      // HTTPS only for normal health/prove eligibility. Server default: dual HTTP/HTTPS probing that
+      // prefers recognized HTTPS. A browser HTTPS connection failure is diagnosed separately below.
       // The transport already read the body ONCE, bounded (deadline + byte cap) — use `body`, never
       // `response.json()`.
       const { response, protocol, body } = await this.#transport.probeHealth();
@@ -232,7 +270,7 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
       // Reachable but not the accelerator's health contract (unparseable, stalled-body, or a
       // foreign/malformed JSON shape — enforced in BOTH normal and httpsOnly modes): "error", NOT
       // "offline". q7e3-F-06: CLEAR the pin — a misbehaving responder must not drive /prove.
-      if (!isRecognizedHealthBody(body)) {
+      if (!isValidHealthBody(body)) {
         return this.#transport.commitStatus(
           { available: false, reason: "error", sdkAztecVersion, protocol },
           { pin: "clear" },
@@ -262,6 +300,43 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
           { pin: "keep" },
           gen,
         );
+      }
+      if (this.#transport.requiresSecureConnection) {
+        try {
+          const diagnosis = await this.#transport.diagnoseHttpHealth(gen);
+          // The diagnostic is informational only: KEEP the existing HTTPS pin/history, and never
+          // turn its recognized HTTP response into availability or proof eligibility.
+          return this.#transport.commitStatus(
+            {
+              available: false,
+              reason: "secure-connection-unavailable",
+              diagnosis,
+              sdkAztecVersion,
+            },
+            { pin: "keep" },
+            gen,
+          );
+        } catch (diagnosticError) {
+          if (isLoopbackPermissionDenied(diagnosticError)) {
+            return this.#transport.commitStatus(
+              { available: false, reason: "permission-blocked", sdkAztecVersion },
+              { pin: "keep" },
+              gen,
+            );
+          }
+          // The transport normally reduces diagnostic failures to `unconfirmed`; retain the safe
+          // classification if an unexpected platform error crosses that boundary.
+          return this.#transport.commitStatus(
+            {
+              available: false,
+              reason: "secure-connection-unavailable",
+              diagnosis: "unconfirmed",
+              sdkAztecVersion,
+            },
+            { pin: "keep" },
+            gen,
+          );
+        }
       }
       // q7e3-F-06: both probes failed without a conclusive permission denial → offline; CLEAR the pin.
       return this.#transport.commitStatus(
@@ -369,6 +444,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
 
     if (!status.available) {
       logger.info("Accelerator not available, falling back to WASM");
+      if (status.reason === "secure-connection-unavailable") {
+        this.#onPhase?.("secure-connection-unavailable");
+      }
       return this.#fallbackToWasm(executionSteps, "Local proof completed");
     }
 
@@ -390,11 +468,10 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
   /**
    * q7e3-F-11: the accelerated proving path — serialize, POST `/prove`, decode. A `403` (origin denied
    * or auth timeout) emits `"denied"` and falls back to WASM. A NETWORK-level failure (no HTTP
-   * response at all — TLS/refused/timeout) while pinned to HTTPS demotes the pin and retries once
-   * over HTTP, then falls back to WASM (in strict `httpsOnly` mode: straight to WASM — the witness
-   * never goes plaintext). Without this, preferring HTTPS at `/health` made a later trust/listener
-   * change fail the whole prove despite a healthy HTTP path (post-impl codex High). Other HTTP-level
-   * errors (the accelerator answered, e.g. 500) still propagate. Extracted from
+   * response at all — TLS/refused/timeout) retries once over HTTP only when plaintext proving was
+   * explicitly permitted; otherwise it goes straight to WASM and the witness never goes plaintext.
+   * Recognized HTTP-level failures also degrade, while misconfiguration/unexpected responses become
+   * the public typed error. Extracted from
    * {@link AcceleratorProver.createChonkProof}; only reached when the accelerator is available.
    */
   async #proveRemote(
@@ -408,9 +485,9 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
     // witness to the unprobed B (post-impl codex High). Every POST below uses these snapshots.
     const attemptUrl = `${this.#transport.baseUrl}/prove`;
     const attemptWasHttps = attemptUrl.startsWith("https:");
-    // Only snapshot the HTTP retry target when a retry is actually permitted. An `http://` URL is
-    // never even CONSTRUCTED when plaintext is off-limits — that's the documented contract, so keep
-    // it literally true rather than computing a string we'd never use. Gated on the EFFECTIVE policy,
+    // Only snapshot the HTTP PROOF-retry target when plaintext proving is permitted. This is separate
+    // from the witness-free diagnostic URL: when plaintext proving is off-limits, no HTTP `/prove`
+    // URL is constructed here. Gated on the EFFECTIVE policy,
     // not the raw `httpsOnly` flag: once HTTPS has proven healthy here the downgrade is refused too,
     // and the old check built the URL anyway (codex round 2 — harmless, but it falsified the claim).
     const httpRetryUrl =
@@ -456,11 +533,12 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             "Local proof completed after endpoint change",
           );
         }
-        // This request went over HTTPS in non-strict mode → the HTTP endpoint may still be healthy.
+        // This request went over HTTPS with plaintext proving explicitly permitted → the HTTP endpoint
+        // may still be healthy.
         // Retry THIS request explicitly over HTTP (independent of the shared pin, so a concurrent
         // failure that already cleared the pin doesn't stop us). `demoteHttpsPin()` only hints FUTURE
         // probes to re-check; the retry itself targets the http URL for this attempt's generation.
-        // `httpRetryUrl` is non-null exactly when this attempt went over HTTPS in non-strict mode —
+        // `httpRetryUrl` is non-null exactly when this attempt went over HTTPS with downgrade consent —
         // guarding on it (rather than re-deriving the condition) also narrows the type.
         if (httpRetryUrl) {
           // F-01: a healthy HTTPS accelerator answered at this endpoint, so a network-layer failure
@@ -530,12 +608,15 @@ export class AcceleratorProver extends BBLazyPrivateKernelProver {
             return this.#fallbackOrThrowHttp(retryErr, executionSteps);
           }
         }
-        // Strict httpsOnly (never retry plaintext), OR the attempt was already HTTP (nothing better to
+        // HTTPS-only (never retry plaintext), OR the attempt was already HTTP (nothing better to
         // try): degrade to WASM rather than failing the dApp.
         logger.warn("Local accelerator /prove failed at the network layer, falling back to WASM", {
           error: String(err),
           httpsOnly: this.#transport.httpsOnly,
         });
+        if (attemptWasHttps && this.#transport.requiresSecureConnection) {
+          this.#onPhase?.("secure-connection-unavailable");
+        }
         return this.#fallbackToWasm(
           executionSteps,
           "Local proof completed after transport failure",

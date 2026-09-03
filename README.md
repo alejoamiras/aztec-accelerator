@@ -27,10 +27,10 @@ Browser (dApp)
     ▼
 ┌─────────────────────────────────────────────────────────┐
 │  SDK (AcceleratorProver)                                │
-│  Probes localhost:59833 → accelerator found? ──────┐    │
+│  Browser: probe loopback HTTPS → healthy? ─────────┐    │
 │                            │ no                    │yes │
 │                            ▼                       ▼    │
-│                     WASM fallback         POST /prove   │
+│  witness-free HTTP diagnosis → WASM       HTTPS /prove │
 └─────────────────────────────────────────────────────────┘
                                                 │
                                                 ▼
@@ -64,10 +64,18 @@ const prover = new AcceleratorProver();
 
 See the [SDK README](packages/sdk/README.md) for full API reference.
 
+Browser prover instances are HTTPS-only by default. If HTTPS cannot connect, the SDK may issue one
+bounded, witness-free HTTP health diagnostic so the dApp can distinguish disabled HTTPS, certificate
+trust trouble, a privacy-limited reachable Accelerator, or an unconfirmed result. It never sends an
+HTTP `/prove` or witness automatically; normal proving continues through WASM. A dApp may offer a
+confirmed, current-tab-only HTTP escape hatch by setting both `httpsOnly: false` and
+`allowInsecureDowngrade: true` on that prover instance.
+
 > **Browser Local Network Access.** Public sites need permission in current Chrome and Firefox to
 > reach the loopback accelerator. An explicit denial is surfaced as `permission-blocked` so an app
-> can show site-permission guidance and Retry; an unresolved/dismissed prompt can still look
-> `offline`. The SDK's loopback annotation does not bypass permission, and HTTPS is subject to the
+> can show site-permission guidance and Retry; under the browser HTTPS-only default, an
+> unresolved/dismissed prompt normally appears as `secure-connection-unavailable` with an
+> `unconfirmed` diagnosis. The SDK's loopback annotation does not bypass permission, and HTTPS is subject to the
 > same address-space gate.
 
 > **Versioning / dist-tags.** SDK `X.Y.Z` targets Aztec `X.Y.Z` — the published version is derived from the pinned `@aztec/stdlib` dependency. The standard release path publishes on npm's **`testnet`** dist-tag; **`latest`** is moved to it in a separate, deliberate step, so the two usually match and differ only while a newer line is being validated or after a rollback. The accelerator downloads the matching `bb` binary **at runtime**, so an Aztec version bump ships **SDK-only** — already-installed accelerators need no re-release. See the [release runbook](docs/RELEASE_RUNBOOK.md).

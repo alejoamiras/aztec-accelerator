@@ -1,11 +1,11 @@
 import ms from "ms";
-import type { AcceleratorProtocol, AcceleratorStatus } from "./types.js";
+import type { AcceleratorProtocol, AcceleratorStatus, SecureConnectionDiagnosis } from "./types.js";
 // q7e3-F-02: import shared types from the neutral module, not back from the prover (kills the 2-way edge).
 import { ACCELERATOR_API_VERSION } from "./types.js";
 
 /** How long a probed {@link AcceleratorStatus} stays fresh before a re-probe. */
 const STATUS_CACHE_TTL_MS = 10_000;
-/** Per-attempt timeout for each /health probe (HTTP and HTTPS fired in parallel). */
+/** Per-attempt timeout for each normal or diagnostic `/health` request. */
 const HEALTH_PROBE_TIMEOUT_MS = 2_000;
 /** Delay before the single /health retry when the first parallel probe fails. */
 const PROBE_RETRY_DELAY_MS = 1_000;
@@ -270,6 +270,58 @@ export function isRecognizedHealthBody(body: unknown): boolean {
   return b.status === "ok" && b.api_version === ACCELERATOR_API_VERSION;
 }
 
+const DETAILED_HEALTH_KEYS = [
+  "version",
+  "aztec_version",
+  "available_versions",
+  "bb_available",
+  "https_port",
+] as const;
+
+function hasAnyDetailedHealthField(body: Record<string, unknown>): boolean {
+  return DETAILED_HEALTH_KEYS.some((key) => key in body);
+}
+
+/**
+ * Validate every optional field the SDK consumes. The two-field public liveness response remains
+ * valid, but a response that starts presenting detailed data must not smuggle invalid runtime types
+ * into the public status or throw from version classification.
+ */
+export function isValidHealthBody(body: unknown): body is Record<string, unknown> {
+  if (!isRecognizedHealthBody(body)) return false;
+  const b = body as Record<string, unknown>;
+  return (
+    (!("version" in b) || typeof b.version === "string") &&
+    (!("aztec_version" in b) || typeof b.aztec_version === "string") &&
+    (!("available_versions" in b) ||
+      (Array.isArray(b.available_versions) &&
+        b.available_versions.every((version) => typeof version === "string"))) &&
+    (!("bb_available" in b) || typeof b.bb_available === "boolean") &&
+    (!("https_port" in b) ||
+      (typeof b.https_port === "number" &&
+        Number.isInteger(b.https_port) &&
+        b.https_port >= 1 &&
+        b.https_port <= 65535))
+  );
+}
+
+/**
+ * Detailed `/health` is available only to local/non-browser or approved browser origins. Keep this
+ * stricter than the public liveness shape so a partial/foreign response can never produce a specific
+ * HTTPS diagnosis. `https_port` is checked separately because its absence is meaningful.
+ */
+function isDetailedHealthBody(body: unknown): body is Record<string, unknown> {
+  if (!isValidHealthBody(body)) return false;
+  const b = body as Record<string, unknown>;
+  return (
+    typeof b.version === "string" &&
+    typeof b.aztec_version === "string" &&
+    Array.isArray(b.available_versions) &&
+    b.available_versions.every((version) => typeof version === "string") &&
+    typeof b.bb_available === "boolean"
+  );
+}
+
 /**
  * Read + JSON-parse a response body with a hard deadline and byte cap. Consumes the body (no
  * `clone()` — a clone tees the stream and can buffer an unbounded pending branch). Returns
@@ -390,7 +442,7 @@ async function readTextBounded(
 
 /**
  * Owns all network I/O to the local accelerator: endpoint/URL construction, the
- * dual HTTP/HTTPS `/health` probe + protocol negotiation, the short-lived status
+ * `/health` probing + protocol negotiation, the diagnostic HTTP health check, the short-lived status
  * cache, and the `/prove` POST. Plain `fetch` for both endpoints; a non-2xx
  * `/prove` answer throws {@link TransportHttpError}, so the thrown-error surface
  * is uniform.
@@ -404,7 +456,7 @@ export class AcceleratorTransport {
   #host: string;
   #port: number;
   #httpsPort: number;
-  /** Strict mode: probe/POST over HTTPS ONLY, never construct an `http://` URL (dApp policy knob). */
+  /** Private transport policy: never send `/prove` or a witness over HTTP (diagnostic GET excepted). */
   #httpsOnly: boolean;
   /** Protocol that last reached `/health`; pins which endpoint `/prove` uses. `null` = not yet negotiated. */
   #protocol: AcceleratorProtocol | null = null;
@@ -515,8 +567,8 @@ export class AcceleratorTransport {
    * was consulted only when an HTTPS `/prove` FAILED, so the plaintext path was still reachable by
    * going around it — let the 10s status cache expire, take the HTTP port while HTTPS is
    * unavailable, and the next dual probe simply pins HTTP with no downgrade check in sight. Refusing
-   * to construct an `http://` URL at PROBE time is what actually closes it: an unreachable HTTPS
-   * endpoint then reports offline and the prover falls back to WASM.
+   * to let the normal negotiation select HTTP is what closes it: the separate HTTP diagnostic has no
+   * path to a protocol pin or `/prove`, and the prover falls back to WASM.
    */
   get #effectiveHttpsOnly(): boolean {
     return this.#httpsOnly || !this.allowsHttpDowngrade;
@@ -527,9 +579,14 @@ export class AcceleratorTransport {
     return this.#generation;
   }
 
-  /** Whether strict HTTPS-only mode is on (no HTTP URL is ever constructed). */
+  /** Whether HTTPS-only private proving is configured (a witness-free HTTP diagnosis is permitted). */
   get httpsOnly(): boolean {
     return this.#httpsOnly;
+  }
+
+  /** Whether the current policy/history permits the normal health probe to use only HTTPS. */
+  get requiresSecureConnection(): boolean {
+    return this.#effectiveHttpsOnly;
   }
 
   /**
@@ -593,9 +650,8 @@ export class AcceleratorTransport {
   }
 
   /**
-   * Base URL for `/prove`. In strict {@link AcceleratorTransport.#httpsOnly} mode it is ALWAYS the
-   * HTTPS endpoint (an `http://` URL is never constructed, even before negotiation). Otherwise it is
-   * `https` iff the negotiated protocol is `https`, else the `http` default.
+   * Base URL for `/prove`. When the effective policy requires a secure connection it is always the
+   * HTTPS endpoint. Otherwise it is `https` iff the negotiated protocol is `https`, else HTTP.
    */
   get baseUrl(): string {
     if (this.#effectiveHttpsOnly || this.#protocol === "https") {
@@ -642,8 +698,8 @@ export class AcceleratorTransport {
    * maps that to `reason: "offline"`). `throwHttpErrors:false` so a non-2xx still *resolves* (caller
    * maps it to `reason: "error"`); nothing retries under the caller's retry logic.
    *
-   * In strict {@link AcceleratorTransport.#httpsOnly} mode, only the HTTPS endpoint is ever probed
-   * (no `http://` URL is constructed); an unreachable HTTPS ⇒ rejects ⇒ caller maps to `offline`.
+   * In HTTPS-only mode, this normal probe constructs only the HTTPS endpoint. If it cannot connect,
+   * the caller may run the separate witness-free HTTP diagnostic and report secure unavailability.
    */
   async probeHealth(): Promise<ProbeResult> {
     const httpsUrl = `https://${this.#host}:${this.#httpsPort}/health`;
@@ -663,7 +719,8 @@ export class AcceleratorTransport {
       ).then(async (response) => ({ response, protocol, body: await readJsonBounded(response) }));
 
     const probe = () => {
-      // Strict mode: probe HTTPS ONLY — never even *construct* an http URL (contract compliance).
+      // HTTPS-only normal path: probe HTTPS only. The separate diagnostic may later construct its
+      // witness-free HTTP `/health` URL, but can never influence this probe's pin or `/prove`.
       // Also taken once HTTPS has proven healthy here, which is what stops a later probe from
       // quietly re-pinning plaintext (see `#effectiveHttpsOnly`).
       if (this.#effectiveHttpsOnly) return fire(httpsUrl, "https");
@@ -689,6 +746,50 @@ export class AcceleratorTransport {
       if (error === LOOPBACK_PERMISSION_DENIED) throw error;
       await new Promise((resolve) => setTimeout(resolve, PROBE_RETRY_DELAY_MS));
       return probeRound();
+    }
+  }
+
+  /**
+   * Perform one witness-free HTTP liveness diagnostic after an HTTPS connection failure.
+   *
+   * This deliberately bypasses normal protocol negotiation: it never commits status, never changes
+   * the protocol pin or HTTPS history, never retries, and has no path to `/prove`. It reuses the same
+   * URL validation, redirect refusal, header/body deadlines, byte cap, LNA annotation, CORS behavior,
+   * and health-shape checks as an ordinary probe.
+   */
+  async diagnoseHttpHealth(generation = this.#generation): Promise<SecureConnectionDiagnosis> {
+    // The failed HTTPS probe and this diagnostic must describe the same endpoint. If configuration
+    // moved while the bounded startup retry was running, do not let the stale operation query or
+    // report on the new HTTP endpoint.
+    if (generation !== this.#generation) return "unconfirmed";
+    const url = `http://${this.#host}:${this.#port}/health`;
+    try {
+      const response = await fetchHeaderBounded(
+        url,
+        { method: "GET", redirect: "error" },
+        HEALTH_PROBE_TIMEOUT_MS,
+      );
+      if (!response.ok) return "unconfirmed";
+
+      const body = await readJsonBounded(response);
+      if (!isRecognizedHealthBody(body)) return "unconfirmed";
+      const recognized = body as Record<string, unknown>;
+      if (!hasAnyDetailedHealthField(recognized)) return "accelerator-reachable";
+      if (!isDetailedHealthBody(body)) return "unconfirmed";
+
+      if (!("https_port" in body)) return "https-disabled";
+      const httpsPort = body.https_port;
+      return typeof httpsPort === "number" &&
+        Number.isInteger(httpsPort) &&
+        httpsPort >= 1 &&
+        httpsPort <= 65535
+        ? "tls-or-trust-failure"
+        : "unconfirmed";
+    } catch {
+      // Explicit LNA denial remains a distinct, actionable status even if it becomes observable only
+      // while the diagnostic request is attempted. Other browser/network failures are opaque.
+      if (await isLoopbackPermissionExplicitlyDenied()) throw LOOPBACK_PERMISSION_DENIED;
+      return "unconfirmed";
     }
   }
 
