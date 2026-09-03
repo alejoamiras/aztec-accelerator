@@ -47,7 +47,7 @@ on:
         type: string
 jobs:
   updater-smoke-linux:
-    name: Updater Smoke Linux
+    name: Updater Smoke Linux (${{ inputs.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -167,4 +167,4 @@ jobs:
 
       - name: Result summary
         if: success()
-        run: echo "✅ Linux AppImage updater smoke PASSED — Tauri applied the raw .AppImage and relaunched on N." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "✅ Linux AppImage updater smoke PASSED (${{ inputs.mode }})." >> "$GITHUB_STEP_SUMMARY"

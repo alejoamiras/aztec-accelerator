@@ -51,12 +51,7 @@ param(
   # When set, /health must report THIS version after N-1 launches, BEFORE any update is expected —
   # proves the installed N-1 actually runs (a wrong fixture or a crashed N-1 otherwise passes the
   # negative leg and fails the positive one confusingly late).
-  [string]$N1Version = "",
-  # N-1's main-binary FILE NAME. Defaults to the renamed binary (current ref); the CALL path
-  # passes "aztec-accelerator.exe" while the fixture is the pre-rename v1.0.7. N itself is always
-  # the current build, so its name is a constant below, and when the two differ the tail asserts
-  # the boundary: new exe present, old exe DELETED (installer.nsi OldMainBinaryName logic).
-  [string]$N1BinaryName = "AztecAccelerator.exe"
+  [string]$N1Version = ""
 )
 $NBinaryName = "AztecAccelerator.exe"
 
@@ -210,8 +205,8 @@ try {
     exit 1
   }
   Write-Host "N-1 installed (exit $($inst.ExitCode))"
-  $Exe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $N1BinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $Exe) { Write-Error "installed N-1 exe ($N1BinaryName) not found under $InstallRoot"; exit 1 }
+  $Exe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $NBinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $Exe) { Write-Error "installed N-1 exe ($NBinaryName) not found under $InstallRoot"; exit 1 }
 
   # ── Pre-seed auto-update so N-1 updates without UI ──
   New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
@@ -317,7 +312,7 @@ try {
     #    proven-absent rename-tolerance can't mask a wrong expected path). ──
     if ($AppProc -and -not $AppProc.HasExited) { Stop-Process -Id $AppProc.Id -Force; $AppProc.WaitForExit() }
     $AppProc = $null
-    Get-Process -Name "AztecAccelerator", "aztec-accelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name "AztecAccelerator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     # Autostart must be OFF for this leg (no Run value armed) — that is exactly the case an
     # ownership gate on the Run value alone would leave open, and it must still not leave a task.
     Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue
@@ -326,8 +321,8 @@ try {
     if ($LASTEXITCODE -eq 0) { Dump-Logs; Write-Error "copy-initiator precondition FAILED — '$TaskName' survived pre-run delete; a later 'no task' assert would be meaningless."; exit 1 }
 
     Copy-Item -Recurse -Force $InstallRoot $QDir
-    $CopyExe = Get-ChildItem -Path $QDir -Recurse -Filter $N1BinaryName | Select-Object -First 1
-    if (-not $CopyExe) { Write-Error "copy-initiator — copied exe ($N1BinaryName) not found under $QDir"; exit 1 }
+    $CopyExe = Get-ChildItem -Path $QDir -Recurse -Filter $NBinaryName | Select-Object -First 1
+    if (-not $CopyExe) { Write-Error "copy-initiator — copied exe ($NBinaryName) not found under $QDir"; exit 1 }
     # Baseline the marker-armed log count BEFORE the copy runs: the installed N-1 was launched
     # earlier for the launch proof and its own 5s update poll may already have armed a marker, and
     # daily log files persist — so mere PRESENCE of the line could come from P, not the copy
@@ -415,7 +410,7 @@ try {
     if ($pStatus -ne "present") {
       Dump-Logs; Write-Error "BARRIER FAILED — sentinel measured P as '$pStatus' (expected 'present' at PREINSTALL, before any File copy); the park point is not where we think it is."; exit 1
     }
-    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter $N1BinaryName | Select-Object -First 1
+    $QExe = Get-ChildItem -Path $QDir -Recurse -Filter $NBinaryName | Select-Object -First 1
     if (-not $QExe) { Write-Error "BARRIER — staged Q exe not found under $QDir"; exit 1 }
     if ((Get-FileHash $Exe.FullName -Algorithm SHA256).Hash -ne (Get-FileHash $QExe.FullName -Algorithm SHA256).Hash) {
       Dump-Logs; Write-Error "BARRIER FAILED — installed exe already differs from the pre-update copy inside the window; mutation began before the barrier (park point too late)."; exit 1
@@ -547,30 +542,21 @@ try {
   }
   Log "SUCCESS — updated to $NVersion via the local feed (artifact downloaded + relaunched)"
 
-  # End-state: no update-transaction file survives N's startup (the real v1.0.7 N-1 predates the
-  # marker and writes none; a current-ref N-1's marker must have been reconciled away by now —
-  # /health == N means the server is up, which happens AFTER startup reconciliation).
+  # End-state: no update-transaction file survives N's startup. A same-key 3.x N-1's marker must
+  # have been reconciled away by now; /health == N happens after startup reconciliation.
   foreach ($f in @("update-in-progress.json", "update-txn", "update-txn-done")) {
     if (Test-Path (Join-Path $ConfigDir $f)) { Dump-Logs; Write-Error "end-state FAILED — $f present after the update; the startup reconcile did not clear the transaction."; exit 1 }
   }
 
-  # End-state: the NEW-name exe is what's installed. Across the rename boundary (call path,
-  # N-1 = pre-rename fixture) also require the OLD exe GONE — the installer's OldMainBinaryName
-  # delete is what keeps stale-exe autostart loops impossible for existing users; observe it.
+  # End-state: the current executable name is installed.
   $NewExe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $NBinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $NewExe) { Dump-Logs; Write-Error "end-state FAILED — $NBinaryName not found under $InstallRoot after the update."; exit 1 }
-  if ($N1BinaryName -ne $NBinaryName) {
-    $OldExe = Get-ChildItem -Path $InstallRoot -Recurse -Filter $N1BinaryName -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($OldExe) { Dump-Logs; Write-Error "end-state FAILED — old-name exe ($($OldExe.FullName)) SURVIVED the renamed update; the installer's OldMainBinaryName delete did not fire (stale-exe autostart loop risk)."; exit 1 }
-  }
-  # End-state: the autostart Run value points at the NEW exe, quoted. Same-name path: the value
-  # set at arming is already the (overwritten-in-place) exe. Rename boundary: the old target was
-  # deleted, so N's startup heal must have rewritten it. One assert covers both.
+  # End-state: the autostart Run value points at the installed executable, quoted.
   if ($Mode -eq "positive") {
     $endVal = (Get-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Aztec Accelerator" -ErrorAction SilentlyContinue)."Aztec Accelerator"
     $expected = '"' + $NewExe.FullName + '"'
     if (-not $endVal -or -not $endVal.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
-      Dump-Logs; Write-Error "end-state FAILED — Run value is '$endVal', expected the quoted installed exe $expected (rename-boundary heal or arming regressed)."; exit 1
+      Dump-Logs; Write-Error "end-state FAILED — Run value is '$endVal', expected the quoted installed exe $expected (arming or startup heal regressed)."; exit 1
     }
   }
 

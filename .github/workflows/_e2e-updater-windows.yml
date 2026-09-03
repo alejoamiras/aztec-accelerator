@@ -138,15 +138,12 @@ jobs:
           if (-not $n1) { Write-Error "N-1 installer not found"; exit 1 }
           # Guard a no-op pass: N-1 must differ from N (the release version).
           if ($env:N1_VERSION -eq $env:N_VERSION) { Write-Error "N-1 == N ($env:N_VERSION) — a no-op update would pass trivially"; exit 1 }
-          $n1BinaryName = if ($env:N1_VERSION -eq "1.0.7") { "aztec-accelerator.exe" } else { "AztecAccelerator.exe" }
           & packages/accelerator/scripts/updater-smoke-windows.ps1 `
             -NVersion $env:N_VERSION `
             -NArtifactsDir "$env:RUNNER_TEMP\n" `
             -N1Installer $n1.FullName `
             -RepoRoot $env:GITHUB_WORKSPACE `
-            -N1Version $env:N1_VERSION `
-            -N1BinaryName $n1BinaryName
-          # The only published complete Windows fixture before the executable rename is 1.0.7.
+            -N1Version $env:N1_VERSION
 
       - name: Result summary
         if: success()

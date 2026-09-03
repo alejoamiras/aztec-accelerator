@@ -142,16 +142,12 @@ describe("CI/scripts reference the renamed binary (lockstep sites)", () => {
     );
   });
 
-  test("the ONLY deliberate old-name literal in workflows is selected for the v1.0.7 fixture", () => {
-    // The resolver can select the pre-rename v1.0.7 release; _e2e-updater-windows.yml must use
-    // its old executable name only for that exact version. Nothing else may reference the old exe.
+  test("the Windows updater workflow requires a renamed 3.x baseline", () => {
     const body = fs.readFileSync(
       path.join(REPO, ".github/workflows/_e2e-updater-windows.yml"),
       "utf8",
     );
-    expect(body).toContain(
-      '$n1BinaryName = if ($env:N1_VERSION -eq "1.0.7") { "aztec-accelerator.exe" } else { "AztecAccelerator.exe" }',
-    );
-    expect(body.split("aztec-accelerator.exe").length - 1).toBe(1);
+    expect(body).not.toContain("aztec-accelerator.exe");
+    expect(body).not.toContain("N1BinaryName");
   });
 });

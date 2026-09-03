@@ -41,6 +41,7 @@ const ACCELERATOR_README = fs.readFileSync(
   path.join(REPO, "packages/accelerator/README.md"),
   "utf8",
 );
+const RELEASE_RUNBOOK = fs.readFileSync(path.join(REPO, "docs/RELEASE_RUNBOOK.md"), "utf8");
 const PLAYGROUND_PACKAGE = fs.readFileSync(
   path.join(REPO, "packages/playground/package.json"),
   "utf8",
@@ -110,17 +111,28 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(CHANGELOG).toContain("456E5A3DB518F598");
   });
 
-  test("an updater-key rotation has a narrow bootstrap gate, then returns to same-key N-1 smokes", () => {
-    expect(WF).toContain("updater_key_rotation_bootstrap:");
+  test("ordinary releases fail closed on a same-key baseline and have no rotation escape hatch", () => {
     expect(WF).toContain("resolve-updater-baseline.ts");
-    expect(WF).toContain("needs.resolve-updater-baseline.outputs.rotation == 'false'");
-    expect(WF).toContain("needs.resolve-updater-baseline.outputs.rotation == 'true'");
-    expect(WF).toContain("mode: key-rotation");
-    expect(WF).toContain("needs.update-smoke-key-rotation.result == 'success'");
-    expect(UPDATER).toContain("old updater key rejected the authentic new-key manifest");
-    expect(UPDATER_SMOKE_SCRIPTS[0]).toContain(
-      "update-manifest verification failed (SignatureInvalid)",
-    );
+    expect(WF).not.toContain("updater_key_rotation_bootstrap");
+    expect(WF).not.toContain("outputs.rotation");
+    expect(WF).not.toContain("update-smoke-key-rotation");
+    expect(WF).not.toContain("mode: key-rotation");
+    expect(UPDATER).toContain("ordinary updater smoke requires a same-key N-1 baseline");
+    expect(UPDATER).not.toContain("key-rotation");
+    expect(UPDATER_SMOKE_SCRIPTS[0]).not.toContain("key-rotation");
+
+    const releaseJob = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    for (const job of [
+      "update-smoke.result",
+      "update-smoke-linux.result",
+      "update-smoke-windows.result",
+      "update-smoke-windows-negative.result",
+    ]) {
+      expect(releaseJob).toContain(`needs.${job} == 'success'`);
+    }
+    expect(WF).toContain("mode: [positive, negative]");
+    expect(RELEASE_RUNBOOK).toContain("no dispatch toggle");
+    expect(RELEASE_RUNBOOK).toContain("deliberately reviewed migration change");
   });
 
   test("mode split: `promote` runs only under promote-only; publish gated across release/tag/finalize", () => {
