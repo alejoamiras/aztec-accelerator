@@ -133,7 +133,7 @@ Desktop builds use fresh throwaway updater keys so a new binary can be produced 
 
 The packaged composed-proof legs replace the playground's workspace SDK with the packed tarball, build the production playground, and serve that bundle only on `127.0.0.1:5173`. They deliberately do not use Vite's development dependency optimizer. Playwright is exact-pinned identically in the desktop and playground packages, and every browser install resolves from the consuming workspace instead of allowing a root-context `bunx` to fetch a different release. Each composed-proof step has a 35-minute ceiling; a failure or cancellation retains the accelerator, node, preview-server, and Playwright trace output in the attempt-specific Actions artifact.
 
-A prerelease is public with `--latest=false` and omits `latest.json`. A stable release includes `latest.json`, but publishing still does not write S3 or alter what installed clients receive.
+A prerelease is public with `--latest=false` and omits `latest.json`. A stable release includes `latest.json`, but publishing still does not write S3, alter what installed clients receive, or mark the release GitHub Latest. After a real forward GA promotion verifies the signed public feed, the workflow marks that release GitHub Latest. A rollback changes only the authoritative updater feed and deliberately leaves GitHub Latest on the newest GA.
 
 ### Expected assets
 
@@ -168,14 +168,14 @@ gh workflow run release-accelerator.yml --ref main \
   -f version=X.Y.Z -f mode=promote-only -f dry_run=true
 ```
 
-For an ordinary GA, flip the feed and open the source-version bump PR:
+For an ordinary GA, flip and verify the feed, mark the release GitHub Latest, and open the source-version bump PR:
 
 ```bash
 gh workflow run release-accelerator.yml --ref main \
   -f version=X.Y.Z -f mode=promote-only -f bump_source=true
 ```
 
-Promotion independently requires a published, non-draft, non-prerelease release with the exact 17 assets. It verifies the release's own signed manifest, exact platform URLs, and reachable payloads before uploading those same manifest bytes. The S3 write is authoritative; CloudFront invalidation is best effort, and a separate job polls the public feed until it serves the requested version and passes cryptographic verification.
+Promotion independently requires a published, non-draft, non-prerelease release with the exact 17 assets. It verifies the release's own signed manifest, exact platform URLs, and reachable payloads before uploading those same manifest bytes. The S3 write is authoritative; CloudFront invalidation is best effort, and a separate job polls the public feed until it serves the requested version and passes cryptographic verification. Only then does an organic-GA promotion (`bump_source=true`) update GitHub's Latest badge. Rollback promotions leave that human-facing badge unchanged.
 
 Merge the source-version bump PR after an organic GA. Never request `bump_source` for a rollback.
 
