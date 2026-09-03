@@ -223,19 +223,23 @@ jobs:
         run: bash .github/scripts/packaged-e2e-swap-sdk.sh
 
       - name: Run packaged-E2E (composed proof)
+        timeout-minutes: 35
         env:
           AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
         run: bun run --cwd packages/playground test:e2e:packaged
 
       - name: Upload app log
-        if: failure()
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packaged-e2e-linux-logs
+          name: packaged-e2e-linux-logs-attempt-${{ github.run_attempt }}
           path: |
             /tmp/accel.log
             /tmp/xvfb.log
             /tmp/aztec-node.log
+            /tmp/packaged-e2e-vite.log
+            packages/playground/test-results
+            packages/playground/playwright-report
           if-no-files-found: ignore
           retention-days: 7
 
@@ -342,18 +346,22 @@ jobs:
         run: bash .github/scripts/packaged-e2e-swap-sdk.sh
 
       - name: Run packaged-E2E (composed proof)
+        timeout-minutes: 35
         env:
           AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
         run: bun run --cwd packages/playground test:e2e:packaged
 
       - name: Upload app log
-        if: failure()
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packaged-e2e-macos-logs
+          name: packaged-e2e-macos-logs-attempt-${{ github.run_attempt }}
           path: |
             /tmp/accel.log
             /tmp/aztec-node.log
+            /tmp/packaged-e2e-vite.log
+            packages/playground/test-results
+            packages/playground/playwright-report
           if-no-files-found: ignore
           retention-days: 7
 

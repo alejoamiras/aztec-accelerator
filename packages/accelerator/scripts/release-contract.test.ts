@@ -40,6 +40,18 @@ const ACCELERATOR_README = fs.readFileSync(
   path.join(REPO, "packages/accelerator/README.md"),
   "utf8",
 );
+const PLAYGROUND_PACKAGE = fs.readFileSync(
+  path.join(REPO, "packages/playground/package.json"),
+  "utf8",
+);
+const PLAYWRIGHT_CONFIG = fs.readFileSync(
+  path.join(REPO, "packages/playground/playwright.config.ts"),
+  "utf8",
+);
+const PACKAGED_E2E_RUNNER = fs.readFileSync(
+  path.join(REPO, "packages/playground/scripts/test-packaged-e2e.sh"),
+  "utf8",
+);
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
   test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
@@ -124,6 +136,27 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     // release never publishes. [mut: revert the fetch to `releases/tags/$TAG` → 404 on the draft → this fails]
     expect(WF).toMatch(/RID=\$\(gh release view "\$TAG" --json databaseId/);
     expect(WF).toContain('gh api "repos/$GH_REPO/releases/$RID"');
+  });
+
+  test("packaged proof serves a production build and fails with retained diagnostics instead of hanging", () => {
+    expect(PLAYGROUND_PACKAGE).toContain(
+      '"test:e2e:packaged": "bash scripts/test-packaged-e2e.sh"',
+    );
+    expect(PACKAGED_E2E_RUNNER).toContain("bun run build");
+    expect(PACKAGED_E2E_RUNNER).toContain(
+      "bun run preview -- --host 127.0.0.1 --port 5173 --strictPort",
+    );
+    expect(PACKAGED_E2E_RUNNER).toContain("PLAYWRIGHT_EXTERNAL_WEBSERVER=1");
+    expect(PLAYWRIGHT_CONFIG).toContain("process.env.PLAYWRIGHT_EXTERNAL_WEBSERVER");
+    expect(PLAYWRIGHT_CONFIG).toContain('baseURL: "http://127.0.0.1:5173"');
+
+    const proofSteps = PACKAGED.match(
+      /- name: Run packaged-E2E \(composed proof\)\n\s+timeout-minutes: 35/g,
+    );
+    expect(proofSteps?.length).toBe(2);
+    expect(PACKAGED.match(/if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}/g)?.length).toBe(2);
+    expect(PACKAGED.match(/\/tmp\/packaged-e2e-vite\.log/g)?.length).toBe(2);
+    expect(PACKAGED.match(/packages\/playground\/test-results/g)?.length).toBe(2);
   });
 
   test("promote pre-flight verifies a published, non-draft, non-prerelease stable with a signed feed", () => {
