@@ -69,6 +69,9 @@
         "vite-plugin-node-polyfills": "^0.28",
       },
     },
+    "packages/release-feed": {
+      "name": "@alejoamiras/aztec-accelerator-release-feed",
+    },
     "packages/sdk": {
       "name": "@alejoamiras/aztec-accelerator",
       "version": "0.0.0",
@@ -107,6 +110,8 @@
     "@alejoamiras/aztec-accelerator-landing": ["@alejoamiras/aztec-accelerator-landing@workspace:packages/landing"],
 
     "@alejoamiras/aztec-accelerator-playground": ["@alejoamiras/aztec-accelerator-playground@workspace:packages/playground"],
+
+    "@alejoamiras/aztec-accelerator-release-feed": ["@alejoamiras/aztec-accelerator-release-feed@workspace:packages/release-feed"],
 
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
 
