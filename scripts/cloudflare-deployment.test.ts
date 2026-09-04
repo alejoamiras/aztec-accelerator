@@ -29,6 +29,7 @@ describe("Cloudflare deployment contract", () => {
     );
     expect(release.match(/wrangler kv key put/g)).toHaveLength(1);
     expect(release).toContain("CLOUDFLARE_RELEASE_FEED_API_TOKEN");
+    expect(release.match(/environment: release-feed/g)).toHaveLength(2);
     expect(release).not.toMatch(/aws-actions|aws s3|cloudfront/i);
   });
 

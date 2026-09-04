@@ -136,6 +136,7 @@ jobs:
     name: Release feed access preflight
     needs: [validate]
     if: ${{ inputs.auth_probe }}
+    environment: release-feed
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1187,6 +1188,7 @@ jobs:
     name: Promote (flip KV feed)
     needs: [validate]
     if: ${{ !inputs.auth_probe && inputs.mode == 'promote-only' }}
+    environment: release-feed
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

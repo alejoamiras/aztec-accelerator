@@ -12,7 +12,8 @@ No OpenTofu, S3, CloudFront, or build server is required.
 3. Change the Worker names and custom-domain routes in each `wrangler.jsonc` for the fork's account.
 4. Create `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_DEPLOY_API_TOKEN`,
    `CLOUDFLARE_RELEASE_FEED_DEPLOY_API_TOKEN`, and `CLOUDFLARE_RELEASE_FEED_API_TOKEN` GitHub Actions
-   secrets. Keep the promotion token limited to KV read/write. Keep the release-feed deployment token
+   secrets. Store the latter two on the `release-feed` environment, not at repository scope. Keep the
+   promotion token limited to KV read/write. Keep the release-feed deployment token
    separate from the site deployment token and scope it to that Worker where the account supports it.
    Worker route deployment also needs Workers Routes edit and Zone read access.
 5. Seed `latest.json`, remove any conflicting DNS-only CNAME, deploy the landing Custom Domain so a
