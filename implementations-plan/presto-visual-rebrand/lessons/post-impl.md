@@ -42,6 +42,24 @@ holds (the exponential approach stalled ~40° short of the claimed "lands on top
 regression test eases materially before sampling so the old bug actually fails it; the sweep's
 workflow guard asserts git's exit code.
 
+## Main merge 2026-09-04 (#485-#496 → branch, commit `1985ccd`)
+Twelve commits, twelve conflicts. Two were features that cut across the rebrand: #495 (HTTPS-default
+browser proving) added a new SDK phase `secure-connection-unavailable`, new recovery UI on the
+landing and playground, and modified the ASCII animation we had deleted; #496 moved hosting to
+Cloudflare Workers. Ported: the new phase into the dial's fallback family (`spark-orbit.ts` + test),
+#495's markup re-voiced into Presto vocabulary and restyled from amber to the gold tokens, its
+e2e/unit assertions updated ("running", "Presto is reachable"), the ASCII animation kept deleted.
+Mechanical: biome/lockfile/schemas from main, package.jsons combined, capability schemas regenerated
+by a plain cargo build (the macOS schema, which Linux cannot regenerate, had the `set_theme`
+allow/deny entries ported by hand so all five schemas carry the same delta).
+Lessons: `build.rs` hash-checks `package.json` against the frontend bundle manifest, so sorting
+package.json AFTER `frontend:build` invalidates the bundle and cargo panics at build.rs:28 (rebuild
+the frontend last). The brand sweep's merge-base guard fails while a merge is in progress (HEAD is
+still the pre-merge commit) and passes once the merge is committed. Landing's typecheck rejects
+main's `mock(...) as typeof fetch` under Bun's types (`preconnect` is required); cast via `unknown`.
+Gates on the merged tree: root suite, SDK 187, playground unit 73 + mocked e2e 13, landing 17,
+accelerator Playwright 84, Rust 125 + core 266, WebDriver 22/22, actionlint, brand sweep.
+
 ## Main merge 2026-08-31 (#479/#481/#482/#484 → branch) + codex audit
 Five conflicts, all in files the rebrand rewrote: `windows.rs` (branch theme lookup + main's
 dev-only loopback navigation exception, both kept), `landing/main.ts` (main's
