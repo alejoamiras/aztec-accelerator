@@ -39,7 +39,7 @@ jobs:
           REPO: ${{ github.repository }}
           # `inputs.*` is EMPTY on a push trigger, and `gh release download ""` silently resolves to whatever
           # GitHub calls "Latest" — which this repo deliberately never updates (every release is published
-          # --latest=false; the signed S3 feed is the source of truth). That resolved to a 1.0.7 installer,
+          # --latest=false; the signed updater feed is the source of truth). That resolved to a 1.0.7 installer,
           # whose binary still carries the pre-rename name, so the run failed looking for AztecAccelerator.exe.
           TAG: ${{ inputs.release_tag || 'accelerator-v2.0.0' }}
         run: |

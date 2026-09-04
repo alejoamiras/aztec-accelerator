@@ -26,12 +26,12 @@ cache
 test-results/
 playwright-report/
 
-# OpenTofu / Terraform
-infra/tofu/.terraform/
-infra/tofu/*.tfstate
-infra/tofu/*.tfstate.*
-infra/tofu/terraform.tfvars
-infra/tofu/.snapshot/
+# Defensive ignores for stale Terraform/OpenTofu state in existing clones. The configuration is gone,
+# but state and variable files can contain credentials and must never become visible to Git.
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
 
 # Yarn (not used — this is a Bun workspace)
 .pnp.*

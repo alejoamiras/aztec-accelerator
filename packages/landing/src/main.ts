@@ -62,7 +62,7 @@ function detectOs(): OsInfo {
   return { label: "Download", pattern: /^$/ };
 }
 
-// Resolve the live stable tag from the SIGNED S3 feed (single source of truth — B6), NOT a GitHub releases
+// Resolve the live stable tag from the SIGNED KV-backed feed (single source of truth — B6), NOT a GitHub releases
 // list-scan (which had no prerelease filter). Best effort, non-blocking; the feed body is untrusted and
 // validated in `feedVersionToTag`.
 async function fetchLatestAcceleratorTag(): Promise<string | null> {

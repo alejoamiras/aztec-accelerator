@@ -7,7 +7,14 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["packages/**/*.ts", "packages/**/*.js", "*.json", "*.md", "!.claude"]
+    "includes": [
+      "packages/**/*.ts",
+      "packages/**/*.js",
+      "*.json",
+      "*.md",
+      "!.claude",
+      "!packages/release-feed/worker-configuration.d.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -5,7 +5,8 @@
     "packages/sdk",
     "packages/accelerator",
     "packages/playground",
-    "packages/landing"
+    "packages/landing",
+    "packages/release-feed"
   ],
   "scripts": {
     "audit:dependencies": "bun scripts/dependency-audit.ts",
@@ -20,15 +21,14 @@
     "lint:pkg": "sort-package-json --check package.json packages/*/package.json",
     "lint:rust": "cd packages/accelerator/src-tauri && cargo fmt --check",
     "lint:shell": "shellcheck packages/*/scripts/*.sh",
-    "lint:tofu": "cd infra/tofu && tofu fmt -check -diff .",
     "prepare": "husky",
     "sdk:promote": "bun scripts/promote-sdk-latest.ts",
     "test": "bun run lint && bun run test:typecheck && bun run test:unit",
     "test:all": "bun run test && bun run test:e2e",
     "test:e2e": "bun run --cwd packages/sdk test:e2e",
     "test:scripts": "bun test scripts/*.test.ts",
-    "test:typecheck": "bun run typecheck:scripts && bun run --cwd packages/sdk test:lint && bun run --cwd packages/playground typecheck && bun run --cwd packages/playground typecheck:scripts",
-    "test:unit": "bun run --cwd packages/sdk test:unit && bun run --cwd packages/playground test:unit && bun run --cwd packages/accelerator test:unit && bun run test:scripts",
+    "test:typecheck": "bun run typecheck:scripts && bun run --cwd packages/sdk test:lint && bun run --cwd packages/playground typecheck && bun run --cwd packages/playground typecheck:scripts && bun run --cwd packages/release-feed typecheck",
+    "test:unit": "bun run --cwd packages/sdk test:unit && bun run --cwd packages/playground test:unit && bun run --cwd packages/accelerator test:unit && bun run --cwd packages/release-feed test && bun run test:scripts",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json"
   },
   "lint-staged": {
@@ -43,9 +43,6 @@
     ],
     "*.sh": [
       "shellcheck"
-    ],
-    "infra/tofu/*.tf": [
-      "tofu fmt"
     ],
     "**/package.json": [
       "sort-package-json"
@@ -64,6 +61,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.3.0",
     "sort-package-json": "^3.7.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "wrangler": "4.124.0"
   }
 }

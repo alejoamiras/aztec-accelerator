@@ -22,7 +22,7 @@ bun run preview   # Preview production build locally
 
 ## Deployment
 
-Auto-deployed on push to `main` via the [`deploy-landing.yml`](../../.github/workflows/deploy-landing.yml) workflow. Hosted on S3 + CloudFront.
+Auto-deployed on push to `main` via the [`deploy-landing.yml`](../../.github/workflows/deploy-landing.yml) workflow. Hosted with Cloudflare Workers Static Assets.
 
 ## License
 

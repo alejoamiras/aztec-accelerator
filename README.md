@@ -98,6 +98,9 @@ bun run --cwd packages/playground dev    # Start playground dev server
 bun run --cwd packages/sdk build         # Build SDK
 ```
 
+Fork deployments use Cloudflare Workers Static Assets plus KV; see the
+[Cloudflare deployment guide](docs/CLOUDFLARE_DEPLOYMENT.md).
+
 ## Contributing
 
 This project uses [conventional commits](https://www.conventionalcommits.org/) enforced by commitlint. Husky + lint-staged run linting on pre-commit.

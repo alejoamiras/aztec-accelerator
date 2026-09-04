@@ -29,7 +29,7 @@ The throwaway build keys therefore test whether a new binary can be produced. Th
 - **Windows x86_64, positive and negative:** install the pinned real N-1 NSIS fixture, require a production-signed N update to apply, and separately require a tampered payload to be rejected.
 - **Bundle/notarization checks:** enforce the macOS bundle shape and verify both DMGs' code signatures and stapled notarization tickets.
 
-The local feed is never public and never writes the production S3 feed. A prerelease publish is also safe for installed users: it is a GitHub prerelease without `latest.json`, and publishing never flips the live feed.
+The local feed is never public and never writes the production KV feed. A prerelease publish is also safe for installed users: it is a GitHub prerelease without `latest.json`, and publishing never flips the live feed.
 
 ## What remains manual
 
