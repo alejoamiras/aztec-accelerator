@@ -96,11 +96,14 @@ test("harness proves a real denied and granted public-to-loopback fetch", async 
 
   await grantLocalNetwork(context, PLAYGROUND_ORIGIN);
   expect(await permissionState(page)).toBe("granted");
-  await expect(page.locator("#accelerator-label")).toHaveText("running");
+  await expect(page.locator("#accelerator-secure-help")).toBeVisible();
   const automaticHits = await healthHits();
   expect(automaticHits).toBeGreaterThan(0);
   expect(await rawAnnotatedHealth(page)).toBe(true);
   expect(await healthHits()).toBe(automaticHits + 1);
+  await page.locator("#accelerator-use-http").click();
+  await page.locator("#http-session-confirm").click();
+  await expect(page.locator("#accelerator-label")).toHaveText("running");
   await context.close();
 });
 
@@ -120,6 +123,9 @@ test("playground denial gives guidance and same-context grant automatically reco
   expect(await healthHits()).toBe(0);
 
   await grantLocalNetwork(context, PLAYGROUND_ORIGIN);
+  await expect(page.locator("#accelerator-secure-help")).toBeVisible();
+  await page.locator("#accelerator-use-http").click();
+  await page.locator("#http-session-confirm").click();
   await expect(page.locator("#accelerator-label")).toHaveText("running");
   await expect(page.locator("#accelerator-permission-help")).toBeHidden();
   await expect(page.locator("#accelerator-status")).toHaveAttribute("data-status", "online");
@@ -143,8 +149,9 @@ test("landing denial suppresses download and same-context grant automatically re
 
   await grantLocalNetwork(context, LANDING_ORIGIN);
   await expect(page.locator("#landing-permission-help")).toBeHidden();
+  await expect(page.locator("#landing-secure-help")).toBeVisible();
   await expect(page.locator("#download-actions")).toBeVisible();
-  await expect(page.locator(".hero-sub")).toContainText("Presto is running");
+  await expect(page.locator("#landing-secure-title")).toHaveText("Presto is reachable");
   expect(await healthHits()).toBeGreaterThan(0);
   await context.close();
 });
@@ -160,12 +167,15 @@ test("playground automatically recovers when an open prompt is allowed after pro
 
   // The prompt remains unresolved longer than both bounded SDK rounds. This used to settle the UI as
   // offline permanently even after the browser later changed the permission to granted.
-  await expect(page.locator("#accelerator-retry")).toBeEnabled({ timeout: 15_000 });
-  await expect(page.locator("#accelerator-label")).toContainText("not detected");
+  await expect(page.locator("#accelerator-secure-retry")).toBeEnabled({ timeout: 15_000 });
+  await expect(page.locator("#accelerator-label")).toContainText("secure connection unavailable");
   expect(await permissionState(page)).toBe("prompt");
   expect(await healthHits()).toBe(0);
 
   await grantLocalNetwork(context, PLAYGROUND_ORIGIN);
+  await expect(page.locator("#accelerator-secure-help")).toBeVisible();
+  await page.locator("#accelerator-use-http").click();
+  await page.locator("#http-session-confirm").click();
   await expect(page.locator("#accelerator-label")).toHaveText("running");
   await expect(page.locator("#accelerator-status")).toHaveAttribute("data-status", "online");
   expect(await healthHits()).toBeGreaterThan(0);
@@ -181,7 +191,7 @@ test("landing automatically renders blocked guidance when an open prompt is deni
   await mockLandingExternals(page);
   await page.goto(LANDING_ORIGIN);
 
-  await expect(page.locator("#landing-accelerator-retry")).toBeEnabled({ timeout: 10_000 });
+  await expect(page.locator("#landing-secure-retry")).toBeEnabled({ timeout: 10_000 });
   expect(await permissionState(page)).toBe("prompt");
   expect(await healthHits()).toBe(0);
 

@@ -1,11 +1,10 @@
 name: _Updater Smoke (reusable)
 
-# Release-time gate: install the previous stable (N-1), let it auto-update to
+# Release-time gate: install the resolver-selected lower release (N-1), let it auto-update to
 # the just-built+signed build (N) via a local feed impersonating the prod
 # endpoint, and assert it relaunches reporting version N. Reproduces the 1.0.1
-# failure class (macOS amfid hang after the in-place .app swap). macOS only in
-# this first increment; Linux (AppImage) + a standing negative test land in a
-# follow-up once this is proven on a 1.0.3-rc dry-run.
+# failure class (macOS amfid hang after the in-place .app swap). Linux and
+# Windows release-blocking siblings live in their own reusable workflows.
 #
 # Needs no signing key: it serves the already-prod-signed N artifact and N-1
 # validates it against its embedded pubkey. See updater-smoke.sh.
@@ -29,23 +28,23 @@ on:
         description: This run's build artifact name (e.g. accelerator-macos-arm64)
         required: true
         type: string
+      n1-tag:
+        description: Resolver-selected real published release tag below N
+        required: true
+        type: string
+      n1-version:
+        description: Version carried by the resolver-selected N-1 release
+        required: true
+        type: string
       n1-dmg-glob:
         description: Glob for the N-1 release DMG asset (e.g. *macOS-Apple-Silicon.dmg)
         required: true
         type: string
       mode:
-        description: "positive (expect the update to apply) | negative (serve a tampered tarball, expect rejection)"
+        description: "positive (apply) | negative (reject tamper)"
         required: false
         default: positive
         type: string
-    secrets:
-      # F-004: a C4+ N-1 enforces the signed-manifest envelope, so the smoke feed must be signed with
-      # the prod updater key (which the synthetic/real N-1 embeds). Same key the build job uses.
-      TAURI_SIGNING_PRIVATE_KEY:
-        required: true
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-        required: true
-
 jobs:
   updater-smoke:
     name: Updater Smoke
@@ -60,39 +59,39 @@ jobs:
         with:
           bun-version-file: .bun-version
 
-      # REQUIRED for sign-smoke-feed.sh: it runs `bunx tauri signer sign`, which only resolves the
-      # LOCAL @tauri-apps/cli (a devDependency of packages/accelerator). Without an install, bunx
-      # falls back to fetching an npm package literally named `tauri` — which has no executable, so
-      # the smoke dies with "could not determine executable to run for package tauri". The Windows
-      # smoke never hit this because it uses ./.github/actions/setup-accelerator, which installs.
-      - name: Install dependencies (provides @tauri-apps/cli for feed signing)
-        run: bun install --frozen-lockfile
-
       - name: Download N artifacts (this run)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.n-artifact }}
           path: n-artifacts
 
-      - name: Download latest stable (N-1) DMG
+      - name: Download resolver-selected N-1 DMG and verify its updater-key relationship
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           N_VERSION: ${{ inputs.n-version }}
+          N1_TAG: ${{ inputs.n1-tag }}
+          N1_VERSION: ${{ inputs.n1-version }}
         run: |
-          N1_TAG=$(gh release list --exclude-pre-releases --limit 20 --json tagName --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
-          if [ -z "$N1_TAG" ]; then
-            echo "::error::no stable release found to use as N-1"
+          if [ "$N1_TAG" != "accelerator-v$N1_VERSION" ]; then
+            echo "::error::resolver output is inconsistent: tag=$N1_TAG version=$N1_VERSION"
             exit 1
           fi
           echo "N-1 = $N1_TAG"
           # Guard against a no-op pass: if N-1 resolves to the SAME version under
-          # test (e.g. a re-run after N is already the latest stable), the updater
+          # test (e.g. bad resolver wiring selects N itself), the updater
           # has nothing to do and `/health == N` would pass trivially (false pass).
           # Exact tag compare (tags are `accelerator-v<version>`) — a suffix match
           # would false-trip on e.g. accelerator-v11.0.3 vs 1.0.3.
           if [ "$N1_TAG" = "accelerator-v$N_VERSION" ]; then
             echo "::error::N-1 ($N1_TAG) is the version under test (accelerator-v$N_VERSION) — no-op no-update would pass trivially. Aborting."
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/contents/packages/accelerator/src-tauri/tauri.conf.json?ref=$N1_TAG" --jq '.content' | base64 -d > n1-tauri.conf.json
+          OLD_PUB=$(jq -r '.plugins.updater.pubkey' n1-tauri.conf.json)
+          NEW_PUB=$(jq -r '.plugins.updater.pubkey' packages/accelerator/src-tauri/tauri.conf.json)
+          if [ "$OLD_PUB" != "$NEW_PUB" ]; then
+            echo "::error::ordinary updater smoke requires a same-key N-1 baseline"
             exit 1
           fi
           # Retry the N-1 asset download: GitHub's release-asset CDN throttles/errors transiently (the
@@ -127,8 +126,6 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           DMG=$(find n1 -name '*.dmg' | head -1)
           if [ -z "$DMG" ]; then echo "::error::N-1 DMG not found"; exit 1; fi

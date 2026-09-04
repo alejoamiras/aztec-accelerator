@@ -1,0 +1,11 @@
+{
+  "name": "@alejoamiras/aztec-accelerator-release-feed",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "test": "bun test",
+    "typecheck": "wrangler types --check && tsc --noEmit",
+    "types": "wrangler types"
+  }
+}

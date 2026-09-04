@@ -490,6 +490,8 @@ h1, h2, h3 {
 .notice-content { max-width: 560px; }
 .notice-content h3 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
 .notice-content p { color: var(--text-muted); font-size: 14px; line-height: 1.6; }
+.landing-permission-notice .notice-content p + p { margin-top: 8px; }
+.landing-permission-notice .notice-content strong { color: var(--text); }
 .btn-outline {
   background: transparent;
   border: 1px solid var(--border);

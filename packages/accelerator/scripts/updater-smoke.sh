@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Release-time updater smoke test (macOS).
 #
-# Proves a user on the previous stable (N-1) can auto-update to the just-built,
-# just-signed build (N) AND the result relaunches successfully — the exact
+# Proves a user on a resolver-selected lower same-key release (N-1) can auto-update
+# to the just-built, just-signed build (N) AND the result relaunches successfully — the exact
 # failure class that shipped in 1.0.1 (amfid hang after the in-place .app swap),
 # which fresh-install smoke does not catch.
 #
@@ -20,6 +20,9 @@
 #     n-artifacts-dir dir with N's *.app.tar.gz + *.app.tar.gz.sig
 #     n1-dmg          path to the downloaded N-1 .dmg
 #     repo-root       repo root (to locate the feed server script)
+#
+# n-artifacts-dir also contains smoke-latest.json, pre-signed by the isolated
+# release signer. This smoke never receives or invokes the production key.
 set -euo pipefail
 
 N_VERSION="$1"
@@ -33,6 +36,10 @@ REPO_ROOT="$5"
 #           the gate has teeth (a green positive run alone is consistent with a
 #           test that can never fail). Set via UPDATER_SMOKE_MODE.
 MODE="${UPDATER_SMOKE_MODE:-positive}"
+case "$MODE" in
+  positive|negative) ;;
+  *) echo "::error::unknown UPDATER_SMOKE_MODE '$MODE'"; exit 1 ;;
+esac
 
 APP="/Applications/Aztec Accelerator.app"
 # APP_BIN is resolved AFTER the N-1 install below — resolving here would probe a not-yet-installed
@@ -113,15 +120,22 @@ log "trusting CA + adding hosts entry"
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$WORK/ca.pem"
 echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
 
-# ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
-# A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry a `manifest`/`manifest_sig`
-# signed with the SAME updater key N-1 embeds (the prod key — the synthetic N-1 keeps the committed
-# prod pubkey). The workflow provides it via TAURI_SIGNING_PRIVATE_KEY[_PASSWORD].
-jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
-  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" \
-  '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
-    platforms: { ($key): { signature:$sig, url:$url, size:$size } }}' > "$WORK/latest.json"
-"$REPO_ROOT/packages/accelerator/scripts/sign-smoke-feed.sh" "$WORK/latest.json" "$REPO_ROOT"
+# ── Stage the pre-signed latest.json for N (F-004 Layer A) ──
+SIGNED_FEED="$(find "$N_ARTIFACTS_DIR" -name 'smoke-latest.json' | head -1)"
+[ -n "$SIGNED_FEED" ] || { echo "::error::no pre-signed smoke-latest.json in $N_ARTIFACTS_DIR"; exit 1; }
+jq -e --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
+  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" '
+    .version == $v
+    and (.platforms | keys == [$key])
+    and .platforms[$key].signature == $sig
+    and .platforms[$key].url == $url
+    and .platforms[$key].size == $size
+    and (.manifest | type == "string" and length > 0)
+    and (.manifest_sig | type == "string" and length > 0)
+  ' "$SIGNED_FEED" >/dev/null || {
+    echo "::error::pre-signed smoke feed does not bind the exact N artifact"; exit 1;
+  }
+cp "$SIGNED_FEED" "$WORK/latest.json"
 log "latest.json:"; cat "$WORK/latest.json"
 
 # ── Start the local HTTPS feed on :443 ──
@@ -160,7 +174,7 @@ APP_BIN=$(find "$APP/Contents/MacOS" -maxdepth 1 -type f \( -name AztecAccelerat
 mkdir -p "$CONFIG_DIR"
 echo '{"config_version":1,"safari_support":false,"approved_origins":[],"speed":"full","auto_update":true}' > "$CONFIG_DIR/config.json"
 
-# ── Launch N-1; it should auto-update to N and relaunch ──
+# ── Launch N-1 and exercise its ordinary same-key update path. ──
 log "launching N-1 (expecting auto-update → N)"
 "$APP_BIN" > "$WORK/app.log" 2>&1 &
 APP_PID=$!

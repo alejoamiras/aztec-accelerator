@@ -1,11 +1,11 @@
 name: _Updater Smoke Linux (reusable)
 
-# ADVISORY Linux/AppImage sibling of _e2e-updater.yml. Installs the previous
-# stable (N-1) AppImage, lets it auto-update to the just-built+signed build (N)
+# Release-blocking Linux/AppImage sibling of _e2e-updater.yml. Installs the resolver-selected
+# lower same-key (N-1) AppImage, lets it auto-update to the just-built+signed build (N)
 # via a local feed impersonating the prod endpoint, and asserts it relaunches
 # reporting version N. Answers the open `v1Compatible` question: does Tauri's
-# Linux updater actually apply a RAW .AppImage in place? NOT in `tag.needs` —
-# a red here is signal about the Linux update path, not a release blocker.
+# Linux updater actually applies a RAW .AppImage in place. A red job blocks the
+# draft release through `release.needs`.
 #
 # Needs no signing key: it serves the already-prod-signed N .AppImage and N-1
 # validates it against its embedded pubkey. See updater-smoke-linux.sh.
@@ -22,6 +22,14 @@ on:
         required: false
         default: accelerator-linux-x86_64
         type: string
+      n1-tag:
+        description: Resolver-selected real published release tag below N
+        required: true
+        type: string
+      n1-version:
+        description: Version carried by the resolver-selected N-1 release
+        required: true
+        type: string
       platform-key:
         description: Tauri updater platform key
         required: false
@@ -37,16 +45,9 @@ on:
         required: false
         default: positive
         type: string
-    secrets:
-      # F-004: sign the smoke feed with the prod updater key (which N-1 embeds). See _e2e-updater.yml.
-      TAURI_SIGNING_PRIVATE_KEY:
-        required: true
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-        required: true
-
 jobs:
   updater-smoke-linux:
-    name: Updater Smoke Linux
+    name: Updater Smoke Linux (${{ inputs.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -57,14 +58,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-
-      # REQUIRED for sign-smoke-feed.sh: it runs `bunx tauri signer sign`, which only resolves the
-      # LOCAL @tauri-apps/cli (a devDependency of packages/accelerator). Without an install, bunx
-      # falls back to fetching an npm package literally named `tauri` — which has no executable, so
-      # the smoke dies with "could not determine executable to run for package tauri". The Windows
-      # smoke never hit this because it uses ./.github/actions/setup-accelerator, which installs.
-      - name: Install dependencies (provides @tauri-apps/cli for feed signing)
-        run: bun install --frozen-lockfile
 
       # FUSE (AppImage runtime) + headless display + tray host + dbus. Running the
       # AppImage natively (via FUSE) sets $APPIMAGE, which the Tauri Linux updater
@@ -104,15 +97,16 @@ jobs:
           name: ${{ inputs.n-artifact }}
           path: n-artifacts
 
-      - name: Download latest stable (N-1) AppImage
+      - name: Download resolver-selected N-1 AppImage
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           N_VERSION: ${{ inputs.n-version }}
+          N1_TAG: ${{ inputs.n1-tag }}
+          N1_VERSION: ${{ inputs.n1-version }}
         run: |
-          N1_TAG=$(gh release list --exclude-pre-releases --limit 20 --json tagName --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
-          if [ -z "$N1_TAG" ]; then
-            echo "::error::no stable release found to use as N-1"
+          if [ "$N1_TAG" != "accelerator-v$N1_VERSION" ]; then
+            echo "::error::resolver output is inconsistent: tag=$N1_TAG version=$N1_VERSION"
             exit 1
           fi
           echo "N-1 = $N1_TAG"
@@ -161,8 +155,6 @@ jobs:
       - name: Updater smoke (install N-1 → auto-update to N → assert /health == N)
         env:
           UPDATER_SMOKE_MODE: ${{ inputs.mode }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           APPIMAGE=$(find n1 -name '*.AppImage' | head -1)
           if [ -z "$APPIMAGE" ]; then echo "::error::N-1 AppImage not found"; exit 1; fi
@@ -175,4 +167,4 @@ jobs:
 
       - name: Result summary
         if: success()
-        run: echo "✅ Linux AppImage updater smoke PASSED — Tauri applied the raw .AppImage and relaunched on N." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "✅ Linux AppImage updater smoke PASSED (${{ inputs.mode }})." >> "$GITHUB_STEP_SUMMARY"

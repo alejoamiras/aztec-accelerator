@@ -3,6 +3,7 @@ import type { AcceleratorStatus } from "@alejoamiras/aztec-accelerator";
 import {
   AcceleratorStatusController,
   acceleratorStatusView,
+  HttpSessionConsentController,
   watchLoopbackPermissionChanges,
 } from "./accelerator-status";
 
@@ -43,6 +44,23 @@ describe("acceleratorStatusView", () => {
     expect(
       acceleratorStatusView({ available: false, reason: "permission-blocked" }).showPermissionHelp,
     ).toBe(true);
+  });
+
+  test.each([
+    ["https-disabled", "Encrypted Connection is disabled", false],
+    ["tls-or-trust-failure", "Secure connection is not trusted", false],
+    ["accelerator-reachable", "Presto is reachable", false],
+    ["unconfirmed", "Secure connection unavailable", true],
+  ] as const)("renders the %s secure recovery diagnosis", (diagnosis, title, showInstall) => {
+    const view = acceleratorStatusView({
+      available: false,
+      reason: "secure-connection-unavailable",
+      diagnosis,
+    });
+    expect(view.showSecureConnectionHelp).toBe(true);
+    expect(view.showPermissionHelp).toBe(false);
+    expect(view.secureConnectionTitle).toBe(title);
+    expect(view.showInstall).toBe(showInstall);
   });
 });
 
@@ -140,6 +158,137 @@ describe("AcceleratorStatusController", () => {
 
     expect(calls).toBe(2);
     expect(rendered).toEqual([available]);
+  });
+
+  test("duplicate secure retry clicks share one forced refresh", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const controller = new AcceleratorStatusController({
+      check: async (options) => {
+        calls++;
+        expect(options).toEqual({ forceRefresh: true });
+        await gate;
+        return { available: false, reason: "offline" };
+      },
+      render: () => {},
+      setPending: () => {},
+    });
+
+    const first = controller.retrySecureConnection();
+    const duplicate = controller.retrySecureConnection();
+    expect(duplicate).toBe(first);
+    expect(calls).toBe(1);
+    release();
+    await first;
+    expect(calls).toBe(1);
+  });
+});
+
+describe("HttpSessionConsentController", () => {
+  test("cancellation leaves HTTPS-only configuration untouched", async () => {
+    let configured = 0;
+    let refreshed = 0;
+    const openStates: boolean[] = [];
+    const announcements: string[] = [];
+    const controller = new HttpSessionConsentController({
+      configure: () => configured++,
+      refresh: async () => {
+        refreshed++;
+      },
+      setConfirmationOpen: (open) => openStates.push(open),
+      setPending: () => {},
+      announce: (message) => announcements.push(message),
+    });
+
+    controller.request();
+    controller.cancel();
+    await controller.confirm();
+
+    expect(openStates).toEqual([true, false]);
+    expect(configured).toBe(0);
+    expect(refreshed).toBe(0);
+    expect(announcements.at(-1)).toContain("HTTPS-only proving remains enabled");
+  });
+
+  test("confirmation configures once, force-refreshes once, and announces accessibly", async () => {
+    let configured = 0;
+    let refreshed = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const openStates: boolean[] = [];
+    const pendingStates: boolean[] = [];
+    const announcements: string[] = [];
+    const controller = new HttpSessionConsentController({
+      configure: () => configured++,
+      refresh: async () => {
+        refreshed++;
+        await gate;
+      },
+      setConfirmationOpen: (open) => openStates.push(open),
+      setPending: (pending) => pendingStates.push(pending),
+      announce: (message) => announcements.push(message),
+    });
+
+    controller.request();
+    const first = controller.confirm();
+    const duplicate = controller.confirm();
+    expect(duplicate).toBe(first);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(configured).toBe(1);
+    expect(refreshed).toBe(1);
+    release();
+    await first;
+
+    expect(openStates).toEqual([true, false]);
+    expect(pendingStates).toEqual([true, false]);
+    expect(announcements[0]).toContain("this tab");
+    expect(announcements.at(-1)).toContain("this tab only");
+  });
+
+  test("a failed refresh announces that HTTP was enabled and clears pending state", async () => {
+    const pendingStates: boolean[] = [];
+    const announcements: string[] = [];
+    const controller = new HttpSessionConsentController({
+      configure: () => {},
+      refresh: async () => {
+        throw new Error("refresh failed");
+      },
+      setConfirmationOpen: () => {},
+      setPending: (pending) => pendingStates.push(pending),
+      announce: (message) => announcements.push(message),
+    });
+
+    controller.request();
+    await expect(controller.confirm()).rejects.toThrow("refresh failed");
+
+    expect(pendingStates).toEqual([true, false]);
+    expect(announcements.at(-1)).toContain("HTTP is allowed for this tab");
+    expect(announcements.at(-1)).toContain("refresh failed");
+  });
+
+  test("a failed configuration reports that HTTPS-only proving remains enabled", async () => {
+    const announcements: string[] = [];
+    const controller = new HttpSessionConsentController({
+      configure: () => {
+        throw new Error("configuration failed");
+      },
+      refresh: async () => {},
+      setConfirmationOpen: () => {},
+      setPending: () => {},
+      announce: (message) => announcements.push(message),
+    });
+
+    controller.request();
+    await expect(controller.confirm()).rejects.toThrow("configuration failed");
+
+    expect(announcements.at(-1)).toContain("HTTP was not enabled");
+    expect(announcements.at(-1)).toContain("HTTPS-only proving remains enabled");
   });
 });
 

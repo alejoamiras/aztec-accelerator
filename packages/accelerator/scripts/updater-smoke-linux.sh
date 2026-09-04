@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Release-time updater smoke test (Linux / AppImage) — ADVISORY.
+# Release-time updater smoke test (Linux / AppImage) — release-blocking.
 #
-# Linux sibling of updater-smoke.sh (macOS). Proves a user on the previous stable
-# (N-1) AppImage can auto-update to the just-built, just-signed build (N) AND the
-# result relaunches reporting version N. This is the open question Tauri's
-# `v1Compatible` Linux updater raises: the shipped feed serves a RAW `.AppImage`
-# (+ `.AppImage.sig`) — does the updater actually apply it in place and re-exec?
-# This test answers that on a real runner. Advisory (NOT in `tag.needs`) until a
-# proving run; a red here is a SIGNAL about the Linux update path, not a release
-# blocker.
+# Linux sibling of updater-smoke.sh (macOS). Proves a user on a resolver-selected
+# lower same-key (N-1) AppImage can auto-update to the just-built, just-signed build (N) AND the
+# result relaunches reporting version N. It verifies Tauri's `v1Compatible`
+# updater applies the shipped raw `.AppImage` (+ `.AppImage.sig`) in place and
+# re-executes it. A red job blocks draft creation.
 #
 # How it works (no signing key needed — identical trust model to macOS):
 #   - We serve the ALREADY prod-signed N `.AppImage` from a local HTTPS server
@@ -35,6 +32,9 @@
 #     n-artifacts-dir dir with N's *.AppImage + *.AppImage.sig
 #     n1-appimage     path to the downloaded N-1 .AppImage
 #     repo-root       repo root (to locate the feed server script)
+#
+# n-artifacts-dir also contains smoke-latest.json, pre-signed by the isolated
+# release signer. This smoke never receives or invokes the production key.
 set -euo pipefail
 
 N_VERSION="$1"
@@ -45,10 +45,12 @@ REPO_ROOT="$5"
 
 # positive (default): expect the update to apply (/health reports N).
 # negative: serve a TAMPERED AppImage and assert the update is REJECTED. Set via
-#           UPDATER_SMOKE_MODE. (The macOS gate already proves signature teeth
-#           arch-independently; Linux ships positive-only first, but the mode is
-#           wired so a negative leg is a one-line matrix add later.)
+#           UPDATER_SMOKE_MODE.
 MODE="${UPDATER_SMOKE_MODE:-positive}"
+case "$MODE" in
+  positive|negative) ;;
+  *) echo "::error::unknown UPDATER_SMOKE_MODE '$MODE'"; exit 1 ;;
+esac
 
 HEALTH="http://127.0.0.1:59833/health"
 HOST="aztec-accelerator.dev"
@@ -143,14 +145,22 @@ sudo cp "$WORK/ca.pem" "$CA_DEST"
 sudo update-ca-certificates >/dev/null 2>&1
 echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
 
-# ── Synthesize + SIGN latest.json for N (F-004 Layer A) ──
-# A C4+ N-1 enforces the signed-manifest envelope, so the feed MUST carry manifest/manifest_sig signed
-# with the SAME (prod) key N-1 embeds. The workflow provides it via TAURI_SIGNING_PRIVATE_KEY[_PASSWORD].
-jq -n --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
-  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" \
-  '{version:$v, notes:("updater smoke "+$v), pub_date:"2026-01-01T00:00:00Z",
-    platforms: { ($key): { signature:$sig, url:$url, size:$size } }}' > "$WORK/latest.json"
-"$REPO_ROOT/packages/accelerator/scripts/sign-smoke-feed.sh" "$WORK/latest.json" "$REPO_ROOT"
+# ── Stage the pre-signed latest.json for N (F-004 Layer A) ──
+SIGNED_FEED="$(find "$N_ARTIFACTS_DIR" -name 'smoke-latest.json' | head -1)"
+[ -n "$SIGNED_FEED" ] || { echo "::error::no pre-signed smoke-latest.json in $N_ARTIFACTS_DIR"; exit 1; }
+jq -e --arg v "$N_VERSION" --arg key "$PLATFORM_KEY" --arg sig "$N_SIG" \
+  --arg url "https://$HOST/releases/download/$N_BASENAME" --argjson size "$N_SIZE" '
+    .version == $v
+    and (.platforms | keys == [$key])
+    and .platforms[$key].signature == $sig
+    and .platforms[$key].url == $url
+    and .platforms[$key].size == $size
+    and (.manifest | type == "string" and length > 0)
+    and (.manifest_sig | type == "string" and length > 0)
+  ' "$SIGNED_FEED" >/dev/null || {
+    echo "::error::pre-signed smoke feed does not bind the exact N artifact"; exit 1;
+  }
+cp "$SIGNED_FEED" "$WORK/latest.json"
 log "latest.json:"; cat "$WORK/latest.json"
 
 # ── Start the local HTTPS feed on :443 ──
@@ -261,6 +271,6 @@ for _ in $(seq 1 150); do
   sleep 2
 done
 
-echo "::error::updater smoke failed — /health never reported version $N_VERSION (advisory: this may indicate Tauri's Linux updater does not apply a raw .AppImage — see app log for FUSE vs updater-reject signal)"
+echo "::error::updater smoke failed — /health never reported version $N_VERSION (see app log for FUSE vs updater-reject signal)"
 dump_logs
 exit 1

@@ -5,12 +5,17 @@ export default defineConfig({
     baseURL: "http://localhost:5173",
     headless: true,
   },
-  webServer: {
-    // --no-orphans: Vite must not outlive the bun wrapper when Playwright tears down.
-    command: "bun --no-orphans run dev",
-    port: 5173,
-    reuseExistingServer: true,
-  },
+  // The packaged release gate owns a production preview process so it can build after swapping in the
+  // packed SDK and preserve the server log. All other projects keep Playwright's managed dev server.
+  webServer: process.env.PLAYWRIGHT_EXTERNAL_WEBSERVER
+    ? undefined
+    : {
+        // Give Playwright the actual server process. A Bun script wrapper can exit first and leave
+        // Vite reparented, which makes teardown wait indefinitely after every assertion has passed.
+        command: "./node_modules/.bin/vite",
+        port: 5173,
+        reuseExistingServer: true,
+      },
   projects: [
     {
       name: "mocked",
@@ -59,6 +64,7 @@ export default defineConfig({
       timeout: 15 * 60 * 1000,
       retries: 1,
       use: {
+        baseURL: "http://127.0.0.1:5173",
         actionTimeout: 0,
         trace: "retain-on-failure",
       },

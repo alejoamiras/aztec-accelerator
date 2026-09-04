@@ -34,6 +34,7 @@ export function phaseToDial(phase: AnimationPhase): DialTarget {
       return { quadrant: 2 };
     case "denied":
     case "version-mismatch":
+    case "secure-connection-unavailable":
     case "fallback":
       // Verified SDK flow: these are followed by the local prover + "receive" — keep moving.
       return { quadrant: 2, fallback: true };

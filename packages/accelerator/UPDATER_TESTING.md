@@ -1,89 +1,46 @@
-# Manual updater test — run before promoting an rc to stable
+# Updater testing
 
-The auto-updater's in-place swap is the one path our automated tests cannot
-fully exercise (the updater verifies an Ed25519 signature against the embedded
-public key, so a CI test would need either the production signing key or a
-throwaway-key build that isn't the artifact we ship). Until that is automated
-(see below), run this **manual check before promoting any `X.Y.Z-rc.N` to a
-stable `X.Y.Z`** — auto-update from an older stable is exactly what broke in
-1.0.1.
+The release pipeline exercises the real N-1 → N updater path before publishing an accelerator release. All release-time updater smokes consume artifacts and feed fragments signed by the isolated `sign-updater-artifacts` job; no smoke job can read the production updater private key.
 
-## What automated CI already covers
+## Signing boundary
 
-- **Bundle structure invariant** (`release-accelerator.yml`, macOS `build` job):
-  asserts the `.app/Contents/MacOS/` directory contains exactly
-  `{AztecAccelerator, bb}`. This deterministically catches the *specific*
-  1.0.1 regression (a stray `accelerator-server` binary changing the signed
-  bundle's shape and breaking amfid revalidation on update).
-- **WebDriver E2E** confirms a freshly-built app launches and is drivable.
+Desktop build jobs generate a throwaway updater key because Tauri requires one while producing updater bundles. Those signatures are excluded from the uploaded build artifacts.
 
-What it does NOT cover: the actual N-1 → N in-place swap + relaunch on a real
-macOS install.
+After all four desktop builds finish, the `release-signing` environment exposes the production key to one short job. Before the key is available, that job checks out the intended commit, installs pinned tooling, builds the locked Rust verifier, and downloads the exact build outputs. The current key-scoped step performs only:
 
-## Manual runbook (macOS, ~5 min)
+- sign the four updater payloads;
+- verify every payload signature against the public key embedded in `tauri.conf.json`;
+- assemble and verify `latest.json`;
+- assemble and verify one-platform `smoke-latest.json` feeds.
 
-1. Pick the current latest stable on GitHub Releases — call it **N-1**.
-2. On a Mac, fully remove any existing install:
-   - Quit the app (tray → Quit), then `rm -rf "/Applications/Aztec Accelerator.app"`, empty Trash.
-3. Download the **N-1** DMG, install it to `/Applications`, launch it. Confirm the tray icon appears and `curl -s http://127.0.0.1:59833/health` returns `"status":"ok"`.
-4. Publish (or stage) release **N** so the updater feed (`latest.json`) advertises it. (For a dry run, you can point the build at a prerelease and temporarily edit your local feed — but the simplest real test is right after cutting N.)
-5. In the running N-1 app, trigger the update (tray prompt → **Update Now**, or wait for the 5-min check).
-6. **Confirm:** the app downloads, swaps, and **relaunches without hanging**. The tray icon returns; `curl -s http://127.0.0.1:59833/health` still answers; the version now reflects **N** (check the tray "vX.Y.Z" line, or `accelerator-server --version` for the headless build).
-7. If the app hangs at launch after the swap (no tray, process stuck at 0% CPU): **do not promote.** That is the 1.0.1 failure mode — investigate the bundle shape / signature before shipping.
+It never builds, installs, launches, or smoke-tests an application. Downstream jobs receive only signed artifacts and feeds.
 
-## Automated gate (`update-smoke`)
+This is secret scoping, not an independent security sandbox: repository code in the signing job is still trusted. In the solo-maintainer setup, protect `main`, restrict the environment to `main`, and inspect signing-workflow changes before release. Add an independent environment reviewer or external signing service only if protection against a compromised maintainer or malicious code already merged to `main` becomes part of the threat model.
 
-This is now partly automated. The `update-smoke` job in `release-accelerator.yml`
-(reusable `_e2e-updater.yml` + `scripts/updater-smoke.sh` + `updater-feed-server.ts`)
-runs the macOS install→update→relaunch check during every release, post-build.
+The throwaway build keys therefore test whether a new binary can be produced. The production key is tested by signature verification and by the N-1 clients accepting the signed N payloads in the updater smokes.
 
-**It needs no signing key.** It serves the **already prod-signed** N artifact
-from a local HTTPS server impersonating `aztec-accelerator.dev` (an `/etc/hosts`
-entry + a per-run local CA trusted on the runner), and N-1 verifies it against
-its **embedded prod pubkey**. No private key, no throwaway key — the job is
-`contents: read` only.
+## Release-blocking automated coverage
 
-**What it proves — and what it doesn't.** N-1 (latest stable) and N (the build
-under test) are *both* post-fix, so a green **positive** leg proves the live
-signed-updater path works end-to-end (endpoint → TLS → download → signature
-verify → in-place swap → bare-spawn relaunch → `/health == N`). It does **not**
-by itself prove the gate would *catch* a 1.0.1-class regression — the
-deterministic guard for that exact class is the **bundle-shape invariant** in
-the `build` job. To give the gate some teeth, a **negative** leg serves the
-**genuine signature with a tampered tarball** (one appended byte) and asserts
-the update is **rejected** — proven by an actual `download/` hit in the feed log
-(the app fetched the artifact) followed by `/health` *never* reporting N (the
-cryptographic check over the tampered bytes failed). This exercises real
-signature verification, not a malformed-blob parse error. Full detection of a
-*validly-signed but bad* bundle would require an ephemeral CI signing key + a
-CI-keyed N-1 (deferred).
+`release-accelerator.yml` blocks draft creation unless all of these pass:
 
-**Robustness baked in:** the macOS build emits updater artifacts via
-`tauri build --bundles app` (no `hdiutil`) and bundles the DMG in a separate
-retried step, so the chronic GH-runner DMG flake can't suppress updater signal;
-`update-smoke` runs per-arch independent of a sibling arch's build failure; and
-the N-1 selection aborts if it resolves to the same version under test (no
-no-op pass).
+- **macOS Apple Silicon and Intel, positive:** install the current stable N-1 DMG, serve the production-signed N payload from a local TLS endpoint impersonating the configured production host, then require the app to update, relaunch, and report N from `/health`.
+- **macOS Apple Silicon, negative:** append a byte to the genuine payload while retaining its signature and require N-1 to reject it.
+- **Linux x86_64, positive:** run the N-1 AppImage natively under FUSE/Xvfb, update the file in place, require its checksum to change, then require the relaunched app to report N.
+- **Windows x86_64, positive and negative:** install the pinned real N-1 NSIS fixture, require a production-signed N update to apply, and separately require a tampered payload to be rejected.
+- **Bundle/notarization checks:** enforce the macOS bundle shape and verify both DMGs' code signatures and stapled notarization tickets.
 
-**Status:** macOS (Apple Silicon + Intel) positive + an arm64 negative leg are
-**release-blocking** (in `tag.needs`) — validated on a `1.0.3-rc` dry-run, plus
-an Intel-DMG notarization check (`smoke-intel`). The macOS manual runbook above
-is therefore covered by CI; run it only as a belt-and-suspenders sanity check.
+The local feed is never public and never writes the production KV feed. A prerelease publish is also safe for installed users: it is a GitHub prerelease without `latest.json`, and publishing never flips the live feed.
 
-**Linux (AppImage) — ADVISORY.** A Linux sibling (`update-smoke-linux` →
-`_e2e-updater-linux.yml` + `scripts/updater-smoke-linux.sh`) runs the same
-install-N-1 → auto-update → relaunch → `/health == N` check on `ubuntu-latest`
-(FUSE-native AppImage exec under Xvfb + dbus + a tray host; the local CA is
-trusted via `update-ca-certificates`, which both OpenSSL and
-`rustls-native-certs` read). It additionally asserts the on-disk AppImage's
-checksum changed (in-place swap). It is **advisory**: absent from `tag.needs`
-and `continue-on-error` inside the reusable workflow, with a failure downgraded
-to a `::warning::` + step-summary line — so it never blocks or reds a release.
-It exists to answer an open question: does Tauri's `v1Compatible` Linux updater
-actually apply a **raw `.AppImage`** in place? It flips to blocking (into
-`tag.needs`, hard-fail the step) after a proving green `-rc` dry-run.
+## What remains manual
 
-A `-rc` dry-run is safe for real users: prereleases skip the S3 `latest.json`
-upload and are marked `--prerelease --latest=false`, so the prod updater feed
-keeps pointing at the current stable — auto-update users never see the rc. The
-gate's feed is also local-only.
+For a release that changes Windows trust, certificate installation, onboarding, or the HTTPS listener, complete the real-Windows composed-proof procedure in the [accelerator README](README.md#windows-composed-proof--manual-pre-ga-check). GitHub-hosted Windows runners cannot approve the interactive root-CA consent dialog.
+
+For a high-risk macOS updater change, a manual installed-app check is still useful as a final sanity check:
+
+1. Install the current stable N-1 DMG in `/Applications` and confirm `/health` reports N-1.
+2. Publish N without promoting it.
+3. Serve or temporarily select N through a controlled local updater test setup; do not hand-edit the production feed.
+4. Trigger the update and confirm the app relaunches, the tray returns, and `/health` reports N.
+5. If it hangs or fails to relaunch, do not promote the release.
+
+The automated gates are authoritative for ordinary releases; this manual check is not a substitute for a failed CI gate.

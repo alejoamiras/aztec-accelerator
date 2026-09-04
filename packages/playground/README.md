@@ -14,7 +14,16 @@ Interactive web app for comparing in-browser WASM proving against native acceler
 - Embedded wallet with in-browser PXE — no extensions required
 - Token deploy and private transfer flow
 - ASCII terminal animation showing proof phases in real time
+- HTTPS recovery with diagnosis-specific guidance and a confirmed, current-tab-only HTTP escape hatch
 - Diagnostics export for debugging
+
+Browser proving is HTTPS-only by default. When HTTPS cannot connect, the playground keeps Local
+Network Access permission guidance separate from secure-connection recovery, explains the SDK's
+best available diagnosis, and offers **Retry secure connection**. **Use HTTP for this session** first
+warns that private proving data may be exposed to another local user or process. On confirmation it
+sets `httpsOnly: false` and `allowInsecureDowngrade: true` only on the in-memory prover and
+force-refreshes status. The choice is not written to local storage, cookies, URL parameters, or
+desktop configuration and resets on reload. There is no production `?httpsOnly=false` switch.
 
 ## Development
 
@@ -56,7 +65,7 @@ E2E tests use [Playwright](https://playwright.dev).
 bun run build   # Output: dist/
 ```
 
-Deployed to S3 + CloudFront at `playground.aztec-accelerator.dev`. `app.yml` is the PR gate (lint, typecheck, unit, e2e); the live deploy is a manual `publish-testnet.yml` dispatch — pass `skip_sdk_publish=true` to ship the playground without re-publishing the SDK to npm.
+Deployed with Cloudflare Workers Static Assets at `playground.aztec-accelerator.dev`. `app.yml` is the PR gate (lint, typecheck, unit, e2e). The live deploy is a manual `release-sdk.yml` dispatch: choose `sdk-and-playground` for a candidate SDK release plus deploy, or `playground-only` to deploy without publishing npm.
 
 ## License
 

@@ -794,7 +794,7 @@ describe("AcceleratorTransport", () => {
       expect(body).toBeUndefined();
     }, 15_000);
 
-    test("unreachable HTTPS rejects (→ caller maps to offline), never touching http", async () => {
+    test("unreachable HTTPS rejects without the normal probe touching HTTP", async () => {
       const urls: string[] = [];
       globalThis.fetch = mock(async (input: any) => {
         const url: string = typeof input === "string" ? input : input.url;
@@ -805,6 +805,115 @@ describe("AcceleratorTransport", () => {
       const t = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
       await expect(t.probeHealth()).rejects.toBeDefined();
       expect(urls.some((u) => u.startsWith("http://"))).toBe(false);
+    });
+  });
+
+  describe("witness-free HTTP diagnosis", () => {
+    let originalFetch: typeof globalThis.fetch;
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    const detailed = {
+      ...HEALTHY,
+      version: "3.0.0",
+      aztec_version: "5.2.0",
+      available_versions: ["5.2.0"],
+      bb_available: true,
+    };
+
+    test.each([
+      ["detailed health without https_port", detailed, "https-disabled"],
+      [
+        "detailed health advertising https_port",
+        { ...detailed, https_port: 59834 },
+        "tls-or-trust-failure",
+      ],
+      ["minimal recognized health", HEALTHY, "accelerator-reachable"],
+    ] as const)("classifies %s", async (_name, body, expected) => {
+      globalThis.fetch = mock(async () => Response.json(body)) as typeof fetch;
+      const transport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      expect(await transport.diagnoseHttpHealth()).toBe(expected);
+    });
+
+    test.each([
+      ["unreachable", () => Promise.reject(new TypeError("connection refused"))],
+      ["malformed", () => Promise.resolve(new Response("not json"))],
+      ["foreign", () => Promise.resolve(Response.json({ hello: "world" }))],
+      [
+        "partially detailed",
+        () => Promise.resolve(Response.json({ ...HEALTHY, version: "3.0.0" })),
+      ],
+      [
+        "malformed detailed field",
+        () => Promise.resolve(Response.json({ ...HEALTHY, version: 42 })),
+      ],
+      ["redirected", () => Promise.resolve(new Response(null, { status: 307 }))],
+      [
+        "oversized",
+        () => Promise.resolve(Response.json({ ...detailed, padding: "x".repeat(64 * 1024) })),
+      ],
+    ] as const)("maps a %s diagnostic to unconfirmed", async (_name, response) => {
+      globalThis.fetch = mock(response) as typeof fetch;
+      const transport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      expect(await transport.diagnoseHttpHealth()).toBe("unconfirmed");
+    });
+
+    test("maps a stalled diagnostic body to unconfirmed within the body deadline", async () => {
+      globalThis.fetch = mock(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"status":"ok",'));
+          },
+        });
+        return new Response(stream);
+      }) as typeof fetch;
+      const transport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      expect(await transport.diagnoseHttpHealth()).toBe("unconfirmed");
+    }, 10_000);
+
+    test("uses one GET with no body and cannot pin HTTP or cache availability", async () => {
+      const requests: Request[] = [];
+      globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(input instanceof Request ? input : new Request(input, init));
+        return Response.json(detailed);
+      }) as typeof fetch;
+      const transport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const generation = transport.generation;
+
+      expect(await transport.diagnoseHttpHealth()).toBe("https-disabled");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.method).toBe("GET");
+      expect(await requests[0]?.arrayBuffer()).toHaveLength(0);
+      expect(requests[0]?.url).toBe("http://127.0.0.1:59833/health");
+      expect(transport.baseUrl).toBe("https://127.0.0.1:59834");
+      expect(transport.getFreshCachedStatus()).toBeNull();
+      expect(transport.generation).toBe(generation);
+    });
+
+    test("does not diagnose a newly configured endpoint for a stale generation", async () => {
+      const urls: string[] = [];
+      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return Response.json(HEALTHY);
+      }) as typeof fetch;
+      const transport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      const staleGeneration = transport.generation;
+      transport.configure({ port: 51337 });
+
+      expect(await transport.diagnoseHttpHealth(staleGeneration)).toBe("unconfirmed");
+      expect(urls).toEqual([]);
+    });
+
+    test("malformed detailed https_port cannot claim a TLS diagnosis", async () => {
+      globalThis.fetch = mock(async () =>
+        Response.json({ ...detailed, https_port: "59834" }),
+      ) as typeof fetch;
+      const transport = new AcceleratorTransport("127.0.0.1", 59833, 59834, true);
+      expect(await transport.diagnoseHttpHealth()).toBe("unconfirmed");
     });
   });
 

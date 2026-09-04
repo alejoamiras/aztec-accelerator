@@ -56,18 +56,20 @@ describe("landing accelerator detection", () => {
       configurable: true,
       get: () => undefined,
     });
-    const seen: Array<{ url: string; annotation?: string }> = [];
+    const seen: Array<{ url: string; method?: string; annotation?: string }> = [];
     globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
       seen.push({
         url: String(input),
+        method: init?.method,
         annotation: (init as RequestInit & { targetAddressSpace?: string })?.targetAddressSpace,
       });
+      if (String(input).startsWith("https://")) throw new TypeError("TLS unavailable");
       return Response.json({ status: "ok", api_version: 1 });
     }) as any;
     await detectAccelerator();
     expect(seen).toEqual([
-      { url: "http://127.0.0.1:59833/health", annotation: "loopback" },
-      { url: "https://127.0.0.1:59834/health", annotation: undefined },
+      { url: "https://127.0.0.1:59834/health", method: "GET", annotation: undefined },
+      { url: "http://127.0.0.1:59833/health", method: "GET", annotation: "loopback" },
     ]);
   });
 
@@ -89,18 +91,61 @@ describe("landing accelerator detection", () => {
       names.push(name);
       return { state: "prompt" };
     });
-    expect(await detectAccelerator()).toBe("offline");
-    expect(names).toEqual(["loopback-network"]);
+    expect(await detectAccelerator()).toEqual({
+      reason: "secure-connection-unavailable",
+      diagnosis: "unconfirmed",
+    });
+    expect(names).toEqual(["loopback-network", "loopback-network"]);
   });
 
-  test("httpsOnly never constructs the HTTP candidate", async () => {
+  test("healthy HTTPS is the default and never constructs the HTTP diagnostic", async () => {
     const urls: string[] = [];
     globalThis.fetch = mock(async (input: string | URL | Request) => {
       urls.push(String(input));
       return Response.json({ status: "ok", api_version: 1 });
     }) as any;
-    expect(await detectAccelerator({ httpsOnly: true })).toBe("available");
+    expect(await detectAccelerator()).toBe("available");
     expect(urls).toEqual(["https://127.0.0.1:59834/health"]);
+  });
+
+  test.each([
+    [
+      "https-disabled",
+      {
+        status: "ok",
+        api_version: 1,
+        version: "3.0.0",
+        aztec_version: "5.2.0",
+        available_versions: ["5.2.0"],
+        bb_available: true,
+      },
+    ],
+    [
+      "tls-or-trust-failure",
+      {
+        status: "ok",
+        api_version: 1,
+        version: "3.0.0",
+        aztec_version: "5.2.0",
+        available_versions: ["5.2.0"],
+        bb_available: true,
+        https_port: 59834,
+      },
+    ],
+    ["accelerator-reachable", { status: "ok", api_version: 1 }],
+    ["unconfirmed", { status: "ok", api_version: 1, version: "3.0.0" }],
+    ["unconfirmed", { status: "ok", api_version: 1, version: 3 }],
+    ["unconfirmed", { hello: "world" }],
+  ] as const)("classifies the witness-free HTTP diagnosis as %s", async (diagnosis, body) => {
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      if (String(input).startsWith("https://")) throw new TypeError("TLS unavailable");
+      return Response.json(body);
+    }) as unknown as typeof fetch;
+
+    expect(await detectAccelerator()).toEqual({
+      reason: "secure-connection-unavailable",
+      diagnosis,
+    });
   });
 
   test("watches a delayed prompt decision and removes the listener on cleanup", async () => {
@@ -166,7 +211,7 @@ test("landing permission refresh starts an uncached probe and owns the display e
 
   const startup = controller.refresh();
   await controller.refreshAfterPermissionChange();
-  resolveFirst("offline");
+  resolveFirst({ reason: "secure-connection-unavailable", diagnosis: "unconfirmed" });
   await startup;
 
   expect(calls).toBe(2);

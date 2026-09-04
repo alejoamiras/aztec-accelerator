@@ -1,10 +1,11 @@
 /**
  * B6 release-pipeline contract guards (`bun test scripts/`). release-accelerator.yml SPLITS publish from
  * promote: a `publish` dispatch builds+gates+publishes the GitHub release but NEVER flips the auto-updater's
- * S3 `latest.json` feed; a separate `promote-only` dispatch flips the feed (and is the rollback lever).
+ * KV-backed `latest.json` feed; a separate `promote-only` dispatch flips the feed (and is the rollback lever).
  * Each row below pins one invariant of that split and is mutation-provable by a single YAML edit — a
- * regression (re-coupling promote into publish, deleting a published release, marking GitHub --latest,
- * dropping a pre-flight check) flips CI in milliseconds instead of surfacing as a bad/oversold release.
+ * regression (re-coupling promote into publish, deleting a published release, marking GitHub Latest before
+ * the live feed verifies, dropping a pre-flight check) flips CI in milliseconds instead of surfacing as a
+ * bad/oversold release.
  */
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
@@ -17,21 +18,53 @@ const UPDATER_LINUX = fs.readFileSync(
   path.join(REPO, ".github/workflows/_e2e-updater-linux.yml"),
   "utf8",
 );
+const UPDATER_WINDOWS = fs.readFileSync(
+  path.join(REPO, ".github/workflows/_e2e-updater-windows.yml"),
+  "utf8",
+);
+const RELEASE_SIGNER = fs.readFileSync(
+  path.join(REPO, "packages/accelerator/scripts/sign-release-updater-artifacts.sh"),
+  "utf8",
+);
+const UPDATER_SMOKE_SCRIPTS = [
+  "updater-smoke.sh",
+  "updater-smoke-linux.sh",
+  "updater-smoke-windows.ps1",
+].map((name) => fs.readFileSync(path.join(REPO, "packages/accelerator/scripts", name), "utf8"));
 const PACKAGED = fs.readFileSync(path.join(REPO, ".github/workflows/_e2e-packaged.yml"), "utf8");
 const UNINSTALL_WIN = fs.readFileSync(
   path.join(REPO, ".github/scripts/packaged-e2e-uninstall-windows.ps1"),
   "utf8",
 );
+const CHANGELOG = fs.readFileSync(path.join(REPO, "packages/accelerator/CHANGELOG.md"), "utf8");
+const ACCELERATOR_README = fs.readFileSync(
+  path.join(REPO, "packages/accelerator/README.md"),
+  "utf8",
+);
+const RELEASE_RUNBOOK = fs.readFileSync(path.join(REPO, "docs/RELEASE_RUNBOOK.md"), "utf8");
+const PLAYGROUND_PACKAGE = fs.readFileSync(
+  path.join(REPO, "packages/playground/package.json"),
+  "utf8",
+);
+const PLAYWRIGHT_CONFIG = fs.readFileSync(
+  path.join(REPO, "packages/playground/playwright.config.ts"),
+  "utf8",
+);
+const PACKAGED_E2E_RUNNER = fs.readFileSync(
+  path.join(REPO, "packages/playground/scripts/test-packaged-e2e.sh"),
+  "utf8",
+);
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
-  test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
-    // [mut: move the aws s3 cp back into `release`, or add id-token to release → fails]
-    expect(WF).toContain("aws s3 cp feed/latest.json"); // promote uploads the verified downloaded bytes
-    expect(WF).not.toContain("aws s3 cp release-files/latest.json"); // the old in-release promote is gone
+  test("least privilege: `promote` is the only leg that writes the feed", () => {
+    expect(WF.match(/wrangler kv key put/g)).toHaveLength(1);
+    expect(WF).toContain("wrangler kv key put latest.json --path feed/latest.json --remote");
     expect(WF).toContain("contents: write     # gh release create --draft");
-    // release-auth-preflight ALSO holds id-token but only PROBES — it must be gated off standalone
-    // promote-only so it can't fail RED after the flip already mutated S3.
-    expect(WF).toContain("inputs.auth_probe || inputs.mode == 'publish'");
+    // Publishing receives no Cloudflare credential; the explicit auth probe is isolated from it.
+    expect(WF).toContain("if: $" + "{{ inputs.auth_probe }}");
+    const release = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    expect(release).not.toContain("release-auth-preflight");
+    expect(release).not.toContain("CLOUDFLARE_API_TOKEN");
   });
 
   test("append-only: only an isDraft-guarded draft delete, never a published release, never --clobber", () => {
@@ -46,11 +79,61 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(WF).not.toContain("--clobber");
   });
 
-  test("the signed feed is the source of truth — no release is marked GitHub --latest", () => {
-    // [mut: change a `gh release create` back to `--latest` / `--latest=true` → fails]
-    // Any bare `--latest`, `--latest=true`, or line-continued `--latest` — but NOT `--latest=false`.
-    expect(WF).not.toMatch(/--latest(\s|=true|$)/m);
+  test("publish never marks Latest; only a verified forward GA promotion does", () => {
+    // Publication and promotion remain separate: creating/finalizing a release keeps Latest unchanged.
     expect(WF).toContain("--latest=false");
+    const bareLatest = /--latest(\s|=true|$)/m;
+    const publishJob = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    const finalizeJob = WF.split("  finalize:")[1]?.split("\n  # B6: PROMOTE")[0] ?? "";
+    expect(publishJob).not.toMatch(bareLatest);
+    expect(finalizeJob).not.toMatch(bareLatest);
+
+    const latestJob = WF.split("  mark-github-latest:")[1]?.split("\n  bump-source:")[0] ?? "";
+    expect(latestJob).toContain("needs: [validate, verify-live-feed]");
+    expect(latestJob).toContain("inputs.bump_source");
+    expect(latestJob).toContain("needs.verify-live-feed.result == 'success'");
+    expect(latestJob).toContain("contents: write");
+    expect(latestJob).toContain('gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --latest');
+    expect(latestJob).toContain('releases/latest" --jq .tag_name');
+    expect(latestJob).toContain('[ "$latest" = "$TAG" ]');
+    expect(latestJob).not.toContain("--latest=false");
+  });
+
+  test("the v3 signing-key break cannot ship without manual-reinstall guidance", () => {
+    for (const document of [WF, CHANGELOG, ACCELERATOR_README]) {
+      expect(document).toContain("manual reinstall");
+      expect(document).toContain("1.x");
+      expect(document).toContain("2.x");
+      expect(document).toMatch(/install it over the\s+existing/i);
+    }
+    expect(WF).toContain(
+      "preserves approved sites, settings, certificate state, and cached bb versions",
+    );
+    expect(CHANGELOG).toContain("456E5A3DB518F598");
+  });
+
+  test("ordinary releases fail closed on a same-key baseline and have no rotation escape hatch", () => {
+    expect(WF).toContain("resolve-updater-baseline.ts");
+    expect(WF).not.toContain("updater_key_rotation_bootstrap");
+    expect(WF).not.toContain("outputs.rotation");
+    expect(WF).not.toContain("update-smoke-key-rotation");
+    expect(WF).not.toContain("mode: key-rotation");
+    expect(UPDATER).toContain("ordinary updater smoke requires a same-key N-1 baseline");
+    expect(UPDATER).not.toContain("key-rotation");
+    expect(UPDATER_SMOKE_SCRIPTS[0]).not.toContain("key-rotation");
+
+    const releaseJob = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    for (const job of [
+      "update-smoke.result",
+      "update-smoke-linux.result",
+      "update-smoke-windows.result",
+      "update-smoke-windows-negative.result",
+    ]) {
+      expect(releaseJob).toContain(`needs.${job} == 'success'`);
+    }
+    expect(WF).toContain("mode: [positive, negative]");
+    expect(RELEASE_RUNBOOK).toContain("no dispatch toggle");
+    expect(RELEASE_RUNBOOK).toContain("deliberately reviewed migration change");
   });
 
   test("mode split: `promote` runs only under promote-only; publish gated across release/tag/finalize", () => {
@@ -80,6 +163,27 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     // release never publishes. [mut: revert the fetch to `releases/tags/$TAG` → 404 on the draft → this fails]
     expect(WF).toMatch(/RID=\$\(gh release view "\$TAG" --json databaseId/);
     expect(WF).toContain('gh api "repos/$GH_REPO/releases/$RID"');
+  });
+
+  test("packaged proof serves a production build and fails with retained diagnostics instead of hanging", () => {
+    expect(PLAYGROUND_PACKAGE).toContain(
+      '"test:e2e:packaged": "bash scripts/test-packaged-e2e.sh"',
+    );
+    expect(PACKAGED_E2E_RUNNER).toContain("bun run build");
+    expect(PACKAGED_E2E_RUNNER).toContain(
+      "bun run preview -- --host 127.0.0.1 --port 5173 --strictPort",
+    );
+    expect(PACKAGED_E2E_RUNNER).toContain("PLAYWRIGHT_EXTERNAL_WEBSERVER=1");
+    expect(PLAYWRIGHT_CONFIG).toContain("process.env.PLAYWRIGHT_EXTERNAL_WEBSERVER");
+    expect(PLAYWRIGHT_CONFIG).toContain('baseURL: "http://127.0.0.1:5173"');
+
+    const proofSteps = PACKAGED.match(
+      /- name: Run packaged-E2E \(composed proof\)\n\s+timeout-minutes: 35/g,
+    );
+    expect(proofSteps?.length).toBe(2);
+    expect(PACKAGED.match(/if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}/g)?.length).toBe(2);
+    expect(PACKAGED.match(/\/tmp\/packaged-e2e-vite\.log/g)?.length).toBe(2);
+    expect(PACKAGED.match(/packages\/playground\/test-results/g)?.length).toBe(2);
   });
 
   test("promote pre-flight verifies a published, non-draft, non-prerelease stable with a signed feed", () => {
@@ -138,58 +242,87 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     }
   });
 
-  test("dry_run flips nothing — the S3 write is gated on !dry_run", () => {
+  test("dry_run flips nothing — the KV write is gated on !dry_run", () => {
     // [mut: remove the `if: !inputs.dry_run` on the flip step → a dry run would mutate prod → fails]
-    expect(WF).toMatch(/Flip the S3 feed[\s\S]{0,120}?if: \$\{\{ !inputs\.dry_run \}\}/);
+    expect(WF).toMatch(/Flip the KV feed[\s\S]{0,120}?if: \$\{\{ !inputs\.dry_run \}\}/);
   });
 
-  test("blocker-1 failure-atomicity: authoritative PUT (fatal) split from best-effort invalidation (non-fatal)", () => {
-    // The S3 PUT commits the promote; the CloudFront invalidation only accelerates propagation. They MUST be
-    // separate steps AND the invalidation must be non-fatal: if a transient invalidation error after the PUT
-    // failed the job, `promote` would go RED (reading as "feed unflipped" when it IS flipped) and the
-    // downstream verify-live-feed gate — implicit success() on `promote` — would be SKIPPED, leaving the flip
-    // unconfirmed. So promote-success must equal PUT-success. Both steps retry; the PUT is fatal on
-    // exhaustion (safe — the feed is unchanged, nothing downstream ran), the invalidation warns + continues.
-    expect(WF).toContain("Flip the S3 feed to this version (authoritative PUT)");
-    expect(WF).toContain("Invalidate CloudFront (best-effort — never fails a committed promote)");
-    // Scope each assert to its own step body so PUT-fatal and invalidation-non-fatal are provable in
-    // isolation (and can't false-catch verify-live-feed's own `exit 1`).
-    const putStep =
-      WF.split("Flip the S3 feed to this version (authoritative PUT)")[1]?.split(
-        "Invalidate CloudFront (best-effort",
-      )[0] ?? "";
-    const invStep =
-      WF.split("Invalidate CloudFront (best-effort")[1]?.split(
+  test("production updater signing is isolated from builds, smokes, apps, and cloud credentials", () => {
+    const secretRef = /\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY(?:_PASSWORD)? \}\}/g;
+    expect(WF.match(secretRef)?.length).toBe(2);
+    const signer = WF.split("  sign-updater-artifacts:")[1]?.split("\n  build-headless:")[0] ?? "";
+    expect(signer).toContain("environment: release-signing");
+    expect(signer).toContain("contents: read");
+    expect(signer).toContain(
+      `TAURI_SIGNING_PRIVATE_KEY: \${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`,
+    );
+    expect(signer).not.toContain("id-token: write");
+    expect(signer).not.toContain("aws-actions/configure-aws-credentials");
+    expect(signer).not.toContain("CLOUDFLARE_API_TOKEN");
+    expect(WF).toContain("bunx tauri signer generate --ci");
+    expect(WF).toContain(`name: unsigned-accelerator-\${{ matrix.platform }}`);
+    for (const smoke of [UPDATER, UPDATER_LINUX, UPDATER_WINDOWS]) {
+      expect(smoke).not.toMatch(secretRef);
+    }
+    for (const script of UPDATER_SMOKE_SCRIPTS) {
+      expect(script).toContain("smoke-latest.json");
+      expect(script).not.toContain("TAURI_SIGNING_PRIVATE_KEY");
+    }
+    expect(RELEASE_SIGNER).toContain("verify-artifact");
+    expect(RELEASE_SIGNER).toContain("verify --feed");
+    expect(RELEASE_SIGNER).toContain(
+      'TAURI_CLI="$REPO_ROOT/packages/accelerator/node_modules/.bin/tauri"',
+    );
+    expect(RELEASE_SIGNER).not.toContain("bunx tauri signer sign");
+    expect(RELEASE_SIGNER).not.toContain("tauri build");
+    expect(RELEASE_SIGNER).not.toContain("bun install");
+  });
+
+  test("passwordless production updater keys remain supported", () => {
+    const requiredKeyExpansion =
+      "$" + "{TAURI_SIGNING_PRIVATE_KEY:?production updater signing key is required}";
+    const optionalPasswordExpansion = "$" + "{TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}";
+    const requiredPasswordExpansion = "$" + "{TAURI_SIGNING_PRIVATE_KEY_PASSWORD:?";
+
+    expect(RELEASE_SIGNER).toContain(`: "${requiredKeyExpansion}"`);
+    expect(RELEASE_SIGNER).toContain(optionalPasswordExpansion);
+    expect(RELEASE_SIGNER).not.toContain(requiredPasswordExpansion);
+  });
+
+  test("dependency audit is a release publication gate", () => {
+    const release = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    expect(WF).toContain("uses: ./.github/workflows/dependency-audit.yml");
+    expect(release).toContain("needs: [validate, dependency-audit,");
+    expect(release).toContain("needs.dependency-audit.result == 'success'");
+  });
+
+  test("authoritative KV write is exact, retried, and always followed by live verification", () => {
+    expect(WF).toContain("Flip the KV feed to this version (authoritative write)");
+    const writeStep =
+      WF.split("Flip the KV feed to this version (authoritative write)")[1]?.split(
         "# Enforce the live-feed check",
       )[0] ?? "";
-    // PUT: retried, and FATAL on exhaustion. [mut: drop the `exit 1` / retry → the flip stops being atomic]
-    expect(putStep, "PUT step body found").toContain("aws s3 cp feed/latest.json");
-    expect(putStep, "PUT retries").toContain("for attempt in 1 2 3 4 5; do");
-    expect(putStep, "PUT is fatal on exhaustion").toContain("exit 1");
-    expect(putStep).toContain("feed unchanged, promote aborted");
-    // Invalidation: retried, then WARN + continue — never fatal. [mut: add `exit 1` to the invalidation
-    // failure branch, or re-merge it into the PUT step → a post-PUT invalidation hiccup skips verify-live-feed]
-    expect(invStep, "invalidation step body found").toContain("create-invalidation");
-    expect(invStep, "invalidation retries").toContain("for attempt in 1 2 3; do");
-    expect(
-      invStep,
-      "a failed invalidation must NOT be fatal — no `exit 1` in the step body",
-    ).not.toContain("exit 1");
-    expect(invStep, "invalidation exhaustion warns (non-fatal)").toContain(
-      "::warning::CloudFront invalidation failed after 3 attempts",
-    );
-    // codex High: verify-live-feed must run after ANY attempted promote via its OWN status function, so a
-    // PUT whose CLI errored AFTER S3 committed (feed live but `promote` RED) can't skip live verification —
+    expect(writeStep).toContain("wrangler kv key put latest.json --path feed/latest.json --remote");
+    expect(writeStep).toContain("for attempt in 1 2 3 4 5; do");
+    expect(writeStep).toContain("exit 1");
+    expect(WF).not.toContain("aws s3 cp");
+    expect(WF).not.toContain("create-invalidation");
+    // verify-live-feed runs after ANY attempted write via its OWN status function, so a CLI timeout after KV
+    // committed cannot skip public verification —
     // the live feed is the source of truth. [mut: revert to the implicit success() on `promote` → fails]
     expect(WF, "verify-live-feed runs on its own always() status function").toMatch(
-      /Verify live updater feed[\s\S]{0,800}?if: \$\{\{ always\(\) && !cancelled\(\) && needs\.validate\.result == 'success' && inputs\.mode == 'promote-only'/,
+      /Verify live updater feed[\s\S]{0,1000}?if: \$\{\{ always\(\) && !cancelled\(\) && needs\.validate\.result == 'success' && needs\.promote\.outputs\.write_attempted == 'true'/,
     );
   });
 
-  test("downstream wiring: verify-live-feed needs promote; bump-source only on organic-GA promote", () => {
-    // [mut: point verify-live-feed back at `release`, or drop the bump_source guard → fails]
+  test("downstream wiring: verified feed → GitHub Latest → organic-GA source bump", () => {
+    // [mut: point verify-live-feed back at `release`, move Latest before verification, or let rollback move
+    // the badge/source version → fails]
     expect(WF).toContain("needs: [validate, promote]");
+    expect(WF).toContain("needs: [validate, verify-live-feed]");
+    expect(WF).toContain("needs: [validate, mark-github-latest]");
     expect(WF).toContain("inputs.bump_source && !inputs.dry_run");
+    expect(WF).toContain("needs.mark-github-latest.result == 'success'");
   });
 });
 
@@ -223,9 +356,9 @@ describe("release-machinery hardening (2026-08-17 GitHub asset-CDN incident)", (
   });
 
   test("prerelease publish DAG is scheduled (own status fn) yet still can't publish an ungated draft", () => {
-    // The RC's skipped `sign-update-feed` poisoned the IMPLICIT success() of the packaged gate / tag /
-    // finalize (transitive via `release`'s always()), so the first RC to reach them drafted but never
-    // published. Each MUST carry its own status function (always()+!cancelled()) so GitHub schedules it,
+    // A skipped prerequisite once poisoned the IMPLICIT success() of the packaged gate / tag / finalize,
+    // so the first RC to reach them drafted but never published. Each MUST carry its own status function
+    // (always()+!cancelled()) so GitHub schedules it,
     // while the explicit `.result == 'success'` chain stays the authorization policy.
     // [mut: drop `always()` from any of the three → the RC silently skips publish again; drop a
     //  `.result == 'success'` guard → an ungated/failed gate could publish]

@@ -189,6 +189,12 @@
           "markdownDescription": "Enables the disable_https command without any pre-configured scope."
         },
         {
+          "description": "Enables the dismiss_onboarding command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-dismiss-onboarding",
+          "markdownDescription": "Enables the dismiss_onboarding command without any pre-configured scope."
+        },
+        {
           "description": "Enables the enable_https command without any pre-configured scope.",
           "type": "string",
           "const": "allow-enable-https",
@@ -229,6 +235,12 @@
           "type": "string",
           "const": "allow-get-verified-info",
           "markdownDescription": "Enables the get_verified_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_onboarding command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-onboarding",
+          "markdownDescription": "Enables the open_onboarding command without any pre-configured scope."
         },
         {
           "description": "Enables the record_renewal_prompt command without any pre-configured scope.",
@@ -309,6 +321,12 @@
           "markdownDescription": "Denies the disable_https command without any pre-configured scope."
         },
         {
+          "description": "Denies the dismiss_onboarding command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-dismiss-onboarding",
+          "markdownDescription": "Denies the dismiss_onboarding command without any pre-configured scope."
+        },
+        {
           "description": "Denies the enable_https command without any pre-configured scope.",
           "type": "string",
           "const": "deny-enable-https",
@@ -349,6 +367,12 @@
           "type": "string",
           "const": "deny-get-verified-info",
           "markdownDescription": "Denies the get_verified_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_onboarding command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-onboarding",
+          "markdownDescription": "Denies the open_onboarding command without any pre-configured scope."
         },
         {
           "description": "Denies the record_renewal_prompt command without any pre-configured scope.",

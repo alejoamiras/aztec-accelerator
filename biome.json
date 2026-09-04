@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.8/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -7,7 +7,14 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["packages/**/*.ts", "packages/**/*.js", "*.json", "*.md", "!.claude"]
+    "includes": [
+      "packages/**/*.ts",
+      "packages/**/*.js",
+      "*.json",
+      "*.md",
+      "!.claude",
+      "!packages/release-feed/worker-configuration.d.ts"
+    ]
   },
   "formatter": {
     "enabled": true,
@@ -18,7 +25,7 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "correctness": {
         "noUnusedImports": "warn"
       },

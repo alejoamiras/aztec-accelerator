@@ -3,7 +3,7 @@ import { BBLazyPrivateKernelProver } from "@aztec/bb-prover/client/lazy";
 import { WASMSimulator } from "@aztec/simulator/client";
 import * as stdlibKernel from "@aztec/stdlib/kernel";
 import sdkPkg from "../../package.json" with { type: "json" };
-import { AcceleratorProver } from "./accelerator-prover.js";
+import { AcceleratorProver, isBrowserRuntime, resolveHttpsOnly } from "./accelerator-prover.js";
 import { AcceleratorHttpError } from "./errors.js";
 
 const SDK_AZTEC_VERSION = (sdkPkg.dependencies as Record<string, string>)["@aztec/stdlib"];
@@ -73,6 +73,40 @@ describe("AcceleratorProver", () => {
   });
 
   describe("Proving", () => {
+    test("emits secure-connection-unavailable immediately before fallback and never POSTs HTTP", async () => {
+      const requests: Request[] = [];
+      globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        requests.push(request);
+        if (request.url.startsWith("https://")) throw new TypeError("certificate rejected");
+        return Response.json({ status: "ok", api_version: 1 });
+      }) as typeof fetch;
+      const phases: string[] = [];
+      const wasmSpy = mockWasmProver();
+      const serializeSpy = mockSerializer();
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { httpsOnly: true },
+        onPhase: (phase) => phases.push(phase),
+      });
+
+      await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
+        "local prover not available in test",
+      );
+
+      expect(phases.slice(0, 3)).toEqual(["detect", "secure-connection-unavailable", "fallback"]);
+      expect(requests.filter((request) => request.url.startsWith("http://"))).toHaveLength(1);
+      expect(
+        requests.some(
+          (request) => request.url.startsWith("http://") && request.url.endsWith("/prove"),
+        ),
+      ).toBe(false);
+      expect(serializeSpy).not.toHaveBeenCalled();
+
+      serializeSpy.mockRestore();
+      wasmSpy.mockRestore();
+    });
+
     test("falls back to WASM when accelerator is unavailable", async () => {
       mockFetchOffline();
       const wasmSpy = mockWasmProver();
@@ -438,6 +472,153 @@ describe("AcceleratorProver", () => {
   });
 
   describe("checkAcceleratorStatus", () => {
+    test.each([
+      [
+        "https-disabled",
+        {
+          status: "ok",
+          api_version: 1,
+          version: "3.0.0",
+          aztec_version: SDK_AZTEC_VERSION,
+          available_versions: [SDK_AZTEC_VERSION],
+          bb_available: true,
+        },
+      ],
+      [
+        "tls-or-trust-failure",
+        {
+          status: "ok",
+          api_version: 1,
+          version: "3.0.0",
+          aztec_version: SDK_AZTEC_VERSION,
+          available_versions: [SDK_AZTEC_VERSION],
+          bb_available: true,
+          https_port: 59834,
+        },
+      ],
+      ["accelerator-reachable", { status: "ok", api_version: 1 }],
+      ["unconfirmed", { status: "not-the-accelerator", api_version: 1 }],
+    ] as const)("returns secure-connection-unavailable: %s", async (diagnosis, httpBody) => {
+      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.startsWith("https://")) throw new TypeError("TLS unavailable");
+        return Response.json(httpBody);
+      }) as typeof fetch;
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { httpsOnly: true },
+      });
+
+      expect(await prover.checkAcceleratorStatus()).toEqual({
+        available: false,
+        reason: "secure-connection-unavailable",
+        diagnosis,
+        sdkAztecVersion: SDK_AZTEC_VERSION,
+      });
+    });
+
+    test.each([
+      ["available_versions object", { available_versions: {} }],
+      ["mixed available_versions", { available_versions: [SDK_AZTEC_VERSION, 42] }],
+      ["numeric aztec_version", { aztec_version: 52 }],
+      ["numeric app version", { version: 3 }],
+      ["string bb_available", { bb_available: "yes" }],
+      ["string https_port", { https_port: "59834" }],
+    ] as const)("keeps a malformed HTTPS %s response classified as error", async (_name, field) => {
+      const urls: string[] = [];
+      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        urls.push(url);
+        if (url.startsWith("http://")) throw new Error("diagnostic must not run");
+        return Response.json({ status: "ok", api_version: 1, ...field });
+      }) as typeof fetch;
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { httpsOnly: true },
+      });
+
+      expect(await prover.checkAcceleratorStatus()).toEqual({
+        available: false,
+        reason: "error",
+        sdkAztecVersion: SDK_AZTEC_VERSION,
+        protocol: "https",
+      });
+      expect(urls.every((url) => url.startsWith("https://"))).toBe(true);
+    });
+
+    test("a probe reconfigured before diagnosis never queries the new HTTP endpoint", async () => {
+      let httpsCalls = 0;
+      let releaseSecond!: () => void;
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      let markSecondStarted!: () => void;
+      const secondStarted = new Promise<void>((resolve) => {
+        markSecondStarted = resolve;
+      });
+      const urls: string[] = [];
+      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        urls.push(url);
+        if (url.startsWith("http://")) return Response.json({ status: "ok", api_version: 1 });
+        httpsCalls++;
+        if (httpsCalls === 2) {
+          markSecondStarted();
+          await secondGate;
+        }
+        throw new TypeError("TLS unavailable");
+      }) as typeof fetch;
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { httpsOnly: true },
+      });
+
+      const stale = prover.checkAcceleratorStatus();
+      await secondStarted;
+      prover.setAcceleratorConfig({ port: 51337 });
+      releaseSecond();
+
+      const status = await stale;
+      expect(status.available).toBe(false);
+      expect(urls.some((url) => url.startsWith("http://"))).toBe(false);
+    }, 10_000);
+
+    test("a diagnostic raced by endpoint configuration cannot overwrite the new status cache", async () => {
+      let releaseDiagnostic!: () => void;
+      const diagnosticGate = new Promise<void>((resolve) => {
+        releaseDiagnostic = resolve;
+      });
+      let markDiagnosticStarted!: () => void;
+      const diagnosticStarted = new Promise<void>((resolve) => {
+        markDiagnosticStarted = resolve;
+      });
+      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.startsWith("https://")) throw new TypeError("TLS unavailable");
+        markDiagnosticStarted();
+        await diagnosticGate;
+        return Response.json({ status: "ok", api_version: 1 });
+      }) as typeof fetch;
+      const prover = new AcceleratorProver({
+        simulator: new WASMSimulator(),
+        accelerator: { httpsOnly: true },
+      });
+
+      const stale = prover.checkAcceleratorStatus();
+      await diagnosticStarted;
+      prover.setAcceleratorConfig({ port: 51337 });
+      releaseDiagnostic();
+      expect((await stale).available).toBe(false);
+
+      let newEndpointFetches = 0;
+      globalThis.fetch = mock(async () => {
+        newEndpointFetches++;
+        throw new TypeError("offline");
+      }) as typeof fetch;
+      await prover.checkAcceleratorStatus();
+      expect(newEndpointFetches).toBeGreaterThan(0);
+    }, 10_000);
+
     test("returns available + version info when healthy (multi-version)", async () => {
       mockFetch({
         "/health": () =>
@@ -888,6 +1069,97 @@ describe("AcceleratorProver", () => {
   });
 
   describe("Constructor", () => {
+    test.each([
+      ["browser default", undefined, undefined, true, true],
+      ["server default", undefined, undefined, false, false],
+      ["browser env false", undefined, "false", true, false],
+      ["server env true", undefined, "TRUE", false, true],
+      ["browser env zero", undefined, "0", true, false],
+      ["server env one", undefined, "1", false, true],
+      ["option false beats env true", false, "true", true, false],
+      ["option true beats env false", true, "false", false, true],
+      ["invalid env keeps browser default", undefined, "yes", true, true],
+      ["invalid env keeps server default", undefined, "yes", false, false],
+    ] as const)("resolves HTTPS policy: %s", (_name, option, environment, browser, expected) => {
+      expect(resolveHttpsOnly(option, environment, browser)).toBe(expected);
+    });
+
+    test("detects page, worker, and server runtimes for the default policy", () => {
+      const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const workerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "WorkerGlobalScope");
+      try {
+        Reflect.deleteProperty(globalThis, "window");
+        Reflect.deleteProperty(globalThis, "WorkerGlobalScope");
+        expect(isBrowserRuntime()).toBe(false);
+
+        Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+        expect(isBrowserRuntime()).toBe(true);
+        Reflect.deleteProperty(globalThis, "window");
+
+        const MockWorkerGlobalScope = function MockWorkerGlobalScope() {};
+        Object.defineProperty(MockWorkerGlobalScope, Symbol.hasInstance, {
+          value: (value: unknown) => value === globalThis,
+        });
+        Object.defineProperty(globalThis, "WorkerGlobalScope", {
+          configurable: true,
+          value: MockWorkerGlobalScope,
+        });
+        expect(isBrowserRuntime()).toBe(true);
+      } finally {
+        if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        if (workerDescriptor)
+          Object.defineProperty(globalThis, "WorkerGlobalScope", workerDescriptor);
+        else Reflect.deleteProperty(globalThis, "WorkerGlobalScope");
+      }
+    });
+
+    test("session consent enables HTTP only on that browser prover instance", async () => {
+      const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const envValue = process.env.AZTEC_ACCELERATOR_HTTPS_ONLY;
+      Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+      delete process.env.AZTEC_ACCELERATOR_HTTPS_ONLY;
+      globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.startsWith("https://")) throw new TypeError("TLS unavailable");
+        return Response.json({
+          status: "ok",
+          api_version: 1,
+          version: "3.0.0",
+          aztec_version: SDK_AZTEC_VERSION,
+          available_versions: [SDK_AZTEC_VERSION],
+          bb_available: true,
+        });
+      }) as typeof fetch;
+
+      try {
+        const consented = new AcceleratorProver({ simulator: new WASMSimulator() });
+        const before = await consented.checkAcceleratorStatus();
+        expect(before.available).toBe(false);
+        if (before.available) throw new Error("expected unavailable");
+        expect(before.reason).toBe("secure-connection-unavailable");
+
+        consented.setAcceleratorConfig({
+          httpsOnly: false,
+          allowInsecureDowngrade: true,
+        });
+        const after = await consented.checkAcceleratorStatus({ forceRefresh: true });
+        expect(after.available).toBe(true);
+        expect(after.protocol).toBe("http");
+
+        const freshInstance = new AcceleratorProver({ simulator: new WASMSimulator() });
+        const fresh = await freshInstance.checkAcceleratorStatus();
+        expect(fresh.available).toBe(false);
+        if (fresh.available) throw new Error("expected unavailable");
+        expect(fresh.reason).toBe("secure-connection-unavailable");
+      } finally {
+        if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        if (envValue === undefined) delete process.env.AZTEC_ACCELERATOR_HTTPS_ONLY;
+        else process.env.AZTEC_ACCELERATOR_HTTPS_ONLY = envValue;
+      }
+    }, 15_000);
+
     test("defaults work with zero-config constructor", async () => {
       mockFetchOffline();
       const wasmSpy = mockWasmProver();
@@ -1160,6 +1432,7 @@ describe("AcceleratorProver", () => {
     test("httpsOnly: /prove network failure falls back to WASM (never a plaintext retry)", async () => {
       const serSpy = mockSerializer();
       const wasmSpy = mockWasmProver();
+      const phases: string[] = [];
       const { fetchedUrls } = mockFetch({
         "https://127.0.0.1:59834/health": () => healthyBody(),
         "https://127.0.0.1:59834/prove": () => {
@@ -1170,12 +1443,15 @@ describe("AcceleratorProver", () => {
       const prover = new AcceleratorProver({
         simulator: new WASMSimulator(),
         accelerator: { httpsOnly: true },
+        onPhase: (phase) => phases.push(phase),
       });
       await expect(prover.createChonkProof([fakeStep])).rejects.toThrow(
         "local prover not available in test", // WASM fallback WAS reached (mock throws this)
       );
       expect(wasmSpy).toHaveBeenCalled();
       expect(fetchedUrls.every((u) => !u.startsWith("http://"))).toBe(true);
+      const fallbackIndex = phases.indexOf("fallback");
+      expect(phases[fallbackIndex - 1]).toBe("secure-connection-unavailable");
       wasmSpy.mockRestore();
       serSpy.mockRestore();
     });

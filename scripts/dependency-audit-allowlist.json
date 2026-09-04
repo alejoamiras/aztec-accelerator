@@ -1,0 +1,77 @@
+{
+  "reviewed": "2026-08-31",
+  "exceptions": [
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-45rx-2jwx-cxfr",
+      "package": "@opentelemetry/propagator-jaeger",
+      "expires": "2026-11-30",
+      "reason": "Aztec 5.2 pins OpenTelemetry 1.30.1. The accelerator does not configure the Jaeger propagator or parse attacker-supplied Jaeger headers.",
+      "upgrade": "Remove when the pinned Aztec release carries OpenTelemetry 2.9.0 or newer."
+    },
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-vrm6-8vpv-qv8q",
+      "package": "undici",
+      "expires": "2026-11-30",
+      "reason": "Aztec 5.2 requires undici ^5.28.5 and no patched 5.x release exists. The affected WebSocket client is not used by the SDK proving path.",
+      "upgrade": "Remove when the pinned Aztec release accepts undici 6.27.0 or newer."
+    },
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-v9p9-hfj2-hcw8",
+      "package": "undici",
+      "expires": "2026-11-30",
+      "reason": "Aztec 5.2 requires undici ^5.28.5 and no patched 5.x release exists. The affected WebSocket client is not used by the SDK proving path.",
+      "upgrade": "Remove when the pinned Aztec release accepts undici 6.27.0 or newer."
+    },
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-vxpw-j846-p89q",
+      "package": "undici",
+      "expires": "2026-11-30",
+      "reason": "Aztec 5.2 requires undici ^5.28.5 and no patched 5.x release exists. The affected WebSocket client is not used by the SDK proving path.",
+      "upgrade": "Remove when the pinned Aztec release accepts undici 6.27.0 or newer."
+    },
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-ggr8-5vv4-36mx",
+      "package": "deepmerge-ts",
+      "expires": "2026-11-30",
+      "reason": "WebdriverIO 9 requires deepmerge-ts 7. The package is used only by desktop test configuration with repository-controlled objects.",
+      "upgrade": "Remove after WebdriverIO accepts deepmerge-ts 8 or the desktop test stack moves to a fixed release."
+    },
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-jmr9-qjv8-65gv",
+      "package": "extract-zip",
+      "expires": "2026-11-30",
+      "reason": "The latest extract-zip release remains affected and is only used by WebdriverIO browser tooling against trusted downloads.",
+      "upgrade": "Remove when extract-zip publishes a patched release and WebdriverIO resolves it."
+    },
+    {
+      "ecosystem": "npm",
+      "id": "GHSA-5c6j-r48x-rmvq",
+      "package": "serialize-javascript",
+      "expires": "2026-11-30",
+      "reason": "Mocha 10 pins serialize-javascript 6. It is used only by the desktop test runner with repository-controlled values.",
+      "upgrade": "Remove after the WebdriverIO Mocha adapter accepts serialize-javascript 7.1.1 or newer."
+    },
+    {
+      "ecosystem": "rust",
+      "id": "RUSTSEC-2026-0194",
+      "package": "quick-xml",
+      "expires": "2026-11-30",
+      "reason": "Tauri and the app's plist dependency resolve quick-xml 0.38.4; the affected XML deserialization path is not used on untrusted XML.",
+      "upgrade": "Remove when plist/Tauri can resolve quick-xml 0.41.0 or newer."
+    },
+    {
+      "ecosystem": "rust",
+      "id": "RUSTSEC-2026-0195",
+      "package": "quick-xml",
+      "expires": "2026-11-30",
+      "reason": "Tauri and the app's plist dependency resolve quick-xml 0.38.4; the affected XML deserialization path is not used on untrusted XML.",
+      "upgrade": "Remove when plist/Tauri can resolve quick-xml 0.41.0 or newer."
+    }
+  ]
+}

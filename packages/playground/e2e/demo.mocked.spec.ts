@@ -34,10 +34,10 @@ const HEALTHY = JSON.stringify({ status: "ok", api_version: 1 });
 
 async function mockHealth(
   page: import("@playwright/test").Page,
-  http: (route: import("@playwright/test").Route) => Promise<void> | void,
+  handler: (route: import("@playwright/test").Route) => Promise<void> | void,
 ) {
-  await page.route("http://127.0.0.1:59833/health", http);
-  await page.route("https://127.0.0.1:59834/health", (route) => route.abort());
+  await page.route("http://127.0.0.1:59833/health", handler);
+  await page.route("https://127.0.0.1:59834/health", handler);
 }
 
 async function mockPermissionState(
@@ -150,14 +150,17 @@ test("recognized health renders available and suppresses install UI", async ({ p
   await expect(page.locator("#accelerator-cta")).toBeHidden();
 });
 
-test("offline remains the quiet install/fallback state", async ({ page }) => {
+test("an unconfirmed secure connection keeps install guidance and shows recovery", async ({
+  page,
+}) => {
   await mockServicesOffline(page);
   await mockPermissionState(page, "prompt");
   await mockHealth(page, (route) => route.abort());
   await page.goto("/");
 
-  await expect(page.locator("#accelerator-label")).toContainText("not detected");
+  await expect(page.locator("#accelerator-label")).toContainText("secure connection unavailable");
   await expect(page.locator("#accelerator-permission-help")).toBeHidden();
+  await expect(page.locator("#accelerator-secure-help")).toBeVisible();
   await expect(page.locator("#accel-banner")).toBeVisible();
   await expect(page.locator("#accelerator-cta")).toBeVisible();
 });
@@ -171,7 +174,8 @@ test("health error and version mismatch do not offer a contradictory install", a
   await expect(page.locator("#accelerator-cta")).toBeHidden();
 
   await page.unroute("http://127.0.0.1:59833/health");
-  await page.route("http://127.0.0.1:59833/health", (route) =>
+  await page.unroute("https://127.0.0.1:59834/health");
+  await mockHealth(page, (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -204,10 +208,73 @@ test("permission-blocked guidance recovers through immediate Retry", async ({ pa
   await page.evaluate(() => {
     (window as typeof window & { __mockLnaPermission?: string }).__mockLnaPermission = "granted";
   });
-  await page.locator("#accelerator-retry").click();
-  await expect(page.locator("#accelerator-retry")).toBeDisabled();
+  await page.locator("#accelerator-permission-retry").click();
+  await expect(page.locator("#accelerator-permission-retry")).toBeDisabled();
   await expect(page.locator("#accelerator-label")).toHaveText("running");
   await expect(page.locator("#accelerator-permission-help")).toBeHidden();
+});
+
+test("HTTP recovery requires confirmation and resets on reload", async ({ page }) => {
+  await mockServicesOffline(page);
+  await mockPermissionState(page, "granted");
+  const detailedHealth = JSON.stringify({
+    status: "ok",
+    api_version: 1,
+    version: "3.0.0",
+    aztec_version: "5.2.0",
+    available_versions: ["5.2.0"],
+    bb_available: true,
+  });
+  const plaintextProofRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url() === "http://127.0.0.1:59833/prove") {
+      plaintextProofRequests.push(request.url());
+    }
+  });
+  await page.route("https://127.0.0.1:59834/health", (route) => route.abort());
+  await page.route("http://127.0.0.1:59833/health", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: detailedHealth }),
+  );
+  await page.goto("/");
+
+  await expect(page.locator("#accelerator-secure-title")).toHaveText(
+    "Encrypted Connection is disabled",
+  );
+  await expect(page.locator("#accelerator-secure-help")).toBeVisible();
+  expect(plaintextProofRequests).toEqual([]);
+  const storageBefore = await page.evaluate(() => ({ ...localStorage }));
+  const cookieBefore = await page.evaluate(() => document.cookie);
+  const urlBefore = page.url();
+
+  await page.locator("#accelerator-use-http").click();
+  await expect(page.locator("#http-session-confirmation")).toBeVisible();
+  await expect(page.locator("#http-session-cancel")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("#http-session-confirm")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#http-session-cancel")).toBeFocused();
+  await expect(page.locator("#http-session-warning")).toHaveText(
+    "HTTP can expose private proving data to another local user or process. Use it only if you accept this risk for the current tab.",
+  );
+  await page.locator("#http-session-cancel").click();
+  await expect(page.locator("#http-session-confirmation")).toBeHidden();
+  await expect(page.locator("#accelerator-service-status")).toBeFocused();
+  await expect(page.locator("#accelerator-label")).toContainText("secure connection unavailable");
+
+  await page.locator("#accelerator-use-http").click();
+  await page.locator("#http-session-confirm").click();
+  await expect(page.locator("#accelerator-label")).toHaveText("running");
+  await expect(page.locator("#accelerator-secure-help")).toBeHidden();
+  await expect(page.locator("#accelerator-service-status")).toBeFocused();
+  await expect(page.locator("#accelerator-recovery-announcement")).toContainText("this tab only");
+  expect(await page.evaluate(() => ({ ...localStorage }))).toEqual(storageBefore);
+  expect(await page.evaluate(() => document.cookie)).toBe(cookieBefore);
+  expect(page.url()).toBe(urlBefore);
+
+  await page.reload();
+  await expect(page.locator("#accelerator-secure-help")).toBeVisible();
+  await expect(page.locator("#accelerator-label")).toContainText("secure connection unavailable");
+  expect(plaintextProofRequests).toEqual([]);
 });
 
 // ── Expanded coverage ──

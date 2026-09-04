@@ -1,0 +1,59 @@
+name: Dependency Audit
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, security-hardening]
+    paths:
+      - '**/package.json'
+      - 'bun.lock'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'scripts/dependency-audit.ts'
+      - 'scripts/dependency-audit.test.ts'
+      - 'scripts/dependency-audit-allowlist.json'
+      - '.github/workflows/dependency-audit.yml'
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.bun/install/cache
+            ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-dependency-audit-bun-${{ hashFiles('bun.lock') }}-cargo-audit-0.22.2
+          restore-keys: ${{ runner.os }}-dependency-audit-
+      - run: bun install --frozen-lockfile
+      - name: Install pinned cargo-audit
+        run: |
+          installed_version="$(cargo audit --version 2>/dev/null | awk '{print $NF}' || true)"
+          if [ "$installed_version" != '0.22.2' ]; then
+            cargo install cargo-audit --version 0.22.2 --locked --force
+          fi
+          installed_version="$(cargo audit --version | awk '{print $NF}')"
+          [ "$installed_version" = '0.22.2' ] || {
+            echo "::error::cargo-audit 0.22.2 required, got $installed_version"
+            exit 1
+          }
+      - run: bun run audit:dependencies

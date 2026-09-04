@@ -2,6 +2,7 @@ import "./style.css";
 import {
   AcceleratorStatusController,
   acceleratorStatusView,
+  HttpSessionConsentController,
   watchLoopbackPermissionChanges,
 } from "./accelerator-status";
 import {
@@ -10,6 +11,7 @@ import {
   checkAcceleratorStatus,
   checkAztecNode,
   deployTestAccount,
+  enableInsecureHttpForSession,
   initializeWallet,
   runTokenFlow,
   setUiMode,
@@ -38,15 +40,60 @@ const acceleratorStatus = new AcceleratorStatusController({
     $("accelerator-label").textContent = view.label;
     $("accelerator-cta").classList.toggle("hidden", !view.showInstall);
     $("accelerator-permission-help").classList.toggle("hidden", !view.showPermissionHelp);
+    $("accelerator-secure-help").classList.toggle("hidden", !view.showSecureConnectionHelp);
+    $("accelerator-secure-title").textContent = view.secureConnectionTitle ?? "";
+    $("accelerator-secure-message").textContent = view.secureConnectionMessage ?? "";
+    if (!view.showSecureConnectionHelp) httpSessionConsent.cancel();
 
     const showInstallBanner = view.showInstall && !localStorage.getItem("accel-banner-dismissed");
     $("accel-banner").classList.toggle("hidden", !showInstallBanner);
     appendLog(view.log, view.logLevel);
   },
   setPending: (pending) => {
-    const retry = $btn("accelerator-retry");
-    retry.disabled = pending;
-    retry.textContent = pending ? "Checking…" : "Retry";
+    const permissionRetry = $btn("accelerator-permission-retry");
+    permissionRetry.disabled = pending;
+    permissionRetry.textContent = pending ? "Checking…" : "Retry";
+    const secureRetry = $btn("accelerator-secure-retry");
+    secureRetry.disabled = pending;
+    secureRetry.textContent = pending ? "Checking…" : "Retry secure connection";
+    $btn("accelerator-use-http").disabled = pending;
+    if (pending) httpSessionConsent.cancel();
+  },
+});
+
+const httpSessionConsent = new HttpSessionConsentController({
+  configure: () => {
+    const displayed = acceleratorStatus.displayed;
+    if (!displayed || displayed.available || displayed.reason !== "secure-connection-unavailable") {
+      throw new Error("secure connection status changed before HTTP consent was confirmed");
+    }
+    enableInsecureHttpForSession();
+  },
+  refresh: () => acceleratorStatus.refresh({ forceRefresh: true }),
+  setConfirmationOpen: (open) => {
+    const confirmation = $("http-session-confirmation");
+    const app = $("playground-app");
+    confirmation.classList.toggle("hidden", !open);
+    confirmation.classList.toggle("flex", open);
+    confirmation.setAttribute("aria-hidden", String(!open));
+    app.inert = open;
+    if (open) {
+      app.setAttribute("aria-hidden", "true");
+      $btn("http-session-cancel").focus();
+    } else {
+      app.removeAttribute("aria-hidden");
+      $("accelerator-service-status").focus();
+    }
+  },
+  setPending: (pending) => {
+    const confirm = $btn("http-session-confirm");
+    const useHttp = $btn("accelerator-use-http");
+    confirm.disabled = pending;
+    useHttp.disabled = pending;
+    confirm.textContent = pending ? "Checking…" : "Use HTTP for this session";
+  },
+  announce: (message) => {
+    $("accelerator-recovery-announcement").textContent = message;
   },
 });
 
@@ -256,10 +303,53 @@ async function init(): Promise<void> {
     localStorage.setItem("accel-banner-dismissed", "1");
   });
 
-  $btn("accelerator-retry").addEventListener("click", () => {
+  $btn("accelerator-permission-retry").addEventListener("click", () => {
     void acceleratorStatus.refresh({ forceRefresh: true }).catch(() => {
       appendLog("Couldn't re-check Presto. Proving stays in-browser", "error");
     });
+  });
+
+  $btn("accelerator-secure-retry").addEventListener("click", () => {
+    void acceleratorStatus.retrySecureConnection().catch(() => {
+      appendLog("Couldn't retry the secure connection. Proving stays in-browser", "error");
+    });
+  });
+
+  $btn("accelerator-use-http").addEventListener("click", () => httpSessionConsent.request());
+  $btn("http-session-cancel").addEventListener("click", () => httpSessionConsent.cancel());
+  $btn("http-session-confirm").addEventListener("click", () => {
+    void httpSessionConsent.confirm().catch(() => {
+      appendLog("Couldn't switch to HTTP. Proving stays in-browser", "error");
+    });
+  });
+  $("http-session-confirmation").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) httpSessionConsent.cancel();
+  });
+  document.addEventListener("keydown", (event) => {
+    const confirmation = $("http-session-confirmation");
+    if (confirmation.getAttribute("aria-hidden") !== "false") return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      httpSessionConsent.cancel();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      confirmation.querySelectorAll<HTMLButtonElement>("button:not([disabled])"),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   });
 
   // Default mode UI

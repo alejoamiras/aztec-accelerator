@@ -17,8 +17,25 @@ Download the latest release from [GitHub Releases](https://github.com/alejoamira
 | macOS (Apple Silicon) | `.dmg` |
 | macOS (Intel) | `.dmg` |
 | Linux (x86_64) | `.deb`, `.AppImage` |
+| Windows (x86_64) | `.exe` |
 
 **Running CI tests?** The release also ships a [headless server tarball](#headless-server-for-ci-test-acceleration) for accelerating end-to-end tests on GitHub-hosted runners.
+
+### Upgrading to 3.0.0 (manual reinstall required)
+
+Accelerator 3 uses a new updater signing key. Existing 1.x and 2.x installations cannot authenticate a
+3.x in-app update, so this upgrade must be installed manually once:
+
+1. Quit the running accelerator from its tray/menu-bar icon.
+2. Download the 3.0.0 installer for your platform from
+   [GitHub Releases](https://github.com/alejoamiras/aztec-accelerator/releases).
+3. Install it over the existing application: replace the app from the DMG on macOS, run the new setup
+   executable on Windows, install the new `.deb`, or replace the AppImage on Linux.
+4. Launch the accelerator and confirm the tray reports version 3.0.0.
+
+Do **not** uninstall first unless the normal install-over fails. Installing over the existing application
+preserves `~/.aztec-accelerator/config.json`, approved sites, HTTPS certificate state, and cached bb versions.
+After this one manual reinstall, automatic updates within the 3.x line work normally again.
 
 ### Upgrading from 1.0.1 (macOS)
 
@@ -63,7 +80,10 @@ Browser (SDK)  →  HTTP POST /prove  →  Accelerator  →  bb binary  →  pro
                   (localhost:59833)     (Tauri app)     (native)
 ```
 
-The SDK auto-detects the accelerator on port 59833. If the accelerator is unavailable or has a version mismatch, the SDK automatically falls back to WASM proving.
+Browser SDK instances probe HTTPS for private proving by default and pin it after success. If HTTPS
+cannot connect, the SDK may use HTTP only for a bounded, witness-free health diagnosis; it never
+sends an HTTP `/prove` or witness automatically, and proving falls back to WASM. Node/Bun/SSR retain
+the dual HTTP/HTTPS behavior needed by the headless CI server.
 
 ### Proving Timing
 
@@ -267,12 +287,13 @@ With auto-update enabled, new versions are downloaded and installed in the backg
 
 HTTPS between your browser and the accelerator is **default-on** on macOS, Linux, and Windows,
 consented through the first-run onboarding wizard (you can opt out). Safari *requires* it (it blocks
-plain HTTP from an HTTPS page); Chrome/Firefox/Edge use it when the local certificate is trusted and
-otherwise fall back to HTTP with no added latency. The SDK probes both ports and prefers HTTPS when
-healthy (see the SDK README).
+plain HTTP from an HTTPS page); Chrome/Firefox/Edge also require trusted HTTPS for browser proving by
+default. If the secure connection is unavailable, the SDK reports recovery detail to the dApp and
+uses WASM without automatically activating HTTP proving (see the SDK README).
 
 Enable/disable anytime via the **Encrypted Connection (HTTPS)** toggle in Settings, or re-run the
-wizard from Settings → "Run setup again".
+wizard from Settings → "Run setup again". When a dApp reports a TLS/trust failure, re-running setup
+repairs certificate trust; restart the affected browser where the platform notes below require it.
 
 **Consent per OS** (installing the certificate):
 - **macOS** — a password dialog (login Keychain).
@@ -455,11 +476,14 @@ ACCELERATOR_DOWNLOAD_TEST=1 cargo test download_and_verify -- --nocapture
 Releases are triggered via `gh workflow run release-accelerator.yml -f version=X.Y.Z`.
 
 ```
-validate → e2e-webdriver gate → tag → build (3 Tauri + 4 headless platforms) → post-build smoke → release → bump
+validate → build (4 desktop + 4 headless) → isolated updater signing → platform/updater smokes → draft release → packaged E2E → tag → publish
 ```
 
-- **E2E gate**: builds with `--features webdriver`, runs 9 WebDriver tests (macOS, release mode)
-- **Build**: Tauri bundles for 3 platforms (macOS arm64/x86_64, Linux x86_64) + headless `accelerator-server` for 4 platforms (macOS arm64/x86_64, Linux x86_64/arm64)
-- **Post-build smoke**: mounts the signed DMG, launches the app, polls `/health`
-- **Release**: creates GitHub Release with DMGs/debs/AppImages + headless tarballs (with SHA-256 sidecars) + `latest.json` for auto-updater
-- **Bump**: auto-creates PR to bump source version
+- **E2E gate**: builds with `--features webdriver` and runs the real desktop WebDriver suite.
+- **Build**: Tauri bundles for macOS arm64/x86_64, Linux x86_64, and Windows x86_64, plus headless `accelerator-server` for macOS arm64/x86_64 and Linux x86_64/arm64. Build jobs use throwaway updater keys.
+- **Updater signing**: one `release-signing` environment job receives the production updater key only after tooling and the verifier are prepared. It signs exact updater payload bytes, builds signed feeds, verifies them, and does not build, install, or launch apps.
+- **Release gates**: notarization/launch checks, blocking N-1→N updater smokes on macOS/Linux/Windows (including tamper rejection controls), then packaged E2E against the draft's own assets. The baseline resolver includes prereleases, selects the greatest complete published same-key release below the candidate, and fails closed if none exists. Any future updater-key rotation requires a deliberately reviewed migration change; it is not an evergreen dispatch option.
+- **Release**: publishes the verified draft after pushing the reviewed commit tag. Stable releases include signed `latest.json`; prereleases do not alter the live updater feed.
+- **Promote**: a separate `promote-only` dispatch verifies the 17-asset stable release and flips the live feed. With `bump_source=true`, it then opens the next-version PR.
+
+The Windows installer is intentionally not Authenticode-signed, so SmartScreen reports an unknown publisher on first install. Updater payloads are still Ed25519-signed and verified before application.

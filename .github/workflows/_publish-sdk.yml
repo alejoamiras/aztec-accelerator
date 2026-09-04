@@ -1,56 +1,26 @@
 name: _Publish SDK (reusable)
 
-# npm `latest` NEVER moves through this workflow's direct dispatch: the dispatch inputs
-# deliberately omit `latest` and constrain `dist_tag` to a non-latest choice list, and the
-# guard step below hard-fails on anything else (both trigger paths). Promotion is a separate,
-# smoke-gated, tag-only step: promote-latest.yml.
+# Intentionally call-only. npm trusted publishing authenticates the top-level
+# `.github/workflows/release-sdk.yml` workflow in the `npm-publish` environment.
 on:
-  workflow_dispatch:
-    inputs:
-      dist_tag:
-        description: "npm dist-tag"
-        required: true
-        type: choice
-        options:
-          - testnet
-          - nightlies
-        default: testnet
   workflow_call:
-    inputs:
-      dist_tag:
-        description: "npm dist-tag (testnet or nightlies — guarded below)"
-        required: true
-        type: string
-    secrets:
-      NPM_TOKEN:
-        required: true
-
-# Shared with promote-latest.yml: an in-flight npm mutation is never canceled (a canceled
-# half-done publish strands irreversible state). Caveat (GitHub semantics): at most ONE
-# run waits per group — a newer dispatch replaces a still-queued run; confirm your run
-# started after dispatching.
-concurrency:
-  group: publish-npm
-  cancel-in-progress: false
+    outputs:
+      sdk_version:
+        description: "The SDK version published to npm testnet"
+        value: ${{ jobs.publish.outputs.sdk_version }}
 
 jobs:
   publish:
-    name: Publish SDK
+    name: Publish SDK candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    environment: npm-publish
     permissions:
-      id-token: write # needed for --provenance (Sigstore attestation)
+      id-token: write
       contents: write
+    outputs:
+      sdk_version: ${{ steps.sdk-version.outputs.version }}
     steps:
-      - name: Guard dist_tag (npm 'latest' moves only via promote-latest.yml)
-        env:
-          DIST_TAG: ${{ inputs.dist_tag }}
-        run: |
-          case "$DIST_TAG" in
-            testnet|nightlies) echo "dist_tag=$DIST_TAG ok" ;;
-            *) echo "::error::dist_tag '$DIST_TAG' is not allowed here"; exit 1 ;;
-          esac
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -60,10 +30,17 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      - name: Require an npm CLI with trusted-publishing support
+        run: |
+          npm_version="$(npm --version)"
+          node -e 'const [major=0,minor=0,patch=0]=process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1)' "$npm_version" || {
+            echo "::error::npm 11.5.1 or newer is required for trusted publishing (got $npm_version)"
+            exit 1
+          }
+          echo "npm $npm_version"
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          # Pinned like every other setup-bun site: the PUBLISH pipeline must never float to a
-          # bun release nobody has validated (this was the one `latest` straggler).
           bun-version-file: .bun-version
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -72,100 +49,148 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build SDK
-        run: bun run --cwd packages/sdk build
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/sdk build
 
       - name: Read Aztec version
         id: aztec-version
         working-directory: packages/sdk
         run: |
-          VERSION=$(node -p "require('./package.json').dependencies['@aztec/stdlib']")
-          if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
+          version=$(node -p "require('./package.json').dependencies['@aztec/stdlib']")
+          if [ -z "$version" ] || [ "$version" = "undefined" ]; then
             echo "::error::@aztec/stdlib not found in packages/sdk/package.json dependencies"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Aztec version: $VERSION"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Determine SDK publish version
         id: sdk-version
         env:
           AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
         run: |
-          VERSION=$(bun scripts/get-sdk-publish-version.ts "$AZTEC_VERSION")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "SDK publish version: $VERSION"
+          version=$(bun scripts/get-sdk-publish-version.ts "$AZTEC_VERSION")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "SDK candidate: $version"
 
-      - name: Set SDK version and fix exports for npm
+      - name: Fail closed if npm, git, or GitHub already contains the candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.sdk-version.outputs.version }}
+        run: |
+          package='@alejoamiras/aztec-accelerator'
+          tag="${package}@${VERSION}"
+          encoded_tag="$(jq -rn --arg tag "$tag" '$tag | @uri')"
+
+          versions="$(npm view "$package" versions --json)"
+          if printf '%s' "$versions" | jq -e --arg version "$VERSION" 'if type == "array" then index($version) != null else . == $version end' >/dev/null; then
+            echo "::error::$package@$VERSION already exists on npm"
+            exit 1
+          fi
+
+          remote_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          if [ -n "$remote_refs" ]; then
+            echo "::error::git tag $tag already exists on origin"
+            exit 1
+          fi
+
+          release_status="$(curl -sS -o "$RUNNER_TEMP/sdk-release.json" -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag")"
+          case "$release_status" in
+            404) ;;
+            200) echo "::error::GitHub release $tag already exists"; exit 1 ;;
+            *) echo "::error::GitHub release preflight returned HTTP $release_status"; exit 1 ;;
+          esac
+
+      - name: Prepare and pack the exact publish artifact
         working-directory: packages/sdk
         env:
           VERSION: ${{ steps.sdk-version.outputs.version }}
-        # B7: the rewrite is a committed, unit-tested script (scripts/prepare-sdk-publish.ts) rather than an
-        # inline node -e — diff-reviewable, and the SAME rewrite the tarball-consumer CI job runs.
-        run: bun ../../scripts/prepare-sdk-publish.ts "$VERSION"
+        run: |
+          bun ../../scripts/prepare-sdk-publish.ts "$VERSION"
+          tarball="$PWD/$(npm pack --silent)"
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+          echo "Packed $tarball"
 
-      # If this step fails AFTER npm accepted the publish, never blind-redispatch: check
-      # `npm view @alejoamiras/aztec-accelerator versions` first — a redispatch mints a
-      # `-revision.N` version by design (get-sdk-publish-version.ts).
-      - name: Publish to npm
-        working-directory: packages/sdk
+      - name: Test the exact publish artifact as an npm consumer
+        run: bash scripts/sdk-tarball-consumer.sh "$TARBALL"
+
+      - name: Publish candidate to npm testnet with OIDC
+        # npm exchanges GitHub's OIDC identity through the configured trusted publisher.
+        # Do not add a traditional token fallback to this run.
+        run: npm publish "$TARBALL" --provenance --access public --tag testnet --workspaces=false
+
+      - name: Verify npm version, testnet tag, and provenance
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          DIST_TAG: ${{ inputs.dist_tag }}
-        run: npm publish --provenance --access public --tag "$DIST_TAG" --workspaces=false
+          VERSION: ${{ steps.sdk-version.outputs.version }}
+        run: |
+          package='@alejoamiras/aztec-accelerator'
+          for attempt in $(seq 1 10); do
+            published="$(npm view "$package@$VERSION" version 2>/dev/null || true)"
+            testnet="$(npm view "$package" dist-tags.testnet 2>/dev/null || true)"
+            if [ "$published" = "$VERSION" ] && [ "$testnet" = "$VERSION" ] && \
+               bun scripts/sdk-release-verification.ts "$VERSION" "$GITHUB_SHA"; then
+              exit 0
+            fi
+            echo "Registry/provenance not consistent yet (attempt $attempt/10)"
+            sleep 6
+          done
+          echo "::error::npm publish could not be verified"
+          exit 1
+
+      - name: Cryptographically verify registry signatures and provenance
+        env:
+          VERSION: ${{ steps.sdk-version.outputs.version }}
+        run: bun scripts/verify-sdk-package-signatures.ts "$VERSION"
 
       - name: Create git tag and GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.sdk-version.outputs.version }}
           AZTEC_VERSION: ${{ steps.aztec-version.outputs.version }}
-          DIST_TAG: ${{ inputs.dist_tag }}
         run: |
-          TAG="@alejoamiras/aztec-accelerator@${VERSION}"
-
+          tag="@alejoamiras/aztec-accelerator@${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # F2 (full-branch audit): NEVER suppress tag/push failures. The old `git tag/push || true` let a
-          # pre-claimed tag (an attacker pushing $TAG at a different commit) survive silently, then
-          # `gh release create` below blessed that wrong-commit tag while npm published from HEAD.
-          # We query the REMOTE directly with `git ls-remote` (which — unlike `git fetch ... || true` —
-          # exits NON-ZERO on network/auth failure, so a masked error can't let a stale local tag pass) and
-          # require any existing remote tag to resolve to the exact commit we publish (HEAD).
-          EXPECTED_SHA="$(git rev-parse HEAD)"
-          # Ask for both the ref and its peeled (^{}) form; an annotated tag reports the commit on the
-          # `^{}` line, a lightweight tag (what `git tag` creates) reports the commit on the plain line.
-          REMOTE_REFS="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
-          if [ -n "$REMOTE_REFS" ]; then
-            REMOTE_SHA="$(printf '%s\n' "$REMOTE_REFS" | awk '/\^\{\}$/ {print $1; exit}')"
-            [ -z "$REMOTE_SHA" ] && REMOTE_SHA="$(printf '%s\n' "$REMOTE_REFS" | awk 'NR==1 {print $1}')"
-            if [ "$REMOTE_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::Tag $TAG already exists on origin at $REMOTE_SHA, not the published commit ($EXPECTED_SHA); aborting"
-              exit 1
-            fi
-            echo "Tag $TAG already on origin at the expected commit; reusing it"
-          else
-            git tag "$TAG"
-            git push origin "$TAG"
-          fi
+          git tag "$tag"
+          git push origin "$tag"
 
           if [ "$VERSION" = "$AZTEC_VERSION" ]; then
-            NOTES="Aligned with Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
+            notes="Aligned with Aztec testnet version \`$AZTEC_VERSION\`."
           else
-            NOTES="SDK revision for Aztec ${DIST_TAG} version \`${AZTEC_VERSION}\`."
+            notes="SDK revision for Aztec testnet version \`$AZTEC_VERSION\`."
           fi
-
-          # ALWAYS --latest=false: `inputs.latest` governs the npm dist-tag only. The repo's GitHub
-          # "Latest" badge belongs to accelerator releases — the 4.2.0-revision.2 SDK release stole
-          # it from accelerator-v1.0.5 (2026-06-11), breaking the updater smokes' N-1 resolution
-          # and the releases/latest URL.
-          # B7 (F15): attach MIGRATION.md so the release page carries the upgrade guide even for consumers
-          # who never open the npm tarball (it is also shipped IN the tarball via `files`).
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes "$NOTES" \
+          gh release create "$tag" \
+            --title "$tag" \
+            --notes "$notes" \
             --latest=false \
             packages/sdk/MIGRATION.md
+
+      - name: Verify release records and a fresh registry install
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.sdk-version.outputs.version }}
+        run: |
+          package='@alejoamiras/aztec-accelerator'
+          tag="${package}@${VERSION}"
+          remote_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          remote_sha="$(printf '%s\n' "$remote_refs" | awk '/\^\{\}$/ {print $1; exit}')"
+          [ -z "$remote_sha" ] && remote_sha="$(printf '%s\n' "$remote_refs" | awk 'NR==1 {print $1}')"
+          if [ "$remote_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::remote tag resolves to $remote_sha, expected $GITHUB_SHA"
+            exit 1
+          fi
+          gh release view "$tag" --json tagName --jq '.tagName' | grep -Fx "$tag"
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --loglevel=error "$package@$VERSION"
+          installed="$(node -p "require('./node_modules/@alejoamiras/aztec-accelerator/package.json').version")"
+          [ "$installed" = "$VERSION" ] || {
+            echo "::error::fresh install resolved $installed, expected $VERSION"
+            exit 1
+          }
+          echo "Verified $package@$VERSION; npm latest remains unchanged."

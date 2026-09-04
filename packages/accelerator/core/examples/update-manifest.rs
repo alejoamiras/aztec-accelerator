@@ -11,6 +11,8 @@
 //!   3. `update-manifest splice --feed latest.json --envelope envelope.json --sig envelope.json.sig \
 //!         > latest.signed.json`
 //!   4. `update-manifest verify --feed latest.signed.json --pubkey pubkey.b64`   # exit 0 ⇒ publishable
+//!   5. `update-manifest verify-artifact --artifact app.tar.gz --sig app.tar.gz.sig \
+//!         --pubkey pubkey.b64` # release signer verifies every updater payload before upload
 //!
 //! Encoding contract (kept in lockstep with `verify_manifest`):
 //!   - `manifest` = base64(envelope.json bytes); verify base64-decodes it then verifies the sig.
@@ -114,8 +116,42 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         }
+        Some("verify-artifact") => {
+            let artifact_path = flag(&args, "--artifact");
+            let sig_path = flag(&args, "--sig");
+            let pubkey_path = flag(&args, "--pubkey");
+            let artifact = std::fs::read(&artifact_path)
+                .unwrap_or_else(|e| die(format!("read {artifact_path}: {e}")));
+            let sig_b64 = read_to_string(&sig_path);
+            let pubkey_b64 = read_to_string(&pubkey_path);
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let sig_doc = b64
+                .decode(sig_b64.trim())
+                .unwrap_or_else(|e| die(format!("decode {sig_path}: {e}")));
+            let sig_doc = String::from_utf8(sig_doc)
+                .unwrap_or_else(|e| die(format!("signature is not UTF-8: {e}")));
+            let pubkey_doc = b64
+                .decode(pubkey_b64.trim())
+                .unwrap_or_else(|e| die(format!("decode {pubkey_path}: {e}")));
+            let pubkey_doc = String::from_utf8(pubkey_doc)
+                .unwrap_or_else(|e| die(format!("public key is not UTF-8: {e}")));
+            let public_key = minisign_verify::PublicKey::decode(&pubkey_doc)
+                .unwrap_or_else(|e| die(format!("decode public key document: {e}")));
+            let signature = minisign_verify::Signature::decode(&sig_doc)
+                .unwrap_or_else(|e| die(format!("decode signature document: {e}")));
+            match public_key.verify(&artifact, &signature, false) {
+                Ok(()) => {
+                    println!("OK  artifact: {artifact_path} ({} bytes)", artifact.len());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("artifact signature verification failed: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         _ => {
-            eprintln!("usage: update-manifest <envelope|splice|verify> [--flags]");
+            eprintln!("usage: update-manifest <envelope|splice|verify|verify-artifact> [--flags]");
             ExitCode::from(2)
         }
     }

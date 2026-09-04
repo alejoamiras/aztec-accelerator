@@ -106,6 +106,8 @@ function pickSessionSender(): AztecAddress {
  */
 export function getAcceleratorProver(): AcceleratorProver {
   if (!state.prover) {
+    // Browser SDK instances are HTTPS-only by default. This explicit flag remains solely as a
+    // packaged-E2E assertion knob; there is intentionally no `httpsOnly=false` URL switch.
     const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
     state.prover = httpsOnly
       ? new AcceleratorProver({ accelerator: { httpsOnly: true, allowInsecureDowngrade: false } })
@@ -113,6 +115,17 @@ export function getAcceleratorProver(): AcceleratorProver {
     state.prover.setForceLocal(state.uiMode === "local");
   }
   return state.prover;
+}
+
+/**
+ * Deliberately allow plaintext proving for this page's in-memory prover instance. The caller owns
+ * the warning/confirmation UI. Nothing is written to storage, the URL, or desktop configuration.
+ */
+export function enableInsecureHttpForSession(): void {
+  getAcceleratorProver().setAcceleratorConfig({
+    httpsOnly: false,
+    allowInsecureDowngrade: true,
+  });
 }
 
 export function checkAcceleratorStatus(
@@ -194,10 +207,9 @@ async function bustStaleCrsCacheOnce(log: LogFn): Promise<void> {
  * Shared by both embedded and external wallet paths.
  */
 export async function initializeNode(log: LogFn): Promise<void> {
-  // B4 packaged-E2E harness: `?httpsOnly=true` forces the prover to HTTPS-only with NO HTTP downgrade, so
-  // when the harness serves this page against the INSTALLED desktop app a green proof positively exercises
-  // the browser⇄app TLS path (the seeded CA trust) — never a silent HTTP or WASM shortcut. Absent the param,
-  // real users keep the normal dual HTTP/HTTPS probe. Paired with `?forceProofs=true` so proving actually runs.
+  // B4 packaged-E2E harness: `?httpsOnly=true` explicitly pins the browser-safe default so a green
+  // proof against the installed desktop app positively exercises the seeded TLS trust path. There is
+  // intentionally no URL-controlled opt-out; HTTP consent exists only in the in-memory recovery UI.
   const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
   log(
     httpsOnly

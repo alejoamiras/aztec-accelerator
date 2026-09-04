@@ -1,271 +1,349 @@
-# Release Runbook
+# Release runbook
 
-This repo ships **two independently releasable artifacts**, and most releases touch only one:
+This repository ships two independently versioned artifacts:
 
-| Artifact | What it is | Released by | When |
-|---|---|---|---|
-| **SDK** (`@alejoamiras/aztec-accelerator`) | npm package dApps import | `publish-testnet.yml` → `_publish-sdk.yml` | An `@aztec/*` bump, or an SDK code/feature change |
-| **Accelerator** (desktop + headless) | The native-proving app/binary | `release-accelerator.yml` (tag + GitHub release + `latest.json`) | The accelerator's **own** code changes (server, tray, updater, bb download/verify) |
+| Artifact | Release entry point | Use it when |
+|---|---|---|
+| SDK (`@alejoamiras/aztec-accelerator`) | `release-sdk.yml` | The SDK or pinned `@aztec/*` dependencies changed |
+| Desktop + headless accelerator | `release-accelerator.yml` | Native server, desktop UI, updater, trust, or bb download logic changed |
 
-**Decision — SDK-only vs full accelerator release:** because the accelerator downloads `bb` at runtime, an Aztec protocol bump is almost always **SDK-only** — re-publish the SDK and you're done; installed accelerators fetch the matching `bb` on the next prove request (see [accelerator README → Version Model](../packages/accelerator/README.md#version-model--why-an-aztec-bump-doesnt-re-release-this-app)). Cut a full accelerator release **only** when the accelerator's own Rust code changed. The accelerator release is documented first below, then the [SDK publish](#releasing-the-sdk-to-npm).
+An Aztec protocol bump is normally SDK-only. Installed accelerators download and verify the matching `bb` version at runtime; do not cut a native-app release merely to track an `@aztec/*` bump.
 
-## Pre-flight Checklist
+## One-time production configuration
 
-- [ ] All CI checks green on `main`
-- [ ] `bun run test` passes locally (lint + typecheck + unit tests)
-- [ ] `cargo test --lib` passes in `packages/accelerator/src-tauri/`
-- [ ] No open "P0" issues on the milestone
-- [ ] Version number decided (semver: `MAJOR.MINOR.PATCH` or `MAJOR.MINOR.PATCH-rc.N`)
+Keep the release setup small: neither GitHub environment requires reviewers, but both restrict deployment branches to `main`. For this solo-maintainer repository, environments scope secrets and OIDC claims to release jobs; they are not independent approval boundaries. A commit already trusted on `main` can change a workflow that consumes an environment secret. Add a reviewer or external signing service only if that stronger threat model becomes necessary.
 
-## Cutting a Release
+### `release-signing` GitHub environment
 
-B6: **publish and promote are two separate dispatches.** A `publish` run builds, gates, and publishes the
-GitHub release (with its signed `latest.json` asset) but does NOT touch the live auto-updater feed. A
-separate `promote-only` run flips the S3 `latest.json` feed to that version — the only step that changes
-what installed clients auto-update to. `promote-only` is also the rollback lever (see Rollback Procedure).
+Store this required environment secret:
 
-### 1. Publish (build + gate + publish — NO feed flip)
+- `TAURI_SIGNING_PRIVATE_KEY`
 
-```bash
-gh workflow run release-accelerator.yml -f version=X.Y.Z            # mode=publish is the default
-```
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional. Omit it when the production key is passwordless; the workflow passes an empty value and the signer supports that configuration. Set it only when the stored private key was generated with that exact password.
 
-Publish pipeline: **validate → e2e-webdriver gate → build (3 Tauri + 4 headless) → smoke → tag →
-sign-update-feed (stable only) → release**. A prerelease (`X.Y.Z-rc.N`) publishes as a public GitHub
-prerelease (`--latest=false`, no feed). A stable publishes the release + attaches the signed `latest.json`
-as a release asset, but the LIVE feed is unchanged until you promote. Failed gates never reach `release`.
+The production updater key and its optional password must not also exist as repository-level secrets. `release-accelerator.yml` exposes these values only to the dedicated signing step, whose commands are intentionally narrow and use the installed, lockfile-pinned Tauri CLI directly. Apple signing/notarization credentials remain separate because they are required by the macOS build jobs; this change does not isolate those build-time credentials.
 
-### 2. Promote (flip the live feed)
+#### Accelerator 3 updater-key rotation (completed)
 
-After verifying the published stable (and, for a GA, soaking the RC), flip the feed:
+Accelerator 3 rotates the production updater key to public key ID `456E5A3DB518F598`. The matching
+passwordless private key is stored in the Personal-vault item
+`Aztec Accelerator Updater Signing Key v3 (passwordless)` and in the `release-signing` environment only.
+The older `Tauri Signing Key` item is retained as historical evidence and must not be used.
 
-```bash
-# Rehearse first — the whole pre-flight, no write, zero prod effect:
-gh workflow run release-accelerator.yml -f version=X.Y.Z -f mode=promote-only -f dry_run=true
-# Organic GA: flip the feed AND open the source version-bump PR:
-gh workflow run release-accelerator.yml -f version=X.Y.Z -f mode=promote-only -f bump_source=true
-```
+In that 1Password Login item, `username` records the public key and `password` contains the private-key
+payload. “Passwordless” means the updater private key has an empty encryption passphrase; it does **not** mean
+the 1Password `password` field is empty. GitHub's `TAURI_SIGNING_PRIVATE_KEY` must be populated from that
+`password` field, while `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` remains unset.
 
-`promote` re-verifies the published release from scratch (exists, non-draft, non-prerelease stable; full
-installer + `latest.json` asset set; production Ed25519 verifier over the release's OWN `latest.json`; feed
-version == dispatched; every payload URL resolves) BEFORE uploading those exact bytes to S3 + invalidating
-CloudFront. `verify-live-feed` then confirms the public CDN actually serves the new version.
+This is an intentionally breaking updater migration: 1.x and 2.x binaries pin the old public key and cannot
+authenticate any 3.x feed. The 3.0.0 changelog and generated GitHub release notes must therefore tell those
+users to quit the accelerator and manually install 3.0.0 over the existing application. A prior uninstall is
+normally unnecessary and risks removing integration state; install-over preserves configuration and cached bb
+versions. After the manual reinstall, 3.x-to-3.x automatic updates work normally.
 
-### 2. Post-release verification
+Before publishing any 3.0.0 candidate, require the isolated signer job to prove that all updater payloads and
+the generated feed verify against the public key committed in `tauri.conf.json`. Never work around a mismatch
+with an HTTP feed, unsigned payload, alternate public key, or hand-edited release artifact.
 
-- [ ] GitHub Release page has all 6 expected assets:
-  - `Aztec-Accelerator-X.Y.Z-macOS-Apple-Silicon.dmg`
-  - `Aztec-Accelerator-X.Y.Z-macOS-Intel.dmg`
-  - `Aztec-Accelerator-X.Y.Z-macOS-Apple-Silicon.app.tar.gz`
-  - `Aztec-Accelerator-X.Y.Z-macOS-Intel.app.tar.gz`
-  - `Aztec-Accelerator-X.Y.Z-Linux-x86_64.deb`
-  - `Aztec-Accelerator-X.Y.Z-Linux-x86_64.AppImage`
-- [ ] `latest.json` is live: `curl https://aztec-accelerator.dev/releases/latest.json`
-  - Verify `version` field matches
-  - Verify all `signature` fields are non-empty
-  - Verify all `url` fields resolve (HTTP 200/302)
-- [ ] Download a DMG, open it, verify the app launches and the tray icon appears
-- [ ] Check "About" info in tray menu shows correct version
-- [ ] If updating from a previous version: verify the auto-updater detects the new version
-- [ ] Verify macOS notarization: `spctl --assess --verbose /Applications/Aztec\ Accelerator.app`
-- [ ] Verify updater signatures are valid (non-empty in latest.json, app accepts update)
+The one-time Accelerator 3 bootstrap machinery has been removed now that complete published 3.x baselines
+exist. There is no dispatch toggle for bypassing same-key updater gates. Any future updater-key rotation
+requires a deliberately reviewed migration change that defines the user migration, release gates, rollback
+behavior, and documentation for that specific rotation.
 
-### Automated artifact checks
+### `npm-publish` GitHub environment and npm trusted publisher
 
-The release workflow already asserts all 6 expected files exist before creating the GitHub Release. The `latest.json` is generated from the `.sig` files produced by Tauri's Ed25519 signing step. If signing fails, the `.sig` files will be missing and `latest.json` will have empty signatures — the auto-updater will reject the update (signature verification is mandatory in tauri-plugin-updater).
+The environment has no npm secret. Configure the package's [npm GitHub Actions trusted publisher](https://docs.npmjs.com/trusted-publishers/) exactly as follows:
 
-### 3. Merge the version-bump PR
+| Field | Value |
+|---|---|
+| Organization or user | `alejoamiras` |
+| Repository | `aztec-accelerator` |
+| Workflow filename | `release-sdk.yml` |
+| Environment | `npm-publish` |
+| Allowed action | `npm publish` only |
 
-The release workflow creates a PR bumping the source version to the next RC. Merge it promptly so `main` always reflects the next development version.
+`_publish-sdk.yml` is intentionally `workflow_call`-only. npm validates the calling workflow name for reusable workflows, so the trusted-publisher filename is `release-sdk.yml`; both caller and called workflow grant `id-token: write`.
 
-## Releasing the SDK to npm
-
-The SDK publishes via `publish-testnet.yml` (manual `workflow_dispatch`), which both publishes the SDK and deploys the playground.
+For the first OIDC canary, leave the existing `NPM_TOKEN` stored but unused. Confirm the workflow contains no token reference:
 
 ```bash
-# Publish the SDK (runs the e2e gate first) + deploy the playground:
-gh workflow run publish-testnet.yml
-
-# Deploy the playground ONLY — skip re-publishing the SDK to npm:
-gh workflow run publish-testnet.yml -f skip_sdk_publish=true
+rg 'NPM_TOKEN|NODE_AUTH_TOKEN' .github/workflows/release-sdk.yml .github/workflows/_publish-sdk.yml
 ```
 
-- **Publishes to `testnet`, never to `latest`.** This release path always uses the `testnet` dist-tag; `_publish-sdk.yml` accepts only `testnet` / `nightlies` (guard step; `nightlies` is available solely through that workflow's own direct dispatch), so moving npm `latest` is structurally impossible from any publish and belongs to `promote-latest.yml` (below). A publish therefore never changes what a bare `npm install` resolves — but it does become eligible immediately for any consumer whose range matches (`^X.Y.Z`) on a fresh or unlocked install, since semver ranges ignore dist-tags. Existing lockfiles keep their resolution until updated.
-- The reusable `_publish-sdk.yml` runs `npm publish --provenance --access public --tag <dist_tag>` — **Sigstore build provenance** is attached via `id-token: write`. npm authentication uses the `NPM_TOKEN` secret (passed into the reusable workflow); the GitHub release it cuts is always `--latest=false` (the npm dist-tag, not the GitHub "Latest" flag, governs consumer resolution).
-- The same run deploys the playground (`deploy-app` job) unless the e2e gate failed. Use `skip_sdk_publish=true` to redeploy the playground after a docs/UI-only change without bumping npm.
-- **7-day npm min-age** applies when a lockfile is regenerated locally, with one standing, scoped exception: the first-party `@aztec/*` packages are listed — by exact name, one per line — in `bunfig.toml`'s `minimumReleaseAgeExcludes` (an Aztec bump PR is human-reviewed and CI-gated, and the gate would otherwise stall every bump for a week). A bump that pulls in a NEW `@aztec/*` package needs that exact name added; never extend the list beyond first-party `@aztec/*` names, and never bypass the gate ad hoc. The publish job itself installs `--frozen-lockfile`, so min-age is not a publish-time control.
+The command must return no matches. After one successful OIDC publish and provenance verification, delete the obsolete automation token/secret. Do not add a token fallback: a fallback would hide a broken trusted-publisher binding.
 
-### Pre-flight (SDK)
+## Preflight for every release
 
-- [ ] `bun run --cwd packages/sdk test:lint` (typecheck) + `bun run --cwd packages/sdk test:unit` green; `bun run lint` clean (biome)
-- [ ] `@aztec/*` deps resolve to the intended version; `bun.lock` committed (`bun install --frozen-lockfile` passes). `packages/sdk/package.json`'s own `version` is a `0.0.0` placeholder, never hand-bumped.
-- [ ] Know the DERIVED publish version before dispatching. `scripts/get-sdk-publish-version.ts` takes the pinned `@aztec/stdlib` version as its base and returns it unchanged only when that exact string is unpublished; if the base is already on npm it appends a revision — `<base>-revision.N` for a stable base, `<base>.N` for a prerelease one (both keep the result valid semver). Run `bun scripts/get-sdk-publish-version.ts <base>` to see which. The two checks below apply to that DERIVED version, not the base.
-- [ ] `gh secret list | grep NPM_TOKEN` — if the timestamp is older than ~85 days, rotate BEFORE dispatching. Granular npm tokens expire on a 90-day lifetime and give no warning; the publish simply 404s. This has cost two releases (2026-05-27, 2026-08-26) and is the cheapest check on this list.
-- [ ] `npm view @alejoamiras/aztec-accelerator versions dist-tags --json` — confirms the derivation above, and that no other npm mutation is queued or in flight (`gh run list` for `publish-testnet.yml`, `_publish-sdk.yml`, `promote-latest.yml`; they share a non-cancelling concurrency group).
-- [ ] `git ls-remote origin 'refs/tags/@alejoamiras/aztec-accelerator@<derived-version>'` empty — the workflow's tag guard fires only AFTER npm publish, so a squatted tag would strand a published version without its release.
-- [ ] Consumer-fidelity proof at the dispatch commit — `sdk.yml`'s `tarball-consumer` job green at that SHA. It packs the REWRITTEN manifest; a bare `npm pack` does not (it ships `0.0.0` with source `exports`) and proves nothing about the published shape. To reproduce locally, mirror what CI does, from `packages/sdk` (the rewrite script's manifest argument defaults to a relative path):
+- Work from a clean `main` checkout at the intended commit.
+- Require all CI checks to be green.
+- Confirm no release workflow is queued or running.
+- Run the repository checks:
 
 ```bash
-# Subshell + `set -e`: safe to paste interactively — a dirty manifest aborts before any
-# mutation, and the manifest is restored when the subshell exits, not when you close the terminal.
-( set -euo pipefail
-  cd packages/sdk
-  git diff --quiet HEAD -- package.json        # refuse to start on a dirty manifest
-  trap 'git checkout HEAD -- package.json; rm -f "${TARBALL:-}"' EXIT
-  bun run build
-  bun ../../scripts/prepare-sdk-publish.ts <derived-version>
-  TARBALL="$PWD/$(npm pack --silent)"
-  bash ../../scripts/sdk-tarball-consumer.sh "$TARBALL"
-)
+bun install --frozen-lockfile
+bun run test
+bun run lint:actions
+bun run audit:dependencies
+bun run --cwd packages/accelerator frontend:build
+cargo test --locked --manifest-path packages/accelerator/core/Cargo.toml
+cargo test --locked --manifest-path packages/accelerator/server/Cargo.toml
+cargo test --locked --manifest-path packages/accelerator/src-tauri/Cargo.toml
 ```
 
-## Promoting the SDK to npm `latest`
+`audit:dependencies` combines `bun audit` with `cargo audit` over all three Rust lockfiles. Both release workflows run the same audit as a publication gate. New npm high/critical findings and every RustSec vulnerability block. npm moderate/low findings and RustSec informational warnings are reported. A blocking finding may be accepted only in `scripts/dependency-audit-allowlist.json` with an exact package/advisory pair, rationale, upgrade path, and future expiry. Never extend an expired exception just to make a release green.
 
-`promote-latest.yml` is the ONLY sanctioned path that moves `latest`. It never publishes: it validates the version string, verifies the version already exists on npm, then moves the tag.
+## Releasing the accelerator
+
+Publishing and promotion are separate, serialized events. Publish creates a tested GitHub release but never changes the live updater feed. Promotion verifies an already-published stable release and moves the feed; the same operation is the rollback lever.
+
+### 1. Publish
 
 ```bash
-# Make an already-published version the default install:
-gh workflow run promote-latest.yml -f version=<NEW_VERSION>
-
-# Roll `latest` back to a previously published version (same workflow — it is the rollback lever):
-gh workflow run promote-latest.yml -f version=<PREV_GOOD>
+gh workflow run release-accelerator.yml --ref main -f version=X.Y.Z
+# or prerelease:
+gh workflow run release-accelerator.yml --ref main -f version=X.Y.Z-rc.N
 ```
 
-- **Precondition**: verify the publish actually landed — `testnet` moved, provenance attestation attached, git tag and GitHub release present — plus whatever acceptance evidence the release was gated on. Record what was checked; the workflow enforces none of it.
-- **What rollback does and does not fix.** Moving the tag back changes what NEW bare/`@latest` installs resolve. It does not downgrade anyone already installed, and it does not help range consumers (`^X.Y.Z`) — the published version stays eligible for their fresh or unlocked installs regardless of dist-tags, and a `X.Y.Z-revision.N` fix-forward is a semver *prerelease* their ranges will not match. Fix-forward for those consumers means the next real version.
-- **Append-only.** Never delete or re-publish a version to "undo" it; a colliding tag makes the publish step fail loud, and re-cutting the same version is a STOP-and-surface event.
+Every publish requires a complete, published, lower release that uses the current updater key. The resolver
+includes prereleases, selects the greatest compatible version, and fails closed when none exists. There is no
+operator override. A future key rotation must arrive as a deliberately reviewed migration change rather than
+an evergreen release-dispatch option.
 
-### Verifying a promote (two stale reads that fake a failure)
+The release path is:
 
-**The registry read-back lags the write.** After a successful `npm dist-tag add`, `npm view` can
-still report the OLD tag for a while — on 2026-08-26 the promote workflow's own `npm view`, running
-0.4 s after its own successful `+latest: …@5.2.0`, still printed the previous version, and a local
-`npm view` a minute later agreed. Confirm with a read that bypasses caches instead:
+```text
+validate/main-only + 3-OS WebDriver
+  → 4 desktop builds + 4 headless builds
+  → isolated production updater signing
+  → resolve the greatest lower complete same-key updater baseline
+  → notarization, launch, updater, and tamper-rejection smokes
+  → draft release
+  → packaged E2E against the draft's own assets
+  → tag the dispatched commit
+  → re-check asset digests and publish the draft
+```
+
+Desktop builds use fresh throwaway updater keys so a new binary can be produced without exposing the production key. Their temporary signatures are excluded. The `release-signing` job then signs the four exact updater payloads with the production key and verifies every payload and feed against the embedded public key. That job does not build, install, launch, or smoke-test applications. Smokes consume only the pre-signed artifacts. The updater baseline may be a prerelease: this is intentional, so RC2 exercises RC1 and GA exercises the newest same-key RC instead of falling back to an older incompatible key.
+
+The packaged composed-proof legs replace the playground's workspace SDK with the packed tarball, build the production playground, and serve that bundle only on `127.0.0.1:5173`. They deliberately do not use Vite's development dependency optimizer. Playwright is exact-pinned identically in the desktop and playground packages, and every browser install resolves from the consuming workspace instead of allowing a root-context `bunx` to fetch a different release. Each composed-proof step has a 35-minute ceiling; a failure or cancellation retains the accelerator, node, preview-server, and Playwright trace output in the attempt-specific Actions artifact.
+
+A prerelease is public with `--latest=false` and omits `latest.json`. A stable release includes `latest.json`, but publishing still does not write KV, alter what installed clients receive, or mark the release GitHub Latest. After a real forward GA promotion verifies the signed public feed, the workflow marks that release GitHub Latest. A rollback changes only the authoritative updater feed and deliberately leaves GitHub Latest on the newest GA.
+
+### Expected assets
+
+Every release has 16 binary assets:
+
+- two macOS DMGs and two macOS updater `.app.tar.gz` files;
+- Linux `.deb` and `.AppImage` files;
+- Windows first-install `.exe` and updater `.nsis.zip` files;
+- four headless server `.tar.gz` files, each with a `.sha256` sidecar.
+
+A stable release has a seventeenth asset: signed `latest.json` containing exactly `darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`, and `windows-x86_64`.
+
+The Windows installer is deliberately not Authenticode-signed. SmartScreen therefore shows **Unknown publisher** on first install; users select **More info → Run anyway**. This is an accepted distribution limitation, not a release blocker. The updater payload is independently Ed25519-signed and verified before application.
+
+### 2. Verify the published release
+
+- Confirm the workflow finalized the draft and the Git tag resolves to the dispatched commit.
+- Confirm the exact asset count: 16 for a prerelease, 17 for stable.
+- Confirm macOS signature and notarization jobs passed.
+- Confirm macOS, Linux, and Windows updater smokes passed, including negative tamper controls.
+- For a stable, download its `latest.json` asset and confirm its version, four platform entries, non-empty signatures, sizes, and exact release URLs.
+- For Windows trust/certificate/HTTPS changes, complete the manual Windows composed-proof check in the [accelerator README](../packages/accelerator/README.md#windows-composed-proof--manual-pre-ga-check).
+
+Do not promote a release that needs unexplained retries or manual asset replacement. Published releases and tags are append-only; fix forward with a new version.
+
+### 3. Promote the live updater feed
+
+Rehearse the exact validation without writing production:
 
 ```bash
-curl -fsSL -H 'Cache-Control: no-cache' 'https://registry.npmjs.org/@alejoamiras%2faztec-accelerator' \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)["dist-tags"]))'
+gh workflow run release-accelerator.yml --ref main \
+  -f version=X.Y.Z -f mode=promote-only -f dry_run=true
 ```
 
-Never roll back on a stale read-back — that would undo a correct promote.
-
-**A local packument cache resolves the OLD `latest`.** A post-promote "fresh install" check on a
-machine that queried the package recently silently installs the PREVIOUS release and then fails on
-whatever the new version added — a convincing fake regression (it happened here: 5.0.1 installed
-minutes after 5.2.0 was promoted). Always revalidate:
+For an ordinary GA, flip and verify the feed, mark the release GitHub Latest, and open the source-version bump PR:
 
 ```bash
-cd "$(mktemp -d)" && npm init -y >/dev/null
-npm install @alejoamiras/aztec-accelerator --prefer-online --no-audit --no-fund
-node -p 'JSON.parse(require("fs").readFileSync("node_modules/@alejoamiras/aztec-accelerator/package.json","utf8")).version'
-node -e 'import("@alejoamiras/aztec-accelerator").then(m => console.log(typeof m.AcceleratorProver, m.ACCELERATOR_API_VERSION))'
+gh workflow run release-accelerator.yml --ref main \
+  -f version=X.Y.Z -f mode=promote-only -f bump_source=true
 ```
 
-Read the installed manifest from `node_modules/…` as above: the published `exports` map exposes
-only `"."`, so `require("@alejoamiras/aztec-accelerator/package.json")` correctly throws
-`ERR_PACKAGE_PATH_NOT_EXPORTED` — a verification script that reaches for an unexported subpath
-manufactures failures against a healthy package.
+Promotion independently requires a published, non-draft, non-prerelease release with the exact 17 assets. It verifies the release's own signed manifest, exact platform URLs, and reachable payloads before uploading those same manifest bytes. The KV write is authoritative, and a separate job polls the public feed until it serves the requested version and passes cryptographic verification. Only then does an organic-GA promotion (`bump_source=true`) update GitHub's Latest badge. Rollback promotions leave that human-facing badge unchanged.
 
-### After any FAILED publish or promote run
+Merge the source-version bump PR after an organic GA. Never request `bump_source` for a rollback.
 
-Read the registry BEFORE classifying the failure — an npm command can fail after the registry accepted the change (a lost response, a failed trailing step):
+### Accelerator rollback
+
+Move the live feed back to an intact previous stable; do not delete or rebuild any release:
+
+```bash
+gh workflow run release-accelerator.yml --ref main \
+  -f version=<PREVIOUS_GOOD> -f mode=promote-only -f dry_run=true
+
+gh workflow run release-accelerator.yml --ref main \
+  -f version=<PREVIOUS_GOOD> -f mode=promote-only
+```
+
+This stops new updater uptake and moves landing-page downloads back. It does not downgrade clients that already updated. Fix forward under the next version.
+
+## Releasing the SDK candidate
+
+`release-sdk.yml` has one manual entry point and three modes:
+
+```bash
+# Default: publish SDK candidate, then deploy the testnet playground
+gh workflow run release-sdk.yml --ref main -f mode=sdk-and-playground
+
+# Publish only
+gh workflow run release-sdk.yml --ref main -f mode=sdk-only
+
+# Deploy playground only; no npm mutation
+gh workflow run release-sdk.yml --ref main -f mode=playground-only
+```
+
+`testnet` is the npm candidate dist-tag used by the public testnet playground. It is not an npm network or a lesser form of the package. There is no separate `mainnet` publish path today: accepted candidates are deliberately promoted from `testnet` to npm's default `latest` tag. The old npm nightly publish path is retired; the historical `nightlies` dist-tag is left untouched.
+
+### Candidate version and gates
+
+The SDK package's checked-in version remains `0.0.0`. The workflow derives a version from the pinned `@aztec/stdlib` version. If the base already exists, it chooses `<base>-revision.N` for a stable base or appends `.N` to a prerelease base.
+
+Preview the derived version:
+
+```bash
+AZTEC_VERSION=$(node -p "require('./packages/sdk/package.json').dependencies['@aztec/stdlib']")
+bun scripts/get-sdk-publish-version.ts "$AZTEC_VERSION"
+```
+
+Before dispatching, verify the derived npm version, matching Git tag, and GitHub release are all absent. The workflow repeats these checks, builds and rewrites the package manifest, packs one exact tarball, runs the consumer test against that tarball, and publishes those bytes with OIDC to `testnet`.
+
+After npm accepts the package, the workflow requires all of the following before creating the tag/release:
+
+- the exact version is readable from npm;
+- `testnet` points to it;
+- npm's current verifier cryptographically validates registry signatures and the SLSA attestation for the exact installed package;
+- the verified attestation subject digest matches npm's exact tarball integrity, and its source dependency identifies `alejoamiras/aztec-accelerator`, `.github/workflows/release-sdk.yml`, `refs/heads/main`, and the dispatched commit.
+
+It then tags the commit, creates a non-latest GitHub release, and verifies a fresh registry install. npm publication is irreversible, so if npm accepted the package but a later step failed, do not redispatch blindly; inspect and repair only the missing record.
+
+### HTTPS-by-default candidate canary
+
+Before promoting an SDK candidate that changes browser transport or recovery UI, validate the
+`testnet` package together with the deployed testnet playground. Do not promote until all of these
+hold in supported browsers:
+
+- trusted HTTPS reaches native proving and `/prove` is sent only to the HTTPS port;
+- HTTPS unavailable produces `secure-connection-unavailable`, then
+  `secure-connection-unavailable` → `fallback`, with WASM completing normally;
+- each health diagnosis renders the intended Encrypted Connection/certificate/install guidance;
+- the post-failure HTTP diagnostic is a bounded `GET /health` with no witness, no POST, no redirect,
+  and no change to proof eligibility or protocol pinning;
+- `permission-blocked` retains its separate browser site-permission recovery;
+- HTTP proving is unavailable until the user confirms the warning, after which both
+  `httpsOnly: false` and `allowInsecureDowngrade: true` apply only to the current prover instance;
+- reload/new prover restores HTTPS-only, with no consent in storage, cookies, URL parameters, or
+  desktop configuration; and
+- the landing page explains recovery but cannot activate or persist HTTP.
+
+If any transport invariant, status classification, prompt, or session-reset behavior regresses,
+stop promotion. Fix forward under a new derived SDK revision and redeploy the testnet playground.
+If a regression is discovered only after promotion, move `latest` back with the SDK rollback command
+below and restore the last known-good playground deployment; never delete or republish the bad npm
+version.
+
+### First OIDC canary
+
+For the first run after enabling trusted publishing:
+
+1. Double-check the npm trusted-publisher fields and `npm publish` allowed action.
+2. Keep the old token stored but ensure it is not referenced by either workflow.
+3. Dispatch `sdk-only` from `main`.
+4. Confirm the publish step reports trusted publishing/OIDC, `testnet` moved, provenance passes, the Git tag/release exist, and a clean install succeeds.
+5. Remove the old automation token from GitHub and revoke it on npm.
+
+An authentication failure before npm contains the derived version is safe to retry after fixing the trusted-publisher configuration. npm does not validate the configuration when it is saved, so filename, owner, repository, environment, runner type, and `id-token: write` are the first things to inspect.
+
+## Promoting the SDK to `latest`
+
+Promotion is intentionally local and interactive so proof of presence/2FA stays with the maintainer:
+
+```bash
+npm login
+bun run sdk:promote -- <VERSION> --dry-run
+bun run sdk:promote -- <VERSION>
+```
+
+The script refuses to mutate npm unless:
+
+- no `release-sdk.yml` run is queued or active;
+- the version exists and `testnet` points to it;
+- provenance matches this repository, `release-sdk.yml`, `main`, and a concrete commit;
+- `npm audit signatures` cryptographically verifies the exact package's SLSA attestation;
+- the remote Git tag resolves to that provenance commit;
+- the matching GitHub release exists.
+
+The non-dry run prints the evidence, asks for `y`, then immediately rechecks active workflows and uncached `latest`/`testnet` state before executing `npm dist-tag add` and reading back `latest`. npm has no compare-and-swap operation for dist-tags, so this deliberately small residual race is accepted for the solo-maintainer workflow; do not run two promotion commands concurrently. This needs a locally authenticated npm identity with package write access and the account's 2FA policy. npm access tokens do not have a promotion-only permission; the safety boundary is the interactive script's checks, dry run, confirmation, and absence of a CI token.
+
+Moving a dist-tag changes new bare/`@latest` installs only. It does not remove the candidate or change consumers already pinned by a lockfile or semver range. Rollback is explicit, must target a lower version, and does not require the old version to remain on `testnet`:
+
+```bash
+bun run sdk:promote -- <PREVIOUS_GOOD> --rollback --dry-run
+bun run sdk:promote -- <PREVIOUS_GOOD> --rollback
+```
+
+Rollback accepts provenance from the current `release-sdk.yml` identity or the retired, exact `publish-testnet.yml` identity so pre-migration releases remain usable. Ordinary forward promotion accepts only `release-sdk.yml` provenance and still requires `testnet` to identify the candidate.
+
+Never delete or re-publish an npm version. Fix forward under a new derived revision/version.
+
+## Failure classification
+
+Always read external state before retrying:
 
 ```bash
 npm view @alejoamiras/aztec-accelerator versions dist-tags --json
+gh run list --workflow release-sdk.yml --limit 20
 ```
 
-**Failed publish.** Version absent + auth-shaped error (E401/E403/E404) → credential problem. npm answers **404, not 403**, for an unauthorized write to a scoped package, so "could not be found" here means permission, never a missing package — do not go looking for a naming or registry-config bug. Check the secret's AGE first: `gh secret list` prints last-updated timestamps (metadata only, no values). Both occurrences of this failure (2026-05-27, 2026-08-26) were `NPM_TOKEN` reaching the end of a 90-day granular-token lifetime — on the second, the secret was 91 days old and the last successful publish had been at day 83, which settled the diagnosis in one read-only call. Rotate the secret, never blind-retry. Version present but a later leg failed → do NOT redispatch the publish (it would mint a revision suffix — `-revision.N` or `.N` per the derivation rule above); repair only the failed leg, and treat a missing tag/release as STOP-and-surface.
+- **Version absent:** no npm publish landed. Fix the root cause, then redispatch.
+- **Version present, `testnet` missing/wrong:** stop and inspect the publish output and registry state; do not mint another revision automatically.
+- **Version and `testnet` correct, tag/release missing:** publication landed. Do not redispatch; repair the missing Git/GitHub record only after matching it to provenance.
+- **Promotion command printed the successful `+latest` mutation but read-back failed:** do not immediately reverse it. Inspect the uncached registry state first; registry reads can lag writes.
+- **Unexpected third version/tag:** stop all mutation and investigate.
 
-**Failed promote.** The tag move can succeed and the run still go red on a trailing step. Judge by the *mutation's own output*, not by a read-back: a landed move prints `+latest: <pkg>@<version>` in the `Point npm latest at the version` step. Printed → the mutation landed, do NOT re-dispatch (investigate the trailing failure only). Not printed → the move did not land; safe to re-dispatch once the cause is understood. A read showing a THIRD version → STOP and surface before any further mutation. Note that a read showing the OLD version proves nothing on its own — see the lag below.
-
-## Rollback Procedure (accelerator app)
-
-For the SDK on npm, rollback is the `promote-latest.yml` dispatch documented above — this section covers the
-desktop app's signed update feed only.
-
-B6 is **append-only**: NEVER delete a published release or tag, and never hand-upload a feed. Rollback is a
-FEED operation — you move the live `latest.json` back to a previous good version with a `promote-only`
-dispatch (the same job that promoted forward). This stops NEW auto-update uptake and moves the landing
-download back (landing reads the feed); already-updated clients are not downgraded.
-
-### 1. Roll the feed back to the last good version
+For the partial-publish case, first run both verifiers and record the provenance commit printed by the first command:
 
 ```bash
-# Rehearse first — pre-flight only, no write:
-gh workflow run release-accelerator.yml -f version=<PREV_GOOD> -f mode=promote-only -f dry_run=true
-# Then roll back for real. bump_source STAYS false — a rollback must NOT bump the source version:
-gh workflow run release-accelerator.yml -f version=<PREV_GOOD> -f mode=promote-only
+bun scripts/sdk-release-verification.ts <VERSION>
+bun scripts/verify-sdk-package-signatures.ts <VERSION>
 ```
 
-`promote` re-verifies `<PREV_GOOD>`'s published release + signed feed before flipping, so you can only roll
-back to a version that still has an intact, verifiable release (which append-only guarantees still exists).
-`verify-live-feed` confirms the CDN serves `<PREV_GOOD>`.
+Then confirm the exact tag and release are absent, fetch the printed commit from `origin`, and inspect it before creating anything. Only when the package digest, source dependency, workflow, branch, and commit all match may you repair the append-only records:
 
-### 2. Fix forward (never re-cut the bad version)
+```bash
+TAG="@alejoamiras/aztec-accelerator@<VERSION>"
+COMMIT="<PROVENANCE_COMMIT>"
+git fetch origin main
+git show --stat "$COMMIT"
+git ls-remote --exit-code origin "refs/tags/$TAG" && exit 1 || true
+gh release view "$TAG" && exit 1 || true
+git tag "$TAG" "$COMMIT"
+git push origin "refs/tags/$TAG"
+gh release create "$TAG" --title "$TAG" --notes "Recovered the release record for the provenance-verified npm package." --latest=false packages/sdk/MIGRATION.md
+```
 
-The bad `X.Y.Z` release stays on GitHub (append-only). Ship the fix as the NEXT version `X.Y.(Z+1)` through
-the normal publish → promote flow. Do NOT delete the bad release/tag and do NOT re-publish `X.Y.Z` — the
-publish step fails loud on a colliding tag. (Re-cutting the SAME version is a STOP-and-surface event, not an
-autonomous step.)
+Those last three commands mutate public state. Run them only as a deliberate repair after the read-only checks; never use them to replace an existing tag or release.
 
-### 3. Communicate
+## User diagnostics
 
-- Post in relevant Aztec channels that the feed was rolled back to `<PREV_GOOD>`.
-- File a GitHub issue documenting what went wrong; land the fix as `X.Y.(Z+1)`.
-
-## User Diagnostics
-
-### Log location
-
-| Platform | Path |
-|----------|------|
+| Platform | Logs |
+|---|---|
 | macOS | `~/Library/Application Support/aztec-accelerator/logs/` |
 | Linux | `~/.local/share/aztec-accelerator/logs/` |
+| Windows | `%LOCALAPPDATA%\\aztec-accelerator\\logs\\` |
 
-Logs rotate daily, keeping the last 7 files. Log level defaults to `info`; set `RUST_LOG=debug` for verbose output.
+Configuration is stored in `~/.aztec-accelerator/config.json` on macOS/Linux and the equivalent user profile location on Windows.
 
-### Config location
-
-| Platform | Path |
-|----------|------|
-| Both | `~/.aztec-accelerator/config.json` |
-
-### Common issues
-
-**"Port 59833 already in use"**: Another instance is running, or another process is using the port. Kill it with `lsof -i :59833` and restart.
-
-**"bb binary not found"**: The bundled sidecar is missing. Re-install the app from the DMG/deb.
-
-**"Cannot verify bb download"**: The GitHub API is unreachable or the release doesn't have a digest. The bundled bb version still works; only on-demand version downloads require verification.
-
-**macOS: "app is damaged"**: Gatekeeper quarantine. Run: `xattr -cr /Applications/Aztec\ Accelerator.app`
-
-**Auto-updater not working**: Check `latest.json` is accessible at `https://aztec-accelerator.dev/releases/latest.json`. Verify the `signature` fields are non-empty. Check app logs for updater errors.
-
-### Collecting logs from users
-
-Ask the user to:
-1. Open the tray menu → "Show Logs"
-2. Copy the latest log file and share it in the issue
-
-Or manually: `cat ~/Library/Application\ Support/aztec-accelerator/logs/aztec-accelerator.log.*`
-
-## Signing & Notarization
-
-### Ed25519 updater signing
-- Private key: `TAURI_SIGNING_PRIVATE_KEY` GitHub secret
-- Public key: in `tauri.conf.json` → `plugins.updater.pubkey`
-- Password: `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub secret
-
-### Apple notarization
-- Certificate: `APPLE_CERTIFICATE` GitHub secret (base64-encoded .p12)
-- Signing identity: `APPLE_SIGNING_IDENTITY`
-- Apple ID + app-specific password: `APPLE_ID`, `APPLE_PASSWORD`
-- Team ID: `APPLE_TEAM_ID`
-
-### Verifying notarization
-
-```bash
-spctl --assess --verbose /Applications/Aztec\ Accelerator.app
-# Should output: accepted, source=Notarized Developer ID
-```
+- **Port 59833 in use:** another accelerator instance or local process owns the HTTP listener. Inspect it before terminating anything.
+- **bb unavailable:** inspect the health payload and logs; versioned proof requests should trigger a verified on-demand download.
+- **bb verification failed:** preserve the logs. Runtime downloads fail closed when the upstream digest is missing or mismatched.
+- **Updater failure:** inspect the published release's `latest.json`, exact platform URL, payload size/signature, and application logs. Never work around it by hand-editing the live feed.

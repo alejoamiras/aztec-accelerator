@@ -81,7 +81,7 @@ function detectOs(): OsInfo {
   return { label: "Get Presto", pattern: /^$/ };
 }
 
-// Resolve the live stable tag from the SIGNED S3 feed (single source of truth — B6), NOT a GitHub releases
+// Resolve the live stable tag from the SIGNED KV-backed feed (single source of truth — B6), NOT a GitHub releases
 // list-scan (which had no prerelease filter). Best effort, non-blocking; the feed body is untrusted and
 // validated in `feedVersionToTag`.
 async function fetchLatestAcceleratorTag(): Promise<string | null> {
@@ -129,12 +129,39 @@ initDownload();
 const heroSub = document.querySelector(".hero-sub") as HTMLElement | null;
 const heroLink = heroSub?.querySelector("a") as HTMLAnchorElement | null;
 const originalHeroLink = heroLink ? Array.from(heroLink.childNodes, (n) => n.cloneNode(true)) : [];
-const httpsOnly = new URLSearchParams(window.location.search).get("httpsOnly") === "true";
 
 function renderAcceleratorStatus(status: LandingAcceleratorStatus): void {
   const blocked = status === "permission-blocked";
+  const secureUnavailable = typeof status === "object";
   document.getElementById("landing-permission-help")?.classList.toggle("hidden", !blocked);
+  document.getElementById("landing-secure-help")?.classList.toggle("hidden", !secureUnavailable);
   document.getElementById("download-actions")?.classList.toggle("hidden", blocked);
+
+  if (secureUnavailable) {
+    const explanation = {
+      "https-disabled": {
+        title: "Encrypted Connection is disabled",
+        message: "Presto is running, but its HTTPS listener is off.",
+      },
+      "tls-or-trust-failure": {
+        title: "Secure connection is not trusted",
+        message: "Presto advertises HTTPS, but this browser could not establish it.",
+      },
+      "accelerator-reachable": {
+        title: "Presto is reachable",
+        message: "Its public health response hides the exact HTTPS configuration.",
+      },
+      unconfirmed: {
+        title: "Secure connection unavailable",
+        message:
+          "Presto may be stopped or not installed, or the browser may have blocked the local diagnostic.",
+      },
+    }[status.diagnosis];
+    const title = document.getElementById("landing-secure-title");
+    const message = document.getElementById("landing-secure-message");
+    if (title) title.textContent = explanation.title;
+    if (message) message.textContent = explanation.message;
+  }
 
   if (!heroSub || !heroLink) return;
   if (status === "available") {
@@ -153,21 +180,29 @@ function renderAcceleratorStatus(status: LandingAcceleratorStatus): void {
 }
 
 const detection = new LandingDetectionController(
-  () => detectAccelerator({ httpsOnly }),
+  detectAccelerator,
   renderAcceleratorStatus,
   (pending) => {
-    const button = document.getElementById("landing-accelerator-retry") as HTMLButtonElement | null;
-    if (!button) return;
-    button.disabled = pending;
-    button.textContent = pending ? "Checking…" : "Retry";
+    for (const id of ["landing-permission-retry", "landing-secure-retry"]) {
+      const button = document.getElementById(id) as HTMLButtonElement | null;
+      if (!button) continue;
+      button.disabled = pending;
+      button.textContent = pending
+        ? "Checking…"
+        : id === "landing-secure-retry"
+          ? "Retry secure connection"
+          : "Retry";
+    }
   },
 );
 
-document.getElementById("landing-accelerator-retry")?.addEventListener("click", () => {
-  // The detector has no settled cache. The token guard ensures a late startup result cannot overwrite
-  // this same-context recovery attempt.
-  void detection.refresh().catch(() => {});
-});
+for (const id of ["landing-permission-retry", "landing-secure-retry"]) {
+  document.getElementById(id)?.addEventListener("click", () => {
+    // The detector has no settled cache. The token guard ensures a late startup result cannot
+    // overwrite this same-context recovery attempt.
+    void detection.refresh().catch(() => {});
+  });
+}
 
 void (async () => {
   // Subscribe before the first health request can open the browser prompt. A decision made after the

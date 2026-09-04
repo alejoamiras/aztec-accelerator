@@ -1,0 +1,87 @@
+name: Release SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Release the SDK candidate, deploy the testnet playground, or both"
+        required: true
+        type: choice
+        options:
+          - sdk-and-playground
+          - sdk-only
+          - playground-only
+        default: sdk-and-playground
+
+# npm publication is irreversible. Never cancel an in-flight release, and verify that a
+# dispatch actually starts because GitHub retains at most one queued run per group.
+concurrency:
+  group: release-sdk
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  assert-main:
+    name: Assert main ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Assert dispatched from main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Release SDK must be dispatched from refs/heads/main (got $GITHUB_REF)"
+            exit 1
+          fi
+
+  e2e:
+    needs: assert-main
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      ref: ${{ github.sha }}
+      # SDK candidates must exercise the native proving path. A playground-only hotfix keeps
+      # the lighter WASM gate because it does not publish a new SDK artifact.
+      build_accelerator: ${{ inputs.mode != 'playground-only' }}
+
+  dependency-audit:
+    needs: assert-main
+    uses: ./.github/workflows/dependency-audit.yml
+
+  publish-sdk:
+    needs: [assert-main, e2e, dependency-audit]
+    if: ${{ inputs.mode != 'playground-only' }}
+    permissions:
+      id-token: write
+      contents: write
+    uses: ./.github/workflows/_publish-sdk.yml
+
+  deploy-app:
+    needs: [assert-main, e2e, dependency-audit, publish-sdk]
+    if: ${{ !cancelled() && inputs.mode != 'sdk-only' && needs.assert-main.result == 'success' && needs.e2e.result == 'success' && needs.dependency-audit.result == 'success' && (inputs.mode == 'playground-only' || needs.publish-sdk.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - run: bun install --frozen-lockfile
+
+      - name: Build playground
+        env:
+          AZTEC_NODE_URL: ${{ secrets.TESTNET_AZTEC_NODE_URL }}
+        run: bun run --cwd packages/playground build
+
+      - name: Deploy playground Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bunx wrangler deploy --config packages/playground/wrangler.jsonc

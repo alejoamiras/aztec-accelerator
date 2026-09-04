@@ -13,7 +13,6 @@ jobs:
     outputs:
       workflows: ${{ steps.override.outputs.workflows || steps.filter.outputs.workflows }}
       shell: ${{ steps.override.outputs.shell || steps.filter.outputs.shell }}
-      tofu: ${{ steps.override.outputs.tofu || steps.filter.outputs.tofu }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -25,8 +24,6 @@ jobs:
               - '.github/actions/**'
             shell:
               - 'infra/**/*.sh'
-            tofu:
-              - 'infra/tofu/**/*.tf'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: override
@@ -34,7 +31,6 @@ jobs:
           {
             echo "workflows=true"
             echo "shell=true"
-            echo "tofu=true"
           } >> "$GITHUB_OUTPUT"
 
   actionlint:
@@ -81,28 +77,10 @@ jobs:
         # `&& … || echo` form would have masked a genuine failure as success).
         run: find infra -type f -name '*.sh' -print0 | xargs -0r shellcheck
 
-  tofu:
-    name: Lint OpenTofu
-    needs: changes
-    if: needs.changes.outputs.tofu == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
-        with:
-          tofu_version: '1.10.0'
-      - name: Format check
-        run: tofu -chdir=infra/tofu fmt -check -diff
-      - name: Init (providers only)
-        run: tofu -chdir=infra/tofu init -backend=false -input=false
-      - name: Validate
-        run: tofu -chdir=infra/tofu validate
-
   status:
     name: Actionlint Status
     if: always()
-    needs: [changes, actionlint, shellcheck, tofu]
+    needs: [changes, actionlint, shellcheck]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -117,8 +95,7 @@ jobs:
             exit 1
           fi
           for r in "actionlint:${{ needs.actionlint.result }}" \
-                   "shellcheck:${{ needs.shellcheck.result }}" \
-                   "tofu:${{ needs.tofu.result }}"; do
+                   "shellcheck:${{ needs.shellcheck.result }}"; do
             name="${r%%:*}"; res="${r#*:}"
             if [ "$res" = "failure" ] || [ "$res" = "cancelled" ]; then
               echo "$name lint $res"

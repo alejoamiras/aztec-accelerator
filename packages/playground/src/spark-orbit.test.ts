@@ -56,6 +56,7 @@ describe("phaseToDial", () => {
     ["denied", 2, true],
     ["version-mismatch", 2, true],
     ["fallback", 2, true],
+    ["secure-connection-unavailable", 2, true],
     ["proved", 3, false],
     ["receive", 3, false],
     ["app:confirm", 3, false],

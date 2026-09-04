@@ -1,5 +1,61 @@
 # Migration guide
 
+## Browsers are HTTPS-only by default
+
+`new AcceleratorProver()` now resolves `httpsOnly` from the explicit option first, then
+`AZTEC_ACCELERATOR_HTTPS_ONLY`, then the runtime default: `true` in browser pages and Web Workers,
+and `false` in Node, Bun, and SSR. Server-side clients therefore retain compatibility with the
+TLS-free headless CI server.
+
+Browser HTTPS connection failures no longer activate HTTP proving. The prover still preserves its
+native-first/WASM-fallback reliability contract, but now exposes an actionable unavailable state:
+
+```ts
+type SecureConnectionDiagnosis =
+  | "https-disabled"
+  | "tls-or-trust-failure"
+  | "accelerator-reachable"
+  | "unconfirmed";
+
+type AcceleratorStatus =
+  | /* existing arms */
+  | {
+      available: false;
+      reason: "secure-connection-unavailable";
+      diagnosis: SecureConnectionDiagnosis;
+      sdkAztecVersion?: string;
+    };
+```
+
+This additive arm is source-breaking for exhaustive TypeScript switches. Handle it separately from
+`permission-blocked`: Local Network Access denial needs browser site-permission recovery, while a
+secure-connection failure needs Accelerator tray → Settings → **Encrypted Connection** and, for
+trust failures, certificate setup again.
+
+When HTTPS cannot connect, the SDK may issue one bounded, witness-free HTTP `GET /health` to improve
+the diagnosis. It never serializes or transmits a witness, never POSTs to HTTP, never pins HTTP, and
+never makes the diagnostic endpoint eligible for proving. Accordingly, `httpsOnly` now means that
+no private proving payload and no `/prove` request is sent over HTTP; it does not prohibit this
+witness-free diagnostic.
+
+`onPhase` may emit `"secure-connection-unavailable"` immediately before `"fallback"`. Normal proving
+does not throw for this condition and continues through WASM.
+
+If a browser dApp deliberately offers plaintext proving, require an informed confirmation and apply
+both flags only to the current prover instance:
+
+```ts
+prover.setAcceleratorConfig({
+  httpsOnly: false,
+  allowInsecureDowngrade: true,
+});
+await prover.checkAcceleratorStatus({ forceRefresh: true });
+```
+
+Do not persist this consent in local storage, cookies, URL parameters, or desktop configuration. A
+reload/new prover restores the HTTPS-only browser default. In particular, do not add a production
+`?httpsOnly=false` switch.
+
 ## `AcceleratorStatus` adds `permission-blocked`
 
 `checkAcceleratorStatus` can now distinguish an explicit browser loopback-network permission denial:
@@ -21,6 +77,9 @@ if (!status.available) {
     case "permission-blocked":
       showBrowserSitePermissionHelp();
       break;
+    case "secure-connection-unavailable":
+      showSecureConnectionRecovery(status.diagnosis);
+      break;
     case "offline":
     case "error":
     case "version-mismatch":
@@ -32,8 +91,10 @@ if (!status.available) {
 await prover.checkAcceleratorStatus({ forceRefresh: true });
 ```
 
-Only an explicit `denied` state is distinguishable. A pending/dismissed prompt, unsupported
-Permissions API, or query error remains `offline`. `forceRefresh` does not reset configuration,
+Only an explicit `denied` state is distinguishable. Under the browser HTTPS-only default, a
+pending/dismissed prompt, unsupported Permissions API, or query error normally becomes
+`secure-connection-unavailable` with `diagnosis: "unconfirmed"`; HTTP-permitted server runtimes can
+still report `offline`. `forceRefresh` does not reset configuration,
 protocol pins, HTTPS history, or an already-running same-generation probe.
 
 ## `AcceleratorStatus` is now a discriminated union (Q12)
@@ -69,6 +130,12 @@ type AcceleratorStatus =
     }
   | { available: false; reason: "offline"; sdkAztecVersion?: string }
   | { available: false; reason: "permission-blocked"; sdkAztecVersion?: string }
+  | {
+      available: false;
+      reason: "secure-connection-unavailable";
+      diagnosis: SecureConnectionDiagnosis;
+      sdkAztecVersion?: string;
+    }
   | { available: false; reason: "error"; protocol: AcceleratorProtocol; sdkAztecVersion?: string }
   | {
       available: false;
@@ -100,13 +167,17 @@ if (status.available) {
     /* ... */
   }
 } else {
-  // status.reason: "offline" | "permission-blocked" | "error" | "version-mismatch"
+  // status.reason: "offline" | "permission-blocked" | "secure-connection-unavailable" |
+  //                "error" | "version-mismatch"
   switch (status.reason) {
     case "version-mismatch":
       console.warn(`accelerator is on ${status.acceleratorVersion}, SDK wants ${status.sdkAztecVersion}`);
       break;
     case "permission-blocked":
       // Show browser site-permission guidance and an immediate forced Retry.
+      break;
+    case "secure-connection-unavailable":
+      // Show HTTPS/certificate recovery and an immediate forced Retry.
       break;
     case "offline":
     case "error":
