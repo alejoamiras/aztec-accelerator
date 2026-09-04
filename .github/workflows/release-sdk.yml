@@ -62,7 +62,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,28 +80,8 @@ jobs:
           AZTEC_NODE_URL: ${{ secrets.TESTNET_AZTEC_NODE_URL }}
         run: bun run --cwd packages/playground build
 
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PLAYGROUND }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Deploy playground to S3
+      - name: Deploy playground Worker
         env:
-          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
-        run: |
-          aws s3 sync packages/playground/dist/ "s3://${S3_BUCKET_NAME}/playground/" --delete
-          # These emscripten assets use stable, unhashed URLs, so force revalidation after deploys.
-          for f in assets/sqlite3.wasm assets/sqlite3-opfs-async-proxy.js; do
-            if [ -f "packages/playground/dist/$f" ]; then
-              aws s3 cp "packages/playground/dist/$f" "s3://${S3_BUCKET_NAME}/playground/$f" \
-                --cache-control "no-cache" --metadata-directive REPLACE
-            fi
-          done
-
-      - name: Invalidate CloudFront
-        env:
-          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths "/playground/*"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bunx wrangler deploy --config packages/playground/wrangler.jsonc

@@ -1,0 +1,26 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "aztec-accelerator-release-feed",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "aztec-accelerator.dev/releases/latest.json*",
+      "zone_name": "aztec-accelerator.dev"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "RELEASE_FEED",
+      "id": "1d28a54a44d94e98a7becc04951807fa"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    }
+  }
+}

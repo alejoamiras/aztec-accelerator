@@ -1,13 +1,13 @@
 name: Update Feed Health
 
 # The updater feed at aztec-accelerator.dev/releases/latest.json is what every INSTALLED app
-# polls to discover a new version. It was silently dead for ~6 weeks after deploy-landing's
-# `s3 sync --delete` wiped it (fixed by adding `--exclude "releases*"` + an IAM Deny), and
+# polls to discover a new version. Historically it was silently dead for ~6 weeks after an old
+# S3 deployment wiped it. The current feed is isolated in Cloudflare KV, but
 # nothing surfaced it — the release pipeline only writes the feed, it never reads it back on a
 # later day. This is the standing read-back that turns a dead or STALE feed into a next-day
 # discovery instead of a months-later one.
 #
-# Deliberately credential-free: the feed is a public URL, so this needs no AWS role, no secrets
+# Deliberately credential-free: the feed is a public URL, so this needs no cloud credentials or secrets
 # and no checkout — only the default GITHUB_TOKEN (contents: read) to look up the latest release
 # for the staleness comparison. Nothing here can be leveraged if the workflow is ever tampered
 # with, which is why it is safe to run on a schedule without review.

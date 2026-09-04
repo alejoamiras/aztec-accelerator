@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: "http://localhost:8080"
+      build_accelerator:
+        description: Build and start the HTTP-only headless accelerator for consent-path tests
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   e2e-app:
@@ -44,9 +49,39 @@ jobs:
         with:
           aztec_node_url: ${{ inputs.aztec_node_url }}
 
+      - uses: ./.github/actions/setup-accelerator
+        if: inputs.build_accelerator
+        with:
+          rust-target: x86_64-unknown-linux-gnu
+          rust-cache-key: accelerator-server-x86_64-unknown-linux-gnu
+          rust-workspaces: packages/accelerator/server -> target
+          rust-components: ""
+          install-tauri-system-deps: "false"
+
+      - name: Build and start headless accelerator
+        if: inputs.build_accelerator
+        env:
+          BB_BINARY_PATH: ${{ github.workspace }}/packages/accelerator/src-tauri/binaries/bb-x86_64-unknown-linux-gnu
+        run: |
+          AZTEC_BB_VERSION="$(cat packages/accelerator/src-tauri/AZTEC_VERSION)"
+          export AZTEC_BB_VERSION
+          cargo build --manifest-path packages/accelerator/server/Cargo.toml
+          packages/accelerator/server/target/debug/accelerator-server > /tmp/accelerator.log 2>&1 &
+          echo "ACCELERATOR_PID=$!" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:59833/health >/dev/null; then
+              echo "Accelerator ready (attempt $attempt)"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/accelerator.log || true
+          exit 1
+
       - name: Run E2E tests
         env:
           AZTEC_NODE_URL: ${{ inputs.aztec_node_url }}
+          ACCELERATOR_URL: ${{ inputs.build_accelerator && 'http://127.0.0.1:59833' || '' }}
           TEST_SCRIPT: ${{ inputs.test_script }}
         run: bun run --cwd packages/playground "$TEST_SCRIPT"
 
@@ -58,3 +93,16 @@ jobs:
           path: /tmp/aztec-node.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Upload accelerator logs
+        if: failure() && inputs.build_accelerator
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: accelerator-logs-app
+          path: /tmp/accelerator.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup accelerator
+        if: always() && inputs.build_accelerator
+        run: kill "$ACCELERATOR_PID" 2>/dev/null || true

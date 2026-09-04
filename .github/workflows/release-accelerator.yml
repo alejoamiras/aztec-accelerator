@@ -8,20 +8,20 @@ on:
         required: true
         type: string
       auth_probe:
-        description: "Probe only: verify the release AWS role still assumes correctly, then stop. Runs validate + the AWS trust preflight; skips build/e2e/tag/release/publish."
+        description: "Probe only: verify the release-feed KV token can read production, then stop. Runs validate + the Cloudflare preflight; skips build/e2e/tag/release/publish."
         required: false
         type: boolean
         default: false
       # B6: publish and promote are SEPARATE operational events (two dispatches), not one job.
       #   publish      = build → 3-OS gates → publish. RC + stable are both PUBLIC GitHub releases pinned
       #                  --latest=false until promotion; the signed latest.json ships as a stable release
-      #                  ASSET. Does NOT touch the S3 feed. (The stable DRAFT-gate — draft → packaged-E2E-on-draft →
+      #                  ASSET. Does NOT touch the KV feed. (The stable DRAFT-gate — draft → packaged-E2E-on-draft →
       #                  finalize — lands in B4, which is a hard prerequisite of any 2.0.0 stable publish.)
-      #   promote-only = no build; pre-flight an ALREADY-PUBLISHED version, then flip the S3 `latest.json`
+      #   promote-only = no build; pre-flight an ALREADY-PUBLISHED version, then flip the KV `latest.json`
       #                  feed. An organic GA (`bump_source=true`) is marked GitHub Latest only after the live
       #                  feed verifies. This is also the rollback lever (`promote-only` an older version).
       mode:
-        description: "publish (build+gate+publish, no feed flip) | promote-only (flip the S3 feed for an already-published version — also the rollback lever)"
+        description: "publish (build+gate+publish, no feed flip) | promote-only (flip the KV feed for an already-published version — also the rollback lever)"
         required: false
         type: choice
         options:
@@ -58,11 +58,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
-      # F-005 (Codex GATE-3 H2): reject any dispatch not on refs/heads/main BEFORE any
-      # build/tag/release. Every other job depends on `validate` (directly or transitively),
-      # so this gates the whole run, and it matches the release role's `sub=main` + `workflow`
-      # OIDC trust — without it an off-main dispatch still builds and SIGNS artifacts with the
-      # production updater key before failing later at the AWS step.
+      # Reject any dispatch not on refs/heads/main before build, signing, tag, release, or cloud access.
+      # Every other job depends on `validate` directly or transitively, so this gates the whole run.
       - name: Assert main ref
         run: |
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
@@ -133,32 +130,30 @@ jobs:
             echo "version=$(echo "$RESULT" | jq -r .version)"
           } >> "$GITHUB_OUTPUT"
 
-  # F-005 (Codex C3): prove the release OIDC token can assume the release-feed role BEFORE any tag/release
-  # side effect. `tag` needs this, so a post-cutover trust/secret failure aborts before a dangling tag is
-  # pushed. Runs on every dispatch (the release role is assumable on Release Accelerator/main regardless of
-  # is_prerelease); with `auth_probe=true` this is the only meaningful job — the side-effecting jobs are
-  # all guarded off. GetBucketLocation is the least-privilege probe (allowed by the release policy).
+  # Explicit credentials probe only. Publishing deliberately has no Cloudflare credential and never
+  # depends on feed availability; promotion validates and uses the write token in its own isolated job.
   release-auth-preflight:
-    name: Release AWS trust preflight
+    name: Release feed access preflight
     needs: [validate]
-    # B6/codex: run under auth_probe or publish (where `tag` needs it), NOT standalone under promote-only —
-    # there it would race the `promote` job and could fail RED after promote already flipped the feed.
-    # promote does its own configure-aws before its (post-verify) S3 write, so it needs no separate preflight.
-    if: ${{ inputs.auth_probe || inputs.mode == 'publish' }}
+    if: ${{ inputs.auth_probe }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      id-token: write
       contents: read
     steps:
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      - name: Prove the release role (GetBucketLocation only)
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - name: Prove release-feed KV access
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_RELEASE_FEED_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          aws s3api get-bucket-location --bucket "${{ secrets.S3_BUCKET_NAME }}" >/dev/null
-          echo "✅ release role assumed + GetBucketLocation OK"
+          bunx wrangler kv key get latest.json --remote \
+            --namespace-id 1d28a54a44d94e98a7becc04951807fa >/dev/null
+          echo "✅ release-feed KV token can read production"
 
   e2e-webdriver:
     name: Pre-release E2E Gate (${{ matrix.runner }})
@@ -746,7 +741,7 @@ jobs:
       n1-version: ${{ needs.resolve-updater-baseline.outputs.version }}
       mode: negative
   # B4/F: MOVED AFTER the packaged-E2E gate (was pre-gate). `packaged-e2e-on-draft` transitively needs the
-  # whole build+smoke+e2e-webdriver+release-auth-preflight chain, so a broken release-role trust or a failed
+  # whole build+smoke+e2e-webdriver chain, so a failed
   # gate aborts BEFORE the tag is pushed (no dangling tag). Pushing the reviewed tag here — after the gate,
   # before `finalize` — lets `finalize` publish with `--verify-tag` while keeping the proven tag==github.sha
   # anchor (codex F-consult: keep `tag`, don't retire it).
@@ -805,12 +800,11 @@ jobs:
   # B4/F: `release` now creates a DRAFT (no git tag yet — GitHub defers tag creation until a draft is
   # PUBLISHED). The packaged-E2E gate then runs against the DRAFT's OWN uploaded assets; `tag` (moved after
   # the gate) pushes the reviewed tag; `finalize` flips the draft to published. So a failed packaged gate
-  # NEVER burns the version tag against a bad SHA. `release-auth-preflight` is now a DIRECT need (it was only
-  # transitive via `tag`, which no longer precedes this job). The isolated signer always runs before
+  # NEVER burns the version tag against a bad SHA. The isolated signer always runs before
   # updater smokes; prereleases simply omit its already-produced latest.json from release assets.
   release:
     name: Create draft release
-    needs: [validate, dependency-audit, release-auth-preflight, resolve-updater-baseline, build, build-headless, sign-updater-artifacts, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
+    needs: [validate, dependency-audit, resolve-updater-baseline, build, build-headless, sign-updater-artifacts, smoke, smoke-intel, update-smoke, update-smoke-linux, update-smoke-windows, update-smoke-windows-negative, e2e-webdriver]
     # codex F-review: require EXPLICIT success of every MANDATORY need (a bare `!contains(failure)` would let a
     # SKIPPED smoke/webdriver/preflight still create a draft). `always() && !cancelled()` is REQUIRED up front:
     # without a status function GitHub implicitly ANDs `success()`, which could skip `release` before the
@@ -819,7 +813,6 @@ jobs:
       ${{ always() && !cancelled() && !inputs.auth_probe && inputs.mode == 'publish'
       && needs.validate.result == 'success'
       && needs.dependency-audit.result == 'success'
-      && needs.release-auth-preflight.result == 'success'
       && needs.resolve-updater-baseline.result == 'success'
       && needs.build.result == 'success'
       && needs.build-headless.result == 'success'
@@ -834,7 +827,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write     # gh release create --draft (publish flip happens in `finalize` — B6: no S3 feed here)
+      contents: write     # gh release create --draft (publish flip happens in `finalize` — B6: no KV feed here)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1036,7 +1029,7 @@ jobs:
           # draft's eventual tag (created only at PUBLISH by `finalize`) would point at the latest
           # default-branch state, not the dispatched SHA (codex F-consult). No `--verify-tag` here: the tag
           # does not exist yet; `tag` pushes it AFTER the packaged gate and `finalize` uses `--verify-tag`.
-          # B6: stable is --latest=false (the signed S3 feed is the source of truth; `promote` flips it).
+          # B6: stable is --latest=false (the signed KV feed is the source of truth; `promote` flips it).
           COMMON=(--title "Aztec Accelerator $VERSION" --notes-file /tmp/release-notes.md --draft --target "$GITHUB_SHA" --latest=false)
           if [ "$IS_PRERELEASE" = "true" ]; then
             gh release create "$RELEASE_TAG" "${COMMON[@]}" --prerelease "${FILES[@]}"
@@ -1182,29 +1175,30 @@ jobs:
           echo "Published $TAG (draft finalized)"
 
   # B6: PROMOTE is a SEPARATE operational event from PUBLISH — its own `mode: promote-only` dispatch. It
-  # flips the S3 `latest.json` feed for an ALREADY-PUBLISHED version, and doubles as the ROLLBACK lever
+  # flips the KV-backed `latest.json` feed for an ALREADY-PUBLISHED version, and doubles as the ROLLBACK lever
   # (dispatch an older version to move the feed back). It re-derives trust from scratch rather than trusting
   # the publish run: it downloads the release's OWN `latest.json` asset, runs the production verifier, and
   # asserts the release is a published, non-draft, non-prerelease stable whose version + full asset set
   # match — THEN uploads those exact verified bytes. `dry_run` runs the whole pre-flight WITHOUT writing the
   # feed (proves the machinery, incl. a rollback-to-prev pre-flight, with zero prod effect). Least-privilege:
-  # this is the only job that WRITES the feed (OIDC → the feed-only AWS role); publish has no AWS creds
-  # (release-auth-preflight also holds id-token but only PROBES GetBucketLocation, never mutates).
+  # this is the only job that WRITES the feed (using a feed-only Cloudflare token); publishing has no
+  # Cloudflare credentials and the preflight only reads KV.
   promote:
-    name: Promote (flip S3 feed)
+    name: Promote (flip KV feed)
     needs: [validate]
     if: ${{ !inputs.auth_probe && inputs.mode == 'promote-only' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read     # gh release view/download
-      id-token: write    # OIDC → AWS feed-only role (Put latest.json)
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       VERSION: ${{ needs.validate.outputs.version }}
       IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
+    outputs:
+      write_attempted: ${{ steps.write.outputs.attempted }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-accelerator
@@ -1293,76 +1287,40 @@ jobs:
       - name: DRY RUN — pre-flight only, feed NOT written
         if: ${{ inputs.dry_run }}
         run: |
-          echo "dry_run OK: promote pre-flight for $VERSION passed; the S3 feed was NOT flipped (no prod effect)"
+          echo "dry_run OK: promote pre-flight for $VERSION passed; the KV feed was NOT flipped (no prod effect)"
 
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      # The KV write is the authoritative promote act. It uploads the exact bytes verified above and is
+      # retried because a client-side timeout can make the outcome ambiguous. The independent public-feed
+      # gate below always runs after an attempted write and resolves that ambiguity.
+      - name: Flip the KV feed to this version (authoritative write)
+        id: write
         if: ${{ !inputs.dry_run }}
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_RELEASE }} # F-005: feed-only role (Put latest.json)
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # blocker-1 (failure-atomicity): the S3 PUT is the AUTHORITATIVE promote act; the CloudFront
-      # invalidation is best-effort acceleration. They must NOT share a fate. If a transient invalidation
-      # error after the PUT commits failed the job, `promote` would go RED (reading as "feed unflipped"
-      # when it IS flipped) and the downstream `verify-live-feed` gate would be skipped via its implicit
-      # success() — the flip left unconfirmed, worst during a rollback. So the PUT is fatal + retried
-      # (safe: nothing downstream has run, so a final failure aborts with the feed unchanged — no partial
-      # state), and the invalidation is retried-then-warned (non-fatal). This makes promote-success
-      # equivalent to PUT-success, so verify-live-feed always runs after a committed PUT; it polls the
-      # public feed for ~600s > the 300s max-age, so it confirms propagation even if invalidation never
-      # fired.
-      - name: Flip the S3 feed to this version (authoritative PUT)
-        if: ${{ !inputs.dry_run }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_RELEASE_FEED_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
+          echo "attempted=true" >> "$GITHUB_OUTPUT"
           # Upload the EXACT verified bytes downloaded in pre-flight — never a re-synthesized feed.
-          # Uploaded under /landing/ because CloudFront routes aztec-accelerator.dev → /landing/.
           for attempt in 1 2 3 4 5; do
-            if aws s3 cp feed/latest.json s3://${{ secrets.S3_BUCKET_NAME }}/landing/releases/latest.json \
-                 --content-type application/json \
-                 --cache-control "max-age=300"; then
-              echo "✅ S3 feed flipped to $VERSION (attempt $attempt)"
+            if bunx wrangler kv key put latest.json --path feed/latest.json --remote \
+                 --namespace-id 1d28a54a44d94e98a7becc04951807fa; then
+              echo "✅ KV feed flipped to $VERSION (attempt $attempt)"
               break
             fi
             if [ "$attempt" = 5 ]; then
-              echo "::error::S3 PUT of latest.json failed after 5 attempts — feed unchanged, promote aborted"
+              echo "::error::KV write of latest.json failed after 5 attempts; public verification determines the live state"
               exit 1
             fi
-            echo "PUT attempt $attempt failed; retrying in $((attempt * 3))s"
+            echo "KV write attempt $attempt failed; retrying in $((attempt * 3))s"
             sleep $((attempt * 3))
           done
-
-      - name: Invalidate CloudFront (best-effort — never fails a committed promote)
-        if: ${{ !inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          # F-005: the viewer-request CloudFront function rewrites the URI PRE-cache, so the cached key is
-          # `/landing/releases/latest.json`; invalidate that (keep the legacy path too, harmless).
-          # The PUT above already committed, so a failed invalidation must NOT RED the job (that would skip
-          # verify-live-feed and hide a successful flip). Retry, then WARN and continue: verify-live-feed
-          # is the real gate.
-          for attempt in 1 2 3; do
-            if aws cloudfront create-invalidation \
-                 --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-                 --paths "/landing/releases/latest.json" "/releases/latest.json"; then
-              echo "✅ CloudFront invalidation created (attempt $attempt)"
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "::warning::CloudFront invalidation failed after 3 attempts after a committed PUT; the feed IS flipped in S3 and propagates within the 300s max-age; verify-live-feed will confirm. Check CLOUDFRONT_DISTRIBUTION_ID if that gate times out."
-              break
-            fi
-            echo "invalidation attempt $attempt failed; retrying in $((attempt * 3))s"
-            sleep $((attempt * 3))
-          done
-          # `create-invalidation` returns while status is InProgress, so don't claim "now serves" here —
-          # verify-live-feed polls the public feed and is the authority on when it actually serves $VERSION.
-          echo "promote: S3 feed set to $VERSION; CloudFront invalidation requested (best-effort). verify-live-feed confirms live propagation."
+          echo "promote: KV feed set to $VERSION; verify-live-feed confirms edge propagation."
 
   # Enforce the live-feed check that was previously done by hand: after `promote`
-  # uploads latest.json + invalidates CloudFront, confirm the PUBLIC prod feed
+  # writes latest.json to KV, confirm the PUBLIC prod feed
   # actually serves this version and every asset URL resolves. Separate job (own
-  # 15m timeout) so CDN lag can't trip the short `promote`/`bump-source` jobs.
+  # 15m timeout) so KV edge propagation can't trip the short `promote`/`bump-source` jobs.
   # `bump-source` gates on this — don't bump source until users would really get
   # the release.
   verify-live-feed:
@@ -1371,11 +1329,11 @@ jobs:
     # B6: verify only in a REAL promote (promote-only, not dry_run).
     # blocker-1 (codex High): run this after ANY attempted promote via its OWN status function — NOT the
     # implicit success() on `promote` — so live verification can't be skipped by a non-fatal invalidation
-    # NOR by a PUT whose CLI errored/timed-out AFTER S3 committed (feed live but `promote` RED). The live
+    # NOR by a write whose CLI errored/timed-out AFTER KV committed (feed live but `promote` RED). The live
     # feed is the source of truth: if the PUT truly didn't land, this polls ~600s and fails RED; if it DID
     # land despite a RED `promote`, this confirms GREEN. Gated to validate-green + promote-only + !dry_run
     # so it never runs in publish mode.
-    if: ${{ always() && !cancelled() && needs.validate.result == 'success' && inputs.mode == 'promote-only' && !inputs.dry_run }}
+    if: ${{ always() && !cancelled() && needs.validate.result == 'success' && needs.promote.outputs.write_attempted == 'true' && inputs.mode == 'promote-only' && !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

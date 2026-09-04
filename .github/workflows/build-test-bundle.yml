@@ -2,7 +2,7 @@ name: Build Test Bundle
 
 # Dispatch-only: build an INSTALLABLE desktop bundle from any ref and upload it as an artifact, so a
 # human can smoke-test a branch on real hardware before it merges. Deliberately NOT a release:
-#   - no version patching, no tag, no GitHub release, no S3/updater feed, no `latest.json`;
+#   - no version patching, no tag, no GitHub release, no production updater feed, no `latest.json`;
 #   - no signing/notarization secrets (see the Gatekeeper note in the summary step) — this exists to
 #     exercise flows that only a real OS can (the macOS Keychain trust dialog, the Windows root-CA
 #     consent dialog, uninstall), not to ship anything.

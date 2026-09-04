@@ -1,7 +1,7 @@
 /**
  * B6 release-pipeline contract guards (`bun test scripts/`). release-accelerator.yml SPLITS publish from
  * promote: a `publish` dispatch builds+gates+publishes the GitHub release but NEVER flips the auto-updater's
- * S3 `latest.json` feed; a separate `promote-only` dispatch flips the feed (and is the rollback lever).
+ * KV-backed `latest.json` feed; a separate `promote-only` dispatch flips the feed (and is the rollback lever).
  * Each row below pins one invariant of that split and is mutation-provable by a single YAML edit — a
  * regression (re-coupling promote into publish, deleting a published release, marking GitHub Latest before
  * the live feed verifies, dropping a pre-flight check) flips CI in milliseconds instead of surfacing as a
@@ -56,14 +56,15 @@ const PACKAGED_E2E_RUNNER = fs.readFileSync(
 );
 
 describe("release-accelerator.yml — B6 publish/promote contract", () => {
-  test("least privilege: `promote` is the only leg that WRITES the feed; `release` (publish) has no AWS", () => {
-    // [mut: move the aws s3 cp back into `release`, or add id-token to release → fails]
-    expect(WF).toContain("aws s3 cp feed/latest.json"); // promote uploads the verified downloaded bytes
-    expect(WF).not.toContain("aws s3 cp release-files/latest.json"); // the old in-release promote is gone
+  test("least privilege: `promote` is the only leg that writes the feed", () => {
+    expect(WF.match(/wrangler kv key put/g)).toHaveLength(1);
+    expect(WF).toContain("wrangler kv key put latest.json --path feed/latest.json --remote");
     expect(WF).toContain("contents: write     # gh release create --draft");
-    // release-auth-preflight ALSO holds id-token but only PROBES — it must be gated off standalone
-    // promote-only so it can't fail RED after the flip already mutated S3.
-    expect(WF).toContain("inputs.auth_probe || inputs.mode == 'publish'");
+    // Publishing receives no Cloudflare credential; the explicit auth probe is isolated from it.
+    expect(WF).toContain("if: $" + "{{ inputs.auth_probe }}");
+    const release = WF.split("  release:")[1]?.split("\n  packaged-e2e-on-draft:")[0] ?? "";
+    expect(release).not.toContain("release-auth-preflight");
+    expect(release).not.toContain("CLOUDFLARE_API_TOKEN");
   });
 
   test("append-only: only an isDraft-guarded draft delete, never a published release, never --clobber", () => {
@@ -241,9 +242,9 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     }
   });
 
-  test("dry_run flips nothing — the S3 write is gated on !dry_run", () => {
+  test("dry_run flips nothing — the KV write is gated on !dry_run", () => {
     // [mut: remove the `if: !inputs.dry_run` on the flip step → a dry run would mutate prod → fails]
-    expect(WF).toMatch(/Flip the S3 feed[\s\S]{0,120}?if: \$\{\{ !inputs\.dry_run \}\}/);
+    expect(WF).toMatch(/Flip the KV feed[\s\S]{0,120}?if: \$\{\{ !inputs\.dry_run \}\}/);
   });
 
   test("production updater signing is isolated from builds, smokes, apps, and cloud credentials", () => {
@@ -257,6 +258,7 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     );
     expect(signer).not.toContain("id-token: write");
     expect(signer).not.toContain("aws-actions/configure-aws-credentials");
+    expect(signer).not.toContain("CLOUDFLARE_API_TOKEN");
     expect(WF).toContain("bunx tauri signer generate --ci");
     expect(WF).toContain(`name: unsigned-accelerator-\${{ matrix.platform }}`);
     for (const smoke of [UPDATER, UPDATER_LINUX, UPDATER_WINDOWS]) {
@@ -294,46 +296,22 @@ describe("release-accelerator.yml — B6 publish/promote contract", () => {
     expect(release).toContain("needs.dependency-audit.result == 'success'");
   });
 
-  test("blocker-1 failure-atomicity: authoritative PUT (fatal) split from best-effort invalidation (non-fatal)", () => {
-    // The S3 PUT commits the promote; the CloudFront invalidation only accelerates propagation. They MUST be
-    // separate steps AND the invalidation must be non-fatal: if a transient invalidation error after the PUT
-    // failed the job, `promote` would go RED (reading as "feed unflipped" when it IS flipped) and the
-    // downstream verify-live-feed gate — implicit success() on `promote` — would be SKIPPED, leaving the flip
-    // unconfirmed. So promote-success must equal PUT-success. Both steps retry; the PUT is fatal on
-    // exhaustion (safe — the feed is unchanged, nothing downstream ran), the invalidation warns + continues.
-    expect(WF).toContain("Flip the S3 feed to this version (authoritative PUT)");
-    expect(WF).toContain("Invalidate CloudFront (best-effort — never fails a committed promote)");
-    // Scope each assert to its own step body so PUT-fatal and invalidation-non-fatal are provable in
-    // isolation (and can't false-catch verify-live-feed's own `exit 1`).
-    const putStep =
-      WF.split("Flip the S3 feed to this version (authoritative PUT)")[1]?.split(
-        "Invalidate CloudFront (best-effort",
-      )[0] ?? "";
-    const invStep =
-      WF.split("Invalidate CloudFront (best-effort")[1]?.split(
+  test("authoritative KV write is exact, retried, and always followed by live verification", () => {
+    expect(WF).toContain("Flip the KV feed to this version (authoritative write)");
+    const writeStep =
+      WF.split("Flip the KV feed to this version (authoritative write)")[1]?.split(
         "# Enforce the live-feed check",
       )[0] ?? "";
-    // PUT: retried, and FATAL on exhaustion. [mut: drop the `exit 1` / retry → the flip stops being atomic]
-    expect(putStep, "PUT step body found").toContain("aws s3 cp feed/latest.json");
-    expect(putStep, "PUT retries").toContain("for attempt in 1 2 3 4 5; do");
-    expect(putStep, "PUT is fatal on exhaustion").toContain("exit 1");
-    expect(putStep).toContain("feed unchanged, promote aborted");
-    // Invalidation: retried, then WARN + continue — never fatal. [mut: add `exit 1` to the invalidation
-    // failure branch, or re-merge it into the PUT step → a post-PUT invalidation hiccup skips verify-live-feed]
-    expect(invStep, "invalidation step body found").toContain("create-invalidation");
-    expect(invStep, "invalidation retries").toContain("for attempt in 1 2 3; do");
-    expect(
-      invStep,
-      "a failed invalidation must NOT be fatal — no `exit 1` in the step body",
-    ).not.toContain("exit 1");
-    expect(invStep, "invalidation exhaustion warns (non-fatal)").toContain(
-      "::warning::CloudFront invalidation failed after 3 attempts",
-    );
-    // codex High: verify-live-feed must run after ANY attempted promote via its OWN status function, so a
-    // PUT whose CLI errored AFTER S3 committed (feed live but `promote` RED) can't skip live verification —
+    expect(writeStep).toContain("wrangler kv key put latest.json --path feed/latest.json --remote");
+    expect(writeStep).toContain("for attempt in 1 2 3 4 5; do");
+    expect(writeStep).toContain("exit 1");
+    expect(WF).not.toContain("aws s3 cp");
+    expect(WF).not.toContain("create-invalidation");
+    // verify-live-feed runs after ANY attempted write via its OWN status function, so a CLI timeout after KV
+    // committed cannot skip public verification —
     // the live feed is the source of truth. [mut: revert to the implicit success() on `promote` → fails]
     expect(WF, "verify-live-feed runs on its own always() status function").toMatch(
-      /Verify live updater feed[\s\S]{0,800}?if: \$\{\{ always\(\) && !cancelled\(\) && needs\.validate\.result == 'success' && inputs\.mode == 'promote-only'/,
+      /Verify live updater feed[\s\S]{0,1000}?if: \$\{\{ always\(\) && !cancelled\(\) && needs\.validate\.result == 'success' && needs\.promote\.outputs\.write_attempted == 'true'/,
     );
   });
 
