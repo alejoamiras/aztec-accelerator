@@ -67,6 +67,10 @@ jobs:
           #    while silently stranding every installed app, so compare against the real latest
           #    stable release. This is the failure mode a naive uptime check cannot see.
           feed_ver=$(jq -r .version feed.json)
+          if [ "$feed_ver" != "3.1.0" ]; then
+            echo "::error::legacy feed must remain frozen at 3.1.0 (got $feed_ver)"
+            exit 1
+          fi
           latest_tag=$(gh release list --exclude-pre-releases --limit 20 --json tagName \
             --jq '[.[].tagName | select(startswith("accelerator-v"))][0]')
           latest_ver="${latest_tag#accelerator-v}"
@@ -87,6 +91,13 @@ jobs:
               echo "::error::updater feed is missing platform: $p"
               exit 1
             fi
+            case "$url" in
+              https://github.com/alejoamiras/aztec-accelerator/releases/download/accelerator-v3.1.0/*) ;;
+              *)
+                echo "::error::$p must remain a legacy 3.1.0 asset, never a Presto installer"
+                exit 1
+                ;;
+            esac
             # Range-request a single byte: proves the asset resolves without pulling ~90MB.
             acode=$(curl -sSL --max-time 60 -o /dev/null -w '%{http_code}' -r 0-0 "$url")
             case "$acode" in
@@ -105,3 +116,35 @@ jobs:
             echo "- platforms: 4/4 present and downloadable"
             echo "- \`manifest_sig\`: present"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  migration-pages:
+    name: Probe migration pages and destinations
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Verify retirement links remain usable
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in \
+            'https://aztec-accelerator.dev|https://presto.build' \
+            'https://playground.aztec-accelerator.dev|https://playground.presto.build'; do
+            retired_url="${pair%%|*}"
+            presto_url="${pair#*|}"
+            code=$(curl -sS --max-time 30 --max-filesize 1048576 -o retirement.html -w '%{http_code}' "$retired_url")
+            if [ "$code" != "200" ] || ! grep -Fq "href=\"$presto_url\"" retirement.html; then
+              echo "::error::migration page or expected destination is missing — $retired_url"
+              exit 1
+            fi
+            if grep -Eiq '<(script|form|button)([[:space:]>])|[[:space:]]on[a-z]+[[:space:]]*=|releases/download|/prove([[:space:]"?]|$)' retirement.html; then
+              echo "::error::old download/proving actions returned — $retired_url"
+              exit 1
+            fi
+            code=$(curl -sSL --max-time 30 --max-redirs 3 --proto '=https' --proto-redir '=https' -o /dev/null -w '%{http_code}' "$presto_url")
+            if [ "$code" != "200" ]; then
+              echo "::error::Presto destination returned HTTP $code — $presto_url"
+              exit 1
+            fi
+            echo "- Migration page and destination healthy: $retired_url → $presto_url" >> "$GITHUB_STEP_SUMMARY"
+          done
