@@ -64,6 +64,7 @@ fn verify_frontend_bundles() {
         "update-prompt.js",
         "onboarding.js",
         "renewal.js",
+        "migration.js",
     ];
     if outputs.len() != bundles.len() {
         panic!(
@@ -160,6 +161,7 @@ fn main() {
         "record_renewal_prompt",
         "set_auto_update",
         "respond_update_prompt",
+        "respond_migration_notice",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()

@@ -2,6 +2,10 @@
 
 Static landing page for the Aztec Accelerator project.
 
+Production now serves the script-free `retirement/index.html` migration page linking to
+[Presto](https://presto.build). The source and `dist/` build below remain regression fixtures;
+Wrangler uploads only `retirement/`, never the old download/detection UI.
+
 Accelerator detection is HTTPS-first and never treats its witness-free HTTP diagnostic as proving
 availability. The page can explain how to enable **Encrypted Connection** or repair certificate
 trust, but it never persists consent or enables plaintext proving. Deliberate, current-tab-only HTTP

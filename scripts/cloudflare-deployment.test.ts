@@ -16,9 +16,25 @@ describe("Cloudflare deployment contract", () => {
 
     for (const file of ["packages/landing/wrangler.jsonc", "packages/playground/wrangler.jsonc"]) {
       const config = read(file);
-      expect(config).toContain('"directory": "./dist"');
+      expect(config).toContain('"directory": "./retirement"');
       expect(config).toContain('"not_found_handling": "single-page-application"');
       expect(config).toContain('"preview_urls": true');
+    }
+  });
+
+  test("retired deployments contain only script-free migration pages, not the proving fixture", () => {
+    for (const [site, destination] of [
+      ["landing", "https://presto.build"],
+      ["playground", "https://playground.presto.build"],
+    ]) {
+      const directory = `packages/${site}/retirement`;
+      expect(fs.readdirSync(path.join(ROOT, directory)).sort()).toEqual(["_headers", "index.html"]);
+      const html = read(`${directory}/index.html`);
+      expect(html).toContain(`href="${destination}"`);
+      expect(html).toContain('<html lang="en">');
+      expect(html).not.toMatch(/<script\b|<form\b|<button\b|\bon\w+\s*=|\bdownload\s*=/i);
+      expect(html).not.toMatch(/localhost|127\.0\.0\.1|releases\/download|\/prove/);
+      expect(read(`${directory}/_headers`)).toContain("default-src 'none'");
     }
   });
 

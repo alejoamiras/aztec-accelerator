@@ -32,6 +32,7 @@ const ENTRIES = [
   "update-prompt.js",
   "onboarding.js",
   "renewal.js",
+  "migration.js",
 ] as const;
 
 /**

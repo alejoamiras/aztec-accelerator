@@ -10,7 +10,7 @@
     }
   ],
   "assets": {
-    "directory": "./dist",
+    "directory": "./retirement",
     "not_found_handling": "single-page-application"
   }
 }

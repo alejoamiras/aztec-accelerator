@@ -7,6 +7,9 @@ use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use url::Host;
 
+/// Keep the old address so migration instructions can evolve without another native release.
+pub const MIGRATION_URL: &str = "https://aztec-accelerator.dev/";
+
 /// True iff `url` is the app's OWN local asset origin. Tauri serves the bundled frontend from
 /// `tauri://localhost` (Linux/macOS) or `http://tauri.localhost` (Windows). Every other navigation
 /// target is off-origin. F-012 (codex HIGH-3): the CSP `connect-src` blocks fetch/XHR/WS exfil but NOT
@@ -133,6 +136,40 @@ fn open_or_focus_window(app: &AppHandle, config: WindowConfig) -> Option<tauri::
         }
         Err(_) => None,
     }
+}
+
+/// Offer manual migration once, then continue any unfinished first-run setup after dismissal.
+#[cfg(not(feature = "webdriver"))]
+pub fn show_migration_window(app: &AppHandle) {
+    let Some(window) = open_or_focus_window(
+        app,
+        WindowConfig {
+            label: "migration",
+            url: "migration.html".to_string(),
+            title: "Aztec Accelerator has moved to Presto",
+            width: 500.0,
+            height: 430.0,
+            always_on_top: false,
+            focus_if_open: true,
+            focus_on_create: true,
+        },
+    ) else {
+        return;
+    };
+    let app = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+            let config = app.state::<commands::ConfigState>();
+            if let Err(error) = commands::dismiss_migration_notice(&config) {
+                tracing::warn!(%error, "Migration notice dismissal could not be saved");
+            }
+            let needs_onboarding =
+                config.read().onboarding_version < aztec_accelerator::config::ONBOARDING_VERSION;
+            if needs_onboarding {
+                show_onboarding_window(&app);
+            }
+        }
+    });
 }
 
 /// Open or focus the Settings window.

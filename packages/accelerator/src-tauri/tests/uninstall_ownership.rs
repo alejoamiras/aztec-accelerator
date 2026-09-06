@@ -6,10 +6,12 @@
 //! `~/.aztec-accelerator`. `--prepare-uninstall` for THIS copy must detect the foreign owner from the
 //! stored autostart entry and LEAVE all shared state (trust + certs) and the other copy's autostart entry.
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use aztec_accelerator::autostart::enable_entry_at;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use aztec_accelerator::uninstall::{prepare_uninstall, Step};
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn make_exe(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let p = dir.join(name);

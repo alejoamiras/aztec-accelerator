@@ -4,6 +4,16 @@
   "entries": [
     {
       "origins": [
+        "https://presto.build",
+        "https://playground.presto.build"
+      ],
+      "displayName": "Presto",
+      "description": "Successor to Aztec Accelerator; site recognition does not grant proving permission",
+      "curatedBy": "alejoamiras",
+      "addedAt": "2026-09-06"
+    },
+    {
+      "origins": [
         "https://nulo.sh",
         "https://faucet.nulo.sh"
       ],

@@ -1,6 +1,17 @@
 # Accelerator changelog
 
-## 3.0.0 - Unreleased
+## 3.1.0 - Final legacy release
+
+- Presto is the successor: [migration instructions](https://aztec-accelerator.dev/).
+- Added a one-time migration notice and permanent **Move to Presto…** tray link. Dismissal is stored
+  only in Aztec Accelerator's existing configuration. Proving remains fully functional.
+- Added Presto production origins to the recognized-site display registry; authorization still requires consent.
+- Retained the existing updater key, native identity, configuration, certificates and installation paths.
+  Installed `3.0.0` applications can update normally to `3.1.0`.
+- Migration to Presto is manual. Quit this app before starting Presto; nothing installs, copies or
+  deletes Presto state automatically. Legacy landing and playground pages now link to Presto.
+
+## 3.0.0 - 2026-09-03
 
 ### Breaking change: one manual reinstall is required
 

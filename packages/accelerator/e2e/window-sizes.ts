@@ -18,6 +18,7 @@ export const WINDOW_SIZES = {
   settings: { width: 500, height: 600 },
   onboarding: { width: 520, height: 560 },
   renewal: { width: 420, height: 260 },
+  migration: { width: 500, height: 430 },
   "update-prompt": { width: 420, height: 280 },
   // The auth popup's label is per-request (`auth-<id>`), so the drift guard keys it by its url.
   authorize: { width: 400, height: 300 },

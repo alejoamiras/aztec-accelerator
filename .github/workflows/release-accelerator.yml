@@ -969,6 +969,14 @@ jobs:
 
           Native proving accelerator for Aztec transactions.
 
+          ### Aztec Accelerator is retiring — meet Presto
+
+          This final legacy update keeps proving functional and adds a one-time migration notice plus
+          a permanent tray link. [Learn about Presto](https://aztec-accelerator.dev/).
+          Switching is manual: quit Aztec Accelerator before starting Presto. Settings, approvals,
+          certificates and cached data do not move automatically. This updater never installs Presto.
+          Existing 3.0.0 installations can update to this release using the same signing key.
+
           ### Important: manual reinstall required when upgrading from 1.x or 2.x
 
           The updater signing key changed for Accelerator 3. Existing 1.x and 2.x installations cannot

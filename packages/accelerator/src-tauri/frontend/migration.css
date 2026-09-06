@@ -1,0 +1,20 @@
+.migration h1 {
+  font-size: 26px;
+  margin-bottom: 16px;
+}
+
+.migration p {
+  margin-bottom: 14px;
+}
+
+.migration .cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.migration button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

@@ -10,6 +10,14 @@ use tauri::Manager;
 pub use crate::config::ConfigStore;
 pub type ConfigState = Arc<config::ConfigStore>;
 
+/// Persist only the legacy notice dismissal, retaining the existing config-schema protection.
+pub fn dismiss_migration_notice(config: &ConfigState) -> Result<(), String> {
+    if config.read().presto_migration_dismissed {
+        return Ok(());
+    }
+    mutate_config(config, |cfg| cfg.presto_migration_dismissed = true)
+}
+
 /// B4 (codex): the single user-facing message for "the on-disk config is from a newer build, so this build
 /// may not overwrite it." Shared by [`mutate_config`]'s refuse arm and the [`require_persistable`] preflight
 /// so the Settings UI shows one consistent string whether a command bails early or fails at the save.
