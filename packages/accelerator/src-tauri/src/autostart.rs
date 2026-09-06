@@ -1731,6 +1731,7 @@ pub fn startup_reconcile() -> bool {
 ///   it. Chosen over the alternative, where a copy silently captures the task and recovery
 ///   launches a binary the user may delete tomorrow.
 /// - `Absent` → allow (unreachable in practice: intent is false, so no caller arms).
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) fn implicit_arm_allowed(stored: &StoredTarget) -> bool {
     match stored {
         // Proven ours.
@@ -1757,6 +1758,7 @@ pub(crate) fn implicit_arm_allowed(stored: &StoredTarget) -> bool {
 /// an AppImage's identity is the `.AppImage` file, NOT `current_exe()` (which points into the
 /// ephemeral `/tmp/.mount_*` squashfs): comparing the mount path would make every AppImage launch
 /// look like a foreign copy and permanently strand those users' crash recovery (r3 #3).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn implicit_arm_gate(reference: &Path) -> bool {
     let allowed = implicit_arm_allowed(&read_stored_target(Some(reference)));
     if !allowed {

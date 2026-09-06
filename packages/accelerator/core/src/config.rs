@@ -90,6 +90,9 @@ pub struct AcceleratorConfig {
     /// HTTPS-by-default migration).
     #[serde(default)]
     pub onboarding_version: u32,
+    /// Dismissal of the final-release migration notice; belongs only to this legacy app.
+    #[serde(default)]
+    pub presto_migration_dismissed: bool,
     /// Unix seconds of the last cert-renewal consent prompt (macOS/Windows renewal-window throttle).
     /// `None` = never prompted. Skipped when `None` to keep on-disk configs clean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +109,7 @@ impl Default for AcceleratorConfig {
             auto_update: None,
             auto_approve_localhost: false,
             onboarding_version: 0,
+            presto_migration_dismissed: false,
             last_rotation_prompt_at: None,
         }
     }
@@ -644,10 +648,30 @@ mod tests {
         assert!(config.approved_origins.is_empty());
         assert_eq!(config.speed, Speed::Full);
         assert_eq!(config.onboarding_version, 0);
+        assert!(!config.presto_migration_dismissed);
         assert_eq!(config.last_rotation_prompt_at, None);
     }
 
     // ── B4: config migration (safari_support→https_enabled) + version-gated persist capability ──
+
+    #[test]
+    fn retirement_dismissal_round_trips_without_changing_existing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"config_version":2,"https_enabled":true,"speed":"light","auto_update":true,"onboarding_version":1}"#,
+        )
+        .unwrap();
+        let loaded = load_with_cap_from(&path);
+        assert!(!loaded.config.presto_migration_dismissed);
+        let mut expected = serde_json::to_value(&loaded.config).unwrap();
+        expected["presto_migration_dismissed"] = serde_json::Value::Bool(true);
+        let mut dismissed = loaded.config;
+        dismissed.presto_migration_dismissed = true;
+        save_to(&dismissed, &path, loaded.cap.as_ref().unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(load_from(&path)).unwrap(), expected);
+    }
 
     #[test]
     fn migrates_safari_support_to_https_and_stamps_v2() {

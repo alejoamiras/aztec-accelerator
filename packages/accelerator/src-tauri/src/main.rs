@@ -68,6 +68,21 @@ fn open_in_browser(target: &impl AsRef<Path>) {
     }
 }
 
+/// The page chooses only whether to open the fixed migration address, never an arbitrary URL.
+#[tauri::command]
+fn respond_migration_notice(
+    window: tauri::WebviewWindow,
+    config: tauri::State<'_, ConfigState>,
+    open_presto: bool,
+) -> Result<(), String> {
+    commands::require_label(window.label(), "migration")?;
+    commands::dismiss_migration_notice(&config)?;
+    if open_presto {
+        open_in_browser(&windows::MIGRATION_URL);
+    }
+    window.close().map_err(|error| error.to_string())
+}
+
 // ── HTTPS startup ────────────────────────────────────────────────────────
 
 /// q7e3-F-01: the launch-time HTTPS gate as a pure value, lifted out of `try_start_https` so the
@@ -461,6 +476,7 @@ fn build_tray(
             open_in_browser(&"https://github.com/alejoamiras/aztec-accelerator");
         }
         "settings" => windows::open_settings_window(app),
+        "presto_migration" => open_in_browser(&windows::MIGRATION_URL),
         _ => {}
     })
 }
@@ -717,6 +733,7 @@ fn main() {
             commands::record_renewal_prompt,
             commands::set_auto_update,
             commands::respond_update_prompt,
+            respond_migration_notice,
         ])
         .setup(move |app| {
             // Hide from Dock — tray-only app
@@ -826,8 +843,13 @@ fn main() {
             // bootstrap the Settings window as their browsing context (the wizard E2E drives it
             // explicitly instead of relying on auto-show, so the existing specs stay unaffected).
             #[cfg(not(feature = "webdriver"))]
-            if config_state.read().onboarding_version < config::ONBOARDING_VERSION {
-                windows::show_onboarding_window(app.handle());
+            {
+                let cfg = config_state.read().clone();
+                if !cfg.presto_migration_dismissed {
+                    windows::show_migration_window(app.handle());
+                } else if cfg.onboarding_version < config::ONBOARDING_VERSION {
+                    windows::show_onboarding_window(app.handle());
+                }
             }
 
             // ── Certificate renewal consent (macOS/Windows, §7) ──

@@ -1,5 +1,10 @@
 # Aztec Accelerator
 
+> **Aztec Accelerator is retiring. Use [Presto](https://presto.build) for new installations and integrations.**
+> The successor SDK is [`@alejoamiras/presto`](https://www.npmjs.com/package/@alejoamiras/presto).
+> Existing installations keep proving; migration is manual. Presto uses separate settings,
+> approvals, certificates and installation data. See the [SDK migration guide](https://github.com/alejoamiras/presto/blob/main/packages/sdk/MIGRATION.md).
+
 Native proving accelerator for Aztec transactions. Bypasses browser WASM throttling by running the `bb` proving binary natively on your machine.
 
 [![SDK](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/sdk.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/sdk.yml)

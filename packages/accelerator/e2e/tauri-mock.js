@@ -78,6 +78,7 @@ const defaults = {
   }),
   renew_cert: () => null,
   record_renewal_prompt: () => null,
+  respond_migration_notice: () => null,
 };
 
 window.__TAURI_MOCK__ = {

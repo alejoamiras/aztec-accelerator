@@ -514,14 +514,12 @@ pub fn post_create_failure_cleanup(
                 );
             }
         }
-    } else {
-        if disarm_confirmed() {
-            if let Err(e) = remove_all(paths) {
-                tracing::warn!("marker removal failed after aborted install ({e}); will expire");
-            }
-        } else {
-            tracing::warn!("disarm unconfirmed after aborted install; leaving marker for retry");
+    } else if disarm_confirmed() {
+        if let Err(e) = remove_all(paths) {
+            tracing::warn!("marker removal failed after aborted install ({e}); will expire");
         }
+    } else {
+        tracing::warn!("disarm unconfirmed after aborted install; leaving marker for retry");
     }
     true
 }

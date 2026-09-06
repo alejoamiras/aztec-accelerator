@@ -76,6 +76,7 @@ pub fn build_tray_menu(
     status: &tauri::menu::MenuItem<tauri::Wry>,
 ) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let settings = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
+    let migration = MenuItemBuilder::with_id("presto_migration", "Move to Presto…").build(app)?;
     let app_version = env!("CARGO_PKG_VERSION");
     let aztec_bb_version = env!("AZTEC_BB_VERSION");
     let version_text = MenuItemBuilder::with_id(
@@ -100,6 +101,7 @@ pub fn build_tray_menu(
                 &versions_submenu,
                 &show_logs,
                 &settings,
+                &migration,
                 &separator,
                 &version_text,
                 &github,
@@ -114,6 +116,7 @@ pub fn build_tray_menu(
             .items(&[
                 &show_logs,
                 &settings,
+                &migration,
                 &separator,
                 &version_text,
                 &github,

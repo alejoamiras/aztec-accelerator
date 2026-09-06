@@ -267,6 +267,12 @@
           "markdownDescription": "Enables the respond_auth command without any pre-configured scope."
         },
         {
+          "description": "Enables the respond_migration_notice command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-respond-migration-notice",
+          "markdownDescription": "Enables the respond_migration_notice command without any pre-configured scope."
+        },
+        {
           "description": "Enables the respond_update_prompt command without any pre-configured scope.",
           "type": "string",
           "const": "allow-respond-update-prompt",
@@ -379,6 +385,12 @@
           "type": "string",
           "const": "deny-respond-auth",
           "markdownDescription": "Denies the respond_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the respond_migration_notice command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-respond-migration-notice",
+          "markdownDescription": "Denies the respond_migration_notice command without any pre-configured scope."
         },
         {
           "description": "Denies the respond_update_prompt command without any pre-configured scope.",

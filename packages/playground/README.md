@@ -65,7 +65,11 @@ E2E tests use [Playwright](https://playwright.dev).
 bun run build   # Output: dist/
 ```
 
-Deployed with Cloudflare Workers Static Assets at `playground.aztec-accelerator.dev`. `app.yml` is the PR gate (lint, typecheck, unit, e2e). The live deploy is a manual `release-sdk.yml` dispatch: choose `sdk-and-playground` for a candidate SDK release plus deploy, or `playground-only` to deploy without publishing npm.
+Production at `playground.aztec-accelerator.dev` now serves only the script-free `retirement/` page,
+linking to [Presto's playground](https://playground.presto.build). The source and `dist/` build remain
+development/CI fixtures so final native proving tests still work; Wrangler never uploads them.
+`app.yml` remains the PR gate. Use `release-sdk.yml` with `mode=playground-only` for retirement-page
+deployment without publishing npm. Do not publish further legacy SDK versions.
 
 ## License
 

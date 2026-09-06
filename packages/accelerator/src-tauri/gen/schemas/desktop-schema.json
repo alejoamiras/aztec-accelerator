@@ -189,12 +189,6 @@
           "markdownDescription": "Enables the disable_https command without any pre-configured scope."
         },
         {
-          "description": "Enables the dismiss_onboarding command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-dismiss-onboarding",
-          "markdownDescription": "Enables the dismiss_onboarding command without any pre-configured scope."
-        },
-        {
           "description": "Enables the enable_https command without any pre-configured scope.",
           "type": "string",
           "const": "allow-enable-https",
@@ -237,12 +231,6 @@
           "markdownDescription": "Enables the get_verified_info command without any pre-configured scope."
         },
         {
-          "description": "Enables the open_onboarding command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-open-onboarding",
-          "markdownDescription": "Enables the open_onboarding command without any pre-configured scope."
-        },
-        {
           "description": "Enables the record_renewal_prompt command without any pre-configured scope.",
           "type": "string",
           "const": "allow-record-renewal-prompt",
@@ -279,6 +267,12 @@
           "markdownDescription": "Enables the respond_auth command without any pre-configured scope."
         },
         {
+          "description": "Enables the respond_migration_notice command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-respond-migration-notice",
+          "markdownDescription": "Enables the respond_migration_notice command without any pre-configured scope."
+        },
+        {
           "description": "Enables the respond_update_prompt command without any pre-configured scope.",
           "type": "string",
           "const": "allow-respond-update-prompt",
@@ -313,12 +307,6 @@
           "type": "string",
           "const": "deny-disable-https",
           "markdownDescription": "Denies the disable_https command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the dismiss_onboarding command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-dismiss-onboarding",
-          "markdownDescription": "Denies the dismiss_onboarding command without any pre-configured scope."
         },
         {
           "description": "Denies the enable_https command without any pre-configured scope.",
@@ -363,12 +351,6 @@
           "markdownDescription": "Denies the get_verified_info command without any pre-configured scope."
         },
         {
-          "description": "Denies the open_onboarding command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-open-onboarding",
-          "markdownDescription": "Denies the open_onboarding command without any pre-configured scope."
-        },
-        {
           "description": "Denies the record_renewal_prompt command without any pre-configured scope.",
           "type": "string",
           "const": "deny-record-renewal-prompt",
@@ -403,6 +385,12 @@
           "type": "string",
           "const": "deny-respond-auth",
           "markdownDescription": "Denies the respond_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the respond_migration_notice command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-respond-migration-notice",
+          "markdownDescription": "Denies the respond_migration_notice command without any pre-configured scope."
         },
         {
           "description": "Denies the respond_update_prompt command without any pre-configured scope.",

@@ -4,6 +4,15 @@ The landing page and playground use Cloudflare Workers Static Assets. The signed
 manifest is served by a small Worker from KV, keeping feed promotion separate from site deploys.
 No OpenTofu, S3, CloudFront, or build server is required.
 
+## Retirement deployment
+
+Both site configurations now upload only their package's `retirement/` directory: a script-free
+migration page and security headers. The existing Vite source and `dist/` builds are development/CI
+fixtures, including the packaged native proving gate; they are not production assets. Deploy the
+landing through `deploy-landing.yml` and the playground through `release-sdk.yml` with
+`mode=playground-only` (no npm publication). Keep the feed Worker and its legacy KV namespace unchanged.
+See [the retirement checklist](PRESTO_RETIREMENT.md) before deploying or freezing the final feed.
+
 ## Fork setup
 
 1. Run `wrangler login` and finish the browser OAuth flow. Verify with `wrangler whoami`.
@@ -24,7 +33,8 @@ The release-feed Worker deploy is manual and uses the protected `release-feed` G
 Feed content promotion remains a separate workflow operation with a KV-only credential.
 
 GitHub Actions runs the Vite builds, so build-time variables such as `AZTEC_NODE_URL` are compiled into
-the publicly downloadable bundle before Wrangler uploads `dist`. Treat them as public configuration;
+the development/CI bundle. Before retirement Wrangler uploaded `dist`; now it uploads only the
+script-free `retirement/` directory. Treat build-time variables as public configuration;
 never place credentials or private values in Vite build-time variables. They are not Worker runtime
 variables.
 

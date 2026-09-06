@@ -35,6 +35,7 @@ const PAGES = [
   "update-prompt.html",
   "onboarding.html",
   "renewal.html",
+  "migration.html",
 ] as const;
 
 async function read(p: string): Promise<string> {
@@ -180,6 +181,7 @@ const WINDOW_MATRIX: Record<string, string[]> = {
   "update-prompt": ["respond_update_prompt"],
   onboarding: ["get_onboarding_state", "complete_onboarding"],
   renewal: ["renew_cert", "record_renewal_prompt"],
+  migration: ["respond_migration_notice"],
 };
 const snakeToPerm = (cmd: string) => `allow-${cmd.replace(/_/g, "-")}`;
 
@@ -195,10 +197,11 @@ describe("F-012 P3 — per-window capability ACL", () => {
     return out;
   }
 
-  test("exactly the 5 scoped capabilities exist — no default.json, no extras", async () => {
+  test("exactly the 6 scoped capabilities exist — no default.json, no extras", async () => {
     const files = await capFiles();
     expect(Object.keys(files).sort()).toEqual([
       "authorize.json",
+      "migration.json",
       "onboarding.json",
       "renewal.json",
       "settings.json",
@@ -265,13 +268,14 @@ describe("F-012 P3 — per-window capability ACL", () => {
 
     expect(buildCommands).toEqual(handlers); // declared surface == registered surface
     expect(grantedSorted).toEqual(handlers); // every registered command is granted to exactly some window
-    expect(handlers.length).toBe(19); // +repair_autostart (autostart self-heal Fix button, plan D16)
+    expect(handlers.length).toBe(20);
   });
 
-  test("tauri.conf.json pins the capability allowlist to exactly the 5", async () => {
+  test("tauri.conf.json pins the capability allowlist to exactly the 6", async () => {
     const c = JSON.parse(await read(TAURI_CONF));
     expect([...(c.app?.security?.capabilities ?? [])].sort()).toEqual([
       "authorize",
+      "migration",
       "onboarding",
       "renewal",
       "settings",

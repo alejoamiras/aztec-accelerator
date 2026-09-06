@@ -1,5 +1,16 @@
 # Release runbook
 
+## Final release: 3.1.0
+
+Presto is the successor. Follow [the retirement checklist](PRESTO_RETIREMENT.md) for the final legacy
+release. Retain the existing production updater key and require the published `3.0.0` same-key
+baseline. Publish and dry-run promotion through the existing gates below, then promote with
+`bump_source=false`: retirement must not create a next-RC source bump. After live signature/asset
+verification, mark `accelerator-v3.1.0` GitHub Latest explicitly, since that badge normally lives in
+the source-bump job. Freeze the verified legacy feed at `3.1.0`, disable further publishing, and keep
+the feed and migration pages online. Never point this updater at a Presto artifact or publish another
+legacy SDK version. The general release procedures below remain historical/rollback reference.
+
 This repository ships two independently versioned artifacts:
 
 | Artifact | Release entry point | Use it when |
