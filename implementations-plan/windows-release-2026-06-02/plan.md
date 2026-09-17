@@ -141,4 +141,4 @@ Rust: `copy-bb.ts` (rewrite), `versions.rs`, `bb.rs`, `crash_recovery.rs` (**lin
 - **main (me):** spike-first framing, `bind_with_retry`-already-covers-Windows (both agents confirmed), per-user-dodges-UAC — **adopted**.
 - **Rejected:** opus's autostart-only-v1 crash-recovery (doesn't meet the owner's "crash-recovery parity"); a Windows **service** (session-0 can't host a tray); **MSI** (no `currentUser`, irrelevant GPO strength); shipping a **headless Windows server** in v1 (no demand); `embedBootstrapper`/`offlineInstaller` WebView2 (size, unnecessary above the UCRT floor). Deferred: **Authenticode signing** (owner's explicit follow-up); the in-session **watchdog** (only if Task Scheduler's kill-test fails).
 
-See [eli5.html](eli5.html).
+See eli5.html.
