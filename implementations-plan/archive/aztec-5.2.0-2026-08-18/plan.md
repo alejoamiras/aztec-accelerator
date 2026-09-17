@@ -1,5 +1,12 @@
 # Plan — @aztec/* 5.0.1 → 5.2.0 bump
 
+## Outcome
+
+**Closed 2026-08-25.** light, **READY FOR MERGE (2026-08-24): PR #467 all-green, codex approve, live-testnet smoke passed** — bump @aztec/* 5.0.1 → 5.2.0 (published same-day; permanent @aztec min-age exclusion per owner), manual Windows bb pin, PR CI + live-testnet proving smoke as merge gate; aztec-standards lockstep held at 5.0.1 (no 5.2.0 upstream) per Ask A1, arbitrated by the Phase-4 manual token flow.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 - **Tier**: `/blueprint light` (rubric: external coupling HIGH, everything else LOW-MOD; fourth bump
   cycle with purpose-built tooling and fail-closed CI gates makes light defensible despite the 1-HIGH
   nominally pointing at mid).

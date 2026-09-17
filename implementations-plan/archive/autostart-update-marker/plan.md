@@ -1,5 +1,12 @@
 # Plan — autostart update marker (piece 2)
 
+## Outcome
+
+**Closed 2026-07-29.** mid, **MERGED (PR #423, `08a4670`)** — piece 2 of the autostart arc: the Windows update-window marker (D18/D21/D22 from the piece-1 ledger) — update-in-progress.json with a transaction nonce + in-payload deadline, a new production NSIS_HOOK_POSTINSTALL completion token (Rename-consumes-handoff, must-fire harness case for the ifmacrodef silent-skip trap), marker-aware perform_update/heal/toggle/startup with every gated mutation checked UNDER autostart.lock, and the Windows automatic heal finally ungated. 3 planning-audit rounds (fable cond, codex reject ×2) folded; ledger in plan.md §10.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 `/blueprint mid`, **revision 3** — post dual-audit + final fresh-context pass (reject, 4 blocking — folded, §10 rounds 1–2) (fable: conditional-approve, 3 blocking; codex:
 reject, 6 blocking; run in parallel, neither seeing the other). All findings folded or explicitly
 adjudicated in §10. The DESIGN remains settled elsewhere

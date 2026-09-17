@@ -1,5 +1,12 @@
 # Headless CI Slim — core-extraction Phase 3b
 
+## Outcome
+
+**Closed 2026-06-08.** mid, **implemented (PR pending)** — core-extraction Phase 3b: slim the bb-less headless CI legs (Smoke + Release-Smoke drop WebKit/GTK + the copy-bb prebuild via composite boolean inputs) + extend the bb-version hook to e2e (`/prove` fast-path) + a `/health.version` guard. **Approach A** (codex+opus dual audit → both A; final codex conditional-approve, conditions folded). e2e untouched; PR-gate validated; no harden. ✅ **merged (#329)** — codex post-impl caught + fixed a silent-empty AZTEC_BB_VERSION hole (d3bdf4a)
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 **Tier:** `/blueprint mid`. Follow-up to `core-extraction-2026-06-07`.
 **Dual audit done: codex + opus BOTH → Approach A, "holds-with-changes" (every defect folded below).**
 

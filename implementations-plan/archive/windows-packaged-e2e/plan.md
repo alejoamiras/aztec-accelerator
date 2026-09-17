@@ -1,5 +1,12 @@
 # Windows packaged-E2E legs — composed proof + full uninstall
 
+## Outcome
+
+**Closed 2026-08-18.** light, **in progress (2026-08-18)** — the two Windows legs of the packaged-E2E release gate. **P1 DONE + PROVEN**: "Full uninstall (windows)" installs the real NSIS setup, lets the PRODUCT arm the state (Run-key intent → healed value + crash-recovery task), runs the real `uninstall.exe /S` with the app still running, then asserts removal (install dir, autostart, task, certs) + retention (`config.json`) + no PT1M resurrection — every "gone" backed by a "present first" precondition. Green against the published 2.0.0 installer; **absorbs backlog #61** (B5's live NSIS belt harness). Logic lives in `.github/scripts/packaged-e2e-uninstall-windows.ps1` because `release-accelerator.yml` refuses non-main refs and is the gate's only caller. **P2 CLOSED as (C)** (owner decision, 2026-08-18): the composed HTTPS proof is a documented manual pre-GA check, NOT a CI leg. Five headless seeding mechanisms were measured dead on hosted runners — `certutil -addstore` and .NET `X509Store.Add` HANG on the consent dialog, while `Import-Certificate`, a LocalMachine import, and a GroupPolicy-store write each succeed yet stay invisible to `certutil -user -store Root`, the query the shipped gate makes — so automating it needed either a production trust change or dedicated pre-trusted runner infra, neither judged worth it for one leg. Runbook with exact witnesses in `packages/accelerator/README.md` ("Windows composed proof"). Four Windows-CI gotchas + the codex rounds are in lessons/phase-1.md.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 **Tier**: `/blueprint light` (bounded surface: two CI jobs in one reusable workflow + one contract-test count).
 **Branch/worktree**: `windows-packaged-e2e` off `main` @ `b98352b` (source already at `2.0.1-rc.1`).
 **Recon**: [recon.md](recon.md) — read it first; every design choice below cites it.

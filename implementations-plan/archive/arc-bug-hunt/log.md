@@ -1,5 +1,12 @@
 # Post-merge bug hunt — pieces 3 + rename + publisher (owner-requested, until-clean loop)
 
+## Outcome
+
+**Closed 2026-07-31.** owner-requested post-merge until-clean hunt over #425+#426+#427 (+piece-2 in post-rename context) — round 1: 2 Medium fixed (identity-guard filter routing; D22 post-milestone settle), 1 Low residual (fixture provenance)
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 Scope: the merged combined diff `08a4670..main` (#425, #426, #427) plus piece-2 product code in
 its post-rename context. Loop: fresh codex hunt at xhigh → every finding verified against the
 code → real bugs fixed through normal gates → resumed "what did you miss" → repeat until a round

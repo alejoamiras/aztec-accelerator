@@ -1,5 +1,12 @@
 # Plan — Bump `@aztec/* 5.0.0 → 5.0.1` + standards-token migration + SDK 5.0.1 release (`/blueprint mid`)
 
+## Outcome
+
+**Closed 2026-07-16.** mid, **shipped (P4 blocked on owner npm auth)** — `@aztec/* 5.0.0 → 5.0.1` client-security patch + playground token swap to @aztec-foundation/aztec-standards@5.0.1 + SDK 5.0.1 `testnet`+`latest` + FPC salt-0 redeploy; code-review (13/15) + codex post-impl audit adopted; P4 deprecation awaits `npm login`
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 **Tier:** `mid` (rubric: external coupling HIGH; novelty/blast/irreversibility/migration MODERATE — 4th bump cycle on hardened rails; the token swap is new demo surface). **Status: ✅ APPROVED 2026-07-16** (verdict: `approve`, unconditional; Phase-0 autonomy carried over — both dispatches autonomous, P4 holds only on auth). **All three audit rounds folded:** codex round-1 `reject` → adopted/dispositioned; fable `conditional approve` (5 conditions) → adopted; final fresh-context codex **`conditional approve`** (5 fold-repair conditions) → adopted.
 
 ## Goal

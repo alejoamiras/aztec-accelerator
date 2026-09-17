@@ -1,5 +1,12 @@
 # Release 1.0.7 — driving to production
 
+## Outcome
+
+**Closed 2026-07-25.** closed by owner review 2026-09-17; no index entry existed
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 **Goal:** `security-hardening` merged to `main`; `@aztec` 5.0.1 carried through; `1.0.7-rc.1`
 released + verified; `1.0.7` stable released with `latest.json` live and a real v1.0.6 → v1.0.7
 auto-update confirmed; legacy IAM role retired.

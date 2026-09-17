@@ -1,3 +1,11 @@
+# rc-dry-run
+
+## Outcome
+
+**Closed 2026-07-31.** **DONE (run 30644544360 green; tag accelerator-v1.0.8-rc.1)** — 1.0.8-rc.1 prerelease rehearsal to execute arc-bug-hunt residual #1 (the v1.0.7→renamed-N release-call-path boundary that only a release run reaches): auth_probe first, then the full pipeline; triage classifies every failure product-bug / harness-bug / fixture-rot before any fix.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
 # Lessons — rc dry-run (1.0.8-rc.1), phase 1
 
 Purpose: execute residual #1 from the arc bug hunt — the **v1.0.7 → renamed-N release-call-path

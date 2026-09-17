@@ -1,5 +1,12 @@
 # Verified Sites — friendly name + recognition marker in authorization popup
 
+## Outcome
+
+**Closed 2026-05-28.** completed — friendly name + green ✓ in authorization popup for curated origins (PR #231 merged; tested locally; placeholder Nulo Chrome extension entry removed pending real Chrome Web Store ID)
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 **Status**: APPROVED v2.2 (user chose Option A visual treatment; pending implementation after CI dedup completes)
 **Date**: 2026-05-28
 **Type**: Tier B (contained UI feature + curated data file)

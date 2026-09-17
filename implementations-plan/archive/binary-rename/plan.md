@@ -1,5 +1,12 @@
 # Plan — mainBinaryName "AztecAccelerator" + bundle metadata (rename piece)
 
+## Outcome
+
+**Closed 2026-07-29.** light, **implementing** — final autostart-arc piece: exe `aztec-accelerator` → `AztecAccelerator` at the CARGO layer ([[bin]] + default-run; conf `mainBinaryName` deliberately OMITTED — plain-cargo webdriver legs would otherwise fork the name by build mode), lockstep CI/script/doc sites + `-N1BinaryName` plumbing (v1.0.7 fixture is pre-rename) + boundary end-state asserts (new exe present, old exe deleted, Run value healed-quoted) + bundle metadata WITHOUT publisher (NSIS `${MANUFACTURER}` registry-namespace hazard — deferred with migration story; pinned by tauri-identity.test.ts). Audit: codex approve-with-changes ×1, all four folded.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 `/blueprint light`. Final piece of the autostart arc (pieces 1–3 merged: #422/#423/#425). The exe
 renames `aztec-accelerator` → `AztecAccelerator` (no space — the space was the old plan's chief
 hazard and the goal settled against it); `productName` stays "Aztec Accelerator", so install dir,

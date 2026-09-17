@@ -1,5 +1,12 @@
 # Plan — SDK 5.2.0 npm release (publish → promote latest)
 
+## Outcome
+
+**Closed 2026-08-26.** light, **SHIPPED 2026-08-26: 5.2.0 on npm `latest` + `testnet`, playground live** — all 3 phases ✓. Docs-truth PR #479 first (stale dist-tag callouts ship inside the tarball; runbook now documents promote-latest + failed-publish/promote triage). Publish blocked once on an expired `NPM_TOKEN` (90-day granular lifetime, diagnosed from `gh secret list` metadata) — owner rotated, clean re-dispatch, nothing stranded. Accelerator app release excluded.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 - **Tier**: `/blueprint light` (owner-requested; rubric: irreversibility HIGH — npm publish is
   append-only — every other dimension low/moderate; 5th publish cycle on proven machinery).
 - **Success criterion** (owner, 2026-08-26): `@alejoamiras/aztec-accelerator@5.2.0` published on

@@ -1,5 +1,12 @@
 # plan.md — v2-release-train (rev 5, confirmation-clean)
 
+## Outcome
+
+**Closed 2026-08-18.** deep, **✅ COMPLETE (2026-08-18) — 2.0.0 GA'd + SDK shipped** — shipped accelerator **2.0.0** end-to-end: readiness cohorts B2 consent-guard (#446) · B3 bb-containment (#447) · B5 real-uninstall (#448) · B7 SDK release-contract (#449) · **B6 publish/promote split (#450)** all ✅ MERGED with mutation-proofs + clean codex rounds. **B4 (LAST) in progress:** item 1 config migration + type-bound persist capability + **cross-process config-write lock** ✅ MERGED (#451, `db8a373`; 6-round codex loop — the lock closed the recheck→rename race, concurrent trust-side-effect race accepted as loopback-only documented residual); items 2–3 = the 3-OS packaged-E2E harness (packed SDK→browser→installed app→native-bb-proof-over-HTTPS, in B6's draft-gate slot) + stateful 1.0.7→2.0.0 upgrade + uninstall matrix + the mac/win composed-HTTPS-proof owner decision — NEXT. Then the 2.0.0-rc→3-OS gates→≥2h soak→promote latest.json→SDK -revision.N publish. B1 (Windows Authenticode signing) DEFERRED. **RELEASED 2026-08-18**: rc.2 published (after ~11 pipeline machinery bugs fixed across 15 dispatches; rc.1 tag burned pre-fix, fix-forward to rc.2) then >=2h soak then stable 2.0.0 published (draft-gate: draft to packaged-E2E to finalize) and **promoted** (prod feed serves 2.0.0, verified live: signed, 4 platforms, assets 200). Pre-promote blocker-1 (promote PUT/invalidation failure-atomicity + always() live-verify) fixed #463. SDK **@alejoamiras/aztec-accelerator@5.0.1-revision.1** published (testnet, SLSA provenance; npm latest untouched at 5.0.1). Linux live smoke PASS. **Owner-gated (AFK) follow-ups**: source-version bump (auto-merges main), playground prod-deploy, Windows composed-HTTPS-proof leg, B1 Authenticode. Binding brief + per-cohort ledgers/lessons/evidence under v2-release-train/. B7 headline: typed AcceleratorHttpError taxonomy, surfaced health fields + version-mismatch phase, packaged+tarball-verified publish, F13 keep-exact-deps.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 Status: rev 5 — final-pass confirmation folded (B2/B3/B5/B7 PASS; D-C25 FAIL corrected —
 macOS/Windows composed HTTPS proof is now an honest STOP-and-surface owner decision, not a
 spike that pretends to work; D-C26/D-C30 nits folded: draft `--target <SHA>`, feed version as

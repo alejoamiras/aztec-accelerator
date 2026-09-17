@@ -1,5 +1,12 @@
 # Plan — flip bundle.publisher to "Aztec Accelerator" (no migration)
 
+## Outcome
+
+**Closed 2026-07-29.** light micro-piece, **implementing** — flip `bundle.publisher` to "Aztec Accelerator" NOW (owner confirmed dev/test-only fleet 2026-07-29) instead of the two-release MANUFACTURER registry migration #426 deferred it for; UNINSTKEY is manufacturer-free so the rename-boundary machinery is untouched; accepted dev-only hole: interactive reinstall across the flip runs the old uninstaller as a REAL uninstall (empty `_?=`) and drops local CA trust. Codex approve-with-changes ×1 (3 factual corrections folded, app-side mirror rejected as unable to protect the boundary).
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 `/blueprint light`, micro-piece. The rename PR (#426) deferred `publisher` because it feeds NSIS
 `${MANUFACTURER}`, whose registry namespace anchors custom-`$INSTDIR` restore — a hazard **for an
 existing fleet**. Owner confirmed today (2026-07-29): the install base is dev/test only. With no

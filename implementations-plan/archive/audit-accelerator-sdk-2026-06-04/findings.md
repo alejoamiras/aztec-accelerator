@@ -1,5 +1,12 @@
 # Full-depth audit — accelerator + SDK (2026-06-04)
 
+## Outcome
+
+**Closed 2026-06-05.** closed by owner review 2026-09-17; no index entry existed
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 Scope: accelerator (Rust+TS+Tauri) + SDK, full depth (owner choice). Bugs + simplification.
 Repo had thorough March audits → focus net-new. Fixes via branch+PR (main protected).
 

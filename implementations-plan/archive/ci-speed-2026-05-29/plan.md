@@ -1,5 +1,12 @@
 # CI Speed — fix the missing cache + Playwright reliability
 
+## Outcome
+
+**Closed 2026-05-29.** approved-pending — fix the uncached `_e2e.yml` server build (server→target) + Playwright install reliability (version-keyed cache + retry + timeout)
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: they describe work that already shipped. Do not execute them.
+
+
 **Status**: v2 (consolidated: main + codex xhigh + opus subagent) — pending final codex pass + approval
 **Date**: 2026-05-29
 **Type**: Tier B (contained CI infra), audited as Tier A alongside updater-validation.
