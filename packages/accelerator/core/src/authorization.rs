@@ -183,7 +183,7 @@ pub enum AuthDecision {
     /// `approved_origins` by `server::auth::authorize_origin`. There is deliberately no ephemeral
     /// variant: the old `Allow { remember: false }` persisted nothing at all and did not even survive
     /// the popup closing, so it re-prompted on the very next proof. See
-    /// implementations-plan/pre-release-polish/decision-allow-once.md for the reversal and its
+    /// implementations-plan/archive/pre-release-polish/decision-allow-once.md for the reversal and its
     /// compensating controls (the popup now discloses the permanence in place of a checkbox).
     Allow,
     Deny,

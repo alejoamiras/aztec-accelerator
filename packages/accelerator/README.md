@@ -136,7 +136,7 @@ Every cached `bb` is verified end-to-end. On download (both the runtime and `bun
 
 ### Windows bb.exe pin provenance (F-008)
 
-Windows has no npm `bb`, so `bb.exe` ships as a sidecar fetched from a GitHub release and pinned by SHA-256 in `scripts/copy-bb.ts` (`WINDOWS_BB_CHECKSUMS`). Pins are **never auto-generated** — auto-downloading and recording the hash is circular ("trust whatever arrived"). Each pin is a structured `{ sha256, provenance, note }`; the resolver only accepts `provenance: "manual-review"` (a human reviewed the release + recorded the hash) and fails closed on anything else. A new bb version with no pin leaves the `@aztec` bump PR **open** (`merge_mode: none`) with a red Windows gate until a human adds a reviewed pin. `manual-review` is a **change-detector**, not cryptographic proof — AztecProtocol does not yet sign/attest bb releases (the same upstream-signing gap as F-007); `attestation` provenance is reserved for when they do. See `implementations-plan/security-hardening/clusters/C7-runbook.md` for how to add a pin + the ruleset-bypass readback the fail-closed guarantee depends on.
+Windows has no npm `bb`, so `bb.exe` ships as a sidecar fetched from a GitHub release and pinned by SHA-256 in `scripts/copy-bb.ts` (`WINDOWS_BB_CHECKSUMS`). Pins are **never auto-generated** — auto-downloading and recording the hash is circular ("trust whatever arrived"). Each pin is a structured `{ sha256, provenance, note }`; the resolver only accepts `provenance: "manual-review"` (a human reviewed the release + recorded the hash) and fails closed on anything else. A new bb version with no pin leaves the `@aztec` bump PR **open** (`merge_mode: none`) with a red Windows gate until a human adds a reviewed pin. `manual-review` is a **change-detector**, not cryptographic proof — AztecProtocol does not yet sign/attest bb releases (the same upstream-signing gap as F-007); `attestation` provenance is reserved for when they do. See `implementations-plan/archive/security-hardening/clusters/C7-runbook.md` for how to add a pin + the ruleset-bypass readback the fail-closed guarantee depends on.
 
 ## Site Authorization
 
@@ -150,7 +150,7 @@ The accelerator uses a MetaMask-style approval flow. When a new website calls `/
 
 There is deliberately no "allow once". The option that existed until 1.0.8 persisted *nothing at
 all* — not a session, not a TTL — so it re-prompted on the very next proof; see
-`implementations-plan/pre-release-polish/decision-allow-once.md` for why it was removed and what
+`implementations-plan/archive/pre-release-polish/decision-allow-once.md` for why it was removed and what
 replaced it.
 
 Approved sites can be reviewed and removed from the Settings window.

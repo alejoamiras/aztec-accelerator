@@ -1,0 +1,8 @@
+# Plan folders are large by nature: collapse them in GitHub review and keep them
+# out of the repo's language stats, so a 40 KB plan never makes a 20-line code
+# change look enormous. Presentation only — this does nothing for agent context.
+implementations-plan/** linguist-generated=true
+
+# ...except the curated layer, which is the part that most needs a human eye.
+implementations-plan/lessons.md -linguist-generated
+implementations-plan/follow-ups.md -linguist-generated

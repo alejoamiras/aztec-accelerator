@@ -83,7 +83,7 @@ impl CertPaths {
 }
 
 /// 824 days — one day under Apple's inclusive 825-day TLS-server-cert cap (applies even to
-/// user-trusted certs; see implementations-plan/safari-tls-ca-removal-2026-06-04).
+/// user-trusted certs; see implementations-plan/archive/safari-tls-ca-removal-2026-06-04).
 const LEAF_VALIDITY_DAYS: i64 = 824;
 /// CA anchor validity. The CA is keyless on disk, so this only bounds how long the anchor is valid;
 /// the leaf's 824-day cap drives rotation well before this.

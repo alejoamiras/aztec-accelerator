@@ -275,7 +275,7 @@ fn should_poll_for_updates() -> bool {
 ///
 /// Not compiled for `webdriver` builds: the prompt window would steal the
 /// active WebDriver browsing context mid-test (see
-/// implementations-plan/ci-reliability-2026-05-29/diagnosis.md).
+/// implementations-plan/archive/ci-reliability-2026-05-29/diagnosis.md).
 #[cfg(not(feature = "webdriver"))]
 async fn run_update_check(app: &AppHandle, config_state: &ConfigState) {
     if let Some(update) = aztec_accelerator::updater::check_for_update(app, config_state).await {

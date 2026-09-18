@@ -1,0 +1,5 @@
+audit-*.md
+plan-*.md
+_*.md
+eli5.html
+!**/lessons/**

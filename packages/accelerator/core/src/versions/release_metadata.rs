@@ -79,7 +79,7 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 /// already does — but Aztec does not yet sign `bb` releases. Pinning known-good digests in the app is
 /// NOT a workaround: barretenberg nightlies ship EVERY night, so a pinned-digest manifest would be
 /// perpetually stale. Revisit once Aztec signs `bb`.
-/// Tracking: `implementations-plan/security-hardening-2026-06-09` (SEC-02) + a GitHub issue.
+/// Tracking: `implementations-plan/archive/security-hardening-2026-06-09` (SEC-02) + a GitHub issue.
 pub(crate) async fn fetch_github_asset_digest(
     version: &str,
     asset_name: &str,
