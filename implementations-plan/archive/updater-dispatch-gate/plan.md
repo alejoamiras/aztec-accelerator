@@ -1,5 +1,14 @@
 # Plan — updater dispatch gate + L8 (piece 3)
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** light, **implementing** — piece 3 of the autostart arc: `smoke-updater-windows.yml` (separate secretless workflow_dispatch file — a called workflow sees the CALLER's `github` context, so an in-file event split would misroute releases) building ephemeral both-ends from the current ref with the L8 sentinel injected into N's NSIS_HOOK_PREINSTALL as a PRE-MUTATION barrier (2.8.1 silent updates never run the old uninstaller — measured, reversing the piece-1 refutation; txn-mid-flight + exe-hash + Q suppression proven non-vacuously via /health==N−1 + feed-hit deltas), plus `_e2e-updater-windows.yml` switched to the REAL accelerator-v1.0.7 N−1 with a 4-point fixture preflight. Plan audit: codex reject ×1 → 4 blockers folded (audit fold in plan.md).
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 `/blueprint light`. CI-only: `.github/workflows/_e2e-updater-windows.yml`,
 `.github/workflows/release-accelerator.yml` (inputs only), `packages/accelerator/scripts/
 updater-smoke-windows.ps1`, plus a **build-time-injected** (never committed) sentinel in the

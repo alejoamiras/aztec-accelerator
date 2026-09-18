@@ -1,5 +1,14 @@
 # Windows release — Aztec Accelerator (consolidated Tier-A plan)
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** **P0–P2 merged, P3 done, P4 designed** — Tier-A deep plan (main + codex + opus). Ship a Windows x64 release: bb.exe sidecar from the aztec-packages tarball (VERIFIED self-contained), NSIS `currentUser` installer, full minisign auto-update, full CI parity, **unsigned v1**. Progress: **P0** spike (#267) + **P1** bb fetch/checksum/Windows gate (#268) + **P2** platform parity — Windows COMPILES, TESTS, BUILDS the NSIS installer (#269) — all merged. **P3** release-feed wiring (windows-x86_64 latest.json) committed `c161015`. **P4** (updater-smoke + WebDriver-win + crash-recovery 3-gate + dual-launch fix) fully designed in lessons/phase-4.md; codex locked the dual-launch fix (exit-0-on-bind-fail, classified via /health probe). Blocked: P3 push + P4 CI iteration need a stable SSH agent (1Password intermittently down mid-session). Stop-before-P6: the rc dispatch is a release tag (AFK hard limit) — surface for owner. See eli5.html
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 ## Context
 Barretenberg/Aztec now publish a Windows `bb` build, so the accelerator (a Tauri 2 tray app that bundles `bb` for local zk proving) can finally ship on Windows. It currently ships macOS (arm64+Intel) + Linux (x86_64). This is a deep, cross-cutting port: a new sidecar source, a new bundle/installer, a brand-new updater path, platform parity (crash-recovery, paths, HTTPS-off), and a hard CI test story. Consolidated from three independent plans (main + codex `019e…` + opus subagent); provenance + rejected ideas documented at the end.
 

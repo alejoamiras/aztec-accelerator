@@ -1,60 +1,91 @@
 # Open follow-ups
 
-Work deferred out of a plan that closed. Read this during Phase 0 recon; delete an entry the moment it resolves.
-A plan must not close while it still owns an open follow-up — lift it here, or open a GitHub issue and leave only a pointer.
+**Read the framing first: this product is retired.** Final native `3.1.0` shipped, the legacy updater feed is frozen,
+`Release Accelerator` / `Release SDK` / `Deploy Release Feed` are all disabled, and landing and playground serve
+migration pages only. See [`docs/PRESTO_RETIREMENT.md`](../docs/PRESTO_RETIREMENT.md). Development continues in Presto.
 
-**Provenance note:** seeded by sweeping the 43 plans archived on 2026-09-17. Each entry was deferred in writing by its
-plan and shows no evidence of closure, but none has been re-verified against today's `main` except where noted. Treat
-status as *unconfirmed* and delete anything already done.
+So most of what follows cannot be acted on here: it gates releases that will not happen again. Only the first two
+sections are live. The rest is kept so archiving does not silently drop it, and should be deleted when the repo is
+archived.
 
-## Needs an owner decision
+Seeded by sweeping all 50 archived plans, 2026-09-17 and 2026-09-18. Status is unconfirmed against today's `main`
+except where a code-level check is noted.
 
-- **AWS root access key still not deleted** — `release-1.0.7`'s closeout leaves this as an explicit unchecked owner
-  action once the three scoped OIDC pipeline roles were proven in production: nothing in the account needs root
-  credentials. No later plan references doing it. Worth re-checking against the Cloudflare Workers migration, which may
-  have changed what that account is still for. `archive/release-1.0.7/STATUS.md`
-- **Windows builds still ship unsigned** — no Authenticode. Deferred across three plans in a row, and `v2-release-train`
-  restates it as owner-deferred, do not touch. The still-active `mega-ready-audit` (2026-08-21) disagrees, calling it the
-  number one mainstream-adoption blocker and recommending it as the next engagement's P0. The tension is unresolved.
-  `archive/v2-release-train/brief.md`
+## Live — survives retirement
 
-## Deferred with concrete work attached
+These are account and credential hygiene. They outlast the product.
 
-- **Assert trust survives an over-the-top update** — the Windows NSIS uninstall hook is `$UpdateMode`-guarded so an update
-  must not delete the CurrentUser Root anchor or the certs dir. The guard shipped; the CI assertion proving it did not.
-  Release-critical, because the hook is baked into each release's uninstaller and cannot be retro-fixed later.
-  `archive/https-by-default-onboarding-2026-07-09/plan.md` (Phase 6)
+- **AWS root access key still not deleted** — `release-1.0.7`'s closeout left this as an unchecked owner action once the
+  three scoped OIDC pipeline roles were proven in production: nothing in the account needs root credentials. The case is
+  stronger now, since the AWS stack is gone entirely (`infra/` holds only a branch-protection ruleset) and hosting moved
+  to Cloudflare Workers. Root keys can only be removed by signing in as the account root.
+  `archive/release-1.0.7/STATUS.md`
 - **Deprecate the superseded `@alejoamiras/aztec-standards` npm package** — P4 has read blocked on owner npm auth
-  (`npm whoami` returned 401) since 2026-07-16, and no later plan runs `npm deprecate`. The old package still resolves as
-  live and undeprecated. `archive/aztec-5.0.1-2026-07-16/plan.md` (P4)
-- **Onboarding spec on the WebDriver leg** — the Playwright onboarding specs landed; the WebDriver equivalent was pushed
-  to "CI iteration". It is the leg that matters, since the wizard is a release-blocking cross-OS flow.
-  `archive/https-by-default-onboarding-2026-07-09/plan.md` (Phase 5)
-- **Tie a release asset to its commit in the preflight** — the fixture preflight checks the release tag's config, not that
-  the downloaded asset actually came from that commit. Accepted as a Low residual, documented but never coded; the fix
-  named was release attestation or a recorded asset digest tied to the tag. `archive/arc-bug-hunt/log.md` (residual 5)
-- **Re-add the Nulo Chrome extension to verified-sites** — the placeholder entry was removed pending a real Chrome Web
-  Store ID that was never obtained. The live `verified-sites.json` ships only Nulo's two `https://` origins, with no
-  `chrome-extension://` entry. `archive/verified-sites-2026-05-28/plan.md`
-- **Thread `versions_to_evict` and `bb_asset_name` through `AztecVersion`** — the value object landed in PR #300, but
-  these two call paths still re-parse the raw string, which is the duplication the object existed to remove.
-  `archive/quality-refactor-2026-06-05/plan.md` (Phase 4)
-- **Manual v5 smoke** — the full local sweep ran; the manual 5.x smoke was explicitly deferred and never recorded as done.
-  `archive/aztec-5.0.0-2026-06-18/plan.md` (Phase 5)
+  (`npm whoami` returned 401) since 2026-07-16, and no later plan ran `npm deprecate`. The old package still resolves as
+  live and undeprecated, so consumers can still install it by accident. `archive/aztec-5.0.1-2026-07-16/plan.md`
 
-## Decided against, revisit only on request
+## Carried to Presto
 
-- **SDK phase-event discriminated union** — cut deliberately as negative ROI: a second phase type tying `durationMs` to
-  "proved" across ~25 sites, fighting the playground's string-based animation model. Owner-overridable and reversible
-  pre-publish. `archive/quality-refactor-2026-06-05/plan.md` (Phase 8)
-- **Window-scoped capability for the onboarding window** — deferred with the bundled-content XSS risk accepted in writing
-  per the S4 fallback. Recorded so the acceptance stays visible rather than buried in a closed plan.
-  `archive/https-by-default-onboarding-2026-07-09/plan.md` (Phase 5)
+The ingress and SDK code was forked into the successor, so these travel with it rather than dying here. Neither has been
+checked against the Presto repo.
+
+- **Untimed HTTP client fallback and unbudgeted in-request download** — `release_metadata.rs` ends
+  `.build().unwrap_or_else(|_| reqwest::Client::new())`, silently dropping its 300s/30s deadlines if the builder ever
+  fails, and `/prove` still awaits an attacker-chosen version download inside the request path with no per-request
+  budget. Closed here as documented, not fixed. `archive/independent-hardening/lessons/phase-1.md`
+- **Node and Bun consumers still default to plaintext** — the browser HTTPS-only default closed the port-squat
+  witness-capture window for dApps, but server runtimes keep the HTTP compatibility path, so the window persists there
+  unless Presto narrows it. `archive/independent-hardening/findings.md`
+
+## Dead-lettered by retirement
+
+Real work, verified still open in code, that nothing will act on because the product is frozen. Kept for the record.
+
+**Windows Authenticode signing** was the standing tension in this file: deferred by the owner in `v2-release-train`,
+while `mega-ready-audit` called it the number one mainstream-adoption blocker. Retirement resolves it. No signed build
+will ship. `archive/v2-release-train/brief.md`
+
+- **Tray build failure takes down the whole app** — `main.rs` propagates a tray error out of `.setup()` with `?`, so a
+  missing libayatana means no accelerator at all rather than an accelerator without a tray. The fix threads an
+  `Option<TrayIcon>` through five startup call sites. `archive/mega-ready-audit/readiness.md`
+- **No hint when Firefox has enterprise roots disabled** — nothing detects `security.enterprise_roots.enabled` being
+  off, so the user sees TLS warnings and the SDK drops to HTTP with no explanation. `archive/mega-ready-audit/readiness.md`
+- **Two accepted same-user hardening nits** — the `secure_create_dir` create-then-open swap window, and the Unix
+  `config.json.tmp` path keeping a pre-planted file's looser mode. Both deliberately left as churn over risk; recorded so
+  the acceptance stays visible. `archive/mega-ready-audit/readiness.md`
+- **Assert trust survives an over-the-top update** — the Windows NSIS uninstall hook is `$UpdateMode`-guarded; the guard
+  shipped, the CI assertion proving it did not. `archive/https-by-default-onboarding-2026-07-09/plan.md`
+- **Onboarding spec never ran on the WebDriver leg** — the Playwright specs landed, the WebDriver equivalent was pushed
+  to "CI iteration". `archive/https-by-default-onboarding-2026-07-09/plan.md`
+- **Playwright consent UI is tested on ubuntu only** — the desktop-ui job runs solely on `ubuntu-latest`, leaving the
+  most security-sensitive UI untested against Windows webview quirks. `archive/mega-ready-audit/test-plan.md`
+- **Router and auth wiring have no direct tests** — server assembly and the per-port host guard are exercised only
+  through HTTP-level tests, and `server/auth.rs` has no inline tests at all. `archive/mega-ready-audit/test-plan.md`
+- **Crash-recovery CI does not watch its own module** — the gate fires only when its `.ps1` or workflow changes, so an
+  edit to `crash_recovery.rs` ships untested by it. `archive/mega-ready-audit/test-plan.md`
+- **Release assets are never tied to their commit** — the fixture preflight checks the release tag's config, not that
+  the downloaded asset came from that commit. Accepted as a Low residual; the named fix was release attestation or a
+  recorded asset digest. `archive/arc-bug-hunt/log.md`
+- **Nulo Chrome extension never re-added to verified-sites** — the placeholder was removed pending a Chrome Web Store ID
+  that was never obtained. `archive/verified-sites-2026-05-28/plan.md`
+- **`versions_to_evict` and `bb_asset_name` still re-parse the raw string** — the `AztecVersion` value object landed in
+  PR #300 without these two call paths, which is the duplication it existed to remove.
+  `archive/quality-refactor-2026-06-05/plan.md`
+- **Manual v5 smoke never recorded as run** — the full local sweep ran; the manual smoke was deferred.
+  `archive/aztec-5.0.0-2026-06-18/plan.md`
+
+## Decided against
+
+- **SDK phase-event discriminated union** — cut as negative ROI: a second phase type tying `durationMs` to "proved"
+  across ~25 sites, fighting the playground's string-based animation model. `archive/quality-refactor-2026-06-05/plan.md`
+- **Window-scoped capability for the onboarding window** — deferred with the bundled-content XSS risk accepted in
+  writing per the S4 fallback. `archive/https-by-default-onboarding-2026-07-09/plan.md`
+- **`F-09` withdrawn-release replay** — every known fix reintroduces the `F-04` permanent-lockout shape; needs an
+  upstream revocation story that does not exist. `archive/mega-ready-audit/readiness.md`
 
 ## Standing non-goals
 
-Declared out of scope by more than one plan, so they read as backlog rather than one-off exclusions. Listed to stop them
-being re-litigated from scratch. `archive/maintenance-2026-05-27/plan.md`, `archive/release-2026-05-27/plan.md`
+Declared out of scope by more than one plan. `archive/maintenance-2026-05-27/plan.md`, `archive/release-2026-05-27/plan.md`
 
 - npm wrapper package for the headless binary
 - Code signing / attestation for the headless tarball

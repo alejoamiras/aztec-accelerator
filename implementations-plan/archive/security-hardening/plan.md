@@ -1,5 +1,14 @@
 # Security-Hardening Campaign — Master Plan
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** deep campaign, **in progress (started 2026-07-13)** — implement the 14 in-scope `/harden security` 2026-07-09 findings (F-002…F-016 minus F-001 owned-elsewhere / F-013 accepted) as 12 blueprinted clusters (C0–C11) merging into branch `security-hardening`, each gated on local+CI green. Codex gpt-5.6-sol@xhigh co-architect (master verdict → audit-codex.md): split risky pairs, C0 CI-bootstrap first, F-004/F-005/F-012/F-002 deep. F-002 BLOCKED on F-001 identity contract; F-005 human-applies tofu/ruleset. New landmines caught: deploy-landing `--delete` can nuke latest.json; `_aztec-update.yml` immediate-merge. **Update 2026-07-14: C0–C10 all merged (#377–#393); C11/F-002 BLOCKED on F-001; human-gated closeout runbook posted (#394). Campaign automation complete.**
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 **Integration branch:** `security-hardening` (cut from `main` @ `9e0d742`).
 **Source audit:** `audit/security/2026-07-09-5c788c0/` (report.md / findings/verified.md).
 **Co-architect:** Codex `gpt-5.6-sol` @ `model_reasoning_effort=xhigh` (invoked on every non-trivial decision).

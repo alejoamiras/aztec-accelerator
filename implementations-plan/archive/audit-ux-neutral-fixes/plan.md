@@ -1,5 +1,14 @@
 # UX-neutral remediation — audit 2026-07-31-9c4cb0c
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** no index entry existed
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 Close the open findings from the security audit **that no user can perceive**: no new prompt, no new
 click, no changed default, no changed timing a human would notice. Findings whose fix alters consent
 behaviour are excluded and stay with the owner.

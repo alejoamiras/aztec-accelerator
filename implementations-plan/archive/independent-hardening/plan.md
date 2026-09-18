@@ -1,5 +1,14 @@
 # Independent Hardening Plan: SDK + GUI App
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** in progress — solo security+bug hunt of SDK & accelerator runtime code; report-only, dynamic loopback red-team authorized
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 **Slug**: `independent-hardening` · **Branch**: `worktree-independent-hardening` · **Base**: main @ `9eff8dc`
 **Mode**: fully solo ox-alpha · report-only · dynamic testing authorized (loopback) · runtime code only
 

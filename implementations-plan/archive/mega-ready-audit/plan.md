@@ -1,5 +1,14 @@
 # mega-ready-audit
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** deep, **audits COMPLETE 2026-08-21 — stacked draft PRs pending** — solo ox-alpha full-app audit post-2.0.0: ALL prior findings re-verified as claims (every fix held; F-07/F-10 found CLOSED by #446), fresh 9-cluster adversarial pass = no new findings above Low (3 Lows recorded, none fixed by design), cross-OS bug hunt clean (B-1 tray degradation + B-2 Firefox-roots hint recorded), win_acl inline tests shipped (first direct tests for the 402-LOC module), CLAUDE.md counts corrected, readiness roadmap: B1 Authenticode = the one mainstream blocker. Reports: audit/{security,bugs}/2026-08-21-mega-ready-bf234e6/
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 **Date:** 2026-08-21 · **Model:** ox-alpha solo (+ own subagents; no codex/fable) · **Status:** implementing
 
 Full-app audit of `packages/accelerator` (GUI app: `src-tauri` + `core` + `frontend-src`) after the

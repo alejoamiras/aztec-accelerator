@@ -1,5 +1,14 @@
 # Accelerator audit fixes (#99) — download OOM, `..` guard, stderr panic + simplifications
 
+## Outcome
+
+**Closed 2026-09-18 — verified against source, not status text.** implemented (branch `fix/accelerator-audit-99`), PR/post-impl pending — #99 net-new audit fixes: download_bb OOM (stream+cap), centralized `..` guard, bb stderr panic, hex+eviction simplifications
+
+Confirmed complete by a code-level re-check during the 2026-09 archive pass. The product has since been retired (final native 3.1.0; release workflows disabled; see `docs/PRESTO_RETIREMENT.md`), so nothing here is actionable.
+
+Archived record of what was decided and why. The `/goal` and `/loop` seeds below are retired: do not execute them.
+
+
 **Tier:** `/plan mid` (codex + opus dual audit → final codex). Verdicts inline.
 **Status:** ✅ **IMPLEMENTED** (branch `fix/accelerator-audit-99`). All 4 phases done; `cargo test --lib`
 122 passed / 0 failed (incl. 4 new tests + all eviction tests green). Pending: `/code-review max --fix`
