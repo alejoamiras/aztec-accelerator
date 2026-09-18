@@ -90,15 +90,35 @@ prompt.
 
 ## Security Model
 
+The authoritative list of trust boundaries and accepted project decisions is
+[docs/SECURITY_MODEL.md](SECURITY_MODEL.md). The details below summarize the platform-facing parts.
+
 ### Localhost Authorization
 
-The accelerator runs an HTTP server on `127.0.0.1:59833` (localhost only — not exposed to the network).
+The accelerator runs an HTTP server on `127.0.0.1:59833` and, when enabled, an HTTPS server on
+`127.0.0.1:59834` (loopback only — neither is exposed to the network).
 
-**Browser requests** (cross-origin): The `Origin` header is checked against the approved origins list. Unknown origins trigger a MetaMask-style authorization popup. Approved origins are persisted in `~/.aztec-accelerator/config.json`.
+**Browser requests** (cross-origin): The `Origin` header is checked against the approved origins
+list. An unknown origin receives only minimal `/health` detail; its first `/prove` request triggers
+a MetaMask-style authorization popup. Approved origins are persisted in
+`~/.aztec-accelerator/config.json`.
 
-**Non-browser requests** (curl, scripts): No `Origin` header is sent, so requests are auto-approved. This is by design — `Origin` is a browser-only mechanism. The binding to `127.0.0.1` is the security boundary for non-browser access.
+**Non-browser requests** (curl, scripts): No `Origin` header is sent, so requests are auto-approved.
+This is by design—`Origin` is a browser control, not general client authentication. The loopback
+binding is the access boundary for non-browser callers.
 
-**Localhost origins** (`http://localhost`, `http://127.0.0.1`, `http://[::1]`): Always auto-approved.
+**Localhost origins** (`http://localhost`, `http://127.0.0.1`, `http://[::1]`): The desktop app
+prompts once and remembers an approval like any other origin. The headless CI server auto-approves
+localhost because it has no approval UI.
+
+Origin approval authenticates a website to the genuine Accelerator; it does not authenticate the
+server to the SDK. Browser proving is HTTPS-only by default. Its post-failure HTTP health diagnostic
+is unauthenticated but carries no witness and cannot activate proving. Node/Bun/SSR clients remain
+HTTP-compatible for single-tenant headless CI, and browser dApps can offer an explicit, non-persisted
+HTTP session fallback by setting both `httpsOnly: false` and `allowInsecureDowngrade: true`. In those
+plaintext modes, a process that squats the fixed HTTP port while Accelerator is stopped can imitate
+the health contract and receive a witness. This is an [explicitly accepted
+boundary](SECURITY_MODEL.md#2-accept-unauthenticated-http-discovery-and-explicit-plaintext-proving).
 
 ### Auto-Update Security
 
@@ -106,4 +126,15 @@ Updates are signed with Ed25519 (minisign format). The public key is embedded in
 
 ### Binary Download Verification
 
-When downloading `bb` binaries for version mismatches, the accelerator verifies the download against a SHA-256 digest from the GitHub API. If the digest is unavailable or verification fails, the download is rejected (fail-closed). The bundled `bb` sidecar does not require verification.
+When downloading `bb` binaries for version mismatches, the accelerator verifies the download
+against a SHA-256 digest from the GitHub API. If the digest is unavailable or verification fails,
+the download is rejected (fail-closed), and cached requested versions are re-hashed before every
+execution. The bundled sidecar is part of the installed application rather than a runtime cache
+entry and is not re-verified through that marker path.
+
+The digest and asset share AztecProtocol's GitHub publisher/control plane, so this detects
+corruption and unexpected byte changes but does not independently authenticate the upstream
+publisher. The project will continue depending on upstream publisher security until AztecProtocol
+provides signatures or attestations, then adopt that mechanism through a reviewed fail-closed
+change. See the [recorded decision](SECURITY_MODEL.md#1-depend-on-upstream-bb-publisher-security) and
+tracking [issue #343](https://github.com/alejoamiras/aztec-accelerator/issues/343).

@@ -1,8 +1,11 @@
 # Aztec Accelerator
 
-Native proving accelerator for Aztec transactions. Bypasses browser WASM throttling by running the `bb` proving binary natively on your machine, exposed via a localhost HTTP server that the SDK auto-detects.
+Native proving accelerator for Aztec transactions. Bypasses browser WASM throttling by running the
+`bb` proving binary natively on your machine, exposed through loopback HTTP/HTTPS endpoints that the
+SDK auto-detects.
 
-If every dApp in the ecosystem uses `AcceleratorProver` with accelerated mode, a single install of this app gives users native-speed proving across all of them — no per-app setup, no downside.
+If dApps use `AcceleratorProver`, a single desktop install can provide native-speed proving across
+all of them without a separate native prover installation for each app.
 
 [![Accelerator](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml/badge.svg)](https://github.com/alejoamiras/aztec-accelerator/actions/workflows/accelerator.yml)
 
@@ -71,13 +74,15 @@ For a tray-only app with no visible window, X11 mode has zero downsides.
 
 ## How It Works
 
-The accelerator runs as a **menu bar / system tray app** with no window — just a tray icon with a status menu.
+The accelerator runs as a **menu bar / system tray app** with no main window — just a tray icon with
+a status menu and focused settings/approval windows.
 
-When running, it listens on `http://127.0.0.1:59833` for proving requests from the SDK. The flow:
+When running, it listens on `http://127.0.0.1:59833` and, when Encrypted Connection is enabled,
+`https://127.0.0.1:59834` for proving requests from the SDK. The flow:
 
 ```
-Browser (SDK)  →  HTTP POST /prove  →  Accelerator  →  bb binary  →  proof
-                  (localhost:59833)     (Tauri app)     (native)
+Browser (SDK)  →  loopback POST /prove  →  Accelerator  →  bb binary  →  proof
+                  HTTP or HTTPS            (Tauri app)     (native)
 ```
 
 Browser SDK instances probe HTTPS for private proving by default and pin it after success. If HTTPS
@@ -91,9 +96,12 @@ Every `/prove` response includes an `x-prove-duration-ms` header with the actual
 
 ## Configuration
 
-### Port
+### Ports
 
-The default port is `59833`. The SDK reads `AZTEC_ACCELERATOR_PORT` to override the client-side target. The server itself currently does **not** honor this env var — it always binds `127.0.0.1:59833`. If you need to change the port on both sides, that requires a code change to `server.rs`.
+The desktop and headless servers bind HTTP on `127.0.0.1:59833`; the desktop HTTPS listener uses
+`127.0.0.1:59834`. These server ports are fixed. The SDK reads `AZTEC_ACCELERATOR_PORT` and
+`AZTEC_ACCELERATOR_HTTPS_PORT` to override its client-side targets, but a working custom port on
+both sides requires a server code change.
 
 ### Automatic Version Management
 
@@ -123,7 +131,10 @@ When **no specific version** is requested (or the bundled version is), the accel
 3. **`~/.bb/bb`** — user-installed via the Aztec CLI
 4. **`PATH`** — system-wide installation
 
-When a **specific version is requested**, the *only* acceptable source is the marker-verified version cache — the accelerator never falls back to the sidecar/`~/.bb`/`PATH` for a requested version (that would silently run the wrong or an unverified `bb` over your private witness).
+When a **specific version is requested**, the marker-verified version cache is the only automatic
+source — the accelerator never falls back to the sidecar/`~/.bb`/`PATH` for a requested version
+(that would silently run the wrong or an unverified `bb` over your private witness). The explicit,
+trusted `BB_BINARY_PATH` operator override remains the documented exception and takes precedence.
 
 ### Cache Integrity (F-007)
 
@@ -133,6 +144,11 @@ Every cached `bb` is verified end-to-end. On download (both the runtime and `bun
 - **Offline** machines with an unmarked cache fail closed until an online verified re-download.
 - **`BB_BINARY_PATH`** is a trusted, unverified operator override — the one documented exception to "nothing unverified runs" (whoever sets the process environment already controls the process).
 - Only releases that expose an asset digest (GitHub added these June 2025) are downloadable; older releases fail closed.
+
+These checks detect download/cache corruption and release-asset changes. Because the asset and its
+digest come from the same upstream GitHub control plane, they do not independently authenticate an
+uncompromised publisher. The project has explicitly chosen to
+[depend on upstream signing and adopt it when available](../../docs/SECURITY_MODEL.md#1-depend-on-upstream-bb-publisher-security).
 
 ### Windows bb.exe pin provenance (F-008)
 
@@ -189,7 +205,7 @@ Each has a matching `.sha256` sidecar file.
 ```yaml
 - name: Install aztec-accelerator headless server
   env:
-    ACCELERATOR_VERSION: "1.0.6"
+    ACCELERATOR_VERSION: "3.0.0" # replace with the release you have reviewed
   run: |
     BASE_URL="https://github.com/alejoamiras/aztec-accelerator/releases/download/accelerator-v${ACCELERATOR_VERSION}"
     TARBALL="accelerator-server-${ACCELERATOR_VERSION}-linux-x86_64.tar.gz"
@@ -241,9 +257,10 @@ The tray menu adapts based on the build profile:
 
 **Production** (release builds):
 ```
+Show Logs
 Settings
 ─────────────
-v1.1.0 · Aztec 5.0.0-nightly.20260309
+v<app-version> · Aztec <bundled-bb-version>
 GitHub
 Quit
 ```
@@ -252,10 +269,10 @@ Quit
 ```
 Status: Idle
 ▸ Versions
-  Show Logs
-  Settings
+Show Logs
+Settings
 ─────────────
-v1.1.0 · Aztec 5.0.0-nightly.20260309
+v<app-version> · Aztec <bundled-bb-version>
 GitHub
 Quit
 ```
@@ -265,9 +282,9 @@ Quit
 Click **Settings** in the tray menu to open the Settings window. From here you can:
 
 - **Approved Sites** — view and remove origins that have been granted access
-- **Start on Login** — auto-launch at login (LaunchAgent on macOS, autostart on Linux)
+- **Encrypted Connection** — manage the local HTTPS listener and certificate trust on every desktop OS
+- **Start on Login** — auto-launch at login using the platform's user-level startup mechanism
 - **Auto-Update** — toggle automatic updates on or off
-- **Safari Support** (macOS only) — toggle HTTPS mode for Safari compatibility
 - **Proving Speed** — control CPU usage with a 5-level slider (Low / Light / Balanced / High / Full)
 
 Speed changes take effect immediately on the next prove request — no restart needed.
@@ -338,9 +355,9 @@ The accelerator supports multiple Aztec versions simultaneously. The `/health` e
 ```json
 {
   "status": "ok",
-  "version": "1.1.0",
-  "aztec_version": "5.0.0-nightly.20260309",
-  "available_versions": ["5.0.0-nightly.20260309", "5.0.0-nightly.20260308"],
+  "version": "APP_VERSION",
+  "aztec_version": "BUNDLED_BB_VERSION",
+  "available_versions": ["BUNDLED_BB_VERSION", "ANOTHER_CACHED_VERSION"],
   "bb_available": true
 }
 ```
@@ -363,10 +380,11 @@ A crash additionally appends a one-line record (timestamp, location, message) to
 
 ### Port Conflicts
 
-If port 59833 is already in use, the accelerator will fail to start. Check for conflicts:
+If port 59833 or 59834 is already in use, the corresponding listener cannot start. Check for
+conflicts:
 
 ```sh
-lsof -i :59833
+lsof -i :59833 -i :59834
 ```
 
 ### bb Binary Not Found
@@ -391,7 +409,7 @@ bun run --filter accelerator prebuild
 cd packages/accelerator/src-tauri
 cargo tauri dev
 
-# Run Rust tests (~90 tests)
+# Run Rust tests
 cargo test
 
 # Build release bundle (.dmg / .deb / .AppImage)
@@ -403,12 +421,12 @@ cargo run --release
 
 ## Testing
 
-### Rust unit tests (~90)
+### Rust unit tests
 ```bash
 cargo test --manifest-path packages/accelerator/src-tauri/Cargo.toml
 ```
 
-### Playwright UI mock tests (28)
+### Playwright UI mock tests
 Tests the Settings, Authorization, and Update Prompt windows with mocked Tauri IPC:
 ```bash
 bun run --cwd packages/accelerator test:e2e:ui
@@ -425,7 +443,8 @@ cargo tauri dev --features webdriver
 bun run --cwd packages/accelerator test:e2e:webdriver
 ```
 
-These run on both macOS and Linux in CI as a PR gate (`accelerator.yml`) and pre-release gate (`release-accelerator.yml`).
+The release-mode WebDriver matrix runs on macOS, Linux, and Windows in CI as a PR gate
+(`accelerator.yml`) and pre-release gate (`release-accelerator.yml`).
 
 ### Windows composed proof — MANUAL pre-GA check
 

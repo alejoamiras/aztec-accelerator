@@ -20,6 +20,10 @@ This repository ships two independently versioned artifacts:
 
 An Aztec protocol bump is normally SDK-only. Installed accelerators download and verify the matching `bb` version at runtime; do not cut a native-app release merely to track an `@aztec/*` bump.
 
+The project-level trust assumptions—including the decision to depend on upstream AztecProtocol
+publisher security until signed or attested `bb` releases exist—are recorded in the
+[security model](SECURITY_MODEL.md).
+
 ## One-time production configuration
 
 Keep the release setup small: neither GitHub environment requires reviewers, but both restrict deployment branches to `main`. For this solo-maintainer repository, environments scope secrets and OIDC claims to release jobs; they are not independent approval boundaries. A commit already trusted on `main` can change a workflow that consumes an environment secret. Add a reviewer or external signing service only if that stronger threat model becomes necessary.
@@ -356,5 +360,5 @@ Configuration is stored in `~/.aztec-accelerator/config.json` on macOS/Linux and
 
 - **Port 59833 in use:** another accelerator instance or local process owns the HTTP listener. Inspect it before terminating anything.
 - **bb unavailable:** inspect the health payload and logs; versioned proof requests should trigger a verified on-demand download.
-- **bb verification failed:** preserve the logs. Runtime downloads fail closed when the upstream digest is missing or mismatched.
+- **bb verification failed:** preserve the logs. Runtime downloads fail closed when the upstream digest is missing or mismatched. The digest is a corruption/change detector from the same GitHub publisher plane, not an independent upstream signature; do not describe it as one.
 - **Updater failure:** inspect the published release's `latest.json`, exact platform URL, payload size/signature, and application logs. Never work around it by hand-editing the live feed.

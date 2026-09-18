@@ -384,7 +384,7 @@ authentication**: while the accelerator app is *not running*, any local process 
 answer the probe, and receive whatever your dApp sends to `/prove` (the witness data). This
 inherits from the unauthenticated-localhost-service model every browser extension and dev tool
 shares; it is documented as an accepted trust boundary in the project's
-[security report](../../audit/security/2026-08-21-independent-hardening/report.md).
+[security model](../../docs/SECURITY_MODEL.md#2-accept-unauthenticated-http-discovery-and-explicit-plaintext-proving).
 
 Practical guidance for integrators:
 

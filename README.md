@@ -91,6 +91,21 @@ Download the latest release from [GitHub Releases](https://github.com/alejoamira
 
 See the [Accelerator README](packages/accelerator/README.md) for installation and configuration.
 
+## Security and privacy
+
+The [security model](docs/SECURITY_MODEL.md) records the project's trust boundaries and accepted
+trade-offs. In particular, Accelerator currently depends on AztecProtocol's GitHub publisher
+security for `bb` authenticity. Browser proving is HTTPS-only by default; its post-failure plaintext
+health diagnostic is service discovery rather than authentication and never carries private proving
+data. Node/Bun/SSR remain HTTP-compatible by default for the headless CI server.
+
+The Windows first installer is intentionally unsigned; updater payloads remain independently
+Ed25519-signed. See [SECURITY.md](SECURITY.md) for private vulnerability reporting and
+[PRIVACY.md](PRIVACY.md) for local data and network behavior.
+
+For installation help and bug reports, see [SUPPORT.md](SUPPORT.md). Community participation is
+governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## Development
 
 ```bash
@@ -108,7 +123,9 @@ Fork deployments use Cloudflare Workers Static Assets plus KV; see the
 
 ## Contributing
 
-This project uses [conventional commits](https://www.conventionalcommits.org/) enforced by commitlint. Husky + lint-staged run linting on pre-commit.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, architecture, testing, and pull-request guidance.
+This project uses [conventional commits](https://www.conventionalcommits.org/) enforced by commitlint.
+Husky + lint-staged run linting on pre-commit.
 
 ```bash
 # Before pushing
