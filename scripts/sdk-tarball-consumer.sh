@@ -6,7 +6,7 @@
 #   2. the F13 deps-vs-peers decision: default npm's `@aztec/stdlib` graph for an EXACT-version host is a
 #      SINGLETON (exact-pinned deps already deliver "one @aztec graph"), and a CONFLICTING-version host is
 #      recorded. Peers are not better here — on a skew they ERESOLVE-fail the install; reproducible evidence
-#      lives in implementations-plan/v2-release-train/evidence/f13-peer-vs-deps.sh + the F13 ledger entry.
+#      lives in implementations-plan/archive/v2-release-train/evidence/f13-peer-vs-deps.sh + the F13 ledger entry.
 #
 #   scripts/sdk-tarball-consumer.sh <absolute-path-to-tarball>
 set -euo pipefail

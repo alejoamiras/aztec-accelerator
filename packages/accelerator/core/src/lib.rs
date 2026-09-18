@@ -5,7 +5,7 @@
 //!
 //! Intentionally `build.rs`-free: the `AZTEC_VERSION` read, `verified-sites.json` check, and
 //! `tauri_build::build()` all stay in src-tauri/build.rs; the bb-version is injected via
-//! `server::HeadlessState.bundled_version`. See implementations-plan/core-extraction-2026-06-07.
+//! `server::HeadlessState.bundled_version`. See implementations-plan/archive/core-extraction-2026-06-07.
 
 pub mod authorization;
 pub mod bb;

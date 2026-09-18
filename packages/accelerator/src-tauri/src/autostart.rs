@@ -1191,7 +1191,7 @@ mod backend {
 /// `/usr`, `$HOME` and `/opt` are not.
 ///
 /// The discriminator is measured, not guessed. From a real mount of our own released 1.0.7 AppImage
-/// (see `implementations-plan/audit-ux-neutral-fixes/lessons/phase-0.md`):
+/// (see `implementations-plan/archive/audit-ux-neutral-fixes/lessons/phase-0.md`):
 ///
 /// ```text
 /// 76 47 0:68 / /…/.mount_Aztec-doOHJf ro,… - fuse.Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage …
@@ -2017,7 +2017,7 @@ mod tests {
     /// Real `/proc/self/mountinfo` lines, CAPTURED — not hand-written — by mounting our own released
     /// `Aztec-Accelerator-1.0.7-Linux-x86_64.AppImage` with `--appimage-mount` and reading procfs
     /// while it was mounted. Method and full capture:
-    /// `implementations-plan/audit-ux-neutral-fixes/lessons/phase-0.md`.
+    /// `implementations-plan/archive/audit-ux-neutral-fixes/lessons/phase-0.md`.
     ///
     /// Inventing this fixture is precisely the mistake that shipped `CRYPT_E_NOT_FOUND` (a constant
     /// real Windows never prints), so it is deliberately transcribed from a real machine. The mount

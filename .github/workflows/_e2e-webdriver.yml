@@ -128,7 +128,7 @@ jobs:
         working-directory: .
         run: |
           if grep -q "Showing update prompt" /tmp/tauri.log 2>/dev/null; then
-            echo "::error::Update prompt fired in a webdriver build — the update check is not gated. See implementations-plan/ci-reliability-2026-05-29/diagnosis.md"
+            echo "::error::Update prompt fired in a webdriver build — the update check is not gated. See implementations-plan/archive/ci-reliability-2026-05-29/diagnosis.md"
             grep -n "Showing update prompt\|Update available" /tmp/tauri.log || true
             exit 1
           fi

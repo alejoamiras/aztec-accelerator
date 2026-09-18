@@ -15,7 +15,7 @@ rust-version = "1.77.2"
 # Keeping `core` / `src-tauri` / `server` as independent build units (each with its own Cargo.lock) means the
 # headless `accelerator-server` resolves `accelerator-core` with only ITS features, so a GUI dependency can
 # never feature-unify Tauri / rustls / rcgen into the headless build. Do NOT add a `[workspace]` spanning these.
-# See implementations-plan/core-extraction-2026-06-07/plan.md.
+# See implementations-plan/archive/core-extraction-2026-06-07/plan.md.
 #
 # Core is intentionally `build.rs`-free: the `AZTEC_VERSION` read, `verified-sites.json` check, and
 # `tauri_build::build()` all stay in src-tauri/build.rs. The bb-version default is injected via

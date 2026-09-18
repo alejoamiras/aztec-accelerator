@@ -16,7 +16,7 @@
 pub trait CrashRecovery {
     /// Arm crash recovery. C8: returns `Err` if the ARMING genuinely failed (so a caller mid-transaction
     /// can roll back) and `Ok` for an idempotent already-armed state — see each `enable_impl`'s per-exit
-    /// classification in `implementations-plan/security-hardening/closeout-followups/lessons/phase-1.md`.
+    /// classification in `implementations-plan/archive/security-hardening/closeout-followups/lessons/phase-1.md`.
     fn enable(&self) -> Result<(), String>;
     fn disable(&self) -> bool;
 }
